@@ -511,6 +511,96 @@ def test_kelvins_approvals_are_locked_while_claude_operates(parts):
     assert client.post("/api/mode", headers=h, json={"mode": "ask"}).status_code == 200
 
 
+def test_only_reading_and_stop_work_while_claude_operates(tmp_path):
+    """Bug hunt: while Claude worked the screen, a rollback to wider limits, Hands on the sample unlocked, a sample's
+    protection lifted, a local-only project opened to every model and an owner's PIN all went through: the lock
+    listed what to lock and missed them. Now only reading and Stop pass."""
+    from labharness.adapters import set_resource_manager
+    from labharness.agent.approval import WebApprover
+    from labharness.agent.runtime import LabRuntime
+    from labharness.web.store import ChatStore
+    from simlab import build_virtual_lab
+    from test_governance import LAB
+    from test_hardware import Bus, Device
+    set_resource_manager(Bus({"GPIB0::24::INSTR": Device("keithley/2400", name="k"),
+                              "GPIB0::8::INSTR": Device("srs/sr830", name="l")}))
+    try:
+        home = tmp_path / "Kelvin"
+        runtime = LabRuntime(build_virtual_lab(seed=1), WebApprover(timeout=5), home / "lab")
+        settings = Settings(home / "settings.json")
+        h = {"X-Kelvin-Token": settings.access_key}
+        with TestClient(create_app(runtime, settings, ChatStore(home / "lab" / "chats"), hosts=["testserver"],
+                                   providers={})) as client:
+            assert client.post("/api/lab", headers=h, json={"yaml": LAB.replace("[-5, 5]", "[-50, 50]")}).json()["ok"]
+            assert client.post("/api/lab", headers=h, json={"yaml": LAB}).json()["ok"]
+            wide = client.get("/api/config/history?subject=lab.yaml", headers=h).json()["entries"][-1]["n"]
+            assert client.post("/api/hands", headers=h, json={"on": True}).json()["hands_on"]
+            p = client.post("/api/projects", headers=h, json={"name": "Secret"}).json()["id"]
+            client.patch("/api/projects/" + p, headers=h, json={"rules": {"providers": ["local"], "literature": False}})
+            d = client.post("/api/projects/%s/devices" % p, headers=h, json={"name": "D3"}).json()["devices"][0]["id"]
+            device = "/api/projects/%s/devices/%s" % (p, d)
+            assert client.patch(device, headers=h, json={"protection": {"limits": {"smu.V": [-1, 1]}}}).status_code == 200
+            runtime.operating = "Open LaserDesk"   # Claude works the screen: its clicks never stand in for a person's
+            for method, path, body in [("POST", "/api/config/rollback", {"n": wide}),
+                                       ("POST", "/api/hands", {"on": False}),
+                                       ("PATCH", device, {"protection": {}}),
+                                       ("PATCH", "/api/projects/" + p, {"rules": {"providers": None, "literature": True}}),
+                                       ("POST", "/api/owner-pin", {"pin": "9999"}),
+                                       ("POST", "/api/chats", {"model": "scripted:m1"})]:
+                r = client.request(method, path, headers=h, json=body)
+                assert r.status_code == 423 and "Stop" in r.json()["error"], (method, path, r.status_code)
+            assert runtime.lab.instruments["smu"].limits("V") == (-5.0, 5.0) and runtime.hands
+            assert client.get("/api/projects/" + p, headers=h).json()["rules"]["providers"] == ["local"]
+            assert client.get("/api/projects/%s/devices" % p, headers=h).json()["devices"][0]["protection"]
+            assert not runtime.owner.is_set
+            assert client.get("/api/lab", headers=h).status_code == 200                  # looking is fine
+            assert client.post("/api/runs/stop", headers=h, json={}).status_code == 200   # and both Stops work
+            assert client.post("/api/stop", headers=h, json={}).status_code == 200
+            runtime.operating = None
+            assert client.post("/api/config/rollback", headers=h, json={"n": wide}).json()["ok"]   # a person's, after
+            assert runtime.lab.instruments["smu"].limits("V") == (-50.0, 50.0)
+    finally:
+        set_resource_manager(None)
+
+
+def test_claude_operates_through_the_portal_while_it_is_locked(parts, monkeypatch):
+    """The lock leaves the operator's own work alone: the person's yes to the task goes through before Claude starts,
+    its screen steps stream into the chat, the page reads meanwhile, and Stop ends it."""
+    import threading
+    import time
+    from test_web import stream_turn
+    monkeypatch.setenv("FAKE_CLAUDE_SLOW", "1")
+    runtime, settings, store = parts
+    call = [{"type": "tool_call", "id": "c1", "name": "operate_computer",
+             "input": {"task": "Open LaserDesk and read the power"}}]
+    bot = Scripted([call, [{"type": "text", "text": "Stopped."}]])
+    h = {"X-Kelvin-Token": settings.access_key}
+    seen = {}
+    with TestClient(create_app(runtime, settings, store, hosts=["testserver"],
+                               providers={"scripted": bot, "claudecode": ClaudeCodeProvider(FAKE, store.root)})) as client:
+        chat = client.post("/api/chats", headers=h, json={"model": "scripted:m1"}).json()
+
+        def person():
+            asked = runtime.approver.wait_for_pending(timeout=10)
+            seen["yes"] = client.post("/api/approvals/" + asked["id"], headers=h, json={"approve": True}).status_code
+            deadline = time.time() + 10
+            while time.time() < deadline and len([e for e in runtime.gate.log.events() if e["type"] == "computer"]) < 2:
+                time.sleep(0.05)
+            seen["operating"] = runtime.operating
+            seen["state"] = client.get("/api/state", headers=h).status_code
+            seen["mode"] = client.post("/api/mode", headers=h, json={"mode": "auto"}).status_code
+            seen["stop"] = client.post("/api/stop", headers=h, json={"chat_id": chat["id"]}).status_code
+        helper = threading.Thread(target=person, daemon=True)
+        helper.start()
+        events = stream_turn(client, h, chat["id"], "read the laser power", "scripted:m1")
+        helper.join(10)
+    assert seen == {"yes": 200, "operating": "Open LaserDesk and read the power", "state": 200, "mode": 423,
+                    "stop": 200}
+    assert [e["text"] for e in events if e["type"] == "computer_step"] == ["looked at the screen", "clicked at (120, 340)"]
+    end = next(e for e in events if e["type"] == "tool_end")
+    assert end["is_error"] and "stopped" in end["content"] and runtime.operating is None
+
+
 def test_screen_tools(monkeypatch):
     # a 2732 x 1536 screen, which Windows hands over scaled to 1366 x 768 (screenshots need no image library)
     white = screen.png(b"\xff" * (1366 * 768 * 3), 1366, 768)

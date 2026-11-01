@@ -535,7 +535,7 @@ def test_the_portal_asks_who_confirms_and_shows_the_history_and_the_roles():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     page = (STATIC / "index.html").read_text(encoding="utf-8")
     assert "function askApprover(why, names, pinSet)" in js and "data.approver && opts.body" in js
-    assert "e.data && e.data.approver" in js                            # a card not confirmed stays open
+    assert 'if (e.status === 409) { card.close("Already closed", false); return; }' in js   # one not confirmed stays open
     for id_ in ("history-dialog", "history-list", "lab-history", "roles-box", "roles-edit", "owner-notify-mine",
                 "lab-change-why"):
         assert 'id="%s"' % id_ in page, id_

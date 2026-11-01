@@ -304,3 +304,17 @@ def test_a_chat_made_elsewhere_changes_the_states_stamp_and_the_sidebar_reloads(
     assert [c["title"] for c in store.list() if c["id"] == made["id"]] == ["Cool to 5 K while measuring"]
     poll = _js("pollState")
     assert "s.chats !== S.chatsStamp" in poll and "refreshChats()" in poll.split("s.chats !== S.chatsStamp")[1][:80]
+
+
+# ------------------------------------------------------------------ 10. the run list follows runs that end, and the chat
+
+def test_the_run_list_follows_the_runs_that_end_and_the_chat_that_opens():
+    """Bug hunt: the run picker and the compare menu loaded only as the pane opened, so a run that ended meanwhile
+    wasn't in them, nor were the runs another chat's model may see once it opened."""
+    refresh = _js("refreshAnalysisRuns")
+    assert "if (!ANA.open) return;" in refresh and "loadAnalysisRuns()" in refresh
+    assert "renderAnalysisForm" not in refresh   # only the list: what the person is writing in the form stays
+    final = _js("loadFinal")
+    assert 'const ended = tab.status === "finishing"' in final and "if (ended) refreshAnalysisRuns();" in final
+    for name in ("openChat", "newChat"):
+        assert "refreshAnalysisRuns();" in _js(name), name

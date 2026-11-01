@@ -22,7 +22,7 @@ import threading
 import time
 import zlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .memory import KINDS, PROJECT_KINDS, SAME, similarity
 from .rules import merge, normalize, restrictive
@@ -44,6 +44,20 @@ MAX_SUMMARY = 6000      # the summary at the top of a project's master report
 SHARING = ("", "unpublished", "confidential")   # on the Kelvin hub: shared (the default), or never
 GENERAL = "general"     # the workspace of runs and devices outside every project
 NOTE_KINDS = PROJECT_KINDS
+IN_USE_TRIES = 40       # about 2 s: how long a file the system says is in use is tried again (_again)
+
+
+def _again(do: Callable[[], Any]) -> Any:
+    """do(), tried again for a while when the system says a file is in use: on Windows a file being replaced can't be
+    opened for a moment, nor one that another program has open (a virus scanner, a backup) replaced or removed.
+    Then its error."""
+    for attempt in range(IN_USE_TRIES):
+        try:
+            return do()
+        except PermissionError:
+            if attempt == IN_USE_TRIES - 1:
+                raise
+            time.sleep(min(0.05, 0.005 * (attempt + 1)))
 
 
 def _label(text: Any) -> str:
@@ -65,6 +79,9 @@ def instructions_text(text: Any) -> str:
 class ChatStore:
     def __init__(self, root: Any, create: bool = True):
         self._lock = threading.Lock()
+        # the store's own reads and writes of its files, one at a time: on Windows a file being read can't be
+        # replaced, and one being replaced can't be read (_read, _put)
+        self._io = threading.Lock()
         self.use(root, create)
 
     def use(self, root: Any, create: bool = True) -> None:
@@ -84,6 +101,19 @@ class ChatStore:
         if not _ID.match(chat_id or ""):
             raise KeyError("no chat %r" % chat_id)
         return self.root / ("%s.json" % chat_id)
+
+    def _read(self, path: Path) -> str:
+        """A file's text, never read while this store writes one, and read again while Windows says it is in use."""
+        with self._io:
+            return _again(lambda: path.read_text(encoding="utf-8"))
+
+    def _put(self, path: Path, text: str) -> None:
+        """A file written whole beside it, then put in its place: never while this store reads one, and tried again
+        while Windows says it is in use (a turn's save once failed while the sidebar read the chat)."""
+        tmp = path.with_suffix(".tmp")
+        with self._io:
+            _again(lambda: tmp.write_text(text, encoding="utf-8"))
+            _again(lambda: os.replace(tmp, path))
 
     # ------------------------------------------------------------------ chats
 
@@ -109,7 +139,7 @@ class ChatStore:
         path = self._path(chat_id)
         if not path.exists():
             raise KeyError("no chat %r" % chat_id)
-        return self._with_kept(json.loads(path.read_text(encoding="utf-8")), self._kept())
+        return self._with_kept(json.loads(self._read(path)), self._kept())
 
     def _kept(self) -> Dict[str, Any]:
         """The marks and rules chats keep from projects they were in (the index's "marks" and "stamped"), read again
@@ -117,7 +147,7 @@ class ChatStore:
         try:
             st = self._index_path.stat()
             key: Any = (st.st_mtime_ns, st.st_size)
-        except OSError:
+        except FileNotFoundError:   # no index yet: no chat has left a project
             return {"marks": {}, "stamped": {}}
         if self._kept_cache is None or self._kept_cache[0] != key:
             index = self._read_index()
@@ -142,10 +172,7 @@ class ChatStore:
             return
         path = self._path(chat["id"])
         self.root.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({k: v for k, v in chat.items() if k != "project"}, ensure_ascii=False),
-                       encoding="utf-8")
-        os.replace(tmp, path)
+        self._put(path, json.dumps({k: v for k, v in chat.items() if k != "project"}, ensure_ascii=False))
 
     def delete(self, chat_id: str) -> None:
         self._temp_media.pop(chat_id, None)
@@ -153,7 +180,8 @@ class ChatStore:
             return
         path = self._path(chat_id)
         if path.exists():
-            path.unlink()
+            with self._io:
+                _again(path.unlink)
         import shutil
         shutil.rmtree(self.root / "media" / chat_id, ignore_errors=True)
         with self._lock:
@@ -211,7 +239,7 @@ class ChatStore:
                 key = (st.st_mtime_ns, st.st_size)
                 seen = self._listed.get(path.name)
                 if seen is None or seen[0] != key:
-                    whole = json.loads(path.read_text(encoding="utf-8"))
+                    whole = json.loads(self._read(path))
                     seen = (key, {k: whole[k] for k in ("id", "title", "updated", "model", "rules") if k in whole})
             except (OSError, ValueError):
                 continue
@@ -255,10 +283,18 @@ class ChatStore:
     # ------------------------------------------------------------------ projects
 
     def _read_index(self) -> Dict[str, Any]:
+        """The index of projects, or none yet. An index that is there but can't be read is never taken for none: it
+        says which chats are confidential or limited to some models (OSError, saying so)."""
         try:
-            data = json.loads(self._index_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            data = json.loads(self._read(self._index_path))
+            if not isinstance(data, dict):
+                raise ValueError("not an index of projects")
+        except FileNotFoundError:
             data = {}
+        except (OSError, ValueError) as e:
+            raise OSError("Kelvin can't read %s (%s), which says which project each chat is in and which are "
+                          "confidential, so it goes no further. If the file is damaged, move it away to start again "
+                          "without projects." % (self._index_path, e)) from e
         projects = [p for p in data.get("projects") or [] if _PROJECT_ID.match(str(p.get("id", "")))]
         for p in projects:
             p.setdefault("instructions", "")
@@ -287,9 +323,7 @@ class ChatStore:
     def _write_index(self, index: Dict[str, Any]) -> None:
         self._kept_cache = None
         self.root.mkdir(parents=True, exist_ok=True)
-        tmp = self._index_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, self._index_path)
+        self._put(self._index_path, json.dumps(index, ensure_ascii=False))
 
     def projects(self) -> List[Dict[str, Any]]:
         """In the order they were made."""

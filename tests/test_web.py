@@ -485,7 +485,96 @@ def test_projects_organize_conversations(parts):
         assert "project" not in store.load(a["id"])              # chat files never carry the project
 
 
-REMEMBER_QUIRK = [{"type": "text", "text": "Noting it."},
+def race(seconds, *jobs):
+    """Each job over and over in its own thread for a while: the errors each raised, and how often each ran."""
+    stop, errors, runs = time.time() + seconds, [], [0] * len(jobs)
+
+    def loop(k):
+        while time.time() < stop:
+            try:
+                jobs[k]()
+                runs[k] += 1
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+    threads = [threading.Thread(target=loop, args=(k,)) for k in range(len(jobs))]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    return errors, runs
+
+
+def test_a_confidential_chat_stays_filed_while_the_index_is_rewritten(tmp_path):
+    """Bug hunt (Windows): the index was read without the lock while a request replaced it; a read that met the
+    replace took the index for empty, so a confidential, local-only chat counted as unfiled for that turn (web
+    tools offered, notes for every conversation allowed), and the replace itself failed (500)."""
+    store = ChatStore(tmp_path / "chats")
+    p = store.create_project("Secret")
+    store.set_sharing(p["id"], "confidential")
+    store.set_rules(p["id"], {"providers": ["local"], "literature": False})
+    chat = store.create("local:x", project=p["id"])
+    n = iter(range(10 ** 9))
+    seen = []
+
+    def read():
+        memory = store.memory_of(chat["id"])
+        seen.append(bool(memory and memory["confidential"] and store.projects()))
+    errors, runs = race(1.5, lambda: store.set_instructions(p["id"], "text %d" % next(n)), read, read)
+    assert errors == [] and all(seen) and runs[0] > 10 and runs[1] > 10
+
+
+def test_a_chat_saved_while_the_sidebar_reads_it_never_fails(tmp_path):
+    """Bug hunt (Windows): a turn's save failed while another request read the chat's file (2211 saves in 6 s)."""
+    store = ChatStore(tmp_path / "chats")
+    chat = store.create("local:x")
+
+    def save():
+        chat["messages"].append({"role": "user", "text": "x" * 200})
+        store.save(chat)
+    errors, runs = race(1.5, save, lambda: store.load(chat["id"]), store.list)
+    assert errors == [] and min(runs) > 10
+    assert len(store.load(chat["id"])["messages"]) == runs[0]
+
+
+def test_an_index_kelvin_cant_read_is_never_taken_for_none(tmp_path, monkeypatch):
+    """An index that is there but can't be read stops what needs it, rather than open a confidential chat to every
+    model, forget the marks a chat keeps from a project it left, or be written over with no projects in it."""
+    from pathlib import Path
+    from labharness.web import store as stored
+    store = ChatStore(tmp_path / "chats")
+    p = store.create_project("Secret")
+    store.set_sharing(p["id"], "confidential")
+    chat = store.create("local:x", project=p["id"])
+    left = store.create("local:x", project=p["id"])
+    store.assign(left["id"], None)                     # it keeps the confidential mark
+    index = tmp_path / "chats" / "_projects.json"
+    real, busy = Path.read_text, {"n": 0}
+
+    def read_text(path, *args, **kwargs):              # in use for a moment: a replace, a virus scanner
+        if path == index and busy["n"]:
+            busy["n"] -= 1
+            raise PermissionError(13, "Permission denied")
+        return real(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    busy["n"] = 3
+    store._kept_cache = None
+    assert store.load(left["id"]).get("confidential") and store.memory_of(chat["id"])["confidential"]
+    monkeypatch.setattr(stored, "IN_USE_TRIES", 3)
+    busy["n"] = 10 ** 6                                # in use for good: an error, never no projects
+    store._kept_cache = None
+    with pytest.raises(OSError, match="_projects.json"):
+        store.memory_of(chat["id"])
+    with pytest.raises(OSError):
+        store.load(left["id"])
+    busy["n"] = 0
+    damaged = '{"projects": [{"id": "%s", "name": "Secret", "confidential": true' % p["id"]
+    index.write_text(damaged, encoding="utf-8")       # cut short
+    for unreadable in (lambda: store.memory_of(chat["id"]), lambda: store.load(left["id"]), store.list,
+                       lambda: store.create_project("Other")):
+        with pytest.raises(OSError, match="move it away"):
+            unreadable()
+    assert index.read_text(encoding="utf-8") == damaged   # never written over
+
+
+REMEMBER_QUIRK =[{"type": "text", "text": "Noting it."},
                   {"type": "tool_call", "id": "n1", "name": "remember",
                    "input": {"scope": "project", "kind": "quirk", "text": "Gate on D3 leaks above 6 V."}}]
 REMEMBER_PREF = [{"type": "text", "text": "Noting it."},
@@ -641,6 +730,47 @@ def test_incognito_is_offered_in_every_chat():
     body = js[js.index("function applyIncognito"):js.index("function toggleIncognito")]
     assert not re.search(r"\.hidden\s*=", body)
     assert "if (S.chatId) newChat();" in js[js.index("function toggleIncognito"):]   # from a saved chat: a new one
+
+
+def portal_function(name):
+    """One function of the portal's app.js, by its name."""
+    from labharness.web.app import STATIC
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    start = js.index("function %s(" % name)
+    return js[start:js.index("\n  }\n", start)]
+
+
+def test_a_message_is_sent_once_however_often_enter_is_pressed():
+    """Bug hunt: two Enters in a new chat made two chats and sent the message twice, as the input emptied only once
+    the chat was made. It empties at once now, and S.sending holds off another Enter until the message is on its way."""
+    send, start, compare = (portal_function(n) for n in ("sendMessage", "startSend", "sendCompare"))
+    assert send.index("if (S.sending) return;") < send.index("await")       # before anything waits
+    assert start.index('$("input").value = ""') < start.index("S.sending = true") < start.index("await")
+    assert "S.sending = false" in start[start.index("finally"):]            # and always lets go
+    assert 'api("/api/chats"' not in send + compare and "startSend(" in send and "startSend(" in compare
+    assert "S.sending" in portal_function("updateSend")                     # Send is greyed meanwhile
+
+
+def test_an_approval_card_closes_only_when_the_request_did():
+    """Bug hunt: a card said "Already closed" whatever failed (a 423 while Claude operates, no connection) though the
+    request was still open, hid the server's words, and came back in the Lab panel at the next poll."""
+    card = portal_function("makeApproval")
+    answer = card[card.index("async function answer(approve)"):card.index("yes.addEventListener")]
+    assert 'if (e.status === 409) { card.close("Already closed", false); return; }' in answer
+    rest = answer[answer.index("e.status === 409"):]
+    assert "yes.disabled = no.disabled = false" in rest and "card.choice = undefined" in rest and "toast(" in rest
+    assert "err.status = res.status" in portal_function("api")
+    assert "if (e.status !== 409) TERM.asked.delete(p.id)" in portal_function("termAnswer")   # the terminal's too
+
+
+def test_the_lab_button_shows_when_its_panel_is_open():
+    """Bug hunt: the Lab button never showed it was pressed, unlike the other panels' buttons."""
+    import re
+    from labharness.web.app import STATIC
+    assert re.search(r'<button id="toggle-lab"[^>]*aria-pressed="false"', (STATIC / "index.html").read_text("utf-8"))
+    lab = portal_function("toggleLab")
+    assert '$("toggle-lab").setAttribute("aria-pressed", String(S.labOpen))' in lab
+    assert '$("toggle-lab").classList.toggle("on", S.labOpen)' in lab
 
 
 def test_incognito_uses_and_keeps_no_memory(parts):
