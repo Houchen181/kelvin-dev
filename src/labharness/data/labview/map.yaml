@@ -1,0 +1,48 @@
+# What a LabVIEW call becomes in a Kelvin experiment (labharness/vimap.py). A call is named as Kelvin's VI
+# description names it: "<library>:<VI>" for a library's VI, "<VI>" for a vi.lib one, "<object>.<method>" for an
+# ActiveX/.NET node. The lab's own map (~/Kelvin/labview-map.yaml) is read first, and a driver's VI that has no
+# entry is matched by the commands it sends.
+
+# Keithley 24XX (NI's instrument driver), the keithley/2400 card
+- {call: "Keithley 24XX.lvlib:Initialize.vi", becomes: nothing, why: "Kelvin opens the instrument itself"}
+- {call: "Keithley 24XX.lvlib:Close.vi", becomes: nothing, why: "Kelvin closes the instrument itself"}
+- {call: "Keithley 24XX.lvlib:Reset.vi", becomes: nothing, why: "Kelvin brings the instrument's drives to safe itself"}
+- {call: "Keithley 24XX.lvlib:Error Query.vi", becomes: nothing, why: "the gate reads the instrument's errors after each command"}
+- {call: "Keithley 24XX.lvlib:Configure Output.vi", becomes: card, card: keithley/2400, sets: [source_function, V, I_source, compliance_I, compliance_V]}
+- {call: "Keithley 24XX.lvlib:Enable Output.vi", becomes: card, card: keithley/2400, sets: [output]}
+- {call: "Keithley 24XX.lvlib:Configure Measurement.vi", becomes: card, card: keithley/2400, sets: [nplc]}
+- {call: "Keithley 24XX.lvlib:Read (Measurements).vi", becomes: card, card: keithley/2400, gets: [V_meas, I]}
+- {call: "Keithley 24XX.lvlib:Read (Single Point).vi", becomes: card, card: keithley/2400, gets: [V_meas, I]}
+- {call: "Keithley 24XX.lvlib:Read.vi", becomes: card, card: keithley/2400, gets: [V_meas, I]}
+- {call: "Keithley 24XX.lvlib:Fetch.vi", becomes: card, card: keithley/2400, gets: [V_meas, I]}
+
+# Stanford Research SR830 lock-in, the srs/sr830 card
+- {call: "Stanford Research 830.lvlib:Read (All Parameters).vi", becomes: card, card: srs/sr830, gets: [X, Y, R, theta]}
+
+# Princeton Instruments LightField (its LabVIEW automation class), the princeton/lightfield card
+- {call: "LightField Automation.lvclass:LFA_Initialize.vi", becomes: nothing, why: "Kelvin opens LightField itself"}
+- {call: "LightField Automation.lvclass:LFA_Close.vi", becomes: nothing, why: "Kelvin closes LightField itself"}
+- {call: "LightField Automation.lvclass:Exp_SetExperiment.vi", becomes: nothing, why: "the instrument's address names the LightField experiment (lightfield://<experiment>)"}
+- {call: "LightField Automation.lvclass:LFA_Capture.vi", becomes: card, card: princeton/lightfield, gets: [spectrum]}
+- {call: "LightField Automation.lvclass:Parse Data Object Simple.vi", becomes: nothing, why: "the spectrum arrives as a trace, with its wavelengths"}
+
+# Thorlabs APT motors (the MG17Motor ActiveX control), the thorlabs/kdc101 card through Kinesis
+- {call: "MG17Motor.StartCtrl", becomes: nothing, why: "Kelvin starts the controller itself, through Kinesis"}
+- {call: "MG17Motor.HWSerialNum", becomes: nothing, why: "the instrument's address names the controller's serial number"}
+- {call: "MG17Motor.SetVelParams", becomes: nothing, why: "the stage keeps the velocity set in Thorlabs' software; the card doesn't change it"}
+- {call: "MG17Motor.MoveAbsoluteRot", becomes: card, card: thorlabs/kdc101, sets: [position]}
+- {call: "MG17Motor.MoveAbsoluteEx", becomes: card, card: thorlabs/kdc101, sets: [position]}
+- {call: "MG17Motor.GetPosition", becomes: card, card: thorlabs/kdc101, gets: [position_actual]}
+- {call: "MG17Motor.GetPosition_Position", becomes: card, card: thorlabs/kdc101, gets: [position_actual]}
+- {call: "MG17Motor.MoveHome", becomes: card, card: thorlabs/kdc101, does: [home]}
+- {call: "MG17Motor.StopImmediate", becomes: card, card: thorlabs/kdc101, does: [stop]}
+
+# vi.lib
+- {call: "Write Delimited Spreadsheet.vi", becomes: python, python: "record(...): each row the VI writes becomes one record() with the same columns"}
+- {call: "Write To Spreadsheet File.vi", becomes: python, python: "record(...), as Write Delimited Spreadsheet"}
+- {call: "Time Delay", becomes: python, python: "time.sleep(seconds)"}
+- {call: "NI_AALBase.lvlib:Ramp Pattern.vi", becomes: python, python: "numpy.linspace(start, end, n), or a list of the n values"}
+- {call: "Check if File or Folder Exists.vi", becomes: nothing, why: "Kelvin keeps each run's data in a folder of its own"}
+- {call: "Simple Error Handler.vi", becomes: nothing, why: "a failed command stops the experiment with the gate's words"}
+- {call: "General Error Handler.vi", becomes: nothing, why: "a failed command stops the experiment with the gate's words"}
+- {call: "Merge Errors.vi", becomes: nothing, why: "an error stops the experiment, as Kelvin reports it"}
