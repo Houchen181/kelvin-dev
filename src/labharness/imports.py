@@ -7,6 +7,9 @@ compute, look_at, plot_runs, fit_run, run_python, reports, the automatic fits):
 - makers' files: BioLogic's EC-Lab .mpt and .mpr, Gamry's .dta, Arbin's CSV and Excel exports, LabVIEW's measurement
   files (.lvm) and NI's TDMS (.tdms: read with npTDMS, which Kelvin installs on demand) (importers/), and
   LightField's .spe spectra;
+- MATLAB's .mat files, read by Kelvin itself (matfile.py): a Special Measure run as its scan lays it out
+  (importers/specialmeasure.py: x its inner loop's set channel, its outer loop a 2-D scan's slow axis), else the
+  file's numeric variables as a .npz's arrays;
 - NumPy's .npy and .npz, and TIFF images: an array of numbers, a table, or camera frames (a frame or a stack of them,
   one point per frame, which look_at shows).
 
@@ -33,10 +36,10 @@ MAX_ROWS = 200000
 MAX_FRAMES = 5000
 UNIT = re.compile(r"^(.*?)\s*[\(\[]\s*([^\)\]]{1,20})\s*[\)\]]\s*$")   # "Wavelength (nm)", "Intensity [counts]"
 DATA_SUFFIXES = (".csv", ".tsv", ".txt", ".dat", ".asc", ".xlsx", ".xlsm", ".mpt", ".mpr", ".dta", ".npy", ".npz",
-                 ".tif", ".tiff", ".spe", ".lvm", ".tdms")
+                 ".tif", ".tiff", ".spe", ".lvm", ".tdms", ".mat")
 WHAT = ("tables (CSV, TSV, text, Excel .xlsx), BioLogic's .mpt and .mpr, Gamry's .dta, Arbin's CSV and Excel "
-        "exports, LabVIEW's .lvm and TDMS (.tdms, with npTDMS installed), LightField's .spe, NumPy's .npy and .npz, "
-        "and TIFF images")
+        "exports, LabVIEW's .lvm and TDMS (.tdms, with npTDMS installed), LightField's .spe, MATLAB's .mat (Special "
+        "Measure's runs too), NumPy's .npy and .npz, and TIFF images")
 
 
 class DataError(ValueError):
@@ -296,7 +299,8 @@ def read(path: Any) -> Table:
 def _read(p: Path) -> Table:
     suffix = p.suffix.lower()
     with open(p, "rb") as f:
-        head = f.read(64)
+        head = f.read(520)   # MATLAB 7.3's HDF5 starts at 512
+    from . import matfile
     from .importers import arrays, biologic, tiff
     if suffix == ".tdms" or head.startswith(b"TDSm"):
         from .importers import tdms
@@ -323,18 +327,21 @@ def _read(p: Path) -> Table:
     if suffix == ".res":
         raise DataError("%s is Arbin's own database (.res), which Kelvin doesn't read: export the test from MITS Pro "
                         "or Data Watcher as Excel (.xlsx) or CSV, then import that" % p.name)
-    if suffix in (".h5", ".hdf5", ".mat", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".zip", ".docx",
-                  ".pptx", ".opj", ".opju"):
+    if suffix == ".mat" or matfile.is_mat(head):
+        return read_mat(p)
+    if suffix in (".h5", ".hdf5", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".zip", ".docx", ".pptx",
+                  ".opj", ".opju"):
         raise DataError("%s: Kelvin imports %s" % (p.name, WHAT))
     return read_table(p)
 
 
 def takes(name: Any, data: bytes) -> bool:
     """Whether an attached file is one of the kinds Kelvin imports (by its name, or its first bytes)."""
+    from . import matfile
     from .importers import tiff
     suffix = Path(str(name or "")).suffix.lower()
     return suffix in DATA_SUFFIXES or tiff.is_tiff(data[:4]) or data[:6] == b"\x93NUMPY" or \
-        data[:22] == b"BIO-LOGIC MODULAR FILE" or data[:4] == b"TDSm"
+        data[:22] == b"BIO-LOGIC MODULAR FILE" or data[:4] == b"TDSm" or matfile.is_mat(data[:520])
 
 
 # ------------------------------------------------------------------ tables
@@ -714,6 +721,21 @@ def frames_table(stem: str, filename: str, frames: List[Any], what: str) -> Tabl
         filename, what, len(frames), "" if len(frames) == 1 else "s", size, first.dtype.name,
         ", colour" if first.ndim == 3 else "", low, high))
     return table
+
+
+def read_mat(p: Path) -> Table:
+    """A MATLAB .mat file (matfile.py reads it): a Special Measure run as its scan lays it out
+    (importers/specialmeasure.py), else its numeric variables as a .npz's arrays are read (importers/arrays.py)."""
+    import numpy as np
+    from . import matfile
+    from .importers import arrays, specialmeasure
+    variables = matfile.load(p)
+    if specialmeasure.is_scan(variables.get("scan")):
+        return specialmeasure.run_table(p, variables)
+    if specialmeasure.is_scan(variables.get("smscan")) and len(variables) == 1:
+        raise DataError("%s holds a Special Measure scan (smscan), not a run: its runs are the NNN_name.mat files "
+                        "smrun saves" % p.name)
+    return arrays.from_variables(key_of(p.stem, "data"), p.name, variables, np)
 
 
 def read_tiff(p: Path) -> Table:

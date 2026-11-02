@@ -154,8 +154,8 @@ TEXT_FILES = {".py", ".pyw", ".ipynb", ".m", ".jl", ".r", ".c", ".h", ".cpp", ".
               ".ts", ".sh", ".ps1", ".bat", ".cmd", ".vb", ".bas", ".ino", ".pro", ".ipf", ".tex", ".bib", ".md",
               ".rst", ".log", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".xml", ".html", ".htm"}
 # data files a person attaches, each made a run as it is attached (imports.py)
-DATA_KINDS = ("CSV, TSV, text and Excel tables, NumPy arrays, TIFF images, BioLogic, Gamry, Arbin and LabVIEW (.lvm, "
-              ".tdms) files")
+DATA_KINDS = ("CSV, TSV, text and Excel tables, NumPy arrays, MATLAB .mat files (Special Measure's runs too), TIFF "
+              "images, BioLogic, Gamry, Arbin and LabVIEW (.lvm, .tdms) files")
 WAIT_S = 120   # the longest wait inside a turn: a wait holds the lab, so longer waits use wake_me
 STOP_POLL_S = 0.2   # how often a tool call that is still running looks at the stop button
 STOPPED_CALL = ("stopped: the person pressed stop while this was still running. Kelvin ends it as soon as the lab "
