@@ -35,7 +35,7 @@ from ..accounts import Accounts, LabRoles, OwnerPin, RoleRefused, cipher_for, ha
 from ..configversions import ConfigVersions, widens as config_widens
 from .. import central, edition, expstore
 from ..agent.approval import WebApprover
-from ..agent.runtime import SETUP_STEPS, LabRuntime, Underway, Viewer, not_shown, writable_folder
+from ..agent.runtime import SETUP_STEPS, KeptAlready, LabRuntime, Underway, Viewer, not_shown, writable_folder
 from ..agent.server import build_server
 from ..adapters import AdapterError
 from ..autosetup import AutoSetup, log as setup_log, reviewed as mark_reviewed
@@ -3585,6 +3585,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     # ---------------------------------------------------------------- the lab's experiments, from its VIs (Plan 4)
 
+    def who(request: Request) -> str:
+        """Who acts in the portal, by their account when one is signed in: who kept or approved a version."""
+        return "%s (portal)" % runtime.user if runtime.user else person(request)
+
     def experiments_refused(request: Request, what: str = "") -> Optional[Response]:
         """The lab's experiments are seen and changed only on this computer (as the library); a trainee doesn't keep
         or approve one."""
@@ -3610,8 +3614,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             body = None
         if not isinstance(body, dict) or not str(body.get("name") or "").strip():
             return error(400, "send {name, value}: the live input and its new value")
-        said = await asyncio.to_thread(runtime.set_live, str(body["name"]), body.get("value"), "", person(request))
-        if said.startswith(("not changed", "no experiment", "run ")):
+        changed, said = await asyncio.to_thread(runtime.set_live_result, str(body["name"]), body.get("value"), "",
+                                                who(request))
+        if not changed:
             return error(400, said)
         return JSONResponse({"said": said})
 
@@ -3686,7 +3691,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(400, "send {draft, name}")
         try:
             out = await asyncio.to_thread(as_person, runtime.keep_experiment_as, str(body["draft"]),
-                                          str(body.get("name") or ""), person(request), bool(body.get("new_version")))
+                                          str(body.get("name") or ""), who(request), bool(body.get("new_version")))
+        except KeptAlready as e:   # what the next version would be, and what changed, for the person to read first
+            return JSONResponse({"error": str(e), "version": e.version, "diff": e.diff}, status_code=409)
         except FileExistsError as e:
             return error(409, str(e))
         except ValueError as e:
@@ -3708,7 +3715,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(400, "send {version}: the version's number")
         try:
             return JSONResponse(await asyncio.to_thread(as_person, runtime.approve_experiment,
-                                                        request.path_params["name"], version, person(request)))
+                                                        request.path_params["name"], version, who(request)))
         except KeyError as e:
             return error(404, e.args[0] if e.args else str(e))
         except ValueError as e:

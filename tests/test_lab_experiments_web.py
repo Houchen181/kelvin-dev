@@ -194,3 +194,67 @@ def test_a_running_experiments_live_inputs_are_in_the_live_view_and_set_from_the
 def test_the_run_view_shows_live_inputs_to_set():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "function liveInputs(" in js and '"/api/runs/live"' in js and "tab.inputs = v.inputs" in js
+
+
+# ------------------------------------------------------------------ the final review's findings (fix pass)
+
+def test_keeping_under_a_kept_name_shows_what_changed_before_the_yes(portal):
+    rt, client, _ = portal
+    keep_as(rt, GOOD, "iv-scan")
+    d = rt.experiments.draft(GOOD.replace("0.5", "0.25"), {"report": {"ok_to_keep": True}}, "agent")
+    r = client.post("/api/experiments/keep", json={"draft": d, "name": "iv-scan"})
+    assert r.status_code == 409 and r.json()["version"] == 2
+    assert any("0.25" in line for line in r.json()["diff"]), r.json()
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "confirm(e.message)" not in js and "Keep as version" in js
+
+
+def test_a_keep_someone_made_meanwhile_is_said_in_words(portal, monkeypatch):
+    rt, client, _ = portal
+    d = rt.experiments.draft(GOOD, {"report": {"ok_to_keep": True}}, "agent")
+
+    def kept_meanwhile(draft, name, by):
+        raise FileExistsError(17, "File exists")
+    monkeypatch.setattr(rt.experiments, "keep", kept_meanwhile)
+    r = client.post("/api/experiments/keep", json={"draft": d, "name": "iv-scan"})
+    assert r.status_code in (400, 409) and "meanwhile" in r.json()["error"], r.text
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert 'busyWhile(["exp-keep"]' in js and 'busyWhile(["exp-approve"]' in js
+
+
+def test_a_changed_version_is_neither_queued_nor_promised(portal):
+    rt, client, _ = portal
+    keep_as(rt, GOOD, "iv-scan")
+    rt.experiments.get("iv-scan").path.write_bytes(b"# changed by hand\n")
+    r = client.post("/api/experiments/iv-scan/run", json={"action": "scan", "queue": True})
+    assert r.status_code == 400 and "changed after it was written" in r.json()["error"], r.text
+    said = rt.check_script("iv-scan")
+    assert "changed after it was written" in said and "your yes to this run approves it" not in said, said
+
+
+def test_a_live_input_named_run_something_is_set_as_any_other(portal):
+    from test_lab_experiments import person
+    from test_experiments import wait_until
+    rt, client, _ = portal
+    keep_as(rt, LOOPS.replace('    step = 0\n', '    step = 0\n    live("run rate", 1.0)\n'), "loops")
+    person(rt)
+    ran = {}
+    t = threading.Thread(target=lambda: ran.update(said=rt.run_script("loops")))
+    t.start()
+    try:
+        wait_until(lambda: "run rate" in ((rt.live_view() or {}).get("inputs") or {}), 30)
+        r = client.post("/api/runs/live", json={"name": "run rate", "value": 2})
+        assert r.status_code == 200, r.text
+    finally:   # the experiment ends however the test went
+        rt.set_live("Break", True)
+        t.join(60)
+
+
+def test_who_keeps_and_approves_is_the_person_signed_in(portal):
+    rt, client, _ = portal
+    rt.user = "ana"
+    d = rt.experiments.draft(GOOD, {"report": {"ok_to_keep": True}}, "agent")
+    assert client.post("/api/experiments/keep", json={"draft": d, "name": "iv-scan"}).json()["approved_by"] == "ana (portal)"
+    rt.experiments.add("iv-scan", GOOD + "\n", {}, by="agent", edited_from=1)
+    client.post("/api/experiments/iv-scan/approve", json={"version": 2})
+    assert rt.experiments.get("iv-scan", 2).approved_by == "ana (portal)"

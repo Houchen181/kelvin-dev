@@ -4716,8 +4716,9 @@
     const pick = h("select", { class: "exp-action", "aria-label": "Action of " + e.name },
       ...(e.actions.length ? e.actions : [{ name: "", main: true }]).map((a) =>
         h("option", { value: a.name }, a.name ? a.name + (a.main ? " (main)" : "") : "the whole experiment")));
-    const act = (label, title, queue) => {
-      const b = h("button", { type: "button", title, "data-busy": key, disabled: BUSY.has(key) }, label);
+    const act = (label, title, queue) => {   // a version whose file changed on disk never runs: no Run, no Queue
+      const b = h("button", { type: "button", title: e.standing === "changed" ? "Its file changed on disk: save it as a new version" : title,
+        "data-busy": key, disabled: BUSY.has(key) || e.standing === "changed" }, label);
       b.addEventListener("click", () => runExperiment(e, pick.value, queue));
       return b;
     };
@@ -4816,23 +4817,34 @@
     $("exp-name").value = d.name || "";
     $("exp-name-row").hidden = false;
     $("exp-keep").hidden = false;
+    $("exp-keep").textContent = "Keep";
     $("exp-keep").disabled = !ok;
     $("exp-keep").title = ok ? "Keep it in the lab's experiments, approved by you" : "Something blocks it: see What blocks it";
     $("exp-msg").textContent = ok ? "" : "It can't be kept as it is: a corrected one goes through the chat (save_experiment).";
   }
-  async function keepDraft(newVersion) {
-    if (!EXP.open || !EXP.open.draft) return;
-    const name = $("exp-name").value.trim();
-    try {
-      const r = await api("/api/experiments/keep", { body: { draft: EXP.open.draft, name, new_version: !!newVersion } });
-      $("exp-msg").textContent = "Kept as " + r.name + ", version " + r.version + ", in Runs → Lab experiments.";
-      $("exp-keep").hidden = true;
-      EXP.open = null;
-      if (RUNS.view === "scans") loadExperiments();
-    } catch (e) {
-      if (e.status === 409 && !newVersion && confirm(e.message)) return keepDraft(true);
-      $("exp-msg").textContent = e.message;
-    }
+  function keepDraft() {
+    return busyWhile(["exp-keep"], async () => {
+      if (!EXP.open || !EXP.open.draft) return;
+      const open = EXP.open, name = $("exp-name").value.trim();
+      try {
+        const r = await api("/api/experiments/keep", { body: { draft: open.draft, name, new_version: open.newVersion === name } });
+        $("exp-msg").textContent = "Kept as " + r.name + ", version " + r.version + ", in Runs → Lab experiments.";
+        $("exp-keep").hidden = true;
+        EXP.open = null;
+        if (RUNS.view === "scans") loadExperiments();
+      } catch (e) {
+        if (e.status === 409 && e.data && e.data.diff) {   // a name kept already: what changed, read before the yes
+          open.newVersion = name;
+          const shown = $("exp-body").querySelector(".exp-kept-diff");
+          if (shown) shown.remove();
+          $("exp-body").prepend(h("details", { class: "exp-kept-diff", open: true },
+            h("summary", {}, "What changed from version " + (e.data.version - 1) + " of " + name),
+            h("pre", { class: "exp-code" }, e.data.diff.join("\n") || "(nothing)")));
+          $("exp-keep").textContent = "Keep as version " + e.data.version;
+        }
+        $("exp-msg").textContent = e.message;
+      }
+    });
   }
   async function openVersions(name, version) {
     const body = expDialog(name);
@@ -4855,14 +4867,16 @@
     $("exp-approve").textContent = "Approve version " + v.number;
     $("exp-msg").textContent = v.standing === "changed" ? "Its file changed on disk after it was written: it won't run. Save it as a new version." : "";
   }
-  async function approveVersion() {
-    if (!EXP.open || !EXP.open.version) return;
-    try {
-      const r = await api("/api/experiments/" + encodeURIComponent(EXP.open.name) + "/approve", { body: { version: EXP.open.version } });
-      $("exp-msg").textContent = "Version " + r.version + " approved by " + r.approved_by + ".";
-      $("exp-approve").hidden = true;
-      if (RUNS.view === "scans") loadExperiments();
-    } catch (e) { $("exp-msg").textContent = e.message; }
+  function approveVersion() {
+    return busyWhile(["exp-approve"], async () => {
+      if (!EXP.open || !EXP.open.version) return;
+      try {
+        const r = await api("/api/experiments/" + encodeURIComponent(EXP.open.name) + "/approve", { body: { version: EXP.open.version } });
+        $("exp-msg").textContent = "Version " + r.version + " approved by " + r.approved_by + ".";
+        $("exp-approve").hidden = true;
+        if (RUNS.view === "scans") loadExperiments();
+      } catch (e) { $("exp-msg").textContent = e.message; }
+    });
   }
   function scansSay(text, bad) {
     $("scans-msg").textContent = text;
@@ -8113,7 +8127,7 @@
     $("lab-add-found").addEventListener("click", addFound);
     $("lab-scripts").addEventListener("click", fromScripts);
     $("lab-labview").addEventListener("click", fromLabview);
-    $("exp-keep").addEventListener("click", () => keepDraft(false));
+    $("exp-keep").addEventListener("click", () => keepDraft());
     $("exp-approve").addEventListener("click", approveVersion);
     $("lab-keep-scans").addEventListener("click", keepScans);
     $("setup-scripts-choose").addEventListener("click", () => answerScripts(false));

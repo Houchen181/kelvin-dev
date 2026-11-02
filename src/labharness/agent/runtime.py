@@ -352,6 +352,14 @@ class Underway(RuntimeError):
     """Work of a kind that goes one at a time was asked for while one is under way (OneAtATime): said in words."""
 
 
+class KeptAlready(FileExistsError):
+    """Keeping a draft under a name kept already, unasked: what the next version would be, and what changed."""
+
+    def __init__(self, words: str, version: int, diff: List[str]):
+        super().__init__(words)
+        self.version, self.diff = version, diff
+
+
 class OneAtATime:
     """Work of one kind (a LabVIEW folder read) on a thread kept for it alone, one at a time: it never takes one of
     the threads other work waits for (a Stop waited 9 s behind twelve LabVIEW folders being read), and while one
@@ -5353,6 +5361,9 @@ class LabRuntime:
             request.items.append(self.KEPT_CLOSING)
 
     def _kept_lines(self, kept: Any) -> List[str]:
+        if not kept.intact:
+            return ["version %d of the lab's experiment %s changed after it was written: it won't run; save it as a "
+                    "new version" % (kept.number, kept.name)]
         if kept.approved:
             return ["version %d of the lab's experiment %s, approved by %s (%s)" % (
                 kept.number, kept.name, kept.approved_by, kept.approved_at)]
@@ -5674,21 +5685,41 @@ class LabRuntime:
         try:
             source = self.experiments.draft_path(draft).read_bytes().decode("utf-8")
             translation = self.experiments.draft_translation(draft)
-        except (KeyError, OSError) as e:
+        except KeyError as e:
             raise ValueError(e.args[0] if e.args else str(e))
+        except OSError as e:
+            raise ValueError(str(e))
         report = translation.get("report") or {}
         if not report.get("ok_to_keep"):
             blocks = [f.get("text", "") for f in report.get("findings") or [] if f.get("blocks")]
             raise ValueError("what blocks it: %s" % ("; ".join(blocks) or "it wasn't checked"))
         return source, translation
 
+    def _draft_diff(self, name: str, source: str) -> Tuple[int, List[str]]:
+        """A draft against a kept experiment's latest version: (that version's number, the lines that changed)."""
+        import difflib
+        latest = self.experiments.get(name)
+        try:
+            old = latest.path.read_bytes().decode("utf-8", "replace")
+        except OSError:
+            old = ""
+        diff = [d.rstrip("\n") for d in difflib.unified_diff(
+            old.splitlines(True), source.splitlines(True), "%s v%d" % (name, latest.number), "this draft")][2:]
+        return latest.number, [d for d in diff if d[:1] in "+-@"]
+
     def _keep_now(self, draft: str, name: str, translation: Dict[str, Any], by: str) -> Tuple[Any, List[str]]:
         """Keep it: the version, approved by by; the proposed mappings into the lab's map; the record."""
         from .. import vimap
         try:
             v = self.experiments.keep(draft, name, by)
-        except (KeyError, OSError) as e:
+        except FileExistsError:   # another keep of it, or a version of that name, made meanwhile
+            now = self.experiments.get(name).number if self.experiments.has(name) else 0
+            raise ValueError("someone kept %s meanwhile%s: read it again before keeping this" % (
+                name, ": it is at version %d now" % now if now else ""))
+        except KeyError as e:
             raise ValueError(e.args[0] if e.args else str(e))
+        except OSError as e:
+            raise ValueError(str(e))
         proposed = [m for m in (translation.get("notes") or {}).get("mappings") or [] if isinstance(m, dict)]
         said = vimap.accept(self.labview_map, proposed, by) if proposed else []
         self.gate.log.write("experiment", by=by, change="kept", name=name, version=v.number)
@@ -5699,8 +5730,9 @@ class LabRuntime:
         Under a name kept already only with new_version (a new version, approved by them). ValueError: why not."""
         source, translation = self._keepable(draft, name)
         if self.experiments.has(name) and not new_version:
-            raise FileExistsError("%s is kept already: keep this as its version %d?" % (
-                name, self.experiments.get(name).number + 1))
+            latest, changed = self._draft_diff(name, source)
+            raise KeptAlready("%s is kept already: this would be its version %d, approved by you; read what changed "
+                              "from version %d first" % (name, latest + 1, latest), latest + 1, changed)
         v, said = self._keep_now(draft, name, translation, by)
         return {"name": name, "version": v.number, "approved_by": v.approved_by, "said": said}
 
@@ -5715,13 +5747,8 @@ class LabRuntime:
         title = "Keep %s in the lab's experiments?" % name
         lines = self._keep_lines(source, translation, name)
         if self.experiments.has(name):   # a new version, approved by this yes: what changed, as a new version's run says
-            import difflib
-            latest = self.experiments.get(name)
-            title = "Keep this as version %d of the lab's experiment %s?" % (latest.number + 1, name)
-            old = latest.path.read_bytes().decode("utf-8", "replace")
-            diff = [d.rstrip("\n") for d in difflib.unified_diff(
-                old.splitlines(True), source.splitlines(True), "%s v%d" % (name, latest.number), "this draft")][2:]
-            changed = [d for d in diff if d[:1] in "+-@"]
+            number, changed = self._draft_diff(name, source)
+            title = "Keep this as version %d of the lab's experiment %s?" % (number + 1, name)
             lines[1:1] = ["what changed:"] + ["  " + d for d in changed[:40]] + (
                 ["  … (%d lines more)" % (len(changed) - 40)] if len(changed) > 40 else [])
         request = ApprovalRequest(title, lines)
@@ -5944,6 +5971,9 @@ class LabRuntime:
         (KeyError for a version that isn't there): why it can't run."""
         from .. import scriptrun
         kept = self._kept_version(spec.path)
+        if kept is not None and not kept.intact:
+            raise scriptrun.ScriptError("%s's version %d changed after it was written, so it won't run: save it as a "
+                                        "new version" % (kept.name, kept.number))
         if kept is not None:   # one of the lab's experiments: its version's file
             path, text = kept.path, scriptrun.source_of(kept.path)
         else:
@@ -6065,16 +6095,20 @@ class LabRuntime:
     def set_live(self, name: str, value: Any, run: str = "", by: str = "agent") -> str:
         """Change a live input of the experiment running now (scriptrun.ScriptRun.set_live), never waiting for the
         lab: the run holds it. run: the run it must be, when given."""
+        return self.set_live_result(name, value, run, by)[1]
+
+    def set_live_result(self, name: str, value: Any, run: str = "", by: str = "agent") -> Tuple[bool, str]:
+        """set_live: (changed, the words)."""
         job = self._live_run
         if job is None:
-            return "no experiment is running now: a live input changes only while its experiment runs"
+            return False, "no experiment is running now: a live input changes only while its experiment runs"
         if run and run != job.rec_id:
-            return "run %s isn't running now; run %s is" % (run, job.rec_id)
+            return False, "run %s isn't running now; run %s is" % (run, job.rec_id)
         try:
             before, after = job.set_live(name, value, by)
         except (KeyError, ValueError, RuntimeError) as e:
-            return "not changed: %s" % (e.args[0] if e.args else e)
-        return "%s is now %r in run %s (it was %r)" % (name, after, job.rec_id, before)
+            return False, "not changed: %s" % (e.args[0] if e.args else e)
+        return True, "%s is now %r in run %s (it was %r)" % (name, after, job.rec_id, before)
 
     def _run_script(self, prep: Any, mark: Callable[[str], str]) -> str:
         return self._script_run(prep, mark)[0]
