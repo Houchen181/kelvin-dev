@@ -3772,10 +3772,11 @@ class LabRuntime:
             card = self.lab.instruments[name].card
             for p in card.params.values():
                 key = "%s.%s" % (name, p.name)
+                alias = {"name": named[key]} if key in named else {}
                 if p.set_cmd is not None and p.type not in ("trace", "image"):
-                    settable.append({"key": key, "unit": p.unit, "drive": p.is_drive, "name": named.get(key)})
+                    settable.append(dict({"key": key, "unit": p.unit, "drive": p.is_drive}, **alias))
                 if p.get_cmd is not None:
-                    readable.append({"key": key, "unit": p.unit, "name": named.get(key)})
+                    readable.append(dict({"key": key, "unit": p.unit}, **alias))
             settable += [{"key": "%s.%s" % (name, a), "unit": "", "action": True} for a in card.actions]
         return {"set": settable, "read": readable}
 
