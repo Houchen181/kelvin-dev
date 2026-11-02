@@ -3733,14 +3733,17 @@ class LabRuntime:
         record (read), each with its unit: from the lab's cards, nothing is read."""
         settable: List[Dict[str, Any]] = []
         readable: List[Dict[str, Any]] = []
+        named: Dict[str, str] = {}   # the lab's own name for a key (names:), shown beside it
+        for alias, key in sorted(self.lab.config.names.items()):
+            named.setdefault(key, alias)
         for name in sorted(self.lab.instruments):
             card = self.lab.instruments[name].card
             for p in card.params.values():
                 key = "%s.%s" % (name, p.name)
                 if p.set_cmd is not None and p.type not in ("trace", "image"):
-                    settable.append({"key": key, "unit": p.unit, "drive": p.is_drive})
+                    settable.append({"key": key, "unit": p.unit, "drive": p.is_drive, "name": named.get(key)})
                 if p.get_cmd is not None:
-                    readable.append({"key": key, "unit": p.unit})
+                    readable.append({"key": key, "unit": p.unit, "name": named.get(key)})
             settable += [{"key": "%s.%s" % (name, a), "unit": "", "action": True} for a in card.actions]
         return {"set": settable, "read": readable}
 
@@ -3795,7 +3798,8 @@ class LabRuntime:
             base = self.library.get(base_id) if base_id else None
         except KeyError:
             base = None
-        data = scanedit.to_plan(parts)
+        # kept with the instruments' own names: a lab's own name (names:) changed later never changes a kept scan
+        data = with_names(scanedit.to_plan(parts), self.lab.config.names)
         text = plan_text(data)
         try:
             self._plan(text)
@@ -5413,7 +5417,7 @@ class LabRuntime:
         for a folder that isn't there. The portal reads it on labview_reads."""
         from .. import specialmeasure
         registry = self.script_cards()
-        found = specialmeasure.survey(folder, registry, own=self._kelvins())
+        found = specialmeasure.survey(folder, registry)   # a person chose it, as Set up reads a LabVIEW folder
         view = found.view(setup)
         view["kind"] = "specialmeasure"
         chosen = found.chosen(setup)
@@ -5429,8 +5433,9 @@ class LabRuntime:
             t = specialmeasure.translate(s["scan"], keys, s["name"], functions)
             x.update({k: t[k] for k in ("title", "text", "summary", "gaps")}, index=s.get("index", 0))
         taken = set(self.lab.config.instruments) | {i["name"] for i in view["instruments"]}
-        view["names"] = {ch: k for ch, (k, _f) in keys.items() if ch.isidentifier() and ch not in taken
-                         and ch not in self.lab.config.names}
+        loaded = self._sm_keys([i for i in view["instruments"] if i.get("used") or i.get("in_lab")], None)[0]
+        view["names"] = {ch: k for ch, (k, _f) in loaded.items() if ch.isidentifier() and ch not in taken
+                         and ch not in self.lab.config.names}   # the channels of the instruments the script loads
         return view
 
     def _sm_channels(self, item: Dict[str, Any], ri: Any, registry: Any) -> None:
@@ -5487,7 +5492,7 @@ class LabRuntime:
         from .. import specialmeasure
         from ..importers import specialmeasure as smfiles
         registry = self.script_cards()
-        found = specialmeasure.survey(folder, registry, own=self._kelvins(), scans=False)
+        found = specialmeasure.survey(folder, registry, scans=False)
         view = found.view(setup)
         s = found.chosen(setup)
         rack = specialmeasure._hardware(s)

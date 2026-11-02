@@ -5218,11 +5218,12 @@
     ED.base = JSON.stringify(d.parts);
     ED.check = d.check;
     const lab = d.lab || { set: [], read: [] };
-    ED.units = new Map(lab.set.concat(lab.read).map((p) => [p.key, p.unit || ""]));
+    // a key's unit, and the lab's own name for it (names:, a Special Measure channel's): "V · Vbg"
+    ED.units = new Map(lab.set.concat(lab.read).map((p) => [p.key, [p.unit, p.name].filter(Boolean).join(" · ")]));
     ED.setKeys = new Set(lab.set.map((p) => p.key));
     ED.readKeys = new Set(lab.read.map((p) => p.key));
-    $("ed-set-keys").replaceChildren(...lab.set.map((p) => h("option", { value: p.key }, p.unit || (p.action ? "action" : ""))));
-    $("ed-read-keys").replaceChildren(...lab.read.map((p) => h("option", { value: p.key }, p.unit || "")));
+    $("ed-set-keys").replaceChildren(...lab.set.map((p) => h("option", { value: p.key }, [p.name, p.unit || (p.action ? "action" : "")].filter(Boolean).join(" · "))));
+    $("ed-read-keys").replaceChildren(...lab.read.map((p) => h("option", { value: p.key }, [p.name, p.unit].filter(Boolean).join(" · "))));
     $("ed-plan").hidden = true;
     $("ed-text").setAttribute("aria-expanded", "false");
     edSay("");
