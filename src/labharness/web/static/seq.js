@@ -361,7 +361,9 @@
     }
     SEQ.q = q;
     badge(q);
+    if (!SEQ.open && !K.$("seqpane").hidden) { onSeq({ open: true }); return; }   // its opening was missed
     if (!SEQ.open) return;
+    if (!SEQ.el.list || !SEQ.el.list.isConnected) { render(); return; }   // a first drawing that failed: again
     if (sigOf(q) !== SEQ.sig || SEQ.pending) render();
     else tick();
     // a block that ended may have left a scan in the library (each scan run is kept there)
@@ -399,6 +401,8 @@
     build();
     document.addEventListener("kelvin:state", (e) => guard(onState, e.detail));
     document.addEventListener("kelvin:seq", (e) => guard(onSeq, e.detail || {}));
+    // opened before this file started (a click while the page was still loading): drawn now
+    if (!K.$("seqpane").hidden) guard(onSeq, { open: true });
     if (window.ResizeObserver) new ResizeObserver(() => guard(fit)).observe(SEQ.el.pane);
     SEQ.el.pane.addEventListener("focusout", () => setTimeout(() => guard(() => {
       if (SEQ.pending && !fieldIn(SEQ.el.list) && !(SEQ.drag && SEQ.drag.active)) render();

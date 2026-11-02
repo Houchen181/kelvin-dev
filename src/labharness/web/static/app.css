@@ -1556,10 +1556,58 @@ body.resizing .plot-svg { pointer-events: none; }
 .mode-seg button:hover { color: var(--text); }
 .mode-seg button.on { background: var(--panel); color: var(--text); border-color: var(--line-strong); box-shadow: 0 1px 2px rgba(20, 32, 44, 0.10); }
 .mode-seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-/* the panels' buttons: icons, their names on hover (title), so the switch has the middle of the bar */
-.topbar-right .pill { padding: 7px 9px; position: relative; }
+/* the panels' buttons: icons (their names on hover), drawn as the Chat | Home switch is: a grey track, each closed
+   panel's button flat on it, an open one raised white */
+.topbar-right { justify-self: end; width: max-content; gap: 2px; padding: 3px; border-radius: 999px; background: var(--seg-track);
+  border: 1px solid var(--line); }
+.topbar .topbar-right .pill { padding: 6px 9px; position: relative; border: 1px solid transparent; background: none;
+  color: var(--muted); box-shadow: none; }
+.topbar .topbar-right .pill:hover { color: var(--text); background: none; }
+.topbar .topbar-right .pill.on, .topbar .topbar-right .pill[aria-pressed="true"], .topbar .topbar-right #toggle-incognito.on {
+  background: var(--panel); color: var(--text); border-color: var(--line-strong); box-shadow: 0 1px 2px rgba(20, 32, 44, 0.10); }
 .topbar-right .pill .pill-text { display: none; }
-.topbar-right .pill .badge, .topbar-right .pill .live-dot { position: absolute; top: -5px; right: -5px; }
+.topbar-right .pill .badge, .topbar-right .pill .live-dot { position: absolute; top: -6px; right: -6px; }
+/* on a wide screen the top bar spans the window above the panels: a panel opening never moves the buttons */
+@media (min-width: 1101px) {
+  #app:not(.full) .topbar { position: fixed; top: 0; right: 0; left: 264px; z-index: 25; background: var(--bg);
+    border-bottom: 1px solid var(--line); }
+  #app.compact:not(.full) .topbar { left: 0; }
+  #app:not(.full) .main { padding-top: 57px; }
+  #app:not(.full) .dock-col { margin-top: 57px; }
+}
+/* the Runs pane: All runs is the first tab, not a link inside a run */
+.rv-back { display: none !important; }
+.run-tab.all-runs { font-weight: 600; padding-right: 12px; }
+.run-tab.all-runs svg { width: 15px; height: 15px; }
+/* text buttons look like buttons: a small outlined button (a destructive one red) */
+button.link { border: 1px solid var(--line-strong); background: var(--panel); border-radius: var(--radius-s);
+  padding: 4px 10px; color: var(--text); font-weight: 550; font-size: 13px; cursor: pointer; }
+button.link:hover { background: var(--hover); color: var(--text); border-color: var(--line-strong); }
+button.link.danger { color: var(--danger); }
+button.link.danger:hover { background: var(--danger-soft); }
+/* the Lab panel: a heading per part, larger, a line between parts, each part folds under its heading */
+#labpanel .lab-scroll h3 { font-size: 15px; font-weight: 650; color: var(--text); margin: 0; }
+#labpanel .inst-head-row { align-items: center; margin: 16px 0 10px; }
+#labpanel .inst-head-row ~ .inst-head-row { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 20px; }
+#labpanel .inst-head-row .btn.small { margin-left: 4px; }
+#labpanel .inst-head-row .inst-summary { margin-right: auto; }
+.fold-btn { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; padding: 0; cursor: pointer;
+  font: inherit; color: inherit; }
+.fold-btn svg { width: 13px; height: 13px; color: var(--muted); transform: rotate(90deg); transition: transform .15s; }
+.folded .fold-btn svg { transform: none; }
+.fold-hide { display: none !important; }
+/* instrument rows: icon, name, the value in a right-aligned column, the state, the arrow; no model in small print */
+#labpanel .inst-row { grid-template-columns: 22px minmax(0, 1fr) 112px 18px 12px; }
+#labpanel .inst-model { display: none; }
+#labpanel .inst-headline { text-align: right; justify-self: end; }
+/* Settings: larger titles; an item with many settings folds under its title */
+.set-title { font-size: 20px; font-weight: 650; }
+.set-page > .field > .field-row:first-child > .field-label { font-size: 15px; font-weight: 650; color: var(--text); }
+.set-page > .field { padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.fold-field.folded > :not(.fold-head), .fold-field.folded > .fold-head > :not(.field-label) { display: none !important; }
+.set-page > .field .field-label .fold-btn { font-size: 15px; font-weight: 650; color: var(--text); }
+.fold-field .fold-btn svg { transform: rotate(90deg); }
+.fold-field.folded .fold-btn svg { transform: none; }
 /* Home takes the conversation's place */
 .app.home-on #scroller, .app.home-on .composer-wrap, .app.home-on #chat-title, .app.home-on #wake-bar { display: none !important; }
 /* the Runs pane is the runs, its History: the scans are the sequence's functions now, and the queue is the sequence, so

@@ -1007,12 +1007,25 @@
       t.body.hidden = !on;
     }
     $("runs-list").hidden = !!active;
+    const all = allRunsTab();   // the tab bar's first tab: the list of every run
+    all.classList.toggle("on", !active);
+    all.setAttribute("aria-selected", String(!active));
     if (view === "history" && !active) loadRunList();
     if (view === "schedule") { loadScans(); loadQueue(); }
   }
-  function showRunList() {   // ← All runs: the open tabs stay open
+  function showRunList() {   // All runs: the open tabs stay open
     RUNS.active = null;
     showView("history");
+  }
+  function allRunsTab() {   // made once, kept first in the run tabs
+    let b = $("runs-all");
+    if (!b) {
+      b = h("button", { id: "runs-all", class: "run-tab all-runs", type: "button", role: "tab", title: "Every run" },
+        svgIcon("M4 6h16M4 12h16M4 18h10"), h("span", {}, "All runs"));
+      b.addEventListener("click", showRunList);
+      $("run-tabs").prepend(b);
+    }
+    return b;
   }
   // the segmented control is a tab list: the arrow keys, Home and End move along it, along the tabs in sight (the
   // Schedule's is not: the queue is the Sequence pane)
@@ -8479,6 +8492,47 @@
     });
     setMode(store("lh.mode") === "home" ? "home" : "chat", true);
   }
+  // the Lab panel's parts, each foldable under its heading (remembered); Hands on the sample and Bring to safe never fold
+  function initLabFolds() {
+    for (const row of document.querySelectorAll("#labpanel .inst-head-row")) {
+      const h3 = row.querySelector("h3");
+      if (!h3 || h3.querySelector(".fold-btn")) continue;
+      const key = "lh.fold." + h3.textContent.trim();
+      const btn = h("button", { class: "fold-btn", type: "button", "aria-expanded": "true" }, icon("chev"), h3.textContent.trim());
+      h3.replaceChildren(btn);
+      const apply = (folded) => {
+        row.classList.toggle("folded", folded);
+        btn.setAttribute("aria-expanded", String(!folded));
+        for (let el = row.nextElementSibling; el && !el.classList.contains("inst-head-row"); el = el.nextElementSibling) {
+          if (!el.matches(".hands-btn, #hands-locked")) el.classList.toggle("fold-hide", folded);
+        }
+      };
+      apply(store(key) === "1");
+      btn.addEventListener("click", () => {
+        const folded = !row.classList.contains("folded");
+        store(key, folded ? "1" : "0");
+        apply(folded);
+      });
+    }
+  }
+  // Settings: an item with many settings (more than two fields) folds under its title, folded until opened
+  function initSettingFolds() {
+    for (const field of document.querySelectorAll("#settings-dialog .set-page > .field")) {
+      const label = field.querySelector(".field-label");
+      const many = field.querySelectorAll("input:not([type=checkbox]):not([type=radio]), select, textarea").length > 2;
+      if (!label || !many || label.querySelector(".fold-btn")) continue;
+      let head = label;   // the part of the item its title is in: what stays shown when it is folded
+      while (head.parentElement && head.parentElement !== field) head = head.parentElement;
+      head.classList.add("fold-head");
+      const btn = h("button", { class: "fold-btn", type: "button", "aria-expanded": "false" }, icon("chev"), label.textContent.trim());
+      label.replaceChildren(btn);
+      field.classList.add("fold-field", "folded");
+      btn.addEventListener("click", () => {
+        const folded = !field.classList.toggle("folded");
+        btn.setAttribute("aria-expanded", String(folded));
+      });
+    }
+  }
   // what the parts kept apart may use: the page's helpers, its state, and the panels and dialogs they open
   window.Kelvin = {
     $, h, api, icon, md, toast, fmt, store, S, MARK,
@@ -8537,6 +8591,8 @@
     applyModels(boot.models.groups, boot.default_model, boot.auto_model, boot.models.hub);
     initPanes();
     initMode();
+    initLabFolds();
+    initSettingFolds();
     initRunsPane();
     initTeam();
     initAnalysis();

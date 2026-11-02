@@ -520,25 +520,25 @@
       </div>
       <div id="lab-observe" class="callout small calm" title="Kelvin asks before each output change on these until you review their limits" hidden>
         <b>Limits not reviewed:</b> <span id="lab-observe-who"></span>
-        <button id="lab-observe-review" class="link" type="button">Review limits…</button>
+        <button id="lab-observe-review" class="btn small" type="button">Review limits…</button>
       </div>
       <div id="lab-drafts" class="callout small calm" title="Kelvin asks before each setting or output change on these until you mark their cards reviewed" hidden>
         <b>Cards not reviewed:</b> <span id="lab-drafts-who"></span>
-        <button id="lab-drafts-review" class="link" type="button">Review cards…</button>
+        <button id="lab-drafts-review" class="btn small" type="button">Review cards…</button>
       </div>
       <div class="inst-head-row"><h3>Sample</h3><span id="mount-summary" class="inst-summary"></span>
-        <button id="mount-new" class="link soft" type="button">New device…</button></div>
+        <button id="mount-new" class="btn small" type="button">New device…</button></div>
       <select id="mount-select" class="mount-select" aria-label="The sample in the setup now"></select>
       <div id="mount-protection" class="mount-protection" hidden>
-        <div class="mp-head"><span id="mp-state" class="mp-state"></span><button id="mount-protect" class="link soft" type="button">Protection…</button></div>
+        <div class="mp-head"><span id="mp-state" class="mp-state"></span><button id="mount-protect" class="btn small" type="button">Protection…</button></div>
         <ul id="mp-lines" class="mp-lines"></ul>
       </div>
       <button id="hands-on" class="btn small hands-btn" type="button" title="Before you touch the sample: Kelvin stops what runs, brings everything that reaches the sample to safe and keeps it there until you unlock"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg> Hands on the sample</button>
       <button id="lab-safe" class="btn small hands-btn" type="button" title="Every instrument to the safe values its card declares: what runs stops, outputs go off, levels and the field to safe, heaters off. Positions and ramp rates stay.">Bring to safe</button>
       <div id="hands-locked" class="hands-locked" role="status" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg><span>Locked: hands on the sample</span><button id="hands-done-panel" class="btn small" type="button">Unlock…</button></div>
       <div class="inst-head-row"><h3>Instruments</h3><span id="inst-summary" class="inst-summary"></span>
-        <button id="open-lab-setup" class="link soft" type="button">Set up…</button>
-        <button id="open-cards-lab" class="link soft" type="button" title="Your instrument cards: review a draft, edit one, or make one from a manual">Cards…</button></div>
+        <button id="open-lab-setup" class="btn small" type="button">Set up…</button>
+        <button id="open-cards-lab" class="btn small" type="button" title="Your instrument cards: review a draft, edit one, or make one from a manual">Cards…</button></div>
       <div class="inst-tools">
         <input id="inst-filter" type="search" placeholder="Filter" aria-label="Filter instruments" spellcheck="false" autocomplete="off">
         <div id="inst-seg" class="seg" role="group" aria-label="Which instruments to show">
@@ -547,7 +547,7 @@
       </div>
       <div id="lab-status" class="inst-list"></div>
       <div class="inst-head-row"><h3>Watches</h3><span id="watch-summary" class="inst-summary"></span>
-        <button id="watch-add-toggle" class="link soft" type="button">Add…</button></div>
+        <button id="watch-add-toggle" class="btn small" type="button">Add…</button></div>
       <form id="watch-form" class="watch-form" hidden>
         <select id="watch-key" aria-label="Reading to watch"></select>
         <input id="watch-above" type="number" step="any" placeholder="above" title="Alarm when the reading goes above this" aria-label="Alarm above">
@@ -559,7 +559,7 @@
       <ul id="watch-list" class="watch-list"></ul>
       <details id="alarm-history" class="alarm-history" hidden><summary>Alarm history</summary><ul id="alarm-history-list" class="watch-list"></ul></details>
       <div class="inst-head-row"><h3>Lab memory</h3><span id="labmem-summary" class="inst-summary"></span>
-        <button id="labmem-add" class="link soft" type="button">Add…</button></div>
+        <button id="labmem-add" class="btn small" type="button">Add…</button></div>
       <form id="labmem-form" class="labmem-form" hidden>
         <select id="labmem-kind" aria-label="What kind of note">
           <option value="lesson">Lesson</option><option value="wiring">Wiring</option><option value="reference">Reference</option>
@@ -570,7 +570,7 @@
         <div class="labmem-actions"><button id="labmem-keep" class="btn small" type="submit">Keep</button><button id="labmem-cancel" class="link soft" type="button">Cancel</button></div>
       </form>
       <ul id="labmem-list" class="labmem-list"></ul>
-      <div class="inst-head-row"><h3>Activity</h3><button id="activity-all" class="link soft" type="button" aria-pressed="false" hidden>Everyone</button></div>
+      <div class="inst-head-row"><h3>Activity</h3><button id="activity-all" class="btn small" type="button" aria-pressed="false" hidden>Everyone</button></div>
       <ol id="lab-events" class="lab-events"></ol>
     </div>
   </aside>
