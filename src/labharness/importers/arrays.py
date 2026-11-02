@@ -1,4 +1,5 @@
-"""NumPy's files (.npy, .npz) as data: a column of numbers, a table, a camera frame or a stack of frames.
+"""NumPy's files (.npy, .npz) as data: a column of numbers, a table, a camera frame or a stack of frames; and a MATLAB
+.mat file's numeric variables, read the same way (from_variables; matfile.py reads the file).
 
 Loaded with allow_pickle=False, so a file can't run code as it loads (an array of Python objects is refused). How an
 array is read follows its shape, as people save them:
@@ -8,7 +9,9 @@ array is read follows its shape, as people save them:
 - 2-D, wide both ways: a camera frame; 3-D: a stack of frames (or one colour frame, rows x columns x 3);
   4-D: a stack of colour frames;
 - a record array (named fields): a table with the fields' names;
-- .npz: its 1-D arrays of one length side by side, or its one array read as above."""
+- .npz: its 1-D arrays of one length side by side, or its one array read as above;
+- .mat: the same, with MATLAB's shapes: a vector (1 x n or n x 1) is a column, and a stack of frames is rows x columns
+  x frames (MATLAB's stack(:, :, k)), as is a stack of colour frames (rows x columns x 3 x frames)."""
 from __future__ import annotations
 
 import zipfile
@@ -46,24 +49,49 @@ def read_npz(p: Path) -> Table:
         raise DataError("%s is not a NumPy .npz file (%s)" % (p.name, e))
     except (zipfile.BadZipFile, OSError) as e:
         raise DataError("%s is not a NumPy .npz file (%s)" % (p.name, e))
-    stem = key_of(p.stem, "data")
+    return from_arrays(key_of(p.stem, "data"), p.name, arrays, np)
+
+
+def from_variables(stem: str, filename: str, variables: Dict[str, Any], np: Any) -> Table:
+    """A MATLAB file's variables (matfile.load) as a .npz's arrays: its numbers in MATLAB's shapes made NumPy's (a
+    vector one column, a stack of frames frames first); text, cells, structs and objects left out, by name."""
+    arrays: Dict[str, Any] = {}
+    for name, v in variables.items():
+        if not isinstance(v, np.ndarray) or v.dtype.kind not in "biufc":
+            arrays[name] = np.empty(0, dtype=object)   # not numbers: said as left out, by its name
+            continue
+        if v.ndim == 2 and 1 in v.shape:
+            v = v.reshape(-1)
+        elif v.ndim == 3 and not (v.shape[2] in (3, 4) and min(v.shape[:2]) > 4):
+            v = np.moveaxis(v, 2, 0)   # MATLAB's stack(:, :, k): frame k
+        elif v.ndim == 4 and v.shape[2] in (3, 4):
+            v = np.moveaxis(v, 3, 0)   # colour frames, rows x columns x 3 x frames
+        arrays[name] = v
+    return from_arrays(stem, filename, arrays, np, word="variables", what="a MATLAB array")
+
+
+def from_arrays(stem: str, filename: str, arrays: Dict[str, Any], np: Any, word: str = "arrays",
+                what: str = "a NumPy array") -> Table:
+    """Named arrays (a .npz's, a .mat's) as a Table: one array of numbers read as from_array reads it, else the 1-D
+    arrays of one length side by side (x the first, or the second after a count of the rows). word: what the file
+    calls them, in the notes."""
     numeric = {k: a for k, a in arrays.items() if a.dtype.kind in "biuf" and a.ndim >= 1 and a.size}
     if len(numeric) == 1:
         (name, a), = numeric.items()
-        return from_array(stem, p.name, a, np)
+        return from_array(stem, filename, a, np, what)
     lengths: Dict[int, List[str]] = {}
     for k, a in numeric.items():
         if a.ndim == 1:
             lengths.setdefault(len(a), []).append(k)
     if not lengths:
-        raise DataError("%s holds no column of numbers (its arrays: %s)" % (
-            p.name, ", ".join(key_of(k, "array") for k in arrays) or "none"))
+        raise DataError("%s holds no column of numbers (its %s: %s)" % (
+            filename, word, ", ".join(key_of(k, "array") for k in arrays) or "none"))
     n, keys = max(lengths.items(), key=lambda kv: (len(kv[1]), kv[0]))
     if len(keys) < 2:
-        raise DataError("%s: no two of its arrays are columns of one length; save x and y as 1-D arrays of the same "
-                        "length" % p.name)
+        raise DataError("%s: no two of its %s are columns of one length; save x and y as %s of the same length" % (
+            filename, word, "1-D arrays" if word == "arrays" else "vectors"))
     if n > MAX_ROWS:
-        raise DataError("%s has more than %d rows" % (p.name, MAX_ROWS))
+        raise DataError("%s has more than %d rows" % (filename, MAX_ROWS))
     columns = list(keys)
     if len(keys) > 2 and counts_rows([float(v) for v in numeric[keys[0]]], keys[0]):   # the rows' own count
         keys = keys[1:]
@@ -75,7 +103,7 @@ def read_npz(p: Path) -> Table:
         table.columns[_unique(table, "%s.%s" % (stem, column_key(k, "y")))] = ("", [float(v) for v in numeric[k]])
     left = [key_of(k, "array") for k in arrays if k not in columns]
     if left:
-        table.notes.append("%s: arrays left out (not columns of %d numbers): %s" % (p.name, n, ", ".join(left)))
+        table.notes.append("%s: %s left out (not columns of %d numbers): %s" % (filename, word, n, ", ".join(left)))
     return table
 
 
@@ -86,12 +114,12 @@ def _unique(table: Table, key: str) -> str:
     return name
 
 
-def from_array(stem: str, filename: str, a: Any, np: Any) -> Table:
+def from_array(stem: str, filename: str, a: Any, np: Any, what: str = "a NumPy array") -> Table:
     if a.dtype.names:
         return _records(stem, filename, a, np)
     if a.dtype.kind == "c" and a.ndim == 1:   # a complex series: its real and imaginary parts
         a = np.stack([a.real, a.imag], axis=1)
-        return _table(stem, filename, a, np, names=["re", "im"], index=True)
+        return _table(stem, filename, a, np, names=["re", "im"], index=True, what=what)
     if a.dtype.kind not in "biuf":
         raise DataError("%s holds %s, not numbers Kelvin reads" % (filename, {
             "c": "complex numbers in more than one dimension", "U": "text", "S": "text", "M": "dates",
@@ -101,23 +129,24 @@ def from_array(stem: str, filename: str, a: Any, np: Any) -> Table:
     if a.ndim == 0 or not a.size:
         raise DataError("%s holds %s" % (filename, "one number" if a.ndim == 0 else "no numbers"))
     if a.ndim == 1:
-        return _table(stem, filename, a[:, None], np, names=["value"], index=True)
+        return _table(stem, filename, a[:, None], np, names=["value"], index=True, what=what)
     if a.ndim == 2:
         n, m = a.shape
         if min(n, m) <= TABLE_COLUMNS and max(n, m) > min(n, m):
-            return _table(stem, filename, a if m <= n else a.T, np)
-        return frames_table(stem, filename, [a], "a NumPy array")
+            return _table(stem, filename, a if m <= n else a.T, np, what=what)
+        return frames_table(stem, filename, [a], what)
     if a.ndim == 3:
         if a.shape[2] in (3, 4) and min(a.shape[:2]) > 4:   # rows x columns x colours: one picture
-            return frames_table(stem, filename, [a[:, :, :3]], "a NumPy array")
-        return frames_table(stem, filename, list(a), "a NumPy array of %d frames" % a.shape[0])
+            return frames_table(stem, filename, [a[:, :, :3]], what)
+        return frames_table(stem, filename, list(a), "%s of %d frames" % (what, a.shape[0]))
     if a.ndim == 4 and a.shape[3] in (3, 4):
-        return frames_table(stem, filename, list(a[:, :, :, :3]), "a NumPy array of %d colour frames" % a.shape[0])
+        return frames_table(stem, filename, list(a[:, :, :, :3]), "%s of %d colour frames" % (what, a.shape[0]))
     raise DataError("%s: an array of shape %s, which Kelvin doesn't read as a table or as frames" % (
         filename, "x".join(str(d) for d in a.shape)))
 
 
-def _table(stem: str, filename: str, a: Any, np: Any, names: Any = None, index: bool = False) -> Table:
+def _table(stem: str, filename: str, a: Any, np: Any, names: Any = None, index: bool = False,
+           what: str = "a NumPy array") -> Table:
     """Columns of a points x columns array. x: the first column when it runs one way, else the index."""
     n, m = a.shape
     if n > MAX_ROWS:
@@ -135,8 +164,8 @@ def _table(stem: str, filename: str, a: Any, np: Any, names: Any = None, index: 
         cols = range(m)
     for k in cols:
         table.columns["%s.%s" % (stem, names[k])] = ("", [float(v) for v in values[:, k]])
-    table.notes.append("%s: a NumPy array of %s%s" % (filename, "x".join(str(d) for d in a.shape) if m > 1 else n,
-                                                     "; x is its first column" if runs else ""))
+    table.notes.append("%s: %s of %s%s" % (filename, what, "x".join(str(d) for d in a.shape) if m > 1 else n,
+                                           "; x is its first column" if runs else ""))
     return table
 
 
