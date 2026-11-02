@@ -66,3 +66,8 @@ def test_a_library_cards_actions_may_call_the_functions_they_name():
     from labharness import library
     sets, gets = library.card_calls(builtin_registry().get("thorlabs/kdc101"))
     assert {"MoveTo", "Home", "StopImmediate"} <= sets and "Position" in gets
+
+
+def test_the_2400s_card_says_what_an_output_on_sets_first():
+    text = builtin_registry().get("keithley/2400").params["output"].description
+    assert "I_source" in text and "compliance_V" in text and "0.2 V" in text

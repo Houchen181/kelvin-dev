@@ -436,3 +436,85 @@ def test_confidential_work_outside_a_chat_never_goes_through_the_hub(lab, folder
     with TestClient(app):
         with pytest.raises(ValueError, match="hub"):
             rt.vi_model("translate", {"confidential": True, "rules": None})
+
+
+# ------------------------------------------------------------------ the polish a customer would notice (Plan 4)
+
+from labharness import scriptrun  # noqa: E402
+from test_script_runs import run  # noqa: E402
+
+
+def run_id_of(said):
+    m = re.search(r"runs[\\/]([^\\/:\s]+)", said)
+    assert m, said
+    return m.group(1)
+
+
+def test_a_kept_experiments_run_is_named_after_it(rt_kept):
+    said = rt_kept.run_script("iv-scan")
+    assert "iv-scan (scan) done" in said, said
+
+
+def test_a_live_value_that_isnt_a_finite_number_is_refused():
+    with pytest.raises(ValueError, match="whole number"):
+        scriptrun._live_value("Steps", 5, "inf")
+    with pytest.raises(ValueError, match="number"):
+        scriptrun._live_value("Target", 1.5, "nan")
+
+
+def test_an_actions_main_block_doesnt_run_it_twice(lab, folder, tmp_path):
+    write(folder, "twice.py", GOOD + '\nif __name__ == "__main__":\n    scan()\n')
+    gate, request, report = run(lab, folder, tmp_path, "twice.py")
+    assert report.status == "done" and len(report.rows) == 3, report.rows
+
+
+def test_a_labs_own_kelvin_py_is_said_in_a_run(lab, folder, tmp_path):
+    write(folder, "kelvin.py", "def helper():\n    return 1\n")
+    write(folder, "uses_helper.py", "import kelvin\nprint(kelvin.helper())\n")
+    gate, request, report = run(lab, folder, tmp_path, "uses_helper.py")
+    assert "rename" in (report.message + "\n".join(report.output)), report.message
+
+
+def test_approving_a_file_that_changed_while_its_card_waited_is_said(rt_kept, monkeypatch):
+    rt = rt_kept
+    rt.save_experiment("iv-scan", GOOD.replace("0.5", "0.25"))
+
+    def changed(name, number, by):
+        raise ValueError("iv-scan v2's file changed after it was written, so it can't be approved")
+    monkeypatch.setattr(rt.experiments, "approve", changed)
+    said = rt.run_script("iv-scan")
+    assert said.startswith("script not run") and "changed after it was written" in said, said
+
+
+def test_a_new_versions_card_holds_when_its_earlier_file_is_gone(rt_kept):
+    rt = rt_kept
+    rt.save_experiment("iv-scan", GOOD.replace("0.5", "0.25"))
+    rt.experiments.get("iv-scan", 1).path.unlink()
+    assert "done" in rt.run_script("iv-scan")
+    assert "version 2 of the lab's experiment iv-scan is new" in rt.asked[-1]
+
+
+def test_check_script_on_a_kept_experiment_names_its_version(rt_kept):
+    said = rt_kept.check_script("iv-scan")
+    assert "version 1 of the lab's experiment iv-scan" in said and "One of the lab's experiments" in said, said
+
+
+def test_a_queued_version_runs_the_version_that_run_ran(rt_kept):
+    rt = rt_kept
+    ran = run_id_of(rt.run_script("iv-scan"))
+    rt.save_experiment("iv-scan", GOOD.replace("0.5", "0.25"))
+    assert rt._prepare_script("iv-scan", version=ran).path == rt.experiments.get("iv-scan", 1).path
+
+
+def test_the_queues_dry_run_rehearsal_stops_with_the_lab(rt_kept, monkeypatch):
+    rt = rt_kept
+    seen = []
+    real_rehearse = scriptrun.rehearse
+
+    def rehearse(*a, **k):
+        seen.append(k.get("real"))
+        return real_rehearse(*a, **k)
+    monkeypatch.setattr(scriptrun, "rehearse", rehearse)
+    rt.queue_add("script: iv-scan\n")
+    rt.queue_start(dry_run=True)
+    assert seen and seen[0] is rt.gate

@@ -883,6 +883,8 @@ def main(argv):
     sys.path[0] = os.path.dirname(script)
     module = types.ModuleType("__main__")
     module.__dict__.update(__file__=script, __builtins__=builtins, __cached__=None)
+    if os.environ.get("KELVIN_ACTION"):   # an experiment's action: Kelvin runs it, so its __main__ block doesn't too
+        module.__dict__["__name__"] = "__kelvin_experiment__"
     sys.modules["__main__"] = module
     status, error = 0, ""
     try:

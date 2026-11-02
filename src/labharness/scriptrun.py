@@ -27,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -777,10 +778,11 @@ class Prepared:
     live: Dict[str, Any] = field(default_factory=dict)   # an experiment's live inputs and their defaults
     # one of the lab's kept experiments (expstore): its process is fenced in its real run too (kelvin_shim._fence)
     fenced: bool = False
+    title: str = ""   # what its run is called instead of its file's name (one of the lab's experiments: its name)
 
     @property
     def name(self) -> str:
-        return self.path.name + (" (%s)" % self.action if self.action else "")
+        return (self.title or self.path.name) + (" (%s)" % self.action if self.action else "")
 
     def drive_values(self, lab: Any) -> Tuple[Dict[str, List[Any]], Dict[str, str], List[str]]:
         """Every drive value the run may use, for the approval; for each drive whose values aren't known before the
@@ -2097,13 +2099,13 @@ def _live_value(name: str, now: Any, value: Any) -> Any:
             x = float(value)
         except (TypeError, ValueError):
             x = None
-        if x is None or isinstance(value, bool) or x != int(x):
+        if x is None or isinstance(value, bool) or not math.isfinite(x) or x != int(x):
             raise ValueError("%s takes a whole number, not %r" % (name, value))
         return int(x)
     if isinstance(now, float):
         try:
-            if isinstance(value, bool):
-                raise ValueError
+            if isinstance(value, bool) or not math.isfinite(float(value)):
+                raise ValueError   # nan and inf are no set points
             return float(value)
         except (TypeError, ValueError):
             raise ValueError("%s takes a number, not %r" % (name, value)) from None

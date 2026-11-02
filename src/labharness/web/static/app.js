@@ -1107,6 +1107,7 @@
         tab.done = v.done; tab.total = v.total;
         if (v.eta_s !== tab.etaRaw || v.phase !== tab.phase) { tab.etaRaw = v.eta_s; tab.etaAt = Date.now(); }  // count down between updates
         tab.phase = v.phase;
+        tab.inputs = v.inputs || null;
         if (v.status !== "running") { setTabStatus(tab, "finishing"); await loadFinal(tab); continue; }
         renderRunView(tab);
         await sleep(500);
@@ -1133,6 +1134,7 @@
       catch (e) { toast(e.message); }
     });
     v.count = h("span", { class: "rv-count" });
+    v.inputs = h("div", { class: "rv-inputs", hidden: true });   // a running experiment's live inputs
     v.bar = h("i");
     v.barBox = h("div", { class: "bar" }, v.bar);
     v.analysis = h("div", { class: "rv-analysis" });
@@ -1153,7 +1155,7 @@
     back.addEventListener("click", showRunList);
     tab.body.replaceChildren(back,
       h("div", { class: "rv-head" }, v.state, h("code", { class: "rv-plan-name" }, tab.plan), h("div", { class: "spacer" }), v.stop),
-      h("div", { class: "rv-progress" }, v.count), v.barBox, v.analysis, v.files, v.plan, v.again, v.charts, v.foot, v.table);
+      h("div", { class: "rv-progress" }, v.count), v.inputs, v.barBox, v.analysis, v.files, v.plan, v.again, v.charts, v.foot, v.table);
     tab.view = v;
   }
 
@@ -1270,7 +1272,36 @@
     return { axes: tab.axes.map((a) => ({ key: a.key, unit: a.unit })), scalars: tab.measures.filter((m) => m.kind === "scalar"),
              rows: tab.rows, traces: tab.trace ? [tab.trace] : [], analysis: null };
   }
+  function liveInputs(tab) {   // a running experiment's live inputs: changed here as the chat's set_live changes them
+    const v = tab.view, inputs = tab.status === "running" ? tab.inputs : null;
+    if (!v || !v.inputs) return;
+    v.inputs.hidden = !inputs || !Object.keys(inputs).length;
+    if (v.inputs.hidden) { delete v.inputs.dataset.names; return; }
+    const names = Object.keys(inputs).join("\n");
+    if (v.inputs.dataset.names === names) {   // the same inputs: their values, unless someone is editing one
+      for (const [name, value] of Object.entries(inputs)) {
+        const f = [...v.inputs.querySelectorAll("input")].find((x) => x.dataset.name === name);
+        if (f && document.activeElement !== f && !f.dataset.dirty) f.value = String(value);
+      }
+      return;
+    }
+    v.inputs.dataset.names = names;
+    v.inputs.replaceChildren(h("span", { class: "muted small" }, "Live inputs:"), ...Object.entries(inputs).map(([name, value]) => {
+      const field = h("input", { class: "mono", "data-name": name, value: String(value), "aria-label": name, size: "8" });
+      field.addEventListener("input", () => { field.dataset.dirty = "1"; });
+      const said = h("span", { class: "muted small" });
+      const set = h("button", { class: "btn small", type: "button", title: "The running experiment reads it next time it asks; a drive it moves still passes the safety gate" }, "Set");
+      set.addEventListener("click", async () => {
+        try {
+          const r = await api("/api/runs/live", { body: { name, value: field.value } });
+          said.textContent = r.said; said.classList.remove("bad"); delete field.dataset.dirty;
+        } catch (e) { said.textContent = e.message; said.classList.add("bad"); }
+      });
+      return h("label", { class: "rv-input" }, name + " ", field, set, said);
+    }));
+  }
   function renderRunView(tab) {
+    liveInputs(tab);
     if (!tab.view) buildRunView(tab);
     const v = tab.view;
     setState(v.state, tab.status);
@@ -4664,6 +4695,188 @@
     SCANS.fresh = null;
     try { SCANS.data = await api("/api/library"); } catch (e) { scansSay(e.message, true); }
     renderScans();
+    loadExperiments();
+  }
+
+  // ---------- the lab's experiments: translated from its VIs, kept with every version (Runs → Lab experiments)
+  const EXP = { data: null, open: null };
+
+  async function loadExperiments() {
+    try { EXP.data = await api("/api/experiments"); } catch (e) { EXP.data = null; }
+    renderExperiments();
+  }
+  function renderExperiments() {
+    const box = $("scans-experiments"), d = EXP.data || {};
+    const rows = (d.experiments || []).map(experimentRow).concat((d.drafts || []).map(draftRow));
+    box.hidden = !rows.length;
+    box.querySelector("ul").replaceChildren(...rows);
+  }
+  function experimentRow(e) {
+    const key = "exp:" + e.name;
+    const pick = h("select", { class: "exp-action", "aria-label": "Action of " + e.name },
+      ...(e.actions.length ? e.actions : [{ name: "", main: true }]).map((a) =>
+        h("option", { value: a.name }, a.name ? a.name + (a.main ? " (main)" : "") : "the whole experiment")));
+    const act = (label, title, queue) => {   // a version whose file changed on disk never runs: no Run, no Queue
+      const b = h("button", { type: "button", title: e.standing === "changed" ? "Its file changed on disk: save it as a new version" : title,
+        "data-busy": key, disabled: BUSY.has(key) || e.standing === "changed" }, label);
+      b.addEventListener("click", () => runExperiment(e, pick.value, queue));
+      return b;
+    };
+    const versions = h("button", { type: "button", title: "Its versions, code and checks" }, e.standing === "new" ? "Approve…" : "Versions");
+    versions.addEventListener("click", () => openVersions(e.name));
+    const tag = e.standing === "new" ? h("span", { class: "tag warn", title: "A new version: its first run, or Approve…, asks a person" }, "new")
+      : e.standing === "changed" ? h("span", { class: "tag warn", title: "Its file changed on disk: it won't run" }, "changed") : null;
+    return h("li", { class: "q-item lib" },
+      h("span", { class: "lib-name" }, h("span", { class: "q-name" }, e.name), tag,
+        e.vi ? h("span", { class: "tag", title: "From " + e.vi }, "LabVIEW") : null),
+      h("span", { class: "q-acts" }, pick, act("Run", "First in the queue, which pauses after it", false),
+        act("Queue", "Last in the queue", true), versions),
+      h("span", { class: "q-sub" }, "version " + e.version + (e.approved_by ? " · approved by " + e.approved_by : "")),
+      h("span", { class: "lib-used" }, Object.keys(e.live || {}).length ? "live: " + Object.keys(e.live).join(", ") : ""));
+  }
+  function draftRow(dr) {
+    const review = h("button", { type: "button", title: "Read it, then keep it or not" }, "Review");
+    review.addEventListener("click", () => openReview(dr.id));
+    return h("li", { class: "q-item lib" },
+      h("span", { class: "lib-name" }, h("span", { class: "q-name" }, dr.name || dr.vi || dr.id), h("span", { class: "tag" }, "draft")),
+      h("span", { class: "q-acts" }, review),
+      h("span", { class: "q-sub" }, (dr.vi ? "from " + dr.vi + " · " : "") + (dr.ok_to_keep ? "nothing blocks keeping it" : "something blocks it")),
+      h("span", { class: "lib-used" }, dr.by || ""));
+  }
+  function runExperiment(e, action, queue) {
+    return busyWhile(["exp:" + e.name].concat(queue ? [] : ["start"]), async () => {
+      scansSay(queue ? "" : "Starting…");   // the queue's approval (or its own) is asked first
+      let r;
+      try { r = await api("/api/experiments/" + encodeURIComponent(e.name) + "/run", { body: { action, queue } }); }
+      catch (err) { scansSay(err.message, true); return; }
+      queueFromState(r.queue);
+      renderQueue();
+      scansSay(r.message || "");
+      if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }
+    });
+  }
+  function translateButton(v) {
+    const b = h("button", { type: "button", class: "btn small", title: "The AI writes it as one of the lab's experiments; Kelvin checks it on the simulated lab; you read it, then keep it or not" }, "Translate");
+    b.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); openTranslate(v); });
+    return b;
+  }
+  function expDialog(title) {
+    $("exp-title").textContent = title;
+    $("exp-msg").textContent = "";
+    $("exp-keep").hidden = $("exp-approve").hidden = $("exp-name-row").hidden = true;
+    if (!$("exp-dialog").open) $("exp-dialog").showModal();
+    return $("exp-body");
+  }
+  async function openTranslate(v) {
+    const body = expDialog("Translate " + v.name);
+    body.replaceChildren(h("div", { class: "review pending" }, h("span", { class: "spinner" }),
+      "Translating " + v.name + ": the AI writes it, and Kelvin checks each attempt on the simulated lab (a few minutes)…"));
+    EXP.open = null;
+    try { showDraft(await api("/api/labview/translate", { body: { path: v.path } })); }
+    catch (e) { body.replaceChildren(h("p", { class: "bad" }, e.message)); }
+  }
+  async function openReview(id) {
+    const body = expDialog("Review a translation");
+    body.replaceChildren(h("span", { class: "spinner" }));
+    try { showDraft(await api("/api/experiments/drafts/" + encodeURIComponent(id))); }
+    catch (e) { body.replaceChildren(h("p", { class: "bad" }, e.message)); }
+  }
+  function fill(box, ...items) {   // a box's content: what's there, the nothing left out
+    box.replaceChildren(...items.flat().filter(Boolean));
+  }
+  function findingLists(report) {
+    const all = (report && report.findings) || [];
+    const blocks = all.filter((f) => f.blocks), warns = all.filter((f) => !f.blocks);
+    const rehearsed = Object.entries((report && report.rehearsals) || {}).map(([a, r]) => h("li", {}, (a || "the experiment") + ": " + r.message));
+    return [
+      blocks.length ? h("h3", {}, "What blocks it") : null, blocks.length ? h("ul", { class: "exp-blocks" }, ...blocks.map((f) => h("li", {}, f.text))) : null,
+      rehearsed.length ? h("h3", {}, "Rehearsed on the simulated lab") : null, rehearsed.length ? h("ul", {}, ...rehearsed) : null,
+      report && report.trace ? h("p", { class: "muted small" }, report.trace) : null,
+      warns.length ? h("details", {}, h("summary", {}, warns.length + " warning" + (warns.length === 1 ? "" : "s") + " (keeping it accepts them)"),
+        h("ul", {}, ...warns.map((f) => h("li", {}, f.text)))) : null];
+  }
+  function codeBlock(code) {
+    const copy = h("button", { type: "button", class: "btn small ghost" }, "Copy");
+    copy.addEventListener("click", () => copyText(code, copy));
+    return h("details", { open: true }, h("summary", {}, "The experiment ", copy), h("pre", { class: "exp-code" }, code));
+  }
+  function showDraft(d) {
+    EXP.open = { draft: d.draft };
+    const ok = d.report && d.report.ok_to_keep;
+    const left = d.not_translated || [];
+    $("exp-title").textContent = "Keep " + ((d.vi && d.vi.name) || "this translation") + "?";
+    fill($("exp-body"),
+      d.vi && d.vi.name ? h("p", { class: "muted small" }, "From " + (d.vi.path || d.vi.name) + (d.model ? ", translated by " + d.model : "")) : null,
+      d.actions && d.actions.length ? h("p", {}, "Its actions: " + d.actions.map((a) => a.name + (a.main ? " (main)" : "")).join(", ")) : null,
+      ...findingLists(d.report),
+      left.length ? h("details", {}, h("summary", {}, left.length + " not translated, as " + d.notes_by + " says"),
+        h("ul", {}, ...left.map((x) => h("li", {}, (x.what || x.id) + (x.why ? ": " + x.why : ""))))) : null,
+      (d.proposed || []).length ? h("div", {}, h("h3", {}, "Keeping it also adds to the lab's LabVIEW map"),
+        h("ul", {}, ...d.proposed.map((m) => h("li", {}, m.call + " → " + m.words + (m.replaces ? " (in place of Kelvin's own: " + m.replaces + ")" : ""))))) : null,
+      codeBlock(d.code || ""));
+    $("exp-name").value = d.name || "";
+    $("exp-name-row").hidden = false;
+    $("exp-keep").hidden = false;
+    $("exp-keep").textContent = "Keep";
+    $("exp-keep").disabled = !ok;
+    $("exp-keep").title = ok ? "Keep it in the lab's experiments, approved by you" : "Something blocks it: see What blocks it";
+    $("exp-msg").textContent = ok ? "" : "It can't be kept as it is: a corrected one goes through the chat (save_experiment).";
+  }
+  function keepDraft() {
+    return busyWhile(["exp-keep"], async () => {
+      if (!EXP.open || !EXP.open.draft) return;
+      const open = EXP.open, name = $("exp-name").value.trim();
+      try {
+        const r = await api("/api/experiments/keep", { body: { draft: open.draft, name, new_version: open.newVersion === name } });
+        $("exp-msg").textContent = "Kept as " + r.name + ", version " + r.version + ", in Runs → Lab experiments.";
+        $("exp-keep").hidden = true;
+        EXP.open = null;
+        if (RUNS.view === "scans") loadExperiments();
+      } catch (e) {
+        if (e.status === 409 && e.data && e.data.diff) {   // a name kept already: what changed, read before the yes
+          open.newVersion = name;
+          const shown = $("exp-body").querySelector(".exp-kept-diff");
+          if (shown) shown.remove();
+          $("exp-body").prepend(h("details", { class: "exp-kept-diff", open: true },
+            h("summary", {}, "What changed from version " + (e.data.version - 1) + " of " + name),
+            h("pre", { class: "exp-code" }, e.data.diff.join("\n") || "(nothing)")));
+          $("exp-keep").textContent = "Keep as version " + e.data.version;
+        }
+        $("exp-msg").textContent = e.message;
+      }
+    });
+  }
+  async function openVersions(name, version) {
+    const body = expDialog(name);
+    body.replaceChildren(h("span", { class: "spinner" }));
+    let d;
+    try { d = await api("/api/experiments/" + encodeURIComponent(name) + (version ? "?version=" + version : "")); }
+    catch (e) { body.replaceChildren(h("p", { class: "bad" }, e.message)); return; }
+    const v = d.version;
+    EXP.open = { name, version: v.number };
+    $("exp-title").textContent = name + ", version " + v.number;
+    const pick = h("select", { "aria-label": "Version" }, ...d.versions.map((x) => h("option", { value: String(x.number), selected: x.number === v.number },
+      "version " + x.number + " · " + x.standing + (x.approved_by ? " by " + x.approved_by : "") + (x.note ? " · " + x.note : ""))));
+    pick.addEventListener("change", () => openVersions(name, Number(pick.value)));
+    fill(body,
+      h("p", {}, pick, " made by " + v.made_by + ", " + v.made_at + (v.edited_from ? ", edited from version " + v.edited_from : "")),
+      v.vi && v.vi.name ? h("p", { class: "muted small" }, "From " + (v.vi.path || v.vi.name)) : null,
+      v.diff ? h("details", { open: v.standing === "new" }, h("summary", {}, "What changed from version " + v.edited_from), h("pre", { class: "exp-code" }, v.diff)) : null,
+      ...findingLists(v.report), codeBlock(v.code || ""));
+    $("exp-approve").hidden = v.standing !== "new";
+    $("exp-approve").textContent = "Approve version " + v.number;
+    $("exp-msg").textContent = v.standing === "changed" ? "Its file changed on disk after it was written: it won't run. Save it as a new version." : "";
+  }
+  function approveVersion() {
+    return busyWhile(["exp-approve"], async () => {
+      if (!EXP.open || !EXP.open.version) return;
+      try {
+        const r = await api("/api/experiments/" + encodeURIComponent(EXP.open.name) + "/approve", { body: { version: EXP.open.version } });
+        $("exp-msg").textContent = "Version " + r.version + " approved by " + r.approved_by + ".";
+        $("exp-approve").hidden = true;
+        if (RUNS.view === "scans") loadExperiments();
+      } catch (e) { $("exp-msg").textContent = e.message; }
+    });
   }
   function scansSay(text, bad) {
     $("scans-msg").textContent = text;
@@ -5943,7 +6156,7 @@
         can ? h("pre", { class: "mono lv-plan" }, s.text) : null);
       return h("div", { class: "found-wrap" },
         h("label", { class: "found lv-vi" }, check, h("span", { class: "found-name", title: v.path }, v.name),
-          h("span", { class: "found-model", title: s.summary }, can ? s.summary : "no scan")),
+          h("span", { class: "found-model", title: s.summary }, can ? s.summary : "no scan"), translateButton(v)),
         s.gaps.length ? h("div", { class: "found-write muted small" }, "Not translated: " + s.gaps.join("; ")) : null,
         h("div", { class: "found-write" }, how));
     });
@@ -5953,7 +6166,8 @@
       rows.push(h("details", { class: "found-wrap lv-names" },
         h("summary", {}, list.length + " VI" + (list.length === 1 ? "" : "s") + ", " + said),
         h("ul", { class: "why-lines" }, ...list.map((v) => h("li", { title: v.path },
-          v.name + (list === plain && v.unread.length ? " (" + v.unread.join("; ") + ")" : ""))))));
+          v.name + (list === plain && v.unread.length ? " (" + v.unread.join("; ") + ")" : ""),
+          list === plain ? translateButton(v) : null)))));
     }
     box.replaceChildren(...rows);
   }
@@ -7913,6 +8127,8 @@
     $("lab-add-found").addEventListener("click", addFound);
     $("lab-scripts").addEventListener("click", fromScripts);
     $("lab-labview").addEventListener("click", fromLabview);
+    $("exp-keep").addEventListener("click", () => keepDraft());
+    $("exp-approve").addEventListener("click", approveVersion);
     $("lab-keep-scans").addEventListener("click", keepScans);
     $("setup-scripts-choose").addEventListener("click", () => answerScripts(false));
     $("setup-scripts-none").addEventListener("click", () => answerScripts(true));

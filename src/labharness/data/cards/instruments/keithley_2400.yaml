@@ -96,7 +96,7 @@ parameters:
     get: ":OUTPut[:STATe]?"
     safe: off
     enables: [V, compliance_I, I_source, compliance_V]
-    description: Connects the source to the device
+    description: Connects the source to the device. Switching it on applies V and compliance_I, or I_source and compliance_V in current mode; any of them nobody set yet goes to its safe value first (V and I_source 0, compliance_I 1 nA, compliance_V 0.2 V), so set the compliance you need before the output goes on
   compliance_V:
     label: Voltage compliance
     applies_when: output

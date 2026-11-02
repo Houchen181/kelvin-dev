@@ -653,6 +653,18 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .lv-how summary, .lv-names summary { cursor: pointer; }
 .lv-names summary { padding: 7px 10px; font-size: 13px; color: var(--muted); }
 .lv-plan { margin: 6px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--raised); overflow: auto; max-height: 220px; }
+/* ---------- the lab's experiments: the review of a translation, a version, and their rows in Runs */
+.exp-body { display: grid; gap: 10px; max-height: 60vh; overflow: auto; }
+.exp-body h3 { margin: 6px 0 2px; font-size: 13px; }
+.exp-body ul { margin: 0; padding-left: 18px; }
+.exp-code { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--raised); overflow: auto; max-height: 360px; font: 12.5px/1.5 ui-monospace, Consolas, monospace; }
+.exp-blocks li { color: var(--bad, #c0392b); }
+.exp-name { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.exp-name input { width: 14em; }
+.exp-list .exp-action { max-width: 9em; }
+.rv-inputs { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 6px 0; }
+.rv-input { display: flex; gap: 4px; align-items: center; font-size: 13px; }
+.rv-input .bad { color: var(--bad, #c0392b); }
 .lv-names .why-lines { padding: 0 10px 8px 38px; }
 .add-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 220px) auto; gap: 8px; }
 .add-row input, .add-row select { border: 1px solid var(--line-strong); border-radius: 10px; padding: 7px 10px; background: var(--raised); color: var(--text); min-width: 0; }
