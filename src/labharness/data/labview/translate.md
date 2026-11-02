@@ -47,6 +47,7 @@ Rules:
   `# VI: n123, c45`. Every control, indicator, instrument call, ActiveX/.NET node, wait and while loop of the VI (and
   of its sub-VIs, s1.n12) must be named by a tag, or listed in the notes as not translated, with why.
 - One function per lab's own sub-VI (s1, s2 …), named after it, its controls as its arguments.
+- Write the actions in the order a person runs them (setting up first): Kelvin rehearses them in that order.
 - Each mode of a state machine, or each case a button runs, is an action. An idle loop that only shows readings on the
   panel is dropped: list it as not translated, why "replaced by Kelvin's Lab panel".
 - A control the diagram reads inside a loop is a `live()` input, read where the VI reads it.

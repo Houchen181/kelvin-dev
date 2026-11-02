@@ -39,10 +39,14 @@ FORBIDDEN_CALLS = ("open", "exec", "eval", "compile", "__import__", "input", "br
 # names that reach Python's machinery past the experiment API (__builtins__.__dict__["open"])
 DUNDERS = ("__builtins__", "__dict__", "__class__", "__subclasses__", "__globals__", "__code__", "__getattribute__",
            "__import__", "__loader__", "__spec__", "__bases__", "__mro__", "__closure__")
+# what reaches native code or files from inside an allowed package (numpy.ctypeslib.load_library loads a DLL)
+FORBIDDEN_ATTRS = ("ctypeslib", "ctypes", "_ctypes", "cffi", "load_library", "f2py", "distutils", "DataSource",
+                   "LowLevelCallable")
 WAITS = ("Wait (ms)", "Wait Until Next ms Multiple", "Time Delay")
-# a rehearsal's refusal that is a safety failure: the gate's limits, guards and interlocks ("refused: smu.V 500 V is
-# outside its limits"), not a refusal of an instrument the lab doesn't have
-SAFETY_WORDS = ("outside", "beyond", "limit", "interlock", "guard", "trip")
+# a rehearsal's refusal that is not a safety failure: an instrument the lab doesn't have, or one switched off or not
+# connected now (lab.away); every other refusal (a limit, a guard, an interlock, hands on the sample, a draft card)
+# blocks keeping the translation
+_NOT_THERE = re.compile(r"^refused: (the lab has no instrument |[\w-]+ is (not connected|switched off))")
 _TAG = re.compile(r"#\s*VI:\s*([A-Za-z0-9_.]+(?:\s*,\s*[A-Za-z0-9_.]+)*)")
 _NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
@@ -164,6 +168,25 @@ def _module_values(tree: ast.Module) -> Dict[str, List[Any]]:
     return out
 
 
+def _tagged_inputs(tree: ast.Module, source: str, panel: Dict[str, Any]) -> Dict[str, str]:
+    """Module-level names whose line's "# VI:" tag names exactly one of the VI's controls: inputs made from it."""
+    by_line: Dict[int, List[str]] = {}
+    for node_id, lines in tags(source).items():
+        if node_id in panel and not panel[node_id].get("indicator"):
+            for n in lines:
+                by_line.setdefault(n, []).append(node_id)
+    out: Dict[str, str] = {}
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] \
+            if isinstance(node, ast.AnnAssign) else []
+        ids = by_line.get(getattr(node, "lineno", 0), [])
+        if len(ids) == 1:
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    out[t.id] = ids[0]
+    return out
+
+
 def _same_value(v: Any, control: Dict[str, Any]) -> bool:
     d = control.get("default")
     choices = control.get("choices") or []
@@ -193,20 +216,24 @@ def static(source: str, desc: Dict[str, Any], mappings: Dict[str, Mapping], lab:
         if isinstance(node, ast.Import):
             for a in node.names:
                 top = a.name.split(".")[0]
-                if top not in ALLOWED_IMPORTS:
-                    add("import", "it imports %s, which a translated experiment may not (only %s)"
-                        % (a.name, ", ".join(ALLOWED_IMPORTS)), True)
+                if top not in ALLOWED_IMPORTS or any(p in FORBIDDEN_ATTRS for p in a.name.split(".")):
+                    add("import", "it imports %s, which a translated experiment may not (only %s, and nothing in "
+                                  "them that reaches native code)" % (a.name, ", ".join(ALLOWED_IMPORTS)), True)
         elif isinstance(node, ast.ImportFrom):
             top = (node.module or "").split(".")[0]
+            names = (node.module or "").split(".") + [a.name for a in node.names]
             if node.level:
                 add("import", "it imports from the folder it is in (from . import), which a translated experiment "
                               "may not", True)
-            elif top not in ALLOWED_IMPORTS:
-                add("import", "it imports %s, which a translated experiment may not (only %s)"
-                    % (node.module, ", ".join(ALLOWED_IMPORTS)), True)
-        elif isinstance(node, ast.Call) and _call_name(node) in FORBIDDEN_CALLS:
-            add("call", "it calls %s(), which a translated experiment may not: it reaches instruments only "
-                        "through kelvin.lab, and what it keeps goes to record()" % _call_name(node), True)
+            elif top not in ALLOWED_IMPORTS or any(p in FORBIDDEN_ATTRS for p in names):
+                add("import", "it imports %s from %s, which a translated experiment may not (only %s, and nothing in "
+                              "them that reaches native code)" % (", ".join(a.name for a in node.names), node.module,
+                                                                  ", ".join(ALLOWED_IMPORTS)), True)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in FORBIDDEN_CALLS:
+            add("call", "it uses %s, which a translated experiment may not: it reaches instruments only through "
+                        "kelvin.lab, and what it keeps goes to record()" % node.id, True)
+        elif isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_ATTRS:
+            add("call", "it uses %s, which reaches native code past the gate" % node.attr, True)
         elif isinstance(node, ast.Name) and node.id in DUNDERS or isinstance(node, ast.Attribute) and \
                 node.attr in DUNDERS:
             add("call", "it uses %s, which reaches past the experiment API" %
@@ -268,20 +295,24 @@ def static(source: str, desc: Dict[str, Any], mappings: Dict[str, Mapping], lab:
             add("instrument", "it sends commands to %s, but the lab has no instrument called %s" % (name, name), False)
             continue
         for cmd in commands:
-            if cmd is None:
+            if cmd is None:   # a raw command it works out as it runs: Kelvin can't say what it would change
+                add("unread", "it sends %s a raw command it works out as it runs: a translation writes its raw commands "
+                              "out, or uses the card's parameters" % name, True)
                 continue
             spec, _ = scriptrun._setter(inst.card, cmd)
             if spec is not None and spec.is_drive and spec.name not in allowed_sets.get(inst.card.id, set()):
                 add("drive", "it sends %r to %s, which sets %s, a drive the VI never sets" % (cmd, name, spec.name),
                     True)
-    if uses.unread:
-        add("instrument", "Kelvin can't read ahead which instrument or parameter these use, so the gate checks them "
-                          "as they run: %s" % "; ".join(uses.unread[:5]), False)
+    if uses.unread:   # the translator's rules write every key out: one worked out as it runs could be any drive
+        add("unread", "Kelvin can't read ahead which instrument or parameter these use, so it can't check them against "
+                      "the VI: %s; write the key out, as \"smu.V\"" % "; ".join(uses.unread[:5]), True)
 
-    # its inputs keep the VI's saved values
+    # its inputs keep the VI's saved values: those its notes name, and each module-level value tagged with one control
     panel = {c.get("id"): c for c in desc.get("panel") or []}
     values = _module_values(tree)
-    for name, cid in (notes.get("inputs") or {}).items():
+    inputs = dict(_tagged_inputs(tree, source, panel))
+    inputs.update(notes.get("inputs") or {})
+    for name, cid in inputs.items():
         control = panel.get(cid)
         if control is None:
             add("default", "its input %s names %s, which isn't on the VI's panel" % (name, cid), False)
@@ -304,9 +335,11 @@ def static(source: str, desc: Dict[str, Any], mappings: Dict[str, Mapping], lab:
 
 
 def _is_safety(problem: str) -> bool:
+    """Does a rehearsal's problem block keeping the translation? Every refusal does (its process's, or the gate's),
+    except one of an instrument that isn't there (the static check says so), never by how the refusal is worded."""
     if problem.startswith("its process refused"):
         return True
-    return problem.startswith("refused") and any(w in problem for w in SAFETY_WORDS)
+    return problem.startswith("refused") and not _NOT_THERE.match(problem)
 
 
 def _default_prepare(lab: Any) -> Callable[[Path, str], Any]:
@@ -316,11 +349,16 @@ def _default_prepare(lab: Any) -> Callable[[Path, str], Any]:
 def rehearse_actions(lab: Any, path: Path, source: str, twin_of: Callable[[], Any],
                      prepare: Optional[Callable[[Path, str], Any]] = None,
                      real: Any = None) -> Tuple[Dict[str, Any], List[Finding]]:
-    """Each action (the whole file when it has none) rehearsed on a simulated copy of the lab, made by twin_of: what
-    each did, and what blocks or warns."""
+    """Each action (the whole file when it has none) rehearsed in file order on one simulated copy of the lab, made by
+    twin_of, as a person runs them one after another (initialize, then scan): what each did, and what blocks or
+    warns."""
     prepare = prepare or _default_prepare(lab)
     out: Dict[str, Any] = {}
     found: List[Finding] = []
+    try:
+        twin = twin_of()
+    except Exception as e:   # the lab couldn't be copied now: nothing is rehearsed, and it says so
+        return {}, [Finding("rehearsal", "not rehearsed: %s" % e, False)]
     for action in experiment.read(source).actions or [""]:
         name = action or "the experiment"
         try:
@@ -331,7 +369,7 @@ def rehearse_actions(lab: Any, path: Path, source: str, twin_of: Callable[[], An
             found.append(Finding("rehearsal", "%s isn't rehearsed: %s" % (name, e), False))
             continue
         try:
-            r = scriptrun.rehearse(lab, prep, seconds=REHEARSE_S, twin=twin_of(), real=real)
+            r = scriptrun.rehearse(lab, prep, seconds=REHEARSE_S, twin=twin, real=real)
         except scriptrun.ScriptError as e:
             out[action] = {"ok": False, "ended": "not rehearsed", "message": str(e), "problems": [str(e)],
                            "columns": {}}

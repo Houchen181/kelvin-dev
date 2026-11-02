@@ -705,6 +705,9 @@ def install():
     time.sleep = _LINK.sleep
     if os.environ.get("KELVIN_REHEARSAL"):
         _rehearsing()
+    elif os.environ.get("KELVIN_FENCE"):   # one of the lab's kept experiments, in its real run: kelvin.lab only
+        _fence(os.environ.get("KELVIN_RUN_DIR") or os.getcwd(),
+               "one of the lab's experiments reaches the lab only through kelvin.lab")
     _install_api()
     return _LINK
 
@@ -745,7 +748,7 @@ _FENCED_WRITES = {"os.remove": (0,), "os.rmdir": (0,), "os.mkdir": (0,), "os.ren
 _REFUSED = []   # what the fence refused, said to Kelvin as the script ends (also when the script carried on)
 
 
-def _fence(folder):
+def _fence(folder, words="a rehearsal reaches only the simulated lab"):
     """A rehearsal's fence, inside the script's process (an audit hook, PEP 578): no programs, native libraries, COM,
     registry, USB or network (the connection to Kelvin is made already), no device files, and no writing outside the
     rehearsal's own folder. What the experiment uses (NumPy) is loaded first. Like run_python's sandbox, it keeps
@@ -770,11 +773,11 @@ def _fence(folder):
     def hook(event, args, _sw=str.startswith, _isinstance=isinstance, _str=str, _bytes=bytes, _int=int,
              _fspath=os.fspath, _full=full, _fold=fold, _sep=sep, _root=root, _null=null, _flags=write_flags,
              _imports=imports, _events=_FENCED_EVENTS, _writes=_FENCED_WRITES, _refused=_REFUSED,
-             _PE=PermissionError, _len=len):
+             _PE=PermissionError, _len=len, _words=words):
         def refuse(what):
             if _len(_refused) < 20:
                 _refused.append(what)
-            raise _PE("a rehearsal reaches only the simulated lab: %s" % what)
+            raise _PE("%s: %s" % (_words, what))
         if event == "import":
             name = args[0] if args else ""
             if _isinstance(name, _str):

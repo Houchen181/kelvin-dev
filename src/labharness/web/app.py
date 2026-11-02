@@ -467,11 +467,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         key = asyncio.run_coroutine_threadsafe(pick(), loop).result(timeout=60)
         if chat is not None:
             why = agent.not_here(chat, key)
-        elif not rulebook.allows((attribution or {}).get("rules"), key):
-            why = "%s is not allowed here: the rules say %s." % (agent.label(key), rulebook.describe(
-                (attribution or {}).get("rules")))
-        else:
-            why = ""
+        else:   # a project's work without a chat: its rules, and confidential work never through the hub
+            why = agent.not_for_project({"rules": (attribution or {}).get("rules"),
+                                         "confidential": (attribution or {}).get("confidential")}, key)
         if why:
             raise ValueError(why)
 

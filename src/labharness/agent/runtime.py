@@ -5413,7 +5413,7 @@ class LabRuntime:
         """A VI's full description, read whole in Kelvin's LabVIEW reader process; ValueError when its diagram
         couldn't be read."""
         from .. import labview
-        desc = labview.describe_vi(Path(path), folder=Path(path).parent)
+        desc = labview.describe_vi(Path(path), folder=Path(path).parent, own=self._kelvins())
         if desc.get("read") != "full":
             raise ValueError("Kelvin couldn't read %s's diagram (%s)" % (
                 Path(path).name, "; ".join(desc.get("unread") or []) or desc.get("read")))
@@ -5426,7 +5426,7 @@ class LabRuntime:
         from ..viscan import on_target, translate
         try:
             registry = self.script_cards()
-            found = labview.survey(str(Path(path).parent), registry)
+            found = labview.survey(str(Path(path).parent), registry, own=self._kelvins())
             target_path = Path(path).resolve()
             s = next((v for v in found.vis if Path(str(v["path"])).resolve() == target_path), None)
             if s is None:
@@ -5467,7 +5467,7 @@ class LabRuntime:
         translation into an experiment is written from. Nothing is run."""
         from .. import labview, videsc
         try:
-            desc = labview.describe_vi(Path(path), folder=Path(path).parent)
+            desc = labview.describe_vi(Path(path), folder=Path(path).parent, own=self._kelvins())
         except (ValueError, OSError) as e:
             return "not described: %s" % e
         text = videsc.render_text(desc)
@@ -5514,7 +5514,8 @@ class LabRuntime:
             shutil.rmtree(folder, ignore_errors=True)
         name = name or self._name_for(desc)
         translation = {"vi": t.vi, "model": t.model, "rounds": t.rounds, "notes": t.notes, "mappings": t.mappings,
-                       "report": t.report.to_json(), "lines": vicheck.tags(t.source), "name": name}
+                       "report": t.report.to_json(), "lines": vicheck.tags(t.source), "name": name,
+                       "notes_by": "the model (%s)" % t.model}
         draft = self.experiments.draft(t.source, translation, by="Kelvin's AI (%s)" % t.model)
         self.gate.log.write("experiment", by=self.gate._who(), change="translated", vi=str(vi), draft=draft,
                             model=t.model)
@@ -5570,7 +5571,8 @@ class LabRuntime:
             return "not saved: %s" % report.text()
         vi_info = {k: desc.get(k) for k in ("path", "name", "sha256", "labview")} if desc else (old.get("vi") or {})
         translation = {"vi": vi_info, "notes": notes, "mappings": {k: asdict(m) for k, m in mappings.items()},
-                       "report": report.to_json(), "lines": vicheck.tags(source), "edited": True}
+                       "report": report.to_json(), "lines": vicheck.tags(source), "edited": True,
+                       "notes_by": "the agent" if notes is not None else "the translation"}
         who = self.gate._who()
         if latest is None:
             draft = self.experiments.draft(source, dict(translation, name=name), by=who)
@@ -5607,14 +5609,21 @@ class LabRuntime:
         lines += ["warning: %s" % w for w in warnings[:12]]
         if len(warnings) > 12:
             lines.append("… and %d warnings more (experiments shows them)" % (len(warnings) - 12))
+        whose = translation.get("notes_by") or "the translation"
         left = [x for x in (translation.get("notes") or {}).get("not_translated") or [] if isinstance(x, dict)]
         if left:
-            lines.append("not translated: %s" % "; ".join("%s (%s)" % (x.get("what") or x.get("id"), x.get("why", ""))
-                                                         for x in left[:10]))
+            lines.append("not translated, as %s says: %s" % (whose, "; ".join(
+                "%s (%s)" % (x.get("what") or x.get("id"), x.get("why", "")) for x in left[:10])))
         proposed = [m for m in (translation.get("notes") or {}).get("mappings") or [] if isinstance(m, dict)]
-        if proposed:
-            lines.append("your yes also adds to the lab's LabVIEW map: %s" % "; ".join(
-                "%s -> %s" % (m.get("call"), m.get("card") or m.get("python") or m.get("becomes")) for m in proposed))
+        if proposed:   # each widens what the checker lets every later translation set: said in full
+            from .. import vimap
+            kelvins = vimap.load()
+            for m in proposed:
+                why = vimap._problem(m)
+                own = kelvins.find(str(m.get("call", "")), {})
+                lines.append("your yes also adds to the lab's LabVIEW map, as %s proposes: %s -> %s%s" % (
+                    whose, m.get("call"), "(not used: %s)" % why if why else vimap._mapping(m, "lab").words(),
+                    " (in place of Kelvin's own: %s)" % own.words() if own is not None and not why else ""))
         lines.append("each run of it goes through the safety gate, approved as a run of a script is")
         return lines
 
@@ -5636,10 +5645,18 @@ class LabRuntime:
             blocks = [f.get("text", "") for f in report.get("findings") or [] if f.get("blocks")]
             return "not kept: what blocks it: %s" % ("; ".join(blocks) or "it wasn't checked")
         title = "Keep %s in the lab's experiments?" % name
-        if self.experiments.has(name):
-            title = "Keep this as version %d of the lab's experiment %s?" % (self.experiments.get(name).number + 1,
-                                                                              name)
-        request = ApprovalRequest(title, self._keep_lines(source, translation, name))
+        lines = self._keep_lines(source, translation, name)
+        if self.experiments.has(name):   # a new version, approved by this yes: what changed, as a new version's run says
+            import difflib
+            latest = self.experiments.get(name)
+            title = "Keep this as version %d of the lab's experiment %s?" % (latest.number + 1, name)
+            old = latest.path.read_bytes().decode("utf-8", "replace")
+            diff = [d.rstrip("\n") for d in difflib.unified_diff(
+                old.splitlines(True), source.splitlines(True), "%s v%d" % (name, latest.number), "this draft")][2:]
+            changed = [d for d in diff if d[:1] in "+-@"]
+            lines[1:1] = ["what changed:"] + ["  " + d for d in changed[:40]] + (
+                ["  … (%d lines more)" % (len(changed) - 40)] if len(changed) > 40 else [])
+        request = ApprovalRequest(title, lines)
         if not self.gate.ask(request):
             return "not kept: %s" % (request.note or "the person said no")
         by = self._person()
@@ -5713,9 +5730,11 @@ class LabRuntime:
         there): why it can't run."""
         from .. import scriptrun
         kept = self._kept_version(path)
-        if kept is not None:   # one of the lab's experiments: its version, in its own folder, nothing beside it
-            return scriptrun.prepare(self.lab, str(kept.path), [str(kept.folder)], params=params, args=args,
+        if kept is not None:   # one of the lab's experiments: its version, in its own folder, nothing beside it,
+            prep = scriptrun.prepare(self.lab, str(kept.path), [str(kept.folder)], params=params, args=args,
                                      drives=drives, python=self.scripts_python() or "", named=python, action=action)
+            prep.fenced = True   # and its process fenced as a rehearsal's is: kelvin.lab, and nothing past it
+            return prep
         folder = self.scripts_folder()
         folders, chosen = [folder] if folder else [], self.library.chosen()
         source = sha = None

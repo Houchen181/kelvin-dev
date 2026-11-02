@@ -280,3 +280,62 @@ def test_a_description_too_large_is_refused_before_the_model_hears_of_it(lab, fo
 
 def test_the_translators_rules_ship_with_kelvin():
     assert "translate.md" in (ROOT / "packaging" / "kelvin.spec").read_text(encoding="utf-8")
+
+
+# ------------------------------------------------------------------ the final review's findings (fix pass)
+
+@pytest.mark.parametrize("bad", [
+    "import numpy\nnumpy.ctypeslib.load_library('visa64', '.')\n",
+    "from numpy import ctypeslib\n",
+    "import numpy.ctypeslib\n",
+    "import scipy\nscipy.LowLevelCallable\n",
+    "g = getattr\n",
+    "e = eval\n",
+    "import datetime\nimport numpy\nT0 = datetime.datetime.now()\n"
+    "if (datetime.datetime.now() - T0).total_seconds() > 1:\n    numpy.ctypeslib.load_library('visa64', '.')\n",
+])
+def test_what_reaches_past_the_gate_blocks_however_it_is_spelled(lab, bad):
+    found = vicheck.static(GOOD + bad, DESC, MAPS, lab, NOTES)
+    assert any(f.blocks for f in found), found
+
+
+def test_a_raw_command_worked_out_as_it_runs_blocks(lab):
+    src = GOOD + "from kelvin import live\n@action('r')\ndef r():\n    lab.raw('smu', ':SOUR:FUNC ' + live('m', 'CURR'))\n"
+    assert any(f.blocks for f in vicheck.static(src, DESC, MAPS, lab, NOTES))
+
+
+def test_a_key_kelvin_cant_read_ahead_blocks(lab):
+    src = GOOD + "def put(key, v):\n    lab.set(key, v)\nput('smu.compliance_I', 0.1)\n"
+    assert any(f.blocks for f in vicheck.static(src, DESC, MAPS, lab, NOTES))
+
+
+def test_a_tagged_input_keeps_the_vis_value_whatever_the_notes_say(lab):
+    src = GOOD.replace("V_STOP = 1.0", "V_STOP = 2.0")
+    found = vicheck.static(src, DESC, MAPS, lab, dict(NOTES, inputs={}))
+    assert any(f.blocks and f.kind == "default" for f in found), found
+
+
+@pytest.mark.parametrize("problem, blocks", [
+    ("refused: smu.V 500 V is outside its limits [-10, 10]", True),
+    ("refused: 'SOUR:FUNC CURR' not sent; smu is held still while a sample is mounted", True),
+    ("refused: the draft card's output asks a person", True),
+    ("its process refused: ctypes.dlopen", True),
+    ("refused: the lab has no instrument scope", False),
+    ("refused: smu is switched off in the Lab panel", False),
+    ("refused: smu is not connected (no reply)", False),
+    ("ZeroDivisionError: division by zero", False)])
+def test_any_refusal_in_a_rehearsal_blocks_but_one_of_an_instrument_that_isnt_there(problem, blocks):
+    assert vicheck._is_safety(problem) is blocks
+
+
+def test_actions_are_rehearsed_in_order_on_one_copy_of_the_lab(lab, folder):
+    src = ('from kelvin import lab, action   # VI: n1\n'
+           '@action("initialize")\ndef initialize():\n    lab.set("smu.output", True)   # VI: n3\n'
+           '@action("scan", main=True)\ndef scan():\n'
+           '    if lab.get("smu.output") is not True:\n        raise RuntimeError("not initialized")\n'
+           '    lab.set("smu.V", 0.5)   # VI: n3\n')
+    maps = dict(MAPS, **{"Smu.lvlib:Set V.vi": vimap.Mapping("Smu.lvlib:Set V.vi", "card", card="virtual/source-meter",
+                                                              sets=["V", "output"])})
+    r = vicheck.check(src, DESC, lab, maps, dict(NOTES, columns={}), write(folder, "t.py", src), lab.make_twin,
+                      prepare=prepare_for(lab))
+    assert r.rehearsals["initialize"]["ok"] and r.rehearsals["scan"]["ok"], r.text()

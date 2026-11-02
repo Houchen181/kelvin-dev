@@ -775,6 +775,8 @@ class Prepared:
     near: Dict[str, str] = field(default_factory=dict)   # the Python files beside it as it starts, hashed (beside)
     action: str = ""          # an experiment's action this run runs ("": it has none; experiment.choose)
     live: Dict[str, Any] = field(default_factory=dict)   # an experiment's live inputs and their defaults
+    # one of the lab's kept experiments (expstore): its process is fenced in its real run too (kelvin_shim._fence)
+    fenced: bool = False
 
     @property
     def name(self) -> str:
@@ -1678,6 +1680,8 @@ class ScriptRun:
                    PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         if self.rehearsal:   # its own folder for what Matplotlib keeps, and no bytecode written beside the lab's code
             env.update(KELVIN_REHEARSAL="1", PYTHONDONTWRITEBYTECODE="1", MPLCONFIGDIR=str(run_dir / ".matplotlib"))
+        elif self.prep.fenced:   # one of the lab's kept experiments: kelvin.lab and nothing past it, in the real run too
+            env.update(KELVIN_FENCE="1", PYTHONDONTWRITEBYTECODE="1", MPLCONFIGDIR=str(run_dir / ".matplotlib"))
         env["PYTHONPATH"] = os.pathsep.join([str(SHIM_DIR)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
         return env
 
@@ -1841,6 +1845,8 @@ class ScriptRun:
             report.warnings.append("past the gate, as a person allowed: " + ", ".join(self.passed))
         if self.through:
             report.warnings.append("past the gate, let through with the run: " + ", ".join(self.through))
+        if self.bye.get("refused") and not self.rehearsal:   # a kept experiment's fence: what it refused
+            report.warnings.append("its process refused: " + "; ".join(str(r) for r in self.bye["refused"]))
         if self.reported:
             report.warnings.append("the instruments refused %d of its commands, as they would have without Kelvin "
                                    "(commands.jsonl says which and why)" % self.reported)

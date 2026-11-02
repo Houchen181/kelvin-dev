@@ -356,3 +356,83 @@ def test_a_persons_stop_ends_a_rehearsal(rt_keysight):
     started = time.monotonic()
     said = rt.rehearse_script(prep)
     assert "on Stop" in said and time.monotonic() - started < 20, said
+
+
+# ------------------------------------------------------------------ the final review's findings (fix pass)
+
+import shutil  # noqa: E402
+
+PROPOSED = [{"call": "Agilent U2722.lvlib:Read.vi", "becomes": "card", "card": "virtual/source-meter",
+             "sets": ["V", "compliance_I", "output"]},
+            {"call": "Write Delimited Spreadsheet.vi", "becomes": "nothing", "why": "the agent says so"}]
+
+
+def test_a_kept_experiments_real_run_reaches_nothing_past_the_gate(rt_keysight, tmp_path):
+    rt = rt_keysight
+    marker = tmp_path / "ran.txt"
+    past = GOOD + '\n@action("past")\ndef past():\n    __import__("os").system(%r)\n' % ("echo x > %s" % marker)
+    keep_as(rt, past, "past-the-gate")      # kept as if a check had missed it: its process is fenced all the same
+    person(rt)
+    said = rt.run_script("past-the-gate", action="past")
+    assert not marker.exists(), said
+    assert "through kelvin.lab" in said or "refused" in said, said
+
+
+def test_the_keep_card_says_what_a_proposed_mapping_lets_the_lab_set(rt_keysight):
+    rt = rt_keysight
+    said = rt.save_experiment("iv-two", GOOD, notes=dict(NOTES_K, mappings=PROPOSED), vi=str(VI))
+    draft = re.search(r"draft (d[0-9]{8}-[0-9]{6}-[0-9a-f]{6})", said).group(1)
+    asked = person(rt)
+    rt.keep_experiment(draft, "iv-two")
+    assert "sets V, compliance_I, output" in asked[0], asked[0]
+    assert "in place of Kelvin's own" in asked[0]                    # Write Delimited Spreadsheet.vi is in Kelvin's map
+
+
+def test_the_keep_card_says_what_the_agent_itself_listed(rt_keysight):
+    rt = rt_keysight
+    notes = dict(NOTES_K, not_translated=[{"id": "n970", "what": "the idle loop", "why": "the Lab panel"}])
+    said = rt.save_experiment("iv-two", GOOD, notes=notes, vi=str(VI))
+    draft = re.search(r"draft (d[0-9]{8}-[0-9]{6}-[0-9a-f]{6})", said).group(1)
+    asked = person(rt)
+    rt.keep_experiment(draft, "iv-two")
+    assert "as the agent says" in asked[0], asked[0]
+
+
+def test_keeping_a_draft_under_a_kept_name_shows_what_changed(rt_kept):
+    rt = rt_kept
+    rt.vi_model = model_of(fenced(GOOD.replace("0.5", "0.25"), NOTES_K))
+    draft, _ = drafted(rt)
+    assert rt.keep_experiment(draft, "iv-scan").startswith("kept")
+    assert "what changed:" in rt.asked[-1] and "0.25" in rt.asked[-1], rt.asked[-1]
+
+
+def test_a_vi_in_kelvins_own_folders_is_never_read(rt_keysight):
+    rt = rt_keysight
+    inside = Path(rt.data_dir) / "lab.vi"
+    inside.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(VI, inside)
+    assert rt.describe_vi(str(inside)).startswith("not described") and "Kelvin" in rt.describe_vi(str(inside))
+    assert rt.translate_vi(str(inside)).startswith("not translated")
+
+
+def test_confidential_work_outside_a_chat_never_goes_through_the_hub(lab, folder, tmp_path):
+    pytest.importorskip("starlette")
+    pytest.importorskip("mcp")
+    from starlette.testclient import TestClient
+    from test_web import Scripted
+
+    from labharness.web.app import create_app
+    from labharness.web.hubmodels import NAMES
+    from labharness.web.settings import Settings
+    from labharness.web.store import ChatStore
+    hub = sorted(NAMES)[0]
+
+    class OnTheHub(Scripted):
+        name = hub
+    rt = script_runtime(lab, folder, tmp_path, timeout=30)
+    settings = Settings(tmp_path / "settings.json")
+    app = create_app(rt, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"],
+                     providers={hub: OnTheHub([])})
+    with TestClient(app):
+        with pytest.raises(ValueError, match="hub"):
+            rt.vi_model("translate", {"confidential": True, "rules": None})
