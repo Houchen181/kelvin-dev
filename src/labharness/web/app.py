@@ -3440,12 +3440,18 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def queue(request: Request) -> Response:
         """GET: the scan queue. POST {op, ...}: a person's change to it. start asks for the queue's approval as usual
-        and returns once it is answered."""
+        and returns once it is answered. {op: fields, item} changes nothing: the item as written, as its mapping
+        ({item, kind, fields}), for the step row to show a step in its fields."""
         if request.method == "GET":
             return JSONResponse(runtime.queue_view())
         body = await request.json()
         op, by = str(body.get("op") or ""), "human"
         item = body.get("item")
+        if op == "fields":
+            try:
+                return JSONResponse(runtime.queue_fields(item))
+            except KeyError as e:
+                return error(404, e.args[0] if e.args else "no such queue item")
 
         def persons(fn: Any, *args: Any) -> str:
             """A person's change, beside whatever Kelvin does (the check may read an instrument): filed under no
@@ -3529,12 +3535,15 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """The person's library of scans and scripts (scanlibrary.py), for the Runs panel. GET: {scripts, scans}, the
         latest used first. POST, a person's change on this computer (no phone, no agent tool): {op: import, path}
         → {entry, check, library}; {op: rename, id, name} and {op: remove, id} → {library}; {op: run, id, params?,
-        args?, queue?} → {queue, message}: at the front of the queue and started, pausing after it (it returns once
-        the queue's approval is answered), or with queue: true at its end. The scan editor (scanedit.py): {op: parts,
-        id?} → {id, name, edited_from, parts, lab, check}, a scan as its parts (a new one without id); {op: check,
-        parts, editor?} → its check (points, time, problems, its plan's text), or {superseded: true} when the same
-        editor asked for a newer one meanwhile; {op: save, parts, from?} → {entry, new, library}, an entry of its own;
-        {op: run, parts, from?, queue?} → {queue, message, entry, library}: saved, then run as above."""
+        args?, queue?, position?} → {queue, message}: at the front of the queue and started, pausing after it (it
+        returns once the queue's approval is answered), with queue: true at its end, or with position at that place
+        (1 = first), not started. The scan editor (scanedit.py): {op: parts, id?, item?} → {id, name, edited_from,
+        parts, lab, check}, a scan as its parts (a new one without id; item: a scan waiting in the queue, then also
+        {item, library}); {op: check, parts, editor?} → its check (points, time, problems, its plan's text), or
+        {superseded: true} when the same editor asked for a newer one meanwhile; {op: text, parts} → {text}: its
+        plan's text, nothing kept (Save puts it back into the queue item with /api/queue op edit); {op: save, parts,
+        from?} → {entry, new, library}, an entry of its own; {op: run, parts, from?, queue?} → {queue, message,
+        entry, library}: saved, then run as above."""
         if role_of(request) != "owner":   # remote.py lists none of it either
             return error(403, ON_THIS_COMPUTER)
         if request.method == "GET":
@@ -3561,19 +3570,24 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 out = await asyncio.to_thread(as_person, runtime.scan_run, body["parts"], base,
                                               bool(body.get("queue")), by)
             elif op == "run":
+                at = body.get("position")   # the Runs panel's ⇒: after the queue item the person selected
+                if at is not None and (isinstance(at, bool) or not isinstance(at, int) or at < 1):
+                    return error(400, "position is a place in the queue: 1 for the first")
                 return JSONResponse(await asyncio.to_thread(as_person, runtime.library_run, entry_id,
                                                             body.get("params"), body.get("args"),
-                                                            bool(body.get("queue")), by))
+                                                            bool(body.get("queue")), by, at))
             elif op == "parts":
-                return JSONResponse(await checked("", runtime.scan_parts, entry_id or None))
+                return JSONResponse(await checked("", runtime.scan_parts, entry_id or None, body.get("item")))
             elif op == "check":
                 check = await checked(str(body.get("editor") or "")[:80], runtime.scan_check, body.get("parts"))
                 return JSONResponse(check if check is not None else {"superseded": True})
+            elif op == "text":
+                return JSONResponse({"text": runtime.scan_text(body.get("parts"))})
             elif op == "save":
                 out = await asyncio.to_thread(runtime.scan_save, body.get("parts"), base, by)
             else:
-                return error(400, "unknown library operation %r (import, rename, remove, run, parts, check or save)"
-                             % op)
+                return error(400, "unknown library operation %r (import, rename, remove, run, parts, check, text or "
+                             "save)" % op)
         except KeyError as e:
             return error(404, e.args[0] if e.args else "nothing like that in the library")
         except ValueError as e:

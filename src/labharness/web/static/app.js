@@ -906,11 +906,11 @@
   }
 
   // ------------------------------------------------------------------ runs pane (beside the chat, like a terminal pane)
-  // Three views: Runs (one tab per open run, else the recent runs), Scans (what can run again) and the Queue.
-  // A running run is polled from /api/live (so runs started by any agent show up); a finished run shows its
-  // assessment, key results, plots with fits, table, and Run again.
+  // Two views: the Schedule (the scans and the queue together, as Special Measure's window) and the History (one tab
+  // per open run, else the recent runs). A running run is polled from /api/live (so runs started by any agent show
+  // up); a finished run shows its assessment, key results, plots with fits, table, and Run again.
   const RUNS = { open: false, tabs: new Map(), active: null, polling: false, cache: new Map(), dismissed: new Set(),
-                 view: "runs", list: null };
+                 view: "schedule", list: null };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const etaText = (s) => (s ? " · about " + (s < 90 ? Math.max(1, Math.round(s)) + " s" : Math.round(s / 60) + " min") + " left" : "");
   const durText = (s) => (s < 90 ? Math.round(s) + " s" : s < 5400 ? (s / 60).toFixed(1) + " min" : (s / 3600).toFixed(1) + " h");
@@ -950,7 +950,7 @@
     RUNS.tabs.set(runId, tab);
     $("run-tabs").append(btn);
     $("run-tabs").hidden = false;
-    $("runs-view").append(body);
+    $("history-view").append(body);
     if (RUNS.tabs.size > 8) {  // keep the strip short: drop the oldest finished tab
       const old = [...RUNS.tabs.values()].find((t) => t.status !== "running" && t !== tab);
       if (old) closeRunTab(old.runId);
@@ -966,7 +966,7 @@
     const tab = RUNS.tabs.get(runId);
     if (!tab) return;
     RUNS.active = runId;
-    showView("runs");
+    showView("history");
     tab.btn.scrollIntoView({ block: "nearest", inline: "nearest" });
     if (tab.status !== "running" && tab.status !== "finishing" && !tab.final) loadFinal(tab);
     else renderRunView(tab);
@@ -981,12 +981,12 @@
     $("run-tabs").hidden = !RUNS.tabs.size;
     if (RUNS.active === runId) {
       RUNS.active = [...RUNS.tabs.keys()].pop() || null;
-      if (RUNS.view === "runs") { if (RUNS.active) selectRun(RUNS.active); else showView("runs"); }
+      if (RUNS.view === "history") { if (RUNS.active) selectRun(RUNS.active); else showView("history"); }
     }
     $("runs-dot").hidden = ![...RUNS.tabs.values()].some((t) => t.status === "running");
   }
-  // the pane's view: "runs" (the active run, or with none the recent runs), "scans" or "queue"
-  const VIEWS = { runs: ["open-runs", "runs-view"], scans: ["open-scans", "scans-view"], queue: ["open-queue", "queue-view"] };
+  // the pane's view: "schedule" (the scans and the queue) or "history" (the active run, or with none the recent runs)
+  const VIEWS = { schedule: ["open-schedule", "schedule-view"], history: ["open-history", "history-view"] };
   function showView(view) {
     RUNS.view = view;
     for (const [v, [seg, panel]] of Object.entries(VIEWS)) {
@@ -996,8 +996,8 @@
       $(seg).tabIndex = on ? 0 : -1;
       $(panel).hidden = !on;
     }
-    QUEUE.open = view === "queue";
-    const active = view === "runs" && RUNS.tabs.get(RUNS.active);
+    QUEUE.open = view === "schedule";
+    const active = view === "history" && RUNS.tabs.get(RUNS.active);
     for (const t of RUNS.tabs.values()) {
       const on = t === active;
       t.btn.classList.toggle("on", on);
@@ -1005,12 +1005,12 @@
       t.body.hidden = !on;
     }
     $("runs-list").hidden = !!active;
-    if (view === "runs" && !active) loadRunList();
-    if (view === "scans") loadScans();
+    if (view === "history" && !active) loadRunList();
+    if (view === "schedule") { loadScans(); loadQueue(); }
   }
   function showRunList() {   // ← All runs: the open tabs stay open
     RUNS.active = null;
-    showView("runs");
+    showView("history");
   }
   // the segmented control is a tab list: the arrow keys, Home and End move along it
   function segKeys(e) {
@@ -1019,7 +1019,7 @@
     if (next === undefined) return;
     e.preventDefault();
     const view = order[(next + order.length) % order.length];
-    if (view === "queue") showQueue(); else showView(view);
+    showView(view);
     $(VIEWS[view][0]).focus();
   }
 
@@ -1066,10 +1066,7 @@
     $("runpane").hidden = !RUNS.open;
     $("toggle-runs").setAttribute("aria-pressed", String(RUNS.open));
     $("toggle-runs").classList.toggle("on", RUNS.open);
-    if (RUNS.open && !was) {   // opened: its list as it is now
-      if (RUNS.view === "scans") loadScans();
-      else if (RUNS.view === "runs" && !RUNS.tabs.get(RUNS.active)) loadRunList();
-    }
+    if (RUNS.open && !was) showView(RUNS.view);   // opened: its lists as they are now
     fitLayout();
   }
   function openRun(runId, plan) {
@@ -1078,13 +1075,19 @@
     toggleRuns(true);
   }
 
-  // a run started (seen in the chat stream or in the lab state): give it a tab, show it, follow it
+  // a run started (seen in the chat stream or in the lab state): give it a tab, show it, follow it; while the person
+  // types in the schedule or drags in it (a step, the next scans), it only gets its tab, and the schedule stays
   function noticeRun(runId, plan) {
     if (RUNS.tabs.has(runId) || RUNS.dismissed.has(runId)) return;
     const tab = runTab(runId, plan);
     setTabStatus(tab, "running");
-    openRun(runId, plan);
+    if (!scheduling()) openRun(runId, plan);
     pollLive();
+  }
+  function scheduling() {
+    const at = document.activeElement;
+    return RUNS.open && RUNS.view === "schedule" && (QUEUE.dragging
+      || !!(at && $("schedule-view").contains(at) && at.closest("input, textarea, select")));
   }
   async function pollLive() {
     if (RUNS.polling) return;
@@ -1166,6 +1169,8 @@
   function syncBusy() {
     for (const b of document.querySelectorAll("[data-busy]")) b.disabled = b.dataset.busy.split(" ").some((k) => BUSY.has(k));
     if (ED.parts) edButtons();   // the scan editor's Run waits too
+    schedButtons();              // and the schedule's ⇒ and Start
+    queueButtons();
   }
   async function busyWhile(keys, fn) {
     if (keys.some((k) => BUSY.has(k))) return null;   // a second click while one is on its way does nothing
@@ -1542,20 +1547,18 @@
   function initRunsPane() {
     $("toggle-runs").addEventListener("click", () => pillClick("runpane", toggleRuns));
     $("close-runs").addEventListener("click", () => toggleRuns(false));
-    $("open-runs").addEventListener("click", () => showView("runs"));
-    $("open-scans").addEventListener("click", () => showView("scans"));
-    $("open-queue").addEventListener("click", showQueue);
+    $("open-schedule").addEventListener("click", () => showView("schedule"));
+    $("open-history").addEventListener("click", () => showView("history"));
     $("runs-seg").addEventListener("keydown", segKeys);
     $("runs-filter").addEventListener("input", renderRunList);
     $("scans-filter").addEventListener("input", renderScans);
     $("scans-import").addEventListener("click", importScript);
     $("scans-new").addEventListener("click", () => openEditor(null));
-    $("scans-pick-queue").addEventListener("click", queuePicked);
-    $("scans-pick-run").addEventListener("click", () => { const [e] = pickedScans(); if (e) runScan(e, false, ["start", "lib:" + encodeURIComponent(e.id)]); });
-    $("scans-pick-edit").addEventListener("click", () => { const [e] = pickedScans(); if (e) openEditor(e.id); });
-    $("scans-pick-clear").addEventListener("click", () => pickScan(null));
+    $("scans-edit").addEventListener("click", () => { const picked = pickedScans(); if (picked.length === 1) editScan(picked[0]); });
+    $("sched-add").addEventListener("click", () => queuePicked(insertAt()));
     $("scans-path").addEventListener("submit", (e) => { e.preventDefault(); if ($("scans-path-input").value.trim()) importPath($("scans-path-input").value.trim()); });
     $("scans-path-input").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); $("scans-path").hidden = true; $("scans-import").focus(); } });
+    initSchedule();
     window.addEventListener("resize", fitLayout);
   }
 
@@ -1729,7 +1732,7 @@
     const sel = $("report-scope");
     const chat = S.chats.find((c) => c.id === S.chatId);
     const opts = [];
-    const active = RUNS.view === "runs" && RUNS.active && RUNS.tabs.get(RUNS.active);   // the run shown
+    const active = RUNS.view === "history" && RUNS.active && RUNS.tabs.get(RUNS.active);   // the run shown
     if (active && active.status !== "running") opts.push(["run", "This run: " + (active.plan || RUNS.active)]);
     if (chat && chat.project) opts.push(["project", "Runs in project " + (projectName(chat.project) || "")]);
     if (S.chatId && !S.incognito) opts.push(["chat", "Runs in this chat"]);
@@ -4526,62 +4529,55 @@
     loadCards();
   }
 
-  // ------------------------------------------------------------------ the scan queue (like Special Measure's)
-  // Plans and steps lined up to run one after another; approved once, run in the background, paused on a failure.
-  const QUEUE = { open: false, data: null, editing: null, built: false };
+  // ------------------------------------------------------------------ the schedule: the scans and the queue
+  // Special Measure's window: the scans, ⇒, the queue (one above the other when the pane is narrow, ⇓ between them:
+  // app.css). The queue: plans, steps and scripts lined up to run one after another; approved once, run in the
+  // background, paused on a failure. ⇒ puts the selected scans after the selected queue item (last when none is), in
+  // the order selected; a scan dragged onto the queue goes where it is dropped, a queue item dragged moves there. A
+  // click selects an item (again: none); u / d move it, Delete removes it, Enter edits it: a scan in the scan editor,
+  // bound to that item, a step in the step row, anything else as written.
+  const QUEUE = { open: false, data: null, editing: null, sel: null, dragging: false, keys: null, units: new Map() };
   const QUEUE_STEP = "step: cool to 2 K\nset: { tc.T_set: 2 }\nstabilize: { read: tc.T, within: 0.02, for: 120, timeout: 7200 }\nwait: 600";
   const Q_STATE = { idle: "Idle", running: "Running", pausing: "Pausing after this item", paused: "Paused" };
   const Q_STATUS = { waiting: "waiting", running: "running…", done: "done", failed: "failed", stopped: "stopped", skipped: "skipped" };
   const Q_KIND = { plan: "scan", step: "step", script: "script" };
+  const DRAG_SCANS = "text/x-kelvin-scans", DRAG_ITEM = "text/x-kelvin-item";
 
-  function buildQueueView() {
-    const add = h("button", { id: "queue-add", class: "btn small", type: "button" }, "Add to the queue");
-    const example = h("button", { class: "link", type: "button" }, "a step");
-    const view = $("queue-view");
-    view.replaceChildren(
-      h("div", { class: "q-head" }, h("span", { id: "queue-state", class: "q-state" }), h("span", { id: "queue-reason", class: "q-reason" }),
-        h("button", { id: "queue-start", class: "btn small primary", type: "button" }, "Start"),
-        h("button", { id: "queue-pause", class: "btn small", type: "button" }, "Pause"),
-        h("select", { id: "queue-onerror", "aria-label": "When an item fails" },
-          h("option", { value: "pause" }, "On a failure: pause"), h("option", { value: "continue" }, "On a failure: go on"))),
-      h("ul", { id: "queue-list", class: "q-list", "aria-label": "Queue" }),
-      h("div", { class: "field q-add" },
-        h("textarea", { id: "queue-text", class: "mono", spellcheck: "false", "aria-label": "A plan or a step to queue",
-          placeholder: "A plan (as Kelvin writes them, or copied from a run's Plan), or a step between scans:\n" + QUEUE_STEP }),
-        h("div", { class: "add-row" },
-          h("input", { id: "queue-note", placeholder: "Note (kept with the run)", "aria-label": "Note" }),
-          h("input", { id: "queue-pos", class: "q-pos", placeholder: "at #", inputmode: "numeric", "aria-label": "Position" }),
-          add),
-        h("span", { class: "hint" }, "Add a scan or ", example, ".")),
-      h("div", { class: "q-foot" },
-        h("button", { id: "queue-clear", class: "btn small ghost", type: "button" }, "Clear finished"),
-        h("button", { id: "queue-save", class: "btn small ghost", type: "button" }, "Save as…"),
-        h("select", { id: "queue-saved", "aria-label": "Saved queues" }),
-        h("button", { id: "queue-load", class: "btn small ghost", type: "button" }, "Load")),
-      h("p", { id: "queue-msg", class: "hint", role: "status" }));
-    example.addEventListener("click", () => { $("queue-text").value = QUEUE_STEP; $("queue-text").focus(); });
-    add.addEventListener("click", queueAddOrSave);
-    $("queue-start").addEventListener("click", async () => {
+  function initSchedule() {
+    $("queue-start").addEventListener("click", () => busyWhile(["start"], () => {
       $("queue-msg").textContent = "Checking every waiting item… then approve the queue once.";
-      $("queue-start").disabled = true;
-      await queueOp({ op: "start" });
-      $("queue-start").disabled = false;
-    });
+      return queueOp({ op: "start" });
+    }));
     $("queue-pause").addEventListener("click", () => queueOp({ op: "pause" }));
-    $("queue-onerror").addEventListener("change", (e) => queueOp({ op: "on_error", value: e.target.value }, true));
-    $("queue-clear").addEventListener("click", () => queueOp({ op: "clear" }, true));
-    $("queue-save").addEventListener("click", () => {
-      const name = prompt("Save the waiting items as:", "overnight");
-      if (name) queueOp({ op: "save", name: name.trim() });
+    $("queue-more").addEventListener("click", (e) => { e.stopPropagation(); queueMenu($("queue-more")); });
+    $("queue-edit").addEventListener("click", () => { const i = queueSelected(); if (i) editQueued(i); });
+    $("queue-up").addEventListener("click", () => moveSelected(-1));
+    $("queue-down").addEventListener("click", () => moveSelected(1));
+    $("queue-remove").addEventListener("click", () => { const i = queueSelected(); if (i) removeItem(i); });
+    queueDrops($("queue-list"));
+    $("step-kind").addEventListener("change", () => { stepShow(); stepChanged(); });
+    for (const id of ["step-key", "step-value", "step-time", "step-read", "step-within", "step-for", "step-timeout"]) $(id).addEventListener("input", stepChanged);
+    $("step-time-unit").addEventListener("change", stepChanged);
+    for (const id of ["step-key", "step-read"]) $(id).addEventListener("focus", labKeys);   // the lab's settings and readings
+    $("step-row").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.target.matches("input")) { e.preventDefault(); stepGo(); }
+      else if (e.key === "Escape" && STEP.editing) { e.preventDefault(); stepReset(); }
     });
-    $("queue-load").addEventListener("click", () => { if ($("queue-saved").value) queueOp({ op: "load", name: $("queue-saved").value }); });
-    QUEUE.built = true;
+    $("step-add").addEventListener("click", stepGo);
+    $("step-save").addEventListener("click", stepGo);
+    $("step-cancel").addEventListener("click", stepReset);
+    $("queue-text").placeholder = QUEUE_STEP;
+    $("queue-paste-open").addEventListener("click", () => pasteOpen($("queue-paste").hidden));
+    $("queue-paste").addEventListener("submit", (e) => { e.preventDefault(); queueAddOrSave(); });
+    $("queue-paste-cancel").addEventListener("click", () => pasteOpen(false));
+    $("queue-text").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); pasteOpen(false); $("queue-paste-open").focus(); } });
+    for (const ev of ["dragend", "drop"]) document.addEventListener(ev, () => { if (QUEUE.dragging) dragDone(); });
   }
-  function showQueue() {
-    if (!QUEUE.built) buildQueueView();
-    showView("queue");
+  function showQueue() {   // the schedule, the queue as it is now
+    showView("schedule");
     toggleRuns(true);
-    renderQueue();
+  }
+  function loadQueue() {
     api("/api/queue").then((q) => { QUEUE.data = q; renderQueue(); }, () => {});
   }
   async function queueOp(body, quiet) {
@@ -4592,85 +4588,165 @@
       if (!quiet) $("queue-msg").textContent = (r.message || "").split("\n")[0];
       return r;
     } catch (e) {
-      if (QUEUE.built) $("queue-msg").textContent = e.message; else toast(e.message);
+      $("queue-msg").textContent = e.message;
       return null;
     }
   }
+  const queueItems = () => (QUEUE.data && QUEUE.data.items) || [];
+  const queueSelected = () => queueItems().find((i) => i.id === QUEUE.sel) || null;
+  // where ⇒ puts what it adds: after the selected item (its place in the queue), else null: last
+  function insertAt() {
+    const n = queueItems().findIndex((i) => i.id === QUEUE.sel);
+    return n >= 0 ? n + 2 : null;
+  }
+  function followInsert(q, last) {   // the selection moves to the last one put after it, so the next goes after that
+    const it = q && q.items && q.items[last - 1];
+    if (it && QUEUE.sel) QUEUE.sel = it.id;
+  }
+  function pickItem(id) {
+    QUEUE.sel = id || null;
+    renderQueue();
+    const row = id && $("queue-list").querySelector('li[data-id="' + CSS.escape(id) + '"]');
+    if (row) row.focus();
+  }
+  function moveSelected(by) {
+    const n = queueItems().findIndex((i) => i.id === QUEUE.sel) + 1;
+    if (n && n + by >= 1 && n + by <= queueItems().length) queueOp({ op: "move", item: QUEUE.sel, position: n + by }, true);
+  }
+  async function removeItem(i) {   // out of the queue; the item after it (else before it) is selected in its place
+    const items = queueItems(), k = items.findIndex((x) => x.id === i.id);
+    const next = items[k + 1] || items[k - 1] || null;
+    if (await queueOp({ op: "remove", item: i.id }, true)) pickItem(next && next.id);
+  }
+  // Paste a plan: any item as written (a plan, a step, a script item), after the selected item; and Edit on an item the
+  // scan editor and the step row don't show, as written
+  function pasteOpen(on, item) {
+    $("queue-paste").hidden = !on;
+    $("queue-paste-open").setAttribute("aria-expanded", String(!!on));
+    QUEUE.editing = on && item ? item.id : null;
+    const n = item ? queueItems().findIndex((i) => i.id === item.id) + 1 : 0;
+    $("queue-add").textContent = QUEUE.editing ? "Save to #" + n : "Add";
+    if (!on) { $("queue-text").value = ""; return; }
+    if (item) $("queue-text").value = item.text;
+    $("queue-text").focus();
+  }
   async function queueAddOrSave() {
     const text = $("queue-text").value.trim();
-    if (!text) { $("queue-msg").textContent = "Paste a plan or a step first."; return; }
+    if (!text) { $("queue-text").focus(); return; }
+    const at = insertAt();
     const r = QUEUE.editing
       ? await queueOp({ op: "edit", item: QUEUE.editing, text })
-      : await queueOp({ op: "add", text, note: $("queue-note").value.trim(), position: $("queue-pos").value.trim() || null });
-    if (r) { $("queue-text").value = $("queue-note").value = $("queue-pos").value = ""; queueEditing(null); }
+      : await queueOp({ op: "add", text, position: at });
+    if (!r) return;
+    if (!QUEUE.editing && at) followInsert(r, at);
+    pasteOpen(false);
+    renderQueue();
   }
-  function queueEditing(item) {
-    QUEUE.editing = item ? item.id : null;
-    $("queue-add").textContent = item ? "Save changes to #" + item.n : "Add to the queue";
-    if (item) { $("queue-text").value = item.text; $("queue-text").focus(); }
+  // Edit on a queue item: a scan in the scan editor, bound to it; a step in the step row; anything else as written. A
+  // running item is fixed, and a restore step stays as Run again made it
+  function editQueued(i) {
+    if (i.status === "running" || i.restores) return;
+    if (i.kind === "plan") openEditor(null, i.id);
+    else if (i.kind === "step") editStep(i);
+    else pasteOpen(true, i);
   }
   function queueItem(i, n, count) {
     const buttons = [];
     const act = (label, title, fn) => {
-      const b = h("button", { type: "button", title }, label);
+      const b = h("button", { type: "button", title, tabindex: "-1" }, label);
       b.addEventListener("click", fn);
       buttons.push(b);
     };
     const idle = i.status !== "running";
-    if (n > 1) act("↑", "Move up (u)", () => queueOp({ op: "move", item: i.id, position: n - 1 }, true));
-    if (n < count) act("↓", "Move down (d)", () => queueOp({ op: "move", item: i.id, position: n + 1 }, true));
-    if (idle && !i.restores) act("Edit", "Edit this item", () => queueEditing(Object.assign({ n }, i)));   // a restore step stays as Run again made it
     if (idle && i.status !== "waiting") act("Again", "Put it back in line", () => queueOp({ op: "again", item: i.id }, true));
     if (i.run_id) act("Open", "Open its run", () => openRun(i.run_id, i.name));
-    if (idle) act("✕", "Remove (Delete)", () => queueOp({ op: "remove", item: i.id }, true));
     const st = i.status === "running" ? h("span", { class: "spinner" }) : i.status === "done" ? icon("check")
       : ["failed", "stopped"].includes(i.status) ? icon("warn") : h("span", { class: "muted" }, "·");
     const sub = [h("span", { class: "q-status" }, Q_STATUS[i.status] || i.status)];
     if (i.then_pause && i.status === "waiting") sub.push(h("span", { title: "The queue pauses after this item" }, "then pauses "));
     if (i.note) sub.push(h("span", {}, i.note + " "));
     if (i.message) sub.push(h("span", {}, "— " + i.message));
-    const li = h("li", { class: "q-item " + i.status, tabindex: "0", title: i.text },
-      h("span", { class: "q-num" }, st), h("span", { class: "q-kind" }, Q_KIND[i.kind] || i.kind),
-      h("span", { class: "q-name" }, n + ". " + i.name), h("span", { class: "q-acts" }, ...buttons), h("div", { class: "q-sub" }, ...sub));
-    li.addEventListener("keydown", (e) => {   // Special Measure's keys: u / d move the item, Delete removes it
-      if (e.target !== li) return;
-      if (e.key === "u" && n > 1) queueOp({ op: "move", item: i.id, position: n - 1 }, true);
-      else if (e.key === "d" && n < count) queueOp({ op: "move", item: i.id, position: n + 1 }, true);
-      else if ((e.key === "Delete" || e.key === "Backspace") && i.status !== "running") queueOp({ op: "remove", item: i.id }, true);
-      else return;
-      e.preventDefault();
+    const on = QUEUE.sel === i.id;
+    const li = h("li", { class: "q-item " + i.status + (on ? " sel" : ""), role: "row", "aria-selected": String(on), tabindex: "-1",
+        draggable: "true", "data-id": i.id, title: i.text },
+      h("span", { class: "q-num", role: "gridcell" }, st), h("span", { class: "q-kind", role: "gridcell" }, Q_KIND[i.kind] || i.kind),
+      h("span", { class: "q-name", role: "gridcell" }, n + ". " + i.name), h("span", { class: "q-acts", role: "gridcell" }, ...buttons),
+      h("div", { class: "q-sub", role: "gridcell" }, ...sub));
+    li.addEventListener("click", (e) => { if (!e.target.closest("button")) pickItem(on ? null : i.id); });
+    li.addEventListener("keydown", (e) => queueKeys(e, li, i, n, count));
+    li.addEventListener("dragstart", (e) => {
+      e.dataTransfer.setData(DRAG_ITEM, i.id);
+      e.dataTransfer.effectAllowed = "move";
+      QUEUE.dragging = true;
+      li.classList.add("dragging");
     });
+    li.addEventListener("dragend", dragDone);
     return li;
+  }
+  // Special Measure's keys on a queue item: u / d move it, Delete removes it, Enter edits it; the arrows (Home, End)
+  // select along the list, Space selects or not, Escape selects none, → reaches its buttons (← and Escape come back)
+  function queueKeys(e, li, i, n, count) {
+    if (e.target !== li) {
+      const btns = [...li.querySelectorAll(".q-acts button")], k = btns.indexOf(e.target);
+      const to = e.key === "ArrowRight" ? btns[k + 1] : e.key === "ArrowLeft" ? btns[k - 1] || li : e.key === "Escape" ? li : undefined;
+      if (k < 0 || to === undefined) return;
+      if (to) to.focus();
+      e.preventDefault();
+      return;
+    }
+    const rows = [...$("queue-list").querySelectorAll("li.q-item")], k = rows.indexOf(li);
+    if (e.key === "u" && n > 1) queueOp({ op: "move", item: i.id, position: n - 1 }, true);
+    else if (e.key === "d" && n < count) queueOp({ op: "move", item: i.id, position: n + 1 }, true);
+    else if ((e.key === "Delete" || e.key === "Backspace") && i.status !== "running") removeItem(i);
+    else if (e.key === "Enter") editQueued(i);
+    else if (e.key === " ") pickItem(QUEUE.sel === i.id ? null : i.id);
+    else if (e.key === "Escape" && QUEUE.sel) pickItem(null);
+    else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
+      const next = e.key === "Home" ? rows[0] : e.key === "End" ? rows[rows.length - 1] : rows[k + (e.key === "ArrowDown" ? 1 : -1)];
+      if (!next) return;
+      pickItem(next.dataset.id);
+    } else if (e.key === "ArrowRight" && li.querySelector(".q-acts button")) li.querySelector(".q-acts button").focus();
+    else return;
+    e.preventDefault();
   }
   function renderQueue() {
     const q = QUEUE.data;
     queueBadge(q);
-    if (!QUEUE.open || !QUEUE.built || !q) return;
+    if (ED.item) edTitle();   // the editor names its item by its place, which moves
+    if (!QUEUE.open || !q) return;
     const items = q.items || [];
-    const running = q.state === "running" || q.state === "pausing";
+    if (QUEUE.sel && !items.some((i) => i.id === QUEUE.sel)) QUEUE.sel = null;   // gone: ⇒ puts at the end again
     const pos = items.findIndex((i) => i.status === "running") + 1;
     $("queue-state").textContent = (Q_STATE[q.state] || q.state) + (pos ? " · item " + pos + " of " + items.length : "");
-    $("queue-reason").textContent = q.reason && q.reason !== "finished" ? q.reason
+    $("queue-reason").textContent = $("queue-reason").title = q.reason && q.reason !== "finished" ? q.reason
       : q.waiting ? q.waiting + " waiting" : q.reason === "finished" ? "Finished" : "";
-    $("queue-start").hidden = running || !q.waiting;
     $("queue-start").textContent = q.state === "paused" ? "Resume" : "Start";
-    $("queue-pause").hidden = q.state !== "running";
-    $("queue-onerror").value = q.on_error || "pause";
-    const focused = document.activeElement && document.activeElement.closest && document.activeElement.closest(".q-item");
-    const focusIdx = focused ? [...$("queue-list").children].indexOf(focused) : -1;
+    queueButtons();
+    if (QUEUE.dragging) return;   // the list as it was until the drop: what is dragged stays where it was picked up
+    const at = document.activeElement, focused = at && at.closest && at.closest("#queue-list li.q-item");
     $("queue-list").replaceChildren(...(items.length ? items.map((i, n) => queueItem(i, n + 1, items.length))
-      : [h("li", { class: "muted small" }, "Nothing queued.")]));
-    if (focusIdx >= 0 && $("queue-list").children[focusIdx]) $("queue-list").children[focusIdx].focus();
-    const saved = q.saved || [];
-    $("queue-saved").replaceChildren(...(saved.length ? saved.map((s) => h("option", { value: s }, s)) : [h("option", { value: "" }, "No saved queues")]));
-    $("queue-load").disabled = !saved.length;
+      : [h("li", { class: "muted small q-none" }, "Nothing queued.")]));
+    const rows = [...$("queue-list").querySelectorAll("li.q-item")];
+    const stop = rows.find((li) => li.dataset.id === QUEUE.sel) || rows[0];   // the list's one tab stop
+    if (stop) stop.tabIndex = 0;
+    const back = focused && rows.find((li) => li.dataset.id === focused.dataset.id);   // the item, wherever it went
+    if (back) back.focus();
+  }
+  function queueButtons() {   // Start and Pause; Edit, ↑ ↓ and ✕ for the selected item
+    const q = QUEUE.data || {}, items = q.items || [], i = queueSelected(), n = i ? items.indexOf(i) + 1 : 0;
+    $("queue-start").disabled = q.state === "running" || q.state === "pausing" || !q.waiting || BUSY.has("start");
+    $("queue-pause").disabled = q.state !== "running";
+    $("queue-edit").disabled = !i || i.status === "running" || !!i.restores;
+    $("queue-up").disabled = n <= 1;
+    $("queue-down").disabled = !n || n >= items.length;
+    $("queue-remove").disabled = !i || i.status === "running";
   }
   function queueBadge(q) {
     if (!q) return;
     const n = (q.waiting || 0) + (q.running ? 1 : 0);
     $("queue-count").textContent = String(n);
     $("queue-count").hidden = !n;
-    $("open-queue").classList.toggle("live", q.state === "running" || q.state === "pausing");
+    $("open-schedule").classList.toggle("live", q.state === "running" || q.state === "pausing");
   }
   function queueFromState(q) {
     if (!q) return;
@@ -4679,20 +4755,198 @@
     if (!old || old.changed !== q.changed || old.state !== q.state || old.reason !== q.reason) renderQueue();
     else queueBadge(q);
   }
+  // the queue's smaller matters, in a menu: what a failure does, clearing what finished, keeping it, loading one kept
+  function queueMenu(anchor) {
+    const q = QUEUE.data || {}, onError = q.on_error || "pause", saved = q.saved || [];
+    const items = [{ heading: "On a failure" },
+      { label: "Pause", checked: onError === "pause", onClick: () => queueOp({ op: "on_error", value: "pause" }, true) },
+      { label: "Go on", checked: onError === "continue", onClick: () => queueOp({ op: "on_error", value: "continue" }, true) },
+      { sep: true },
+      { label: "Clear finished", onClick: () => queueOp({ op: "clear" }, true) },
+      { label: "Save as…", onClick: () => { const name = prompt("Save the waiting items as:", "overnight"); if (name) queueOp({ op: "save", name: name.trim() }); } }];
+    if (saved.length) items.push({ heading: "Load" }, ...saved.map((s) => ({ label: s, onClick: () => queueOp({ op: "load", name: s }) })));
+    popMenu(anchor, items);
+  }
+
+  // ---------- dragging onto the queue: scans go where they are dropped, an item moves there
+  function dropIndex(list, y) {   // before the first row whose middle is below y; the rows' count: last
+    const rows = [...list.querySelectorAll("li.q-item")];
+    const k = rows.findIndex((li) => { const r = li.getBoundingClientRect(); return y < r.top + r.height / 2; });
+    return k < 0 ? rows.length : k;
+  }
+  function dropMark(list, k) {   // the line where it would go; null: none
+    const rows = [...list.querySelectorAll("li.q-item")];
+    rows.forEach((li, j) => li.classList.toggle("drop-before", j === k));
+    list.classList.toggle("drop-end", k !== null && k === rows.length);
+  }
+  function queueDrops(list) {
+    const ours = (e) => [...e.dataTransfer.types].some((t) => t === DRAG_SCANS || t === DRAG_ITEM);
+    list.addEventListener("dragover", (e) => {
+      if (!ours(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = [...e.dataTransfer.types].includes(DRAG_ITEM) ? "move" : "copy";
+      dropMark(list, dropIndex(list, e.clientY));
+    });
+    list.addEventListener("dragleave", (e) => { if (!list.contains(e.relatedTarget)) dropMark(list, null); });
+    list.addEventListener("drop", (e) => {
+      if (!ours(e)) return;
+      e.preventDefault();
+      const k = dropIndex(list, e.clientY), item = e.dataTransfer.getData(DRAG_ITEM);
+      let ids = [];
+      try { ids = JSON.parse(e.dataTransfer.getData(DRAG_SCANS) || "[]"); } catch (err) { ids = []; }
+      dragDone();
+      if (item) moveTo(item, k);
+      else if (ids.length) queuePicked(k + 1, ids);
+    });
+  }
+  function dragDone() {
+    QUEUE.dragging = false;
+    for (const el of document.querySelectorAll(".dragging")) el.classList.remove("dragging");
+    dropMark($("queue-list"), null);
+    renderQueue();
+  }
+  function moveTo(id, k) {   // the item dragged to before row k (0-based; the rows' count: last)
+    const from = queueItems().findIndex((i) => i.id === id);
+    if (from < 0) return;
+    const position = (k > from ? k - 1 : k) + 1;
+    if (position !== from + 1) queueOp({ op: "move", item: id, position }, true);
+  }
+
+  // ---------- the step row: Special Measure's command box, typed and checked
+  // Set (a parameter of the lab and its value), Wait (a time) or Wait until settled (a reading, within, for, a timeout),
+  // written as the queue's step (scanqueue.py, as QUEUE_STEP) and checked by Kelvin as it is added; its ⇒ puts it
+  // after the selected item. Edit on a step the row can show fills it, and Save puts it back
+  const STEP = { editing: null };   // the step item the row edits now
+  const STEP_FIELDS = { set: "step-set", wait: "step-wait", settle: "step-settle" };
+  const yamlWord = (s) => (/^[\w.+-]+$/.test(s) ? s : JSON.stringify(s));   // a number or a word as typed, else quoted
+  const yamlName = (s) => (/^[A-Za-z][\w .+\-\/()%°µ]*$/.test(s) && !/\s$/.test(s) ? s : JSON.stringify(s));
+  const stepNumber = (s) => { const t = String(s).trim(); return t !== "" && isFinite(Number(t)) && Number(t) > 0 ? t : null; };
+  function stepShow() {
+    for (const [kind, id] of Object.entries(STEP_FIELDS)) $(id).hidden = $("step-kind").value !== kind;
+  }
+  // the step the row makes, in the queue's step format: what it does in words, then the value it sets, the seconds it
+  // waits, or the reading it waits on to settle; null while a field it needs is empty, or not a number
+  function stepText() {
+    const v = (id) => $(id).value.trim(), kind = $("step-kind").value;
+    if (kind === "set") {
+      const key = v("step-key"), value = v("step-value"), unit = QUEUE.units.get(key) || "";
+      if (!key || !value) return null;
+      const said = "set " + key + " to " + value + (unit && isFinite(Number(value)) ? " " + unit : "");
+      return "step: " + yamlName(said) + "\nset: { " + yamlWord(key) + ": " + yamlWord(value) + " }";
+    }
+    if (kind === "wait") {
+      const t = stepNumber(v("step-time")), unit = $("step-time-unit");
+      if (!t) return null;
+      return "step: " + yamlName("wait " + t + " " + unit.selectedOptions[0].textContent)
+        + "\nwait: " + String(Number((Number(t) * Number(unit.value)).toPrecision(12)));
+    }
+    const read = v("step-read"), within = stepNumber(v("step-within"));
+    const more = [["for", v("step-for")], ["timeout", v("step-timeout")]];
+    if (!read || !within || more.some(([, x]) => x && !stepNumber(x))) return null;
+    const keys = ["read: " + yamlWord(read), "within: " + within].concat(more.filter(([, x]) => x).map(([k, x]) => k + ": " + x));
+    return "step: " + yamlName("wait until " + read + " settles") + "\nstabilize: { " + keys.join(", ") + " }";
+  }
+  function stepSay(text, bad) {
+    $("step-msg").textContent = text;
+    $("step-msg").classList.toggle("bad", !!bad);
+  }
+  function stepChanged() {
+    const ok = !!stepText();
+    $("step-add").disabled = $("step-save").disabled = !ok;
+    $("step-unit").textContent = QUEUE.units.get($("step-key").value.trim()) || "";
+    $("step-within-unit").textContent = QUEUE.units.get($("step-read").value.trim()) || "";
+    stepSay("");
+  }
+  async function stepGo() {
+    const text = stepText();
+    if (!text) return;
+    const at = STEP.editing ? null : insertAt();
+    let r;
+    try { r = await api("/api/queue", { body: STEP.editing ? { op: "edit", item: STEP.editing, text } : { op: "add", text, position: at } }); }
+    catch (e) { stepSay(e.message, true); return; }
+    QUEUE.data = r;
+    if (STEP.editing) stepReset();
+    else if (at) followInsert(r, at);
+    renderQueue();
+  }
+  function stepReset() {
+    STEP.editing = null;
+    for (const id of ["step-key", "step-value", "step-time", "step-read", "step-within", "step-for", "step-timeout"]) $(id).value = "";
+    $("step-add").hidden = false;
+    $("step-save").hidden = $("step-cancel").hidden = true;
+    stepChanged();
+  }
+  // a step's mapping as the row's fields: one value set, a wait, or a settle; null when it does more than one of them,
+  // or more than the row shows (a note, a settle's every or near): it opens as written
+  function stepFields(f) {
+    const keys = Object.keys(f).filter((k) => k !== "step"), one = f[keys[0]];
+    const plain = (x) => x !== null && typeof x !== "object";
+    if (keys.length !== 1 || one == null) return null;
+    if (keys[0] === "set" && typeof one === "object" && Object.keys(one).length === 1 && plain(Object.values(one)[0])) {
+      const [key, value] = Object.entries(one)[0];
+      return { kind: "set", key, value: edShow(value) };
+    }
+    if (keys[0] === "wait" && plain(one) && stepNumber(one)) return { kind: "wait", seconds: Number(one) };
+    if (keys[0] === "stabilize" && typeof one === "object" && "read" in one && Object.values(one).every(plain)
+        && Object.keys(one).every((k) => ["read", "within", "for", "timeout"].includes(k))) {
+      return { kind: "settle", read: String(one.read), within: edShow(one.within), for: edShow(one.for), timeout: edShow(one.timeout) };
+    }
+    return null;
+  }
+  async function editStep(i) {
+    let r;
+    try { r = await api("/api/queue", { body: { op: "fields", item: i.id } }); } catch (e) { $("queue-msg").textContent = e.message; return; }
+    const f = stepFields(r.fields || {});
+    if (!f) { pasteOpen(true, i); return; }
+    labKeys();
+    stepReset();
+    $("step-kind").value = f.kind;
+    if (f.kind === "set") { $("step-key").value = f.key; $("step-value").value = f.value; }
+    else if (f.kind === "wait") {
+      const unit = f.seconds % 3600 === 0 ? 3600 : f.seconds % 60 === 0 ? 60 : 1;
+      $("step-time-unit").value = String(unit);
+      $("step-time").value = String(f.seconds / unit);
+    } else {
+      $("step-read").value = f.read;
+      $("step-within").value = f.within; $("step-for").value = f.for; $("step-timeout").value = f.timeout;
+    }
+    STEP.editing = i.id;
+    $("step-add").hidden = true;
+    $("step-save").hidden = $("step-cancel").hidden = false;
+    $("step-save").textContent = "Save to #" + (queueItems().findIndex((x) => x.id === i.id) + 1);
+    stepShow();
+    stepChanged();
+    $("step-row").querySelector(".step-f:not([hidden]) input").focus();
+  }
+  // the lab's settings and readings for the step row's lists, as the scan editor has them (POST /api/library op parts),
+  // asked for once each time the schedule is shown
+  function labKeys() {
+    if (QUEUE.keys) return QUEUE.keys;
+    QUEUE.keys = api("/api/library", { body: { op: "parts", id: null } }).then((d) => {
+      const lab = d.lab || { set: [], read: [] };
+      QUEUE.units = new Map(lab.set.concat(lab.read).map((p) => [p.key, p.unit || ""]));
+      $("step-set-keys").replaceChildren(...lab.set.filter((p) => !p.action).map((p) => h("option", { value: p.key }, p.unit || "")));
+      $("step-read-keys").replaceChildren(...lab.read.map((p) => h("option", { value: p.key }, p.unit || "")));
+      stepChanged();
+    }, () => { QUEUE.keys = null; });
+    return QUEUE.keys;
+  }
 
   // ------------------------------------------------------------------ scans and scripts, kept to run again
   // Each scan Kelvin runs and each script a person imports (GET/POST /api/library): Run puts it first in the queue,
   // which pauses after it; Queue puts it last. A script runs with the settings last used and those changed in Show.
   // A row is selected with a click (Ctrl adds one, Shift the rows from the last one picked) or the keyboard (Space,
-  // Enter, the arrows); the bar above the list adds the selected to the queue in the order they were selected, runs
-  // one, or edits a scan. The list is a grid with one tab stop (at: the row that has it); a row the filter hides
+  // the arrows); ⇒ adds the selected to the queue in the order they were selected, and Edit (Enter) edits a scan, or
+  // shows a script's settings. The list is a grid with one tab stop (at: the row that has it); a row the filter hides
   // leaves the selection.
   const SCANS = { data: null, shown: new Set(), params: new Map(), renaming: null, fresh: null, empty: "", sel: [], anchor: null, at: null };
+  const SCAN_ROWS = "#scans-view li.lib[data-id]";   // the scans and scripts (a lab experiment's row isn't one)
 
   async function loadScans() {   // a fresh visit: the last import's check and message go
     $("scans-check").hidden = true;
     scansSay("");
     SCANS.fresh = null;
+    QUEUE.keys = null;   // the step row asks for the lab's settings again
     try { SCANS.data = await api("/api/library"); } catch (e) { scansSay(e.message, true); }
     renderScans();
     loadExperiments();
@@ -4831,7 +5085,7 @@
         $("exp-msg").textContent = "Kept as " + r.name + ", version " + r.version + ", in Runs → Lab experiments.";
         $("exp-keep").hidden = true;
         EXP.open = null;
-        if (RUNS.view === "scans") loadExperiments();
+        if (RUNS.view === "schedule") loadExperiments();
       } catch (e) {
         if (e.status === 409 && e.data && e.data.diff) {   // a name kept already: what changed, read before the yes
           open.newVersion = name;
@@ -4874,7 +5128,7 @@
         const r = await api("/api/experiments/" + encodeURIComponent(EXP.open.name) + "/approve", { body: { version: EXP.open.version } });
         $("exp-msg").textContent = "Version " + r.version + " approved by " + r.approved_by + ".";
         $("exp-approve").hidden = true;
-        if (RUNS.view === "scans") loadExperiments();
+        if (RUNS.view === "schedule") loadExperiments();
       } catch (e) { $("exp-msg").textContent = e.message; }
     });
   }
@@ -4914,7 +5168,7 @@
   }
   // the list's one tab stop: the row the keyboard was last on, else the first selected, else the first
   function scanStop() {
-    const rows = [...document.querySelectorAll("#scans-view li.lib")];
+    const rows = [...document.querySelectorAll(SCAN_ROWS)];
     const stop = rows.find((li) => li.dataset.id === SCANS.at) || rows.find((li) => SCANS.sel.includes(li.dataset.id)) || rows[0];
     for (const li of rows) li.tabIndex = li === stop ? 0 : -1;
   }
@@ -4948,14 +5202,27 @@
     });
     li.addEventListener("keydown", (ev) => scanKeys(ev, li, e));
     li.addEventListener("focusin", () => { if (SCANS.at !== e.id) { SCANS.at = e.id; scanStop(); } });
+    dragScan(li, e);
     if (SCANS.shown.has(e.id)) li.append(scanDetail(e));
     return li;
   }
+  // a row dragged onto the queue: it, or with it the rest of the selection in the order picked (never from its fields)
+  function dragScan(li, e) {
+    li.draggable = true;
+    li.addEventListener("pointerdown", (ev) => { li.draggable = !ev.target.closest("input, textarea, select, pre, .lib-detail"); });
+    li.addEventListener("dragstart", (ev) => {
+      ev.dataTransfer.setData(DRAG_SCANS, JSON.stringify(SCANS.sel.includes(e.id) ? SCANS.sel : [e.id]));
+      ev.dataTransfer.effectAllowed = "copy";
+      QUEUE.dragging = true;
+      li.classList.add("dragging");
+    });
+    li.addEventListener("dragend", dragDone);
+  }
   // the selection: "only" this one (a click), "toggle" it (Ctrl+click, Space), a "range": the rows from the last one
   // picked to this one, those alone (Shift+click: it grows and shrinks); null clears it. In the order picked, which is
-  // the order Add to queue adds them in
+  // the order ⇒ adds them in
   function pickScan(id, how) {
-    const ids = [...document.querySelectorAll("#scans-view li.lib")].map((li) => li.dataset.id);
+    const ids = [...document.querySelectorAll(SCAN_ROWS)].map((li) => li.dataset.id);
     if (id === null) SCANS.sel = [];
     else if (how === "range" && SCANS.anchor && ids.includes(SCANS.anchor)) {
       const a = ids.indexOf(SCANS.anchor), b = ids.indexOf(id);
@@ -4967,16 +5234,17 @@
       SCANS.sel = [id];
       SCANS.anchor = id;
     }
-    const focused = document.activeElement && document.activeElement.closest && document.activeElement.closest("#scans-view li.lib");
+    const focused = document.activeElement && document.activeElement.closest && document.activeElement.closest(SCAN_ROWS);
     renderScans();
     const back = focused && document.querySelector('#scans-view li[data-id="' + CSS.escape(focused.dataset.id) + '"]');
     if (back) back.focus();
   }
-  // on a row: Space toggles it, Enter picks it alone, the arrows (Home, End) move, Shift with them picks the rows from
-  // the last one picked, Escape clears, → goes to its buttons. On a button: ← → move among them (← from the first and
-  // Escape: back to the row), ↑ ↓ to the row above or below. A field's keys are its own
+  // on a row: Space toggles it, Enter edits it (Shift+Enter picks the rows from the last one picked), the arrows (Home,
+  // End) move, Shift with them picks the rows from the last one picked, Escape clears, → goes to its buttons. On a
+  // button: ← → move among them (← from the first and Escape: back to the row), ↑ ↓ to the row above or below. A
+  // field's keys are its own
   function scanKeys(ev, li, e) {
-    const rows = [...document.querySelectorAll("#scans-view li.lib")], i = rows.indexOf(li);
+    const rows = [...document.querySelectorAll(SCAN_ROWS)], i = rows.indexOf(li);
     const btns = [...li.querySelectorAll(".q-acts button")].filter((b) => !b.disabled);
     if (ev.target !== li) {
       const k = btns.indexOf(ev.target);
@@ -4989,7 +5257,8 @@
       return;
     }
     if (ev.key === " ") pickScan(e.id, "toggle");
-    else if (ev.key === "Enter") pickScan(e.id, ev.shiftKey ? "range" : "only");
+    else if (ev.key === "Enter" && ev.shiftKey) pickScan(e.id, "range");
+    else if (ev.key === "Enter") editScan(e);
     else if (ev.key === "ArrowDown" || ev.key === "ArrowUp" || ev.key === "Home" || ev.key === "End") {
       const next = ev.key === "Home" ? rows[0] : ev.key === "End" ? rows[rows.length - 1] : rows[i + (ev.key === "ArrowDown" ? 1 : -1)];
       if (!next) return;
@@ -5000,43 +5269,52 @@
     else return;
     ev.preventDefault();
   }
-  function pickedScans() {
+  function pickedScans(ids) {   // the entries selected (or these ids), in the order picked
     const lib = SCANS.data || {};
     const all = new Map([...(lib.scripts || []), ...(lib.scans || [])].map((e) => [e.id, e]));
-    return SCANS.sel.map((id) => all.get(id)).filter(Boolean);
+    return (ids || SCANS.sel).map((id) => all.get(id)).filter(Boolean);
   }
   function renderPick() {
-    const picked = pickedScans();
-    SCANS.sel = picked.map((e) => e.id);   // what is no longer in the library goes
-    $("scans-pick").hidden = !picked.length;
-    if (!picked.length) return;
-    const one = picked.length === 1 ? picked[0] : null;
-    $("scans-pick-what").textContent = one ? one.name : picked.length + " selected";
-    $("scans-pick-run").hidden = !one;
-    $("scans-pick-edit").hidden = !(one && one.kind === "plan");
-    $("scans-pick-queue").dataset.busy = picked.map((e) => "lib:" + encodeURIComponent(e.id)).join(" ");
-    $("scans-pick-run").dataset.busy = "start" + (one ? " lib:" + encodeURIComponent(one.id) : "");
+    SCANS.sel = pickedScans().map((e) => e.id);   // what is no longer in the library goes
     syncBusy();
   }
-  // Add to queue: each selected scan or script at the end of the queue, in the order they were selected, as its Queue does
-  function queuePicked() {
+  function schedButtons() {   // ⇒ for what is selected (not while it is on its way), Edit for one
     const picked = pickedScans();
+    $("sched-add").disabled = !picked.length || picked.some((e) => BUSY.has("lib:" + encodeURIComponent(e.id)));
+    $("scans-edit").disabled = picked.length !== 1;
+    $("scans-edit").title = picked.length === 1 && picked[0].kind === "script" ? "Its settings (Enter)" : "Edit (Enter)";
+  }
+  // Edit: a scan in the scan editor; a script's settings, shown in its row
+  function editScan(e) {
+    if (e.kind === "plan") { openEditor(e.id); return; }
+    SCANS.shown.add(e.id);
+    renderScans();
+    const field = document.querySelector('#scans-view li[data-id="' + CSS.escape(e.id) + '"] .lib-params input');
+    if (field) field.focus();
+  }
+  // ⇒ (or a drop): each selected scan or script (or those dragged: ids) into the queue in the order they were selected,
+  // as its Queue does: at that place (at: from insertAt, after the selected item, or where they were dropped), else
+  // last. The queue says what it took, and why it took no more
+  function queuePicked(at, ids) {
+    const picked = pickedScans(ids);
     return busyWhile(picked.map((e) => "lib:" + encodeURIComponent(e.id)), async () => {
       const names = [];
       let r = null;
+      scansSay("");
       for (const e of picked) {
         const body = { op: "run", id: e.id, queue: true };
+        if (at) body.position = at + names.length;
         const params = e.kind === "script" ? scanParams(e) : null;
         if (params) body.params = params;
-        const got = await scansOp(body);
-        if (!got) break;   // it said why; those before it are in the queue
-        r = got;
+        try { r = await api("/api/library", { body }); }
+        catch (err) { $("queue-msg").textContent = err.message; break; }   // those before it are in the queue
         names.push(e.name);
         queueFromState(r.queue);
       }
-      if (!r) return;
+      if (!names.length) return;
+      if (at && !ids) followInsert(r.queue, at + names.length - 1);
       renderQueue();
-      if (names.length === picked.length) scansSay(names.length === 1 ? r.message || "" : "Added " + andList(names) + " to the queue.");
+      if (names.length === picked.length) $("queue-msg").textContent = names.length === 1 ? r.message || "" : "Added " + andList(names) + ".";
     });
   }
   function scanMenu(anchor, e) {
@@ -5184,9 +5462,11 @@
   // (opening it never closes one). Each change is checked (POST /api/library op check: its points, its time as its card
   // would say it, what load_plan and the gate find; no instrument is asked). Save keeps it as a new scan of the library,
   // "edited from" the one it came from, which stays; Run and Add to queue run it as any scan runs, through the queue,
-  // its gate and its approval. What the editor doesn't show as fields is kept as written, read-only.
-  const ED = { open: false, id: null, from: "", parts: null, base: "", units: new Map(), setKeys: new Set(),
-               readKeys: new Set(), check: null, timer: 0, gen: 0, busy: false, asking: null,
+  // its gate and its approval. What the editor doesn't show as fields is kept as written, read-only. A scan waiting in
+  // the queue (its Edit) is "Queue item #n" (item: its id): Save puts it back into that item, which the queue checks
+  // again; Save as scan keeps it in the library instead (lib: the entry its runs are noted under, edited from).
+  const ED = { open: false, id: null, item: null, lib: null, from: "", parts: null, base: "", units: new Map(),
+               setKeys: new Set(), readKeys: new Set(), check: null, timer: 0, gen: 0, busy: false, asking: null,
                key: Math.random().toString(36).slice(2) };   // this editor, to Kelvin: of its checks, only the newest runs
   const ED_MODES = [["range", "Range"], ["values", "Values"], ["ramp", "Ramp"]];
 
@@ -5201,18 +5481,21 @@
     if (ED.asking) ED.asking.abort();
     ED.asking = null;
   }
-  // the scan with this library id in the editor, or a new scan (null); the one open there with changes stays open
-  // when asked for again, and goes only when the person says so
-  async function openEditor(id) {
-    const same = !!ED.parts && ED.id === (id || null);
+  // the scan with this library id in the editor, the scan waiting in the queue as this item (item: its id), or a new
+  // scan (neither); the one open there with changes stays open when asked for again, and goes only when the person
+  // says so
+  async function openEditor(id, item) {
+    const same = !!ED.parts && ED.id === (id || null) && ED.item === (item || null);
     if (same && edDirty()) { toggleEditor(true); fullShow("edpane"); $("ed-name").focus(); return; }
     if (ED.parts && !same && edDirty() && !confirm("Discard your changes to " + (ED.parts.name || "this scan") + "?")) return;
     let d;
-    try { d = await api("/api/library", { body: { op: "parts", id: id || null } }); }
-    catch (e) { scansSay(e.message, true); return; }
+    try { d = await api("/api/library", { body: Object.assign({ op: "parts", id: id || null }, item ? { item } : {}) }); }
+    catch (e) { if (item) $("queue-msg").textContent = e.message; else scansSay(e.message, true); return; }
     edStopCheck();   // a check of the scan open before is no answer for this one
     ED.gen++;
     ED.id = d.id || null;
+    ED.item = d.item || null;
+    ED.lib = d.library || null;
     ED.from = d.edited_from || "";
     ED.parts = d.parts;
     ED.base = JSON.stringify(d.parts);
@@ -5306,9 +5589,19 @@
     box.input = input;
     return box;
   }
+  // the editor's title, and what its Save does: a scan waiting in the queue is "Queue item #n" (its place now, which
+  // moves), saved back into it, beside Save as scan; with no Run or Add to queue (it is in the queue)
+  function edTitle() {
+    const n = queueItems().findIndex((i) => i.id === ED.item) + 1;
+    $("ed-title").textContent = ED.item ? "Queue item " + (n ? "#" + n : "(removed)") : ED.id ? "Edit scan" : "New scan";
+    $("ed-queue").hidden = $("ed-run").hidden = !!ED.item;
+    $("ed-save-as").hidden = !ED.item;
+    $("ed-save").classList.toggle("primary", !!ED.item);
+    $("ed-save").title = ED.item ? "Back into the queue" + (n ? " as #" + n : "") : "A new scan in your library; the one it came from stays";
+  }
   function renderEditor() {
     const p = ED.parts, fixed = new Set(p.fixed || []);
-    $("ed-title").textContent = ED.id ? "Edit scan" : "New scan";
+    edTitle();
     $("ed-from").textContent = ED.from ? "edited from " + ED.from : "";
     const field = (id, value, kept) => {   // a part kept as written shows there, not here
       if (!("hint" in $(id).dataset)) $(id).dataset.hint = $(id).placeholder;
@@ -5524,7 +5817,8 @@
   }
   function edButtons() {
     const c = ED.check || {}, busy = ED.busy || BUSY.has("ed"), dirty = edDirty();
-    $("ed-save").disabled = busy || !c.loads || !(dirty || !ED.id);
+    $("ed-save").disabled = busy || !c.loads || !(ED.item ? dirty : dirty || !ED.id);   // an item saved unchanged would run again
+    $("ed-save-as").disabled = busy || !c.loads;
     $("ed-run").disabled = busy || BUSY.has("start") || !c.loads;
     $("ed-queue").disabled = busy || !c.loads;
     $("ed-revert").disabled = busy || !dirty;
@@ -5533,25 +5827,38 @@
     $("ed-msg").textContent = text;
     $("ed-msg").classList.toggle("bad", !!bad);
   }
-  // the scan the editor now edits: the entry it was saved as (the one it came from stays in the library), as it was sent
+  // the scan the editor now edits: the entry it was saved as (the one it came from stays in the library; a queue item
+  // stays as it was), as it was sent
   function edSaved(entry, library, sent) {
     ED.id = entry.id;
+    ED.item = ED.lib = null;
     ED.from = entry.edited_from && !entry.named ? entry.edited_from : "";
     ED.base = sent;   // what was typed meanwhile is still a change
-    $("ed-title").textContent = "Edit scan";
+    edTitle();
     $("ed-from").textContent = ED.from ? "edited from " + ED.from : "";
     if (library) { SCANS.data = library; SCANS.fresh = entry.id; renderScans(); }
     edButtons();
   }
-  async function edSave() {
+  // Save: a queued scan back into its item (its plan's text from Kelvin, op text, then the queue's edit, which checks it
+  // as it checks any change); else, and Save as scan, a new scan in the library, edited from the one it came from
+  async function edSave(asScan) {
     clearTimeout(ED.timer);
     ED.busy = true;
     edButtons();
     try {
       const sent = JSON.stringify(ED.parts);
-      const r = await api("/api/library", { body: { op: "save", parts: ED.parts, from: ED.id } });
-      edSaved(r.entry, r.library, sent);
-      edSay(r.new ? "Saved." : "Already in your scans.");
+      if (ED.item && !asScan) {
+        const { text } = await api("/api/library", { body: { op: "text", parts: ED.parts } });
+        QUEUE.data = await api("/api/queue", { body: { op: "edit", item: ED.item, text } });
+        ED.base = sent;
+        renderQueue();
+        edSay("Saved to the queue.");
+      } else {
+        const from = ED.item ? ED.lib : ED.id;
+        const r = await api("/api/library", { body: { op: "save", parts: ED.parts, from } });
+        edSaved(r.entry, r.library, sent);
+        edSay(r.new ? "Saved." : "Already in your scans.");
+      }
     } catch (e) { edSay(e.message, true); }
     ED.busy = false;
     edButtons();
@@ -5613,7 +5920,8 @@
       $("ed-text").setAttribute("aria-expanded", String(show));
     });
     $("ed-copy").addEventListener("click", () => copyText($("ed-plan-text").textContent, $("ed-copy")));
-    $("ed-save").addEventListener("click", edSave);
+    $("ed-save").addEventListener("click", () => edSave(false));
+    $("ed-save-as").addEventListener("click", () => edSave(true));
     $("ed-run").addEventListener("click", () => edRun(false));
     $("ed-queue").addEventListener("click", () => edRun(true));
     $("ed-revert").addEventListener("click", edRevert);
@@ -6182,7 +6490,7 @@
     try {
       const k = await api("/api/instruments/labview/scans", { body: { folder: r.folder, vis, instruments } });
       if (k.library) SCANS.data = k.library;
-      $("lab-msg").textContent = [k.kept.length ? "Kept " + andList(k.kept.map((x) => x.name)) + " in Runs → Scans." : "",
+      $("lab-msg").textContent = [k.kept.length ? "Kept " + andList(k.kept.map((x) => x.name)) + " in Runs → Schedule." : "",
         ...k.not.map((x) => x.vi + ": " + x.gaps.join("; "))].filter(Boolean).join(" ");
     } catch (e) { $("lab-msg").textContent = e.message; }
     finally { btn.disabled = false; }

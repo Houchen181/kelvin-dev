@@ -234,8 +234,8 @@
   <section id="runpane" class="runpane" aria-label="Runs" hidden>
     <div id="runpane-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the runs pane" tabindex="0"></div>
     <header class="pane-head">
-      <div id="runs-seg" class="seg runs-seg" role="tablist" aria-label="Runs, scans and the queue">
-        <button id="open-runs" class="on" type="button" role="tab" aria-selected="true" aria-controls="runs-view">Runs</button><button id="open-scans" type="button" role="tab" aria-selected="false" aria-controls="scans-view" tabindex="-1" title="Kelvin's scans and your scripts, to run again">Scans</button><button id="open-queue" type="button" role="tab" aria-selected="false" aria-controls="queue-view" tabindex="-1" title="Scans lined up to run one after another">Queue<span id="queue-count" class="badge q-badge" hidden></span></button>
+      <div id="runs-seg" class="seg runs-seg" role="tablist" aria-label="Schedule and history">
+        <button id="open-schedule" class="on" type="button" role="tab" aria-selected="true" aria-controls="schedule-view">Schedule<span id="queue-count" class="badge q-badge" hidden></span></button><button id="open-history" type="button" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1">History</button>
       </div>
       <div class="spacer"></div>
       <button id="open-report" class="btn small ghost" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
@@ -248,39 +248,99 @@
     </header>
     <div id="run-tabs" class="run-tabs" role="tablist" aria-label="Open runs" hidden></div>
     <div id="run-body" class="pane-body">
-      <div id="runs-view" role="tabpanel" aria-labelledby="open-runs">
+      <!-- the schedule, as Special Measure's window: the scans, ⇒ (⇓ when they stand one above the other), the queue -->
+      <div id="schedule-view" class="schedule-view" role="tabpanel" aria-labelledby="open-schedule">
+        <div class="sched">
+          <section id="scans-view" class="scans-view sched-col" aria-label="Scans">
+            <div class="scans-top">
+              <button id="scans-new" class="btn small" type="button">New scan</button>
+              <button id="scans-import" class="btn small" type="button">Import a script…</button>
+              <input id="scans-filter" class="pane-filter" type="search" placeholder="Filter" aria-label="Filter scans and scripts" spellcheck="false" autocomplete="off">
+              <button id="scans-edit" class="btn small" type="button" title="Edit (Enter)" disabled>Edit</button>
+            </div>
+            <form id="scans-path" class="scans-path" hidden>
+              <input id="scans-path-input" placeholder="The script's full path (.py or .ipynb)" aria-label="The script's full path" spellcheck="false" autocomplete="off">
+              <button class="btn small" type="submit">Import</button>
+            </form>
+            <div id="scans-check" class="callout small calm scans-check" role="status" hidden></div>
+            <p id="scans-msg" class="hint" role="status"></p>
+            <div class="sched-list">
+              <section id="scans-experiments" aria-labelledby="scans-experiments-h" hidden><h3 id="scans-experiments-h">Lab experiments</h3><ul class="q-list exp-list" aria-labelledby="scans-experiments-h"></ul></section>
+              <section id="scans-scripts" aria-labelledby="scans-scripts-h" hidden><h3 id="scans-scripts-h">Your scripts</h3><ul class="q-list" role="grid" aria-multiselectable="true" aria-labelledby="scans-scripts-h"></ul></section>
+              <section id="scans-plans" aria-labelledby="scans-plans-h" hidden><h3 id="scans-plans-h">Scans</h3><ul class="q-list" role="grid" aria-multiselectable="true" aria-labelledby="scans-plans-h"></ul></section>
+              <p id="scans-empty" class="pane-empty" hidden>Each scan Kelvin runs, and each script you import, is kept here to run again.</p>
+            </div>
+            <!-- Special Measure's command box, typed: a step between scans, written as the queue's step (scanqueue.py) -->
+            <div id="step-row" class="step-row" role="group" aria-label="A step">
+              <select id="step-kind" class="ed-mode" aria-label="Step"><option value="set">Set</option><option value="wait">Wait</option><option value="settle">Wait until settled</option></select>
+              <span id="step-set" class="step-f">
+                <input id="step-key" class="ed-in step-key" list="step-set-keys" placeholder="instrument.parameter" aria-label="Parameter" spellcheck="false" autocomplete="off">
+                <span class="ed-eq">=</span>
+                <input id="step-value" class="ed-in ed-short" placeholder="value" aria-label="Value" spellcheck="false" autocomplete="off">
+                <span id="step-unit" class="ed-unit"></span>
+              </span>
+              <span id="step-wait" class="step-f" hidden>
+                <input id="step-time" class="ed-in ed-short" inputmode="decimal" aria-label="Wait" autocomplete="off">
+                <select id="step-time-unit" class="ed-mode" aria-label="Unit"><option value="1">s</option><option value="60">min</option><option value="3600">h</option></select>
+              </span>
+              <span id="step-settle" class="step-f" hidden>
+                <input id="step-read" class="ed-in step-key" list="step-read-keys" placeholder="reading" aria-label="Reading" spellcheck="false" autocomplete="off">
+                <label class="ed-f">within<input id="step-within" class="ed-in ed-short" inputmode="decimal" autocomplete="off"><i id="step-within-unit"></i></label>
+                <label class="ed-f">for<input id="step-for" class="ed-in ed-short" inputmode="decimal" placeholder="10" autocomplete="off"><i>s</i></label>
+                <label class="ed-f">timeout<input id="step-timeout" class="ed-in ed-short" inputmode="decimal" placeholder="900" autocomplete="off"><i>s</i></label>
+              </span>
+              <span class="step-go">
+                <button id="step-add" class="sched-arrow small" type="button" aria-label="Add the step to the queue" title="After the selected item (last when none is)" disabled><span class="to-side">⇒</span><span class="to-below">⇓</span></button>
+                <button id="step-save" class="btn small primary" type="button" hidden>Save</button>
+                <button id="step-cancel" class="icon-btn" type="button" aria-label="Stop editing the step" title="Cancel (Esc)" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+              </span>
+              <datalist id="step-set-keys"></datalist>
+              <datalist id="step-read-keys"></datalist>
+            </div>
+            <div class="step-foot">
+              <button id="queue-paste-open" class="link soft" type="button" aria-expanded="false" aria-controls="queue-paste">Paste a plan</button>
+              <span id="step-msg" class="hint" role="status"></span>
+            </div>
+            <form id="queue-paste" class="q-paste" hidden>
+              <textarea id="queue-text" class="mono" spellcheck="false" aria-label="A plan, a step or a script item, as written"></textarea>
+              <div class="q-paste-foot">
+                <button id="queue-add" class="btn small" type="submit">Add</button>
+                <button id="queue-paste-cancel" class="link soft" type="button">Cancel</button>
+              </div>
+            </form>
+          </section>
+          <div class="sched-mid">
+            <button id="sched-add" class="sched-arrow" type="button" aria-label="Add the selected to the queue" title="After the selected item (last when none is), in the order selected" disabled><span class="to-side">⇒</span><span class="to-below">⇓</span></button>
+          </div>
+          <section id="queue-view" class="queue-view sched-col" aria-labelledby="queue-h">
+            <div class="q-top">
+              <h3 id="queue-h">Queue</h3>
+              <span id="queue-state" class="q-state"></span>
+              <span id="queue-reason" class="q-reason"></span>
+              <button id="queue-more" class="icon-btn" type="button" aria-label="More: the queue" aria-haspopup="menu"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="19" cy="12" r="1.1"/></svg></button>
+            </div>
+            <div class="q-tools">
+              <button id="queue-start" class="btn primary q-big" type="button">Start</button>
+              <button id="queue-pause" class="btn q-big" type="button">Pause</button>
+              <div class="spacer"></div>
+              <button id="queue-edit" class="btn small" type="button" title="Edit (Enter)" disabled>Edit</button>
+              <span class="q-acts q-move">
+                <button id="queue-up" type="button" aria-label="Move up" title="Up (u)" disabled>↑</button>
+                <button id="queue-down" type="button" aria-label="Move down" title="Down (d)" disabled>↓</button>
+                <button id="queue-remove" type="button" aria-label="Remove" title="Remove (Delete)" disabled>✕</button>
+              </span>
+            </div>
+            <ul id="queue-list" class="q-list" role="grid" aria-labelledby="queue-h"></ul>
+            <p id="queue-msg" class="hint said" role="status"></p>
+          </section>
+        </div>
+      </div>
+      <div id="history-view" role="tabpanel" aria-labelledby="open-history" hidden>
         <div id="runs-list" class="runs-list">
           <input id="runs-filter" class="pane-filter" type="search" placeholder="Filter runs" aria-label="Filter runs" spellcheck="false" autocomplete="off">
           <ul id="runs-items" class="runs-items" aria-label="Recent runs"></ul>
         </div>
       </div>
-      <div id="scans-view" class="scans-view" role="tabpanel" aria-labelledby="open-scans" hidden>
-        <div class="scans-top">
-          <button id="scans-import" class="btn small" type="button">Import a script…</button>
-          <button id="scans-new" class="btn small" type="button" title="A scan of your own, in the scan editor">New scan</button>
-          <input id="scans-filter" class="pane-filter" type="search" placeholder="Filter" aria-label="Filter scans and scripts" spellcheck="false" autocomplete="off">
-        </div>
-        <div id="scans-pick" class="scans-pick" role="toolbar" aria-label="Selected" hidden>
-          <span id="scans-pick-what" class="pick-what" role="status"></span>
-          <button id="scans-pick-queue" class="btn small primary" type="button" title="Last in the queue, in the order selected">Add to queue</button>
-          <button id="scans-pick-run" class="btn small" type="button" title="First in the queue, which pauses after it">Run</button>
-          <button id="scans-pick-edit" class="btn small" type="button" title="In the scan editor">Edit</button>
-          <button id="scans-pick-clear" class="icon-btn" type="button" aria-label="Clear the selection" title="Clear (Esc)">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-          </button>
-        </div>
-        <form id="scans-path" class="scans-path" hidden>
-          <input id="scans-path-input" placeholder="The script's full path (.py or .ipynb)" aria-label="The script's full path" spellcheck="false" autocomplete="off">
-          <button class="btn small" type="submit">Import</button>
-        </form>
-        <div id="scans-check" class="callout small calm scans-check" role="status" hidden></div>
-        <p id="scans-msg" class="hint" role="status"></p>
-        <section id="scans-experiments" aria-labelledby="scans-experiments-h" hidden><h3 id="scans-experiments-h">Lab experiments</h3><ul class="q-list exp-list" aria-labelledby="scans-experiments-h"></ul></section>
-        <section id="scans-scripts" aria-labelledby="scans-scripts-h" hidden><h3 id="scans-scripts-h">Your scripts</h3><ul class="q-list" role="grid" aria-multiselectable="true" aria-labelledby="scans-scripts-h"></ul></section>
-        <section id="scans-plans" aria-labelledby="scans-plans-h" hidden><h3 id="scans-plans-h">Scans</h3><ul class="q-list" role="grid" aria-multiselectable="true" aria-labelledby="scans-plans-h"></ul></section>
-        <p id="scans-empty" class="pane-empty" hidden>Each scan Kelvin runs, and each script you import, is kept here to run again.</p>
-      </div>
-      <div id="queue-view" class="queue-view" role="tabpanel" aria-labelledby="open-queue" hidden></div>
     </div>
   </section>
 
@@ -348,6 +408,7 @@
         <button id="ed-queue" class="btn small primary" type="button" title="Last in the queue">Add to queue</button>
         <button id="ed-run" class="btn small" type="button" title="First in the queue, which pauses after it">Run</button>
         <button id="ed-save" class="btn small" type="button" title="A new scan in your library; the one it came from stays">Save</button>
+        <button id="ed-save-as" class="btn small" type="button" title="A new scan in your library; the queue item stays as it was" hidden>Save as scan</button>
         <button id="ed-revert" class="btn small ghost" type="button">Revert</button>
       </div>
     </footer>

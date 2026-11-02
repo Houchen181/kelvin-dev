@@ -2911,6 +2911,18 @@ class LabRuntime:
         self.gate.log.write("queue_edit", by=by, item=item.id, name=item.name)
         return "changed %s\n%s" % (item.name, self._queue_text())
 
+    def queue_fields(self, ref: Any) -> Dict[str, Any]:
+        """An item as written, read as its mapping, for a person on this computer: the Runs panel's step row shows a
+        step's set, wait or settle in its fields, and writes them back as text, which queue_edit checks. {item, kind,
+        fields}; KeyError: no such item."""
+        item = self.queue.find(ref)
+        try:
+            data = load_yaml(item.text)
+        except yaml.YAMLError:
+            data = None
+        fields = json.loads(json.dumps(data, default=str)) if isinstance(data, dict) else {}
+        return {"item": item.id, "kind": item.kind, "fields": fields}
+
     def queue_change(self, op: str, ref: Any = None, position: Optional[int] = None, by: str = "agent") -> str:
         """move, remove, again (put a finished item back in line), clear (remove finished items)."""
         try:
@@ -3601,16 +3613,16 @@ class LabRuntime:
         return entry
 
     def library_run(self, entry_id: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
-                    at_end: bool = False, by: str = "human") -> Dict[str, Any]:
+                    at_end: bool = False, by: str = "human", at: Optional[int] = None) -> Dict[str, Any]:
         """An entry of the library, run again (queue_run_now), as whose work its latest run was (its marks: a
         confidential project's scan stays that project's): a scan as it ran; a script as its file is now, with the
         values given, else those its last run changed, its arguments, and the Python its last run had while Kelvin
-        still runs the lab's scripts with it."""
+        still runs the lab's scripts with it. at: queued at that place instead (queue_run_now)."""
         entry = self.library.get(entry_id)
         whose = dict(entry.get("marks") or {})
         if entry["kind"] == "plan":
             with self.attributed(whose):
-                return self.queue_run_now([str(entry.get("text") or "")], at_end, by, library=entry_id)
+                return self.queue_run_now([str(entry.get("text") or "")], at_end, by, library=entry_id, at=at)
         item: Dict[str, Any] = {"script": str(entry.get("path") or "")}
         params = entry.get("params") if params is None else params
         args = entry.get("args") if args is None else args
@@ -3625,7 +3637,8 @@ class LabRuntime:
         if python:
             item["python"] = python
         with self.attributed(whose):
-            return self.queue_run_now([yaml.safe_dump(item, sort_keys=False, allow_unicode=True)], at_end, by, notes)
+            return self.queue_run_now([yaml.safe_dump(item, sort_keys=False, allow_unicode=True)], at_end, by, notes,
+                                      at=at)
 
     def _python_here(self, script: str, python: Any, notes: List[str]) -> Optional[str]:
         """The Python a run had (as its record names it), if Kelvin still runs the lab's scripts with it here; else
@@ -3642,14 +3655,23 @@ class LabRuntime:
 
     # ------------------------------------------------------------------ the scan editor (people, the Runs panel)
 
-    def scan_parts(self, entry_id: Optional[str] = None) -> Dict[str, Any]:
-        """A scan of the library in the scan editor (scanedit.py), or a new scan (no entry_id): {id, name, edited_from
-        (the scan it was edited from, until it is renamed), parts, lab: what a scan can step or set and record ({set,
-        read}: key, unit), check: scan_check}. KeyError: no such entry; ValueError: it is a script, or its text isn't
-        a plan."""
+    def scan_parts(self, entry_id: Optional[str] = None, item: Any = None) -> Dict[str, Any]:
+        """A scan of the library in the scan editor (scanedit.py), a scan waiting in the queue (item: its id or #n,
+        which the editor's Save puts back with queue_edit), or a new scan (neither): {id, name, edited_from (the scan
+        it was edited from, until it is renamed), parts, lab: what a scan can step or set and record ({set, read}:
+        key, unit), check: scan_check}; a queued one's also {item: its id, library: the entry its runs are noted
+        under}. KeyError: no such entry or item; ValueError: it is a script or a step, or its text isn't a plan."""
         from .. import scanedit
-        name, came = "", None
-        if entry_id:
+        name, came, queued = "", None, None
+        if item not in (None, ""):
+            queued = self.queue.find(item)
+            name = queued.name
+            if queued.kind != "plan":
+                raise ValueError("%s is a %s, not a scan" % (name, KINDS.get(queued.kind, queued.kind)))
+            data = self._kept_plan({"text": queued.text})
+            if data is None:
+                raise ValueError("%s isn't a plan the editor can read" % name)
+        elif entry_id:
             entry = self.library.get(entry_id)
             name = str(entry.get("name") or "")
             if entry["kind"] != "plan":
@@ -3661,8 +3683,18 @@ class LabRuntime:
         else:
             data = {"plan": "scan"}
         parts = scanedit.to_parts(data)
-        return {"id": entry_id or None, "name": name, "edited_from": came, "parts": parts, "lab": self._scan_choices(),
-                "check": self.scan_check(parts)}
+        out = {"id": entry_id or None, "name": name, "edited_from": came, "parts": parts, "lab": self._scan_choices(),
+               "check": self.scan_check(parts)}
+        if queued is not None:
+            out.update(id=None, item=queued.id, library=queued.library)
+        return out
+
+    @staticmethod
+    def scan_text(parts: Any) -> str:
+        """The plan the scan editor's parts make, as text, nothing kept or checked: what Save puts back into the queue
+        item the editor shows (queue_edit checks it). ValueError: they can't make a plan, and why."""
+        from .. import scanedit
+        return plan_text(scanedit.to_plan(parts))
 
     @staticmethod
     def _kept_plan(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -3773,16 +3805,18 @@ class LabRuntime:
 
     def queue_run_now(self, texts: List[str], at_end: bool = False, by: str = "human",
                       notes: Iterable[str] = (), restores: bool = False,
-                      library: Optional[str] = None) -> Dict[str, Any]:
+                      library: Optional[str] = None, at: Optional[int] = None) -> Dict[str, Any]:
         """Items a person runs now, from the Runs panel, filed as whose work this thread does (a run again's: the
         run's own): checked together first, then at the front of the line, the last marked then_pause, and the queue
         started (its approval, as ever: this returns once it is answered); that start runs them alone, and the queue
         pauses after them if more items wait. While the queue runs they go next in line, and it goes on as it was;
         while it is pausing, or running a start with a pause point (another Run's, which runs only what it was
         started for), they wait next in line after what it still runs, marked as well, for its next start. at_end: at
-        the end of the queue, not started. restores: the first is a step setting back what the second ran with (if it
-        doesn't finish, the second is skipped). library: the entry the last one's runs are noted under. {queue,
-        message}; ValueError: nothing was added, and why (a start that didn't happen takes them out again)."""
+        the end of the queue, not started; at: at that place instead (1 = first; the Runs panel's ⇒, after the item a
+        person selected), the others after it, not started either. restores: the first is a step setting back what
+        the second ran with (if it doesn't finish, the second is skipped). library: the entry the last one's runs are
+        noted under. {queue, message}; ValueError: nothing was added, and why (a start that didn't happen takes them
+        out again)."""
         for text in texts:
             try:
                 problems = self._queue_problems(text)
@@ -3795,8 +3829,11 @@ class LabRuntime:
             running = q.state in ("running", "pausing")
             pausing = q.state == "pausing"
             only = self._queue_only if q.state == "running" else None   # a start with a pause point: not run by it
-            first = None if at_end else next((n for n, i in enumerate(q.items, 1) if i.status == "waiting"), None)
-            if first is not None and only is not None:   # after the items that start still runs: in the order they run
+            if at is not None:   # where the person put them: there, and nothing starts
+                at_end, first = True, max(1, min(int(at), len(q.items) + 1))
+            else:
+                first = None if at_end else next((n for n, i in enumerate(q.items, 1) if i.status == "waiting"), None)
+            if first is not None and only is not None and at is None:   # after the items that start still runs
                 first = max((n + 1 for n, i in enumerate(q.items, 1) if i.status == "waiting" and i.id in only),
                             default=first)
             last = len(texts) - 1
@@ -3808,8 +3845,11 @@ class LabRuntime:
                 added[0].restores, added[1].restored_by = added[1].id, added[0].id
                 q.save()
             after = "the item running now" if only is None else self._started_for(only)
+            place = q.items.index(added[0]) + 1 if added else 0
         names = " and ".join(i.name for i in added)
-        if at_end:
+        if at is not None:
+            said = "added %s as #%d" % (names, place)
+        elif at_end:
             said = "added %s at the end of the queue" % names
         elif running:
             them = "them" if len(added) > 1 else "it"
