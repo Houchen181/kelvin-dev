@@ -71,9 +71,10 @@ def parse(answer: str) -> Tuple[str, Dict[str, Any]]:
     """The experiment (the first ```python block; a block cut off at the end counts, to its end) and its notes (the
     first ```json block; {} when there is none or it isn't JSON). ValueError, in words, when there is no code."""
     answer = answer or ""
-    blocks = _PYTHON.findall(answer)
-    if blocks:
-        source = blocks[0]
+    first = _PYTHON.search(answer)
+    end = first.end() if first else 0
+    if first:
+        source = first.group(1)
     else:
         opened = _OPEN.search(answer)
         if opened is None:
@@ -81,7 +82,7 @@ def parse(answer: str) -> Tuple[str, Dict[str, Any]]:
                              "block, then the notes in one ```json block")
         source = answer[opened.end():]   # cut off before its block closed: the checks say where it breaks
     notes: Dict[str, Any] = {}
-    m = _JSON.search(answer)
+    m = _JSON.search(answer, end) or _JSON.search(answer)   # the notes after the code; an example before it isn't
     if m:
         try:
             found = json.loads(m.group(1))
@@ -121,8 +122,8 @@ def translate(desc: Dict[str, Any], lab: Any, ask: Ask, table: vimap.Table, fold
     mappings = vimap.map_description(desc, table, cards)
     first = prompt(desc_text, vimap.text(mappings), lab_text(lab))
     if len(first) > MAX_PROMPT:
-        raise ValueError("the description is %d characters, more than Kelvin sends in one go (%d): translate its "
-                         "sub-VIs first" % (len(first), MAX_PROMPT))
+        raise ValueError("the description and its context are %d characters, more than Kelvin sends in one go (%d): "
+                         "translate its sub-VIs first" % (len(first), MAX_PROMPT))
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / "experiment.py"

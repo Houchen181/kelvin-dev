@@ -339,3 +339,18 @@ def test_actions_are_rehearsed_in_order_on_one_copy_of_the_lab(lab, folder):
     r = vicheck.check(src, DESC, lab, maps, dict(NOTES, columns={}), write(folder, "t.py", src), lab.make_twin,
                       prepare=prepare_for(lab))
     assert r.rehearsals["initialize"]["ok"] and r.rehearsals["scan"]["ok"], r.text()
+
+
+# ------------------------------------------------------------------ the polish a customer would notice (Plan 4)
+
+def test_the_size_refusal_says_what_it_counted(lab, folder, monkeypatch):
+    monkeypatch.setattr(vitranslate, "MAX_PROMPT", 100)
+    with pytest.raises(ValueError, match="the description and its context are"):
+        translated(lab, folder, scripted(fenced(GOOD, NOTES)))
+
+
+def test_the_notes_are_the_json_after_the_code():
+    answer = ('An example of the notes:\n```json\n{"inputs": {"X": "c1"}}\n```\n```python\n' + GOOD + '\n```\n'
+              '```json\n' + json.dumps(NOTES) + '\n```')
+    source, notes = vitranslate.parse(answer)
+    assert notes == NOTES and "V_STOP" in source

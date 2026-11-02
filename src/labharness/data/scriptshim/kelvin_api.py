@@ -17,6 +17,14 @@ KelvinRefused = RuntimeError          # the shim's own, once attached
 KelvinInstrumentError = IOError
 
 
+def __getattr__(name):   # Python 3.7+: what a lab's own kelvin.py offered isn't here
+    if name.startswith("__"):
+        raise AttributeError(name)
+    raise AttributeError("kelvin is Kelvin's experiment API in a run (lab, action, live, stopped, record, trace, columns), "
+                         "so it has no %r: a file of the lab's own named kelvin.py can't be imported under that name in "
+                         "a run; rename it (kelvin_tools.py, say)" % name)
+
+
 def attach(shim):
     """Kelvin's stand-in (kelvin_shim) this API speaks through: its connection, and its errors as this module's."""
     global _shim, KelvinRefused, KelvinInstrumentError

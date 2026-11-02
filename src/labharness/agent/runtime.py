@@ -3072,7 +3072,8 @@ class LabRuntime:
                 covered = self._covered_item(item)
                 if covered is not None:
                     try:
-                        r = scriptrun.rehearse(self.lab, covered[0], envelope=self.gate.envelope, twin=twin)
+                        r = scriptrun.rehearse(self.lab, covered[0], envelope=self.gate.envelope, twin=twin,
+                                               real=self.gate)
                         if not r.ok:
                             problems.append(self._item_line(n, item, "; ".join(r.problems) or r.message))
                     except scriptrun.ScriptError as e:
@@ -5336,6 +5337,21 @@ class LabRuntime:
             return self.experiments.get(text)
         return self.experiments.find(text)
 
+    KEPT_CLOSING = ("One of the lab's experiments: in auto mode an approved version is rehearsed on the simulated lab "
+                    "first and runs without asking when the rehearsal is clean and every drive is low-risk; a new "
+                    "version asks a person once")
+
+    def _kept_card(self, kept: Any, prep: Any, request: Any) -> None:
+        """A kept version's run card: its title, which version (and what changed in a new one), and the closing line
+        an experiment's card has for its own (scriptrun.approval)."""
+        request.title = "Run %s, version %d%s?" % (kept.name, kept.number, " (%s)" % prep.action if prep.action else "")
+        request.items[1:1] = self._kept_lines(kept)
+        plain = [i for i, item in enumerate(request.items) if item.startswith("A person approves each run of a script")]
+        if plain:
+            request.items[plain[-1]] = self.KEPT_CLOSING
+        else:
+            request.items.append(self.KEPT_CLOSING)
+
     def _kept_lines(self, kept: Any) -> List[str]:
         if kept.approved:
             return ["version %d of the lab's experiment %s, approved by %s (%s)" % (
@@ -5345,7 +5361,11 @@ class LabRuntime:
         if kept.note:
             lines.append("its note: %s" % kept.note)
         if kept.edited_from:
-            diff = self.experiments.diff(kept.name, kept.edited_from, kept.number).splitlines()[2:]
+            try:
+                diff = self.experiments.diff(kept.name, kept.edited_from, kept.number).splitlines()[2:]
+            except (KeyError, OSError):   # the version it was edited from is gone: its code is all there is to read
+                return lines + ["what changed: version %d's file can't be read, so read this version whole "
+                                "(experiments)" % kept.edited_from]
             shown = [d for d in diff if d[:1] in "+-@"][:40]
             lines += ["what changed:"] + ["  " + d for d in shown]
             if len(shown) < len([d for d in diff if d[:1] in "+-@"]):
@@ -5864,10 +5884,17 @@ class LabRuntime:
         there): why it can't run."""
         from .. import scriptrun
         kept = self._kept_version(path)
+        if kept is not None and version and "." not in str(path):   # Run again of a run: the version that run ran
+            try:
+                ran = (self._ran(version)[0].meta.get("experiment") or {}).get("version")
+                kept = self.experiments.get(kept.name, int(ran)) if ran else kept
+            except (KeyError, ValueError, TypeError, OSError):
+                pass
         if kept is not None:   # one of the lab's experiments: its version, in its own folder, nothing beside it,
             prep = scriptrun.prepare(self.lab, str(kept.path), [str(kept.folder)], params=params, args=args,
                                      drives=drives, python=self.scripts_python() or "", named=python, action=action)
             prep.fenced = True   # and its process fenced as a rehearsal's is: kelvin.lab, and nothing past it
+            prep.title = kept.name
             return prep
         folder = self.scripts_folder()
         folders, chosen = [folder] if folder else [], self.library.chosen()
@@ -5968,6 +5995,9 @@ class LabRuntime:
                     lines.append("Actions: " + ", ".join(a + (" (main)" if a == exp.main else "") for a in exp.actions))
             lines += ["will be refused now: " + p for p in problems]
             lines.append("run_script asks a person once:")
+            kept = self._kept_version(prep.path)
+            if kept is not None:   # one of the lab's experiments: its version, as its run's card says it
+                self._kept_card(kept, prep, request)
             lines += ["  " + i for i in request.items]
             return "\n".join(lines)
         return {"text": self._do("reading script %s" % prep.name, run), "problems": refused}
@@ -6101,12 +6131,7 @@ class LabRuntime:
             if not kept.intact:
                 return ("script not run: %s's version %d changed after it was written, so it isn't what was approved: "
                         "save it as a new version (save_experiment)" % (kept.name, kept.number)), None
-            request.title = "Run %s, version %d%s?" % (kept.name, kept.number,
-                                                        " (%s)" % prep.action if prep.action else "")
-            request.items[1:1] = self._kept_lines(kept)
-            request.items[-1] = ("One of the lab's experiments: in auto mode an approved version is rehearsed on the "
-                                 "simulated lab first and runs without asking when the rehearsal is clean and every "
-                                 "drive is low-risk; a new version asks a person once")
+            self._kept_card(kept, prep, request)
         covered: List[str] = []
         if queued and kept is not None and kept.approved:
             covered = ["the queue's approval covers it: an approved version of the lab's experiment %s" % kept.name]
@@ -6128,7 +6153,10 @@ class LabRuntime:
             gate.log.write("run_declined", by=gate.operator, plan=prep.name)
             return "declined: script %s not run%s" % (prep.name, " (%s)" % request.note if request.note else ""), None
         if kept is not None and not kept.approved:   # the person's yes to its run approves the version
-            kept = self.experiments.approve(kept.name, kept.number, self._person())
+            try:
+                kept = self.experiments.approve(kept.name, kept.number, self._person())
+            except ValueError as e:   # its file changed while the card waited: not what the person read
+                return "script not run: %s" % e, None
             gate.log.write("experiment", by=self._person(), change="approved", name=kept.name, version=kept.number)
         meta = self._attribute(None)
         apart = meta.pop("_apart", "")
