@@ -255,3 +255,104 @@ def test_a_projects_rules_keep_the_vi_from_a_model_they_exclude(lab, folder, tmp
             said = rt.translate_vi(str(VI))
     assert said.startswith("not translated") and "not allowed" in said, said
     assert len(model.turns) == 1                                   # nothing was sent to the model
+
+
+# ------------------------------------------------------------------ auto mode and the queue (Task 8)
+
+import time  # noqa: E402
+
+from test_script_runs import SWEEP  # noqa: E402
+
+WIDE = GOOD.replace("[0.0, 0.5, V_STOP]", "[0.0, 2.5, 5.0]")     # inside smu.V's limits, beyond auto mode's 25 %
+SLOW = '''
+import time
+from kelvin import lab, action, stopped   # VI: n1
+@action("scan", main=True)
+def scan():
+    while not stopped():                  # VI: n2
+        lab.set("smu.V", 0.1)             # VI: n3
+        time.sleep(1)
+'''
+
+
+def keep_as(rt, source, name):
+    s = rt.experiments
+    return s.keep(s.draft(source, {"vi": {"name": "x.vi"}, "report": {"ok_to_keep": True}}, by="agent"), name, "ana")
+
+
+def auto_approved(rt, name):
+    return [e for e in rt.approver.history_list() if e.get("by") == "auto mode" and name in e.get("title", "")]
+
+
+def test_in_auto_mode_an_approved_experiment_is_rehearsed_then_runs_without_asking(rt_kept):
+    rt = rt_kept
+    rt.gate.auto = True
+    asked = len(rt.asked)
+    assert "done" in rt.run_script("iv-scan")
+    assert len(rt.asked) == asked and auto_approved(rt, "iv-scan"), rt.asked[asked:]
+    reasons = [r for e in rt.approver._history if e.get("by") == "auto mode" for r in e.get("reasons", [])]
+    assert any("rehearsal on the simulated lab" in r for r in reasons), reasons
+
+
+def test_auto_mode_never_covers_a_new_version(rt_kept):
+    rt = rt_kept
+    rt.gate.auto = True
+    rt.save_experiment("iv-scan", GOOD.replace("0.5", "0.25"))
+    assert "done" in rt.run_script("iv-scan")
+    assert "version 2 of the lab's experiment iv-scan is new" in rt.asked[-1]
+    assert "Auto mode does not cover this run: version 2 is new" in rt.asked[-1]
+
+
+def test_a_changed_file_is_never_run(rt_kept):
+    rt = rt_kept
+    rt.gate.auto = True
+    rt.experiments.get("iv-scan").path.write_bytes((GOOD + "\n# edited by hand\n").encode("utf-8"))
+    assert "changed after it was written" in rt.run_script("iv-scan")
+
+
+def test_a_run_beyond_auto_modes_reach_is_not_covered(rt_keysight):
+    rt = rt_keysight
+    keep_as(rt, WIDE, "wide")
+    asked = person(rt)
+    rt.gate.auto = True
+    assert "done" in rt.run_script("wide")
+    assert "Auto mode does not cover this run" in asked[-1] and not auto_approved(rt, "wide")
+
+
+def test_a_plain_script_still_asks_in_auto_mode(rt_kept, folder):
+    write(folder, "sweep.py", SWEEP)
+    rt_kept.gate.auto = True
+    rt_kept.run_script("sweep.py")
+    assert "a person approves each run" in rt_kept.asked[-1]
+
+
+def test_the_queue_rehearses_and_covers_an_approved_experiment(rt_kept):
+    rt = rt_kept
+    assert rt.queue_add("script: iv-scan\n").startswith("added"), rt.queue_add("script: iv-scan\n")
+    said = rt.queue_start(dry_run=True)
+    assert "can't be rehearsed" not in said and "would fail" not in said, said
+    asked = len(rt.asked)
+    assert rt.queue_start().startswith("queue started")
+    rt._queue_thread.join(120)
+    assert [i.status for i in rt.queue.items] == ["done"], [(i.status, i.message) for i in rt.queue.items]
+    assert len(rt.asked) == asked + 1 and "this approval covers it" in rt.asked[-1], rt.asked[asked:]
+
+
+def test_a_new_version_in_the_queue_still_asks_as_it_starts(rt_kept):
+    rt = rt_kept
+    rt.save_experiment("iv-scan", GOOD.replace("0.5", "0.25"))
+    rt.queue_add("script: iv-scan\n")
+    asked = len(rt.asked)
+    rt.queue_start()
+    rt._queue_thread.join(120)
+    assert any("version 2 of the lab's experiment iv-scan is new" in a for a in rt.asked[asked:]), rt.asked[asked:]
+
+
+def test_a_persons_stop_ends_a_rehearsal(rt_keysight):
+    rt = rt_keysight
+    keep_as(rt, SLOW, "slow")
+    prep = rt._prepare_script("slow")
+    threading.Timer(1.0, rt.gate.request_abort).start()
+    started = time.monotonic()
+    said = rt.rehearse_script(prep)
+    assert "on Stop" in said and time.monotonic() - started < 20, said

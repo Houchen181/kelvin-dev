@@ -629,6 +629,7 @@ class LabRuntime:
         # the Kelvin app's model for translating a VI ("translate") and for its second opinion ("review"), as the
         # asking chat's project's rules allow: an Ask, or ValueError with why not; None outside the Kelvin app
         self.vi_model: Optional[Callable[[str, Dict[str, Any]], Callable[[str, str], Tuple[str, str]]]] = None
+        self._queue_covered: Dict[str, int] = {}   # queue item -> the experiment's version its approval covered
         self.manuals_found: Dict[str, Dict[str, Any]] = {}  # by VISA resource: the manual found while writing a card
         self.fetch_url: Optional[Callable[[str], bytes]] = None   # read_web_page and save_manual (profiles.http_get)
         # the app's part when Kelvin changes the lab itself ("added" an instrument, "switched" one on): keep it in
@@ -2951,7 +2952,10 @@ class LabRuntime:
         from ..forecast import action_of   # an on_abort action is the card's, not a drive's value
         out: Dict[str, List[Any]] = {}
         for item in items:
-            if item.kind == "script":   # a script asks its own approval when it starts
+            if item.kind == "script":   # a script asks its own approval when it starts; an approved experiment's
+                covered = self._covered_item(item)   # version is covered as a scan is, its drives with the queue's
+                for key, vals in (covered[0].drive_values(self.lab)[0] if covered else {}).items():
+                    out.setdefault(key, []).extend(vals)
                 continue
             if item.kind == "plan":
                 plan = self._plan(item.text)
@@ -3046,6 +3050,7 @@ class LabRuntime:
 
     def _rehearse(self, items: List[Item]) -> Tuple[float, List[str]]:
         """The whole queue, in order, on a simulated copy of the lab: (lab seconds it takes, what went wrong)."""
+        from .. import scriptrun
         from ..gate import SimulationApprover
         twin = self.lab.make_twin()
         gate = SafetyGate(twin, SimulationApprover(), EventLog(None, twin.clock), envelope=self.gate.envelope,
@@ -3059,7 +3064,15 @@ class LabRuntime:
                 if r.status != "done":
                     problems.append(self._item_line(n, item, r.message))
                 continue
-            if item.kind == "script":   # a script can't be rehearsed on the simulated lab
+            if item.kind == "script":   # a script can't be rehearsed; an approved experiment's version is
+                covered = self._covered_item(item)
+                if covered is not None:
+                    try:
+                        r = scriptrun.rehearse(self.lab, covered[0], envelope=self.gate.envelope, twin=twin)
+                        if not r.ok:
+                            problems.append(self._item_line(n, item, "; ".join(r.problems) or r.message))
+                    except scriptrun.ScriptError as e:
+                        problems.append(self._item_line(n, item, str(e)))
                 continue
             step = load_step(item.text)
             for instr, param, value in step.sets:
@@ -3126,7 +3139,7 @@ class LabRuntime:
                                                      later=self._queue_later(items))
             refusals += self._queue_interlocks(items)
             self._dry_ran("\n".join(item.text for item in items), failed + refusals)
-            scripts = sum(1 for i in items if i.kind == "script")
+            scripts = sum(1 for i in items if i.kind == "script" and self._covered_item(i) is None)
             return "\n".join([REHEARSAL % "queue_start", "the %d waiting item%s would take ~%s%s" % (
                 len(items), "" if len(items) == 1 else "s", _dur(duration), " without %s (a script can't be "
                 "rehearsed)" % ("its script" if scripts == 1 else "its %d scripts" % scripts) if scripts else "")]
@@ -3185,8 +3198,14 @@ class LabRuntime:
         if lines or starting or running:
             going_on = ["If an item fails, the queue goes on to the next (on a failure: continue); a stop, a "
                         "guard trip or an interlock still pauses it"] if self.queue.on_error == "continue" else []
-            scripts = [self._item_line(n, i, "a script: it asks you itself when it starts, as it can't be "
-                                             "rehearsed") for n, i in enumerate(items, 1) if i.kind == "script"]
+            scripts = []
+            for n, i in enumerate(items, 1):
+                if i.kind == "script":
+                    c = self._covered_item(i)
+                    scripts.append(self._item_line(n, i, (
+                        "the lab's experiment %s, version %d, approved: this approval covers it, as it covers a "
+                        "scan%s" % (c[1].name, c[1].number, ", rehearsed with the queue" if self.gate.auto else ""))
+                        if c else "a script: it asks you itself when it starts, as it can't be rehearsed"))
             pause = ["The queue pauses after %s" % self._item_line(len(items), items[-1])] \
                 if items[-1].then_pause else []
             first = ["These were added to the queue, or changed, after it was approved: it waits for your answer "
@@ -3215,6 +3234,10 @@ class LabRuntime:
                 note = " (%s)" % request.note if request.note else ""
                 self.gate.log.write("queue_declined", by=by)
                 return {"ok": False, "said": "declined: %s%s" % (said, note)}
+        for item in items:   # the experiments' versions this approval covered: those run without asking again
+            c = self._covered_item(item)
+            if c is not None:
+                self._queue_covered[item.id] = c[1].number
         return {"ok": True, "grants": grants, "actions": frozenset(starting) | frozenset(running), "title": title,
                 "duration": duration}
 
@@ -3474,8 +3497,10 @@ class LabRuntime:
             message = "script not run: %s" % (e.args[0] if e.args else e)
             q.mark(item, "failed", message[:300])
             return False, message
+        kept = self._kept_version(prep.path)
+        queued = kept is not None and kept.approved and self._queue_covered.get(item.id) == kept.number
         text, report = self._script_run(prep, lambda t: t, {"queue": {
-            "item": item.id, "position": position, "note": item.note}}, told=False)
+            "item": item.id, "position": position, "note": item.note}}, told=False, queued=queued)
         stopped = self.gate.stop_generation != gen
         if report is None:   # refused, declined or not ready: it never started
             q.mark(item, "stopped" if stopped else "failed", text[:300])
@@ -5323,6 +5348,47 @@ class LabRuntime:
                 lines.append("  … (experiments shows the whole change)")
         return lines
 
+    def _auto_experiment(self, prep: Any, grants: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Does auto mode cover a run of an approved version of one of the lab's experiments? As a plan: it is
+        rehearsed on a simulated copy of the lab first (the caller holds the lab), and every drive it sets is low-risk
+        (gate.auto_plan). Never when it loads a maker's library, opens what isn't in the lab, or runs a card's action
+        that drives the sample. (covered, why)."""
+        from .. import scriptrun
+        found = prep.found
+        why = (["it loads %s, a maker's library" % ", ".join(found.libraries)] if found.libraries else []) + \
+            (["it opens %s, which isn't in the lab" % ", ".join(found.unknown)] if found.unknown else []) + \
+            (["it does %s, which drives the sample" % ", ".join(found.actions)] if found.actions else [])
+        if why:
+            return False, why
+        try:
+            r = scriptrun.rehearse(self.lab, prep, envelope=self.gate.envelope, twin=self.lab.make_twin(),
+                                   real=self.gate)
+        except scriptrun.ScriptError as e:
+            return False, ["it can't be rehearsed: %s" % e]
+        ok, reasons = self.gate.auto_plan(grants, r)
+        if not ok:
+            return False, reasons + ["its rehearsal: %s" % p for p in r.problems[:2]]
+        return True, reasons + [r.message]
+
+    def _covered_item(self, item: Item) -> Optional[Tuple[Any, Any]]:
+        """A queued script item the queue's approval covers, as it covers a scan: an approved version of one of the
+        lab's experiments that runs nothing past the gate (prepared, and that version). None for anything else,
+        which asks a person as it starts."""
+        from .. import scriptrun
+        if item.kind != "script":
+            return None
+        try:
+            spec = load_script_item(item.text)
+            kept = self._kept_version(spec.path)
+            if kept is None or not kept.approved:
+                return None
+            prep = self._prepare_script(spec.path, spec.params, spec.args, python=spec.python, action=spec.action)
+        except (scriptrun.ScriptError, PlanError, KeyError, OSError, ValueError):
+            return None
+        if prep.found.libraries or prep.found.unknown or prep.found.actions:
+            return None
+        return prep, kept
+
     def _vi_twin(self) -> Callable[[], Any]:
         """A simulated copy of the lab for each rehearsal of a translation, made as a plan's dry run makes one: its
         instruments read with the lab held."""
@@ -5697,10 +5763,14 @@ class LabRuntime:
         it, said before it joins the queue; its Python and its approval come when it starts. scriptrun.ScriptError
         (KeyError for a version that isn't there): why it can't run."""
         from .. import scriptrun
-        folder = self.scripts_folder()
-        path = scriptrun.locate(spec.path, [folder] if folder else [], self.library.chosen(),
-                                missing=bool(spec.version))
-        text = self._script_as_run(spec.version, path)[0] if spec.version else scriptrun.source_of(path)
+        kept = self._kept_version(spec.path)
+        if kept is not None:   # one of the lab's experiments: its version's file
+            path, text = kept.path, scriptrun.source_of(kept.path)
+        else:
+            folder = self.scripts_folder()
+            path = scriptrun.locate(spec.path, [folder] if folder else [], self.library.chosen(),
+                                    missing=bool(spec.version))
+            text = self._script_as_run(spec.version, path)[0] if spec.version else scriptrun.source_of(path)
         source, _ = scriptrun.with_params(text, dict(spec.params))
         try:
             compile(source, str(path), "exec")
@@ -5803,7 +5873,7 @@ class LabRuntime:
             said = self._do("copying the lab to rehearse %s" % prep.name, copy)
             if "twin" not in made:
                 return "not rehearsed: %s" % said
-            r = scriptrun.rehearse(self.lab, prep, envelope=self.gate.envelope, twin=made["twin"])
+            r = scriptrun.rehearse(self.lab, prep, envelope=self.gate.envelope, twin=made["twin"], real=self.gate)
         except scriptrun.ScriptError as e:
             return "not rehearsed: %s" % e
         return "\n".join([r.message] + ["problem: %s" % p for p in r.problems] +
@@ -5851,10 +5921,12 @@ class LabRuntime:
         return lines
 
     def _script_run(self, prep: Any, mark: Callable[[str], str], extra: Optional[Dict[str, Any]] = None,
-                    told: bool = True) -> Tuple[str, Any]:
+                    told: bool = True, queued: bool = False) -> Tuple[str, Any]:
         """A prepared script, run after its one approval: (the answer, its ScriptReport; None when it never started:
         refused, declined, or an instrument it opens not ready). extra: more for its run's record (its place in the
-        queue). told: a notice when it ends (a queue's account says it at the end instead)."""
+        queue). told: a notice when it ends (a queue's account says it at the end instead). queued: an approved
+        version of one of the lab's experiments the queue's approval covered, which runs without asking again. In
+        auto mode an approved version is rehearsed first and covered as a plan is (_auto_experiment)."""
         from .. import scriptrun
         gate, lab = self.gate, self.lab
         names = list(prep.found.instruments)
@@ -5879,11 +5951,27 @@ class LabRuntime:
             request.title = "Run %s, version %d%s?" % (kept.name, kept.number,
                                                         " (%s)" % prep.action if prep.action else "")
             request.items[1:1] = self._kept_lines(kept)
-        if gate.auto:
-            request.items.append("Auto mode does not cover this run: a person approves each run of a script, "
-                                 "experiments too" if prep.found.experiment else
-                                 "Auto mode does not cover this run: a script can't be dry-run first")
-        if not gate.ask(request):
+            request.items[-1] = ("One of the lab's experiments: in auto mode an approved version is rehearsed on the "
+                                 "simulated lab first and runs without asking when the rehearsal is clean and every "
+                                 "drive is low-risk; a new version asks a person once")
+        covered: List[str] = []
+        if queued and kept is not None and kept.approved:
+            covered = ["the queue's approval covers it: an approved version of the lab's experiment %s" % kept.name]
+        elif gate.auto and kept is not None and kept.approved:
+            ok, why = self._auto_experiment(prep, grants)
+            if ok:
+                covered = why
+            else:
+                request.items.append("Auto mode does not cover this run: " + "; ".join(why))
+        elif gate.auto:
+            request.items.append(
+                "Auto mode does not cover this run: version %d is new, and a person approves a new version once"
+                % kept.number if kept is not None else
+                "Auto mode does not cover this run: a person approves each run of a script, experiments too"
+                if prep.found.experiment else "Auto mode does not cover this run: a script can't be dry-run first")
+        if covered:
+            gate.auto_approve(request, covered, "approved with the queue" if queued else "auto mode")
+        elif not gate.ask(request):
             gate.log.write("run_declined", by=gate.operator, plan=prep.name)
             return "declined: script %s not run%s" % (prep.name, " (%s)" % request.note if request.note else ""), None
         if kept is not None and not kept.approved:   # the person's yes to its run approves the version
