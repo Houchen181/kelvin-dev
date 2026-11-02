@@ -594,9 +594,10 @@ def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
     rated = {} if used else rated_limits(card, str(item.get("idn") or item.get("note") or ""))
     lim = ["%s: [%g, %g]" % (p.name, p.limits[0], p.limits[1]) for p in card.drives
            if p.numeric and p.limits and p.name not in used and p.name not in rated]
-    if used and item.get("from") == "specialmeasure":
-        lines.append("    limits: { %s }   # from your Special Measure rack (its channels' limits): check them, and "
-                     "tighten the rest" % ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in used.items()] + lim))
+    if used and item.get("from") == "specialmeasure":   # which are the rack's, said apart from the card's own
+        lines.append("    limits: { %s }   # %s from your Special Measure rack (its channels' limits): check %s%s" % (
+            ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in used.items()] + lim), ", ".join(used),
+            "it" if len(used) == 1 else "them", "; the rest are its card's vendor limits: tighten them" if lim else ""))
     elif used:
         lines.append("    limits: { %s }   # from your %s (the values they use): check them, and tighten the rest" % (
             ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in used.items()] + lim),
@@ -606,8 +607,10 @@ def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
                      "can take" % ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in rated.items()] + lim))
     elif lim:
         lines.append("    limits: { %s }   # vendor limits: tighten to what your sample can take" % ", ".join(lim))
-    rates = {p: v for p, v in (item.get("rates") or {}).items() if p in card.params}
-    if rates:   # a Special Measure rack's ramp rates, per second in the parameter's unit
+    rates = {p: min(v, card.params[p].max_rate) if card.params[p].max_rate else v
+             for p, v in (item.get("rates") or {}).items()
+             if p in card.params and card.params[p].ramp == "gate" and isinstance(v, (int, float)) and v > 0}
+    if rates:   # a Special Measure rack's ramp rates, per second in the parameter's unit, as the lab config takes them
         lines.append("    rates: { %s }   # from your Special Measure rack (its ramp rates)" % ", ".join(
             "%s: %g" % (p, v) for p, v in rates.items()))
     if card.kind in ("laser", "laser-driver"):
@@ -696,8 +699,10 @@ def add_to_config(text: str, items: Sequence[Dict[str, Any]], registry: CardRegi
 def add_names(text: str, names: Dict[str, str]) -> str:
     """A lab config text with the lab's own names for settings (names: name: instrument.parameter) added, keeping
     what is there: a name it has already keeps its meaning."""
+    from .labconfig import NOT_NAMES
     from .yamlio import load_yaml
-    if not names:
+    names = {k: v for k, v in (names or {}).items() if isinstance(k, str) and k.isidentifier() and k not in NOT_NAMES}
+    if not names:   # Kelvin's own words (t, i, pi...) are never a lab's name: the lab config refuses them
         return text
     data = load_yaml(text) if text.strip() else None
     have = data.get("names") if isinstance(data, dict) and isinstance(data.get("names"), dict) else None

@@ -60,7 +60,8 @@ def test_from_special_measure_sets_the_lab_up_with_its_channels_names(bench):
         assert {c["name"]: c["param"] for c in src["channels"]} == {"Vbg": "V", "Ibg": "I"}
         assert src["card"]["limits"] == {"V": [-5, 5]} and src["card"]["rates"] == {"V": 0.2}
         assert src["startup"] == ["sense:current:protection 1e-6"]
-        assert lock["card"]["limits"] == {"amplitude": [0.004, 1]} and lock["card"]["rates"] == {"amplitude": 0.5}
+        assert lock["card"]["limits"] == {"amplitude": [0.004, 1]}
+        assert lock["card"]["rates"] == {}   # Kelvin doesn't ramp its amplitude: no rate, which the config would refuse
         assert not mag["used"] and mag["address"] == "serial://COM1"   # its flag is 0: listed, not ticked
         assert view["names"] == {"X_A": "lockin_a.X", "Vref_A": "lockin_a.amplitude", "Vbg": "source.V",
                                  "Ibg": "source.I"}
@@ -70,7 +71,8 @@ def test_from_special_measure_sets_the_lab_up_with_its_channels_names(bench):
                   "rates": src["card"]["rates"], "from": "specialmeasure"}]
         text = client.post("/api/instruments/draft", json={"items": items, "base": "", "names": view["names"]},
                            headers=headers).json()["yaml"]
-        assert "V: [-5, 5]" in text and "from your Special Measure rack (its channels' limits)" in text
+        assert "V: [-5, 5]" in text and "V from your Special Measure rack (its channels' limits)" in text
+        assert "the rest are its card's vendor limits" in text   # said apart from the rack's
         assert "rates: { V: 0.2 }" in text and "\nnames:" in text and "  Vbg: source.V" in text
         text = text.replace("  X_A: lockin_a.X\n", "").replace("  Vref_A: lockin_a.amplitude\n", "")
         r = client.post("/api/lab", json={"yaml": text}, headers=headers).json()

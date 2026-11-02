@@ -9,7 +9,7 @@ reads or drives an instrument: an edited scan runs through the queue, its gate a
     parts = {name, description, loops: [loop, ...], measure: [key, ...], setup: [{key, value}], after: [{key, value}],
              sets: [{key, value: its expression}], settle, repeat, time: {every, for, points, order} | None,
              kept: YAML text of the plan's other keys, fixed: those keys (the editor's fields for them are read-only),
-             order: the plan's keys as written}
+             order: the plan's keys as written, variables: its variables as it came (kept_variables)}
     loop  = {key, mode: range | values | ramp | kept, its fields, kept: YAML text of its other keys, fixed, order}
       range:  from, to, and step or points (by: the one the loop gives), log, back, settle
       values: values, back, settle; form: "list" for a bare list of values
@@ -75,6 +75,8 @@ def to_parts(data: Any) -> Dict[str, Any]:
         raise ValueError("a plan is a mapping of its keys")
     parts: Dict[str, Any] = {"name": "", "description": "", "loops": [], "measure": [], "setup": [], "after": [],
                              "sets": [], "settle": None, "repeat": None, "time": None, "order": [str(k) for k in data]}
+    sweep = data.get("sweep")
+    parts["variables"] = [k for k in sweep if isinstance(k, str) and "." not in k] if isinstance(sweep, dict) else []
     kept: Dict[Any, Any] = {}
     for key, value in data.items():
         shown = _shown(key, value)
@@ -238,6 +240,15 @@ def _legs(ramp: Any) -> Optional[List[Dict[str, Any]]]:
 
 
 # ------------------------------------------------------------------ the parts → the plan
+
+def kept_variables(parts: Any) -> set:
+    """The loops that are still the variables the scan came with (parts' variables: a kept plan's bare sweep keys):
+    the lab's own names never take them (plans.with_names keep). A loop a person adds or renames isn't one."""
+    if not isinstance(parts, dict) or not isinstance(parts.get("variables"), list):
+        return set()
+    keys = {loop.get("key") for loop in parts.get("loops") or [] if isinstance(loop, dict)}
+    return {k for k in parts["variables"] if isinstance(k, str) and k in keys}
+
 
 def to_plan(parts: Any) -> Dict[str, Any]:
     """The editor's parts as the plan (a mapping, for load_plan); ValueError: they can't be one (a loop with nothing to

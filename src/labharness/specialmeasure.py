@@ -27,8 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from . import scripts
-from .scripts import Command, Instrument, _call_args, _matlab_args, _matlab_code, _setting, _statements, normalize
+from . import expr, scripts
+from .scripts import Command, Instrument, _call_args, _matlab_args, _matlab_code, _setting, normalize
 
 MAX_LOOKED = 200_000        # files and folders a survey looks through in one folder
 WALK_SECONDS = 60.0         # and for at most this long
@@ -84,6 +84,7 @@ class RackInstrument:
     formulas: List[str] = field(default_factory=list)      # ... and the formula for each (MATLAB, as written)
     numbered: Dict[str, List[str]] = field(default_factory=dict)   # its driver's commands, by its channels' names
     sends: List[Command] = field(default_factory=list)   # what its driver can send: only to find its card
+    order: List[str] = field(default_factory=list)   # its channels in its sminst file's order (channel 1 first)
 
     @property
     def function(self) -> bool:
@@ -146,7 +147,7 @@ class Found:
         return {"folder": self.folder, "setups": [{"path": x.path, "modified": x.modified, "problem": x.problem,
                                                    "instruments": len(_hardware(x))} for x in self.setups],
                 "setup": s.path if s else "", "instruments": items,
-                "functions": [{"name": ri.name, "variables": [c.name for c in ri.channels], "sets": ri.dependences,
+                "functions": [{"name": ri.name, "variables": function_variables(ri), "sets": ri.dependences,
                                "formulas": ri.formulas} for ri in (s.instruments if s else []) if ri.function],
                 "scans": [{k: x[k] for k in ("name", "path", "source", "runs")} for x in self.scans],
                 "runs": dict(sorted(self.runs.items())), "skipped": self.skipped[:20], "unread": self.unread[:20]}
@@ -263,7 +264,17 @@ class _Setup(scripts._Matlab):
         return None if n is None else n != 0
 
     def statement(self, code: str, line: int, comment: str) -> None:
+        parts = _top_split(code, ",")
+        if len(parts) > 1:   # statements on one line: if X, smloadinst(...), end
+            for part in parts:
+                self.statement(part, line, comment)
+            return
         if not code:
+            return
+        m = re.match(r"^(else|try)\s+(\S.*)$", code)
+        if m:   # else if X: else, then an if of its own (which has its own end); try smopen(...)
+            self.statement(m.group(1), line, comment)
+            self.statement(m.group(2), line, comment)
             return
         m = re.match(r"^(if|elseif)\b\s*(.*)$", code)
         if m:
@@ -455,8 +466,11 @@ def driver_commands(text: str) -> Dict[int, List[str]]:
             if s and s.group(1).strip():
                 out.setdefault(k, []).append(s.group(1).strip())
     depth, at, current = 0, None, []   # the switch on the channel: its depth, and the case being read
-    for line in code.split("\n"):
-        t = line.strip()
+    statements = [t.strip() for line in code.split("\n") for t in _top_split(line, ";,")]
+    for t in statements:   # one at a time: if x, fprintf(...), end on one line opens and ends a block
+        m = re.match(r"^else\s+(if\b.*)$", t)
+        if m:   # else if: an if of its own, with its own end
+            t = m.group(1)
         if at is None and re.match(r"^switch\s+ic\s*\(\s*2\s*\)", t):
             at = depth
             depth += 1
@@ -478,6 +492,34 @@ def driver_commands(text: str) -> Dict[int, List[str]]:
                     for n in current:
                         out.setdefault(n, []).append(sent.strip())
     return out
+
+
+def _top_split(code: str, seps: str) -> List[str]:
+    """A line's statements, split at the separators (MATLAB's , and ;) outside brackets and quotes."""
+    out, depth, cur, quote, prev = [], 0, [], "", ""
+    for ch in code:
+        if quote:
+            cur.append(ch)
+            if ch == quote:
+                quote = ""
+        elif ch == '"' or (ch == "'" and not (prev.isalnum() or prev in ")]}._'")):
+            quote = ch
+            cur.append(ch)
+        elif ch in "([{":
+            depth += 1
+            cur.append(ch)
+        elif ch in ")]}":
+            depth -= 1
+            cur.append(ch)
+        elif ch in seps and depth <= 0:
+            out.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+        if not ch.isspace():
+            prev = ch
+    out.append("".join(cur).strip())
+    return [s for s in out if s]
 
 
 def _command_like(text: str) -> bool:
@@ -673,6 +715,8 @@ def _driver(ri: RackInstrument, drivers: Dict[str, str], library: Dict[str, Path
     driver sends, which help name its card. The sminst file also gives the channels' order (by number)."""
     fn = ""
     info = _sminst(library.get(ri.model.lower()))
+    order = [c.strip() for c in info.get("channels") or []]
+    ri.order = order
     if info.get("cntrlfn"):
         fn = str(info["cntrlfn"]).lower()
     if not fn or fn not in drivers:
@@ -682,7 +726,6 @@ def _driver(ri: RackInstrument, drivers: Dict[str, str], library: Dict[str, Path
         return
     text = texts.get(Path(ri.driver)) or ""
     by_number = driver_commands(text)
-    order = [c.strip() for c in info.get("channels") or []]
     ri.inst.hints += scripts._hints(Path(ri.driver).stem[3:])
     ri.numbered = {name: by_number.get(i + 1, []) for i, name in enumerate(order)}
     sent = [c for cs in by_number.values() for c in cs]
@@ -885,15 +928,63 @@ def zeroes_of(text: str) -> Optional[Dict[str, float]]:
     if len(args) < 2:
         return None
     chans = re.findall(r"'([^']*)'", args[0])
-    nums = re.findall(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", args[1])
     if not chans:
         return None
-    values = [float(n) for n in nums]
+    values = _plain_numbers(args[1])
+    if values is None:   # anything but numbers as written (-[1 2], [-(1) 2], a variable): not translated
+        return None
     if len(values) == 1 and len(chans) > 1:
         values = values * len(chans)
     if len(values) != len(chans):
         return None
     return {c.strip(): v for c, v in zip(chans, values) if c.strip()}
+
+
+_NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def _plain_numbers(text: str) -> Optional[List[float]]:
+    """A number or a vector of numbers as written ([0, 0], [-1 2.5], 0); None for anything else."""
+    t = text.strip()
+    if t.startswith("[") and t.endswith("]"):
+        t = t[1:-1]
+    parts = [p for p in re.split(r"[,\s]+", t.strip()) if p]
+    if not parts or not all(_NUMBER.fullmatch(p) for p in parts):
+        return None
+    return [float(p) for p in parts]
+
+
+def _chained_power(body: str) -> bool:
+    """a^b^c: MATLAB takes it as (a^b)^c, Python's ** as a^(b^c), so it isn't translated."""
+    i = 0
+    while True:
+        i = body.find("^", i)
+        if i < 0:
+            return False
+        j = i + 1
+        while j < len(body) and body[j] in " +-":
+            j += 1
+        if j < len(body) and body[j] == "(":   # the power is a group: past its end
+            depth = 0
+            while j < len(body):
+                depth += {"(": 1, ")": -1}.get(body[j], 0)
+                j += 1
+                if depth == 0:
+                    break
+        else:
+            m = re.match(r"[\w.]+", body[j:])
+            j += m.end() if m else 0
+            if j < len(body) and body[j] == "(":   # a call: past its arguments
+                depth = 0
+                while j < len(body):
+                    depth += {"(": 1, ")": -1}.get(body[j], 0)
+                    j += 1
+                    if depth == 0:
+                        break
+        rest = body[j:].lstrip()
+        if rest.startswith("^") or rest.startswith(".^"):
+            return True
+        i += 1
 
 
 _MATLAB_FUNCS = {"sqrt", "abs", "exp", "log", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh",
@@ -913,6 +1004,8 @@ def expression(text: str, args: List[str]) -> Optional[str]:
     if len(params) > len(args):
         return None
     rename = dict(zip(params, args))
+    if _chained_power(body):
+        return None
     body = body.replace(".*", "*").replace("./", "/").replace(".^", "**").replace("^", "**")
     body = re.sub(r"\basin\(", "arcsin(", body)
     body = re.sub(r"\bacos\(", "arccos(", body)
@@ -978,13 +1071,18 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
     sweep: Dict[str, Any] = {}
     sets: Dict[str, str] = {}
     measure: List[str] = []
+    scaled: List[str] = []   # readings sm records divided by a multiplier
     repeat = None
     time_axis = None
     for depth, lp in enumerate(reversed(loops)):   # outer first
         inner = depth == len(loops) - 1
         setchans = _names(lp.get("setchan"))
         getchans = [c for c in _names(lp.get("getchan")) if c != "time"]   # sm's clock: every Kelvin point has t
+        scaled += [c for c in getchans if key(c)[0] and key(c)[1] != 1]
         npoints = _one(lp.get("npoints"))
+        if npoints is not None and not (math.isfinite(npoints) and npoints >= 1 and npoints == int(npoints)):
+            return {"plan": None, "text": "", "title": title, "summary": "", "gaps": [
+                "loop %d's npoints (%s) isn't a number of points" % (len(loops) - depth, _num(npoints))]}
         rng = _numbers(lp.get("rng"))
         ranges = lp.get("setchanranges")
         ranges = [(_numbers(r) + [None, None])[:2] for r in ranges] if isinstance(ranges, list) else []
@@ -1012,8 +1110,11 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
         if not setchans or setchans == ["count"]:   # sm's counter: the same point again
             if not inner and depth == 0:
                 repeat = n
+                if getchans:
+                    gaps.append("loop %d reads %s once per repeat; Kelvin reads %s at every point" % (
+                        len(loops) - depth, ", ".join(getchans), "it" if len(getchans) == 1 else "them"))
             elif inner:
-                time_axis = {"every": max(wait, 0.01), "points": n}
+                time_axis = {"every": _round(max(wait, 0.01)), "points": n}
             else:
                 gaps.append("loop %d repeats points between other loops, which Kelvin's scans do outermost "
                             "(repeat:) or innermost (a time series)" % (len(loops) - depth))
@@ -1041,6 +1142,9 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
             if loop_key is None:
                 missing.append(first)
                 continue
+        if loop_key in sweep:
+            return {"plan": None, "text": "", "title": title, "summary": "", "gaps": [
+                "two loops step %s: a Kelvin scan steps a setting in one loop" % first]}
         a, b = spans[0]
         factor0 = 1.0 if fn is not None else key(first, True)[1]
         if not npoints and rng and len(rng) == n and n > 2 and not ranges:
@@ -1091,6 +1195,18 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
             "%s %s not channels of the rack read" % (", ".join(dict.fromkeys(missing)),
                                                     "is" if len(set(missing)) == 1 else "are")] + gaps}
     variables = [k for k in sweep if "." not in k]
+    setting = set(sweep) | {k for s in sweep.values() for k in s.get("with") or {}} | set(sets)
+    measure = [k for k in measure if k not in setting]   # what the sweep sets: each point records its value
+    for s in sweep.values():
+        if "measure" in s:
+            s["measure"] = [k for k in s["measure"] if k not in setting]
+            if not s["measure"]:
+                del s["measure"]
+    if scaled:
+        gaps.append("%s %s recorded as the instrument reads %s; Special Measure records %s divided by %s rack's "
+                    "multiplier" % (", ".join(dict.fromkeys(scaled)), "is" if len(set(scaled)) == 1 else "are",
+                                    "it" if len(set(scaled)) == 1 else "them", "it" if len(set(scaled)) == 1 else
+                                    "them", "its" if len(set(scaled)) == 1 else "their"))
     for v in variables:   # a Function's other variables: as the scan's constants set them
         fn = functions[v]
         for other in fn["variables"]:
@@ -1106,13 +1222,49 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
     # kept scan's text is what the model reads of it
     plan: Dict[str, Any] = {"plan": plan_name(title), "description": "From Special Measure"}
     setup: Dict[str, Any] = {}
+    swept_fns = {functions[v].get("function") for v in variables}
+    fixed: Dict[Any, Dict[str, Any]] = {}   # a Function no loop sweeps, whose channels the constants set
     for c in _consts(scan):
-        if c["set"] and c["setchan"] not in functions:
-            kk, f = key(c["setchan"], True)
+        if not c["set"]:
+            continue
+        if c["setchan"] in functions:
+            fn = functions[c["setchan"]]
+            if fn.get("function") not in swept_fns:
+                fixed.setdefault(fn.get("function"), fn)
+            continue
+        kk, f = key(c["setchan"], True)
+        if kk is None:
+            gaps.append("the constant %s isn't a channel of the rack read" % c["setchan"])
+        else:
+            setup[kk] = _round(c["val"] * f)
+    for fn in fixed.values():   # as sm sets them: its formulas at the constants' values, before the loops
+        known = {v: _const(scan, v) for v in fn["variables"] if _const(scan, v) is not None}
+        for dep, formula in fn["sets"].items():
+            kk, f = key(dep, True)
             if kk is None:
-                gaps.append("the constant %s isn't a channel of the rack read" % c["setchan"])
-            else:
-                setup[kk] = _round(c["val"] * f)
+                missing.append(dep)
+                continue
+            text = expression(formula, fn["variables"])
+            if text is None:
+                return {"plan": None, "text": "", "title": title, "summary": "", "gaps": [
+                    "the constants set %s's channels, whose formula for %s (%s) isn't one Kelvin can work out" % (
+                        fn.get("function") or "a Function", dep, formula)]}
+            unknown = [n for n in expr.names_in(text) if n not in known]
+            if unknown:
+                return {"plan": None, "text": "", "title": title, "summary": "", "gaps": [
+                    "the constants set %s's channels, and its formula for %s also uses %s, which keeps the value it "
+                    "had before the scan: Kelvin can't know it, give it as a constant" % (
+                        fn.get("function") or "a Function", dep, ", ".join(unknown))]}
+            try:
+                setup[kk] = _round(expr.scalar(text, known) * f)
+            except expr.ExprError as e:
+                return {"plan": None, "text": "", "title": title, "summary": "", "gaps": [
+                    "the constants set %s's channels, and its formula for %s can't be worked out at them: %s" % (
+                        fn.get("function") or "a Function", dep, e)]}
+    if missing:
+        return {"plan": None, "text": "", "title": title, "summary": "", "gaps": [
+            "%s %s not channels of the rack read" % (", ".join(dict.fromkeys(missing)),
+                                                    "is" if len(set(missing)) == 1 else "are")] + gaps}
     if setup:
         plan["setup"] = setup
     plan["sweep"] = sweep
@@ -1177,7 +1329,9 @@ def _consts(scan: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _const(scan: Dict[str, Any], channel: str) -> Optional[float]:
-    return next((c["val"] for c in _consts(scan) if c["setchan"] == channel), None)
+    """The value the scan's constants leave a channel at (the last that sets it); None when none does."""
+    values = [c["val"] for c in _consts(scan) if c["setchan"] == channel and c["set"]]
+    return values[-1] if values else None
 
 
 def _escape(scan: Dict[str, Any]) -> Dict[str, float]:
@@ -1200,9 +1354,10 @@ def channel_map(setup: Setup, named: Dict[str, str]) -> Tuple[Dict[str, Tuple[An
     functions: Dict[str, Dict[str, Any]] = {}
     for ri in setup.instruments:
         if ri.function:
-            variables = [c.name for c in sorted(ri.channels, key=lambda c: c.channel)]
+            variables = function_variables(ri)
             for c in ri.channels:
-                functions[c.name] = {"variables": variables, "sets": dict(zip(ri.dependences, ri.formulas))}
+                functions[c.name] = {"variables": variables, "sets": dict(zip(ri.dependences, ri.formulas)),
+                                     "function": ri.name}
             continue
         name = named.get(ri.name)
         if not name:
@@ -1214,11 +1369,33 @@ def channel_map(setup: Setup, named: Dict[str, str]) -> Tuple[Dict[str, Tuple[An
     return keys, functions
 
 
+def function_variables(ri: RackInstrument) -> List[str]:
+    """A Function's channels as its formulas take them: sm's Function driver gives a formula the values of channels
+    1, 2, ... in turn, so argument i is the rack channel on channel i (its place in the sminst file, else the number
+    it ends in: VAR10 after VAR2). A channel number no rack channel has keeps its own name (VAR2): only a constant
+    can give it a value. As the rack adds them when the numbers can't be told."""
+    def number(ch: Channel) -> Optional[int]:
+        if ch.channel in ri.order:
+            return ri.order.index(ch.channel) + 1
+        m = re.search(r"(\d+)$", ch.channel)
+        return int(m.group(1)) if m else None
+    placed: Dict[int, str] = {}
+    for ch in ri.channels:
+        n = number(ch)
+        if n is None or n in placed or n > 64:
+            return [c.name for c in ri.channels]
+        placed[n] = ch.name
+    if not placed:
+        return []
+    return [placed.get(i) or (ri.order[i - 1] if i - 1 < len(ri.order) else "VAR%d" % i)
+            for i in range(1, max(placed) + 1)]
+
+
 def names_of(setup: Setup, named: Dict[str, str], taken: Iterable[str] = ()) -> Dict[str, str]:
     """The lab config's names: for a rack: each channel's sm name → instrument.parameter (named: each instrument's
     Kelvin name, by its rack name); a name that is an instrument's, or that two channels share, is left out."""
+    from .labconfig import NOT_NAMES
     from .plans import RESERVED
-    blocked = set(taken) | set(named.values()) | RESERVED | {"on", "off", "true", "false", "and", "or", "not", "if",
-                                                             "else", "pi", "e", "count"}
+    blocked = set(taken) | set(named.values()) | RESERVED | NOT_NAMES | {"e", "count"}
     keys, _ = channel_map(setup, named)
     return {ch: k for ch, (k, *_) in keys.items() if ch not in blocked and re.fullmatch(r"[A-Za-z_]\w*", ch)}

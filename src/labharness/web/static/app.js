@@ -6524,8 +6524,11 @@
       (c.low != null || c.high != null ? " [" + (c.low == null ? "−∞" : c.low) + ", " + (c.high == null ? "∞" : c.high) + "]" : "") +
       (c.rate != null ? " at " + c.rate + "/s" : "") + (c.factor !== 1 ? " ×" + c.factor : "")).join(" · ");
   }
+  // Kelvin's own words, never a lab's name (labconfig.NOT_NAMES)
+  const NOT_NAMES = new Set(["i", "t", "time", "repeat", "stabilizing", "gap_s", "on", "off", "true", "false", "and", "or",
+    "not", "if", "else", "pi", "col"]);
   function smNames() {   // each checked (or in-lab) instrument's channels: their sm names for instrument.parameter
-    const r = LAB.scripts, names = {}, taken = new Set();
+    const r = LAB.scripts, names = {}, taken = new Set(NOT_NAMES);
     for (const it of r.instruments) taken.add(it.in_lab || (it.ui ? it.ui.name.value.trim() : it.name));
     for (const it of r.instruments) {
       const name = it.in_lab || (it.ui && it.ui.check.checked ? it.ui.name.value.trim() : "");

@@ -3797,6 +3797,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         out["library"] = await asyncio.to_thread(runtime.library_view)
         return JSONResponse(out)
 
+    def sm_why(e: Exception) -> str:
+        return str(e).splitlines()[0][:200] if str(e) else type(e).__name__
+
     async def specialmeasure_view(request: Request) -> Response:
         """The lab's Special Measure, read (no MATLAB is run, MATLAB isn't needed) to switch the lab to Kelvin as its
         rack has it: {folder, setup?: the setup script to start from}. Each instrument of the rack with its likely card,
@@ -3817,6 +3820,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(409, str(e))
         except (OSError, ValueError) as e:
             return error(400, str(e))
+        except Exception as e:   # nothing was changed: say what went wrong rather than a bare 500
+            return error(500, "Kelvin could not read that Special Measure folder (%s)" % sm_why(e))
 
     async def specialmeasure_scans(request: Request) -> Response:
         """POST {folder, setup, scans: [{path, index}], instruments: [{rack, name, card}]}: Special Measure scans a
@@ -3842,6 +3847,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(409, str(e))
         except (OSError, ValueError) as e:
             return error(400, str(e))
+        except Exception as e:
+            return error(500, "Kelvin could not keep those scans (%s)" % sm_why(e))
         out["library"] = await asyncio.to_thread(runtime.library_view)
         return JSONResponse(out)
 
@@ -3865,6 +3872,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                                                         str(body["folder"]).strip(), runs, person(request)))
         except (OSError, ValueError) as e:
             return error(400, str(e))
+        except Exception as e:
+            return error(500, "Kelvin could not import those runs (%s)" % sm_why(e))
 
     async def run_again(request: Request) -> Response:
         """A run again, from the Runs panel; on this computer only. GET: {kind, name, text? (a plan's), script? ({path,

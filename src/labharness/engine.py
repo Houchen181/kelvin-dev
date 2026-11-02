@@ -1048,7 +1048,9 @@ class RunEngine:
             go a ramp step at a time, each in turn, so two gates of a device travel the line between their points
             rather than one and then the other (which could put a field on the device it never sees in the scan).
             Only between values the run was approved for: from where a drive is before the run, it goes on its own
-            (the steps on the way are not values of the run). Each step goes through the gate."""
+            (the steps on the way are not values of the run). A drive reads back within half a ramp step (or its
+            card's tolerance) of its span: the readback's noise (7.28 read for 7.279999999999999) is no move from it,
+            and its steps start from where it is, taken into the span. Each step goes through the gate."""
             paired, alone = [], []
             for instr, param, value in moves:
                 try:
@@ -1062,8 +1064,12 @@ class RunEngine:
                     step = (spec.ramp_step or inst.rate(spec.name) * 0.2) if now is not None else None
                 except Exception:   # no rate to step at: the gate sets it as it would alone
                     step = None
-                if step and step > 0 and _num(now) and span and span[0] <= now <= span[1] and _num(target):
-                    paired.append((instr, param, now, target, max(1, int(math.ceil(abs(target - now) / step - 1e-9)))))
+                slack = max(spec.tol or 0.0, step / 2, 1e-9 * max(1.0, abs(span[0]), abs(span[1]))) \
+                    if step and step > 0 and span else None
+                if slack is not None and _num(now) and _num(target) and span[0] - slack <= now <= span[1] + slack:
+                    start = min(max(float(now), span[0]), span[1])
+                    paired.append((instr, param, start, target,
+                                   max(1, int(math.ceil(abs(target - start) / step - 1e-9)))))
                 else:
                     alone.append((instr, param, value))
             for instr, param, value in alone:
@@ -1088,7 +1094,7 @@ class RunEngine:
                     moves.append((w.instr, w.param, w.values[k]))
                     extra[w.key] = w.values[k]
                 if worked.get(j):   # its other values: as the loops outside are, and where the loops inside start
-                    known = dict(at, **{axis.key: v}, **extra)
+                    known = {**at, axis.key: v, **extra}
                     for inner in plan.axes[j + 1:]:
                         known.setdefault(inner.key, inner.values[0] if inner.values else None)
                         for w in inner.with_:
@@ -1103,7 +1109,7 @@ class RunEngine:
                 together(moves)
                 st = axis.stabilize
                 if st:
-                    log = (lambda: take(dict(at, **{axis.key: v}, **extra), waiting=True)) if st.every else None
+                    log = (lambda: take({**at, axis.key: v, **extra}, waiting=True)) if st.every else None
                     info = self._stabilize(st, gen, warnings, v if self._same_unit(axis.key, st.key) else None, log)
                     settled.append(dict(info, axis=axis.key, value=v, t=round(clock.now() - t0, 3)))
                 hold = axis.settle_first(k)
@@ -1136,7 +1142,7 @@ class RunEngine:
                 same = k and v == axis.values[k - 1] and all(w.values[k] == w.values[k - 1] for w in axis.with_)
                 if not same:   # the same value again right after: nothing to set
                     extra = set_axis(axis, j, k, v, at)
-                if not loop(j + 1, dict(at, **{axis.key: v}, **extra)):
+                if not loop(j + 1, {**at, axis.key: v, **extra}):
                     return False
                 why = ends(axis.until, axis.while_, state["last"]) if (axis.until or axis.while_) else None
                 if why:   # this loop's other values are skipped; the loops outside it go on
@@ -1243,7 +1249,15 @@ class RunEngine:
                     known = {}
                 rec.note(held=self.held(plan, measuring),
                          setup={"%s.%s" % (s.instr, s.param): s.value for s in plan.setup}, **known)
-                loop(0, {})
+                fixed: Dict[str, Any] = {}   # what sets: works out from no loop: set once, kept on every point
+                for c in plan.sets:
+                    if not c.names:
+                        try:
+                            fixed[c.key] = expr.scalar(c.text, {})
+                        except expr.ExprError as e:
+                            raise _Abort("sets.%s: %s" % (c.key, e))
+                        apply(c.instr, c.param, fixed[c.key])
+                loop(0, fixed)
                 late = self.readback_problems(plan.setup, swept)
                 if late:   # something reset a level during the sweep: the assessment must not say all was well
                     warnings.append("at the end of the sweep %s: points may not have been measured at the approved "

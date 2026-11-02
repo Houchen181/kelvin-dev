@@ -247,3 +247,88 @@ def test_a_channel_set_through_its_set_point_is_swept_as_the_set_point_and_read_
     plan = translate(scan, keys)["plan"]
     assert list(plan["sweep"]) == ["optc.T_set"] and plan["measure"] == ["optc.T", "lockin.X"]
     assert plan["setup"] == {"optc.T_set": 10}
+
+
+def test_constants_on_a_function_no_loop_sweeps_set_what_its_formulas_give():
+    fn = {"variables": ["n", "E"], "sets": {"Vtg": "@(n, E) 1.2*n - 8*E", "Vg2": "@(n, E) 0.9*n + 7*E"},
+          "function": "Gates"}
+    functions = {"n": fn, "E": fn}
+    scan = {"name": "freq", "loops": [{"npoints": 3, "setchan": ["Freq_A"], "setchanranges": [[100, 300]],
+                                       "getchan": ["X_A"]}],
+            "consts": [{"setchan": "n", "val": 1, "set": 1}, {"setchan": "E", "val": 0.05, "set": 1}]}
+    t = translate(scan, KEYS, functions=functions)
+    assert t["plan"]["setup"] == {"dac.CH0": 0.8, "dac.CH1": 0.125} and not t["gaps"]   # Vg2's multiplier 0.1
+    t = translate(dict(scan, consts=scan["consts"][:1]), KEYS, functions=functions)   # E as it was before
+    assert t["plan"] is None and "E, which keeps the value it had before the scan" in t["gaps"][0]
+
+
+def test_a_functions_variables_follow_its_channel_numbers():
+    ri = specialmeasure.RackInstrument("Function", "F", specialmeasure.Instrument("", [], "", []))
+    ri.channels = [specialmeasure.Channel("E", "VAR2"), specialmeasure.Channel("n", "VAR1")]
+    assert specialmeasure.function_variables(ri) == ["n", "E"]   # as sm's Function gives its formulas their values
+    ri.channels = [specialmeasure.Channel("a", "VAR10"), specialmeasure.Channel("b", "VAR2"),
+                   specialmeasure.Channel("c", "VAR1")]
+    v = specialmeasure.function_variables(ri)
+    assert v[:3] == ["c", "b", "VAR3"] and v[9] == "a" and len(v) == 10   # VAR10 after VAR2
+    ri.order = ["VAR1", "VAR2", "VAR10"]   # its sminst file's order
+    assert specialmeasure.function_variables(ri) == ["c", "b", "a"]
+
+
+def test_what_would_translate_differently_is_said_or_refused():
+    from labharness.yamlio import dump_yaml
+    keys = dict(KEYS, I=("smu.I", 1e-7))
+    t = translate({"loops": [{"npoints": 3, "setchan": ["Vtg"], "setchanranges": [[0, 1]], "getchan": ["I"]}]}, keys)
+    assert t["plan"] is not None and "I is recorded as the instrument reads it" in t["gaps"][0]
+    two = {"loops": [{"npoints": 3, "setchan": ["Vtg"], "setchanranges": [[0, 1]]},
+                     {"npoints": 2, "setchan": ["Vtg"], "setchanranges": [[0, 1]]}]}
+    assert "two loops step Vtg" in translate(two, KEYS)["gaps"][0]
+    for npoints in (float("nan"), float("inf"), 2.5):
+        bad = {"loops": [{"npoints": npoints, "setchan": ["Vtg"], "setchanranges": [[0, 1]]}]}
+        assert "isn't a number of points" in translate(bad, KEYS)["gaps"][0]
+    own = {"loops": [{"npoints": 3, "setchan": ["Vtg"], "setchanranges": [[0, 1]], "getchan": ["X_A"]},
+                     {"npoints": 2, "setchan": ["Freq_A"], "setchanranges": [[100, 200]],
+                      "getchan": ["Freq_A", "Vref_A"]}]}
+    plan = translate(own, KEYS)["plan"]
+    assert plan["sweep"]["lockin.frequency"]["measure"] == ["lockin.amplitude"]   # its own setting: its column
+    assert load_plan(dump_yaml(plan)).points == 6
+    rep = {"loops": [{"npoints": 3, "setchan": ["Vtg"], "setchanranges": [[0, 1]]},
+                     {"npoints": 4, "setchan": ["count"], "getchan": ["X_A"]}]}
+    t = translate(rep, KEYS)
+    assert t["plan"]["repeat"] == 4 and "once per repeat" in t["gaps"][0]
+    assert zeroes_of("@(x) smset({'A','B'}, -[1 2])") is None and zeroes_of("@(x) smset({'A','B'}, [-(1) 2])") is None
+    assert zeroes_of("@(x) smset({'A','B'}, [-1 2.5])") == {"A": -1.0, "B": 2.5}
+    assert expression("@(a,b) a^b^2", ["x", "y"]) is None   # MATLAB groups it (a^b)^2, Python a^(b^2)
+    assert expression("@(a,b) (a^2)^3 + b^2", ["x", "y"]) == "(x**2)**3 + y**2"
+
+
+def test_statements_on_one_line_are_read_as_matlab_runs_them(tmp_path):
+    (tmp_path / "smsetup.m").write_text("""
+Use = 1;
+Off = 0;
+if Off == 1, smloadinst('SP2150', [], 'serial', 'COM5'), end
+if Off == 1
+    if Use == 0
+        smloadinst('K2400', [], 'ni', 0, 24);
+    else if Use == 1
+        smloadinst('K2400', [], 'ni', 0, 25);
+        end
+    end
+    smloadinst('SR830', [], 'ni', 0, 8);
+end
+smloadinst('BabyDAC', [], 'serial', 'COM2');
+smaddchannel('BabyDAC', 'CH0', 'Vg');
+""", encoding="utf-8")
+    found = specialmeasure.survey(tmp_path, homelab.builtin_registry(), read_mat=False)
+    used = {ri.model: ri.used for ri in found.setup.instruments}
+    assert used == {"SP2150": False, "K2400": False, "SR830": False, "BabyDAC": True}, used
+    driver = """function val = smcX(ic, val, rate)
+switch ic(2)
+    case 1
+        if val > 1, fprintf(inst, 'SOUR1:VOLT %f', val); end
+    case 2
+        fprintf(inst, 'FREQ %f', val);
+    case 3
+        fprintf(inst, '*RST');
+end
+"""
+    assert specialmeasure.driver_commands(driver) == {1: ["SOUR1:VOLT %f"], 2: ["FREQ %f"], 3: ["*RST"]}

@@ -238,3 +238,102 @@ def test_the_editor_shows_what_moves_with_a_loop_its_readings_and_the_computed_s
     assert again["sweep"]["n"]["with"] == {"lockin.amplitude": {"from": 0.1, "to": 0.2}, "stage.x": {"from": 0, "to": 5}}
     assert "measure" not in again["sweep"]["E"] and again["sets"]["top.V"] == "n + E"
     assert load_plan(again).axes[1].with_[1].values == [0, 2.5, 5]
+
+
+def test_gates_move_together_at_the_ends_of_a_line_where_a_worked_out_value_reads_back_rounded(tmp_path):
+    engine, lab, gate, approver = _engine(tmp_path)
+    log = []
+    real_set, real_read = gate._set, lab.read
+
+    def watched(instr, param, value, *a, **k):
+        log.append(("%s.%s" % (instr, param), value))
+        return real_set(instr, param, value, *a, **k)
+
+    def read(instr, param):
+        if (instr, param) == ("lockin", "X"):
+            log.append(("point", None))
+        return real_read(instr, param)
+    gate._set, lab.read = watched, read
+    report = engine.run("""
+plan: n_E_map
+setup: { top.output: on, bottom.output: on }
+sweep:
+  E: { from: -0.3, to: 0.3, points: 7 }
+  n: { from: 0, to: 2, points: 11 }
+sets: { bottom.V: "1.18*n - 8.4*E + 2.4", top.V: "0.95*n + 7.6*E + 2.6" }
+measure: [lockin.X]
+after: { top.V: 0, bottom.V: 0 }
+""")
+    assert report.ok, report.message
+    points = [i for i, (k, _) in enumerate(log) if k == "point"]
+    last, biggest = {}, 0.0
+    for k, v in log[points[0]:points[-1]]:   # from the first point to the last: the line's ends too
+        if k in ("top.V", "bottom.V"):
+            if k in last:
+                biggest = max(biggest, abs(v - last[k]))
+            last[k] = v
+    assert biggest <= 0.05 + 1e-6   # a ramp step at a time, both gates in turn: never one gate's whole move alone
+
+
+def test_a_computed_setting_that_uses_no_loop_is_set_once_before_the_first_point(tmp_path):
+    engine, lab, gate, approver = _engine(tmp_path)
+    report = engine.run("""
+plan: fixed_gate
+setup: { top.output: on, bottom.output: on }
+sweep: { top.V: { from: 0, to: 0.2, points: 3 } }
+sets: { bottom.V: "8*(0.05)" }
+measure: [lockin.X]
+""")
+    assert report.ok, report.message
+    assert [r["bottom.V"] for r in report.rows] == [pytest.approx(0.4)] * 3
+    assert lab.read("bottom", "V") == pytest.approx(0.4)
+    assert "bottom.V" in str(approver.requests[0])
+
+
+def test_what_the_sweep_sets_isnt_read_again_by_a_loop_and_a_name_beside_its_setting_is_refused():
+    for sweep in ({"top.V": {"values": [0, 1], "measure": ["top.V"]}},
+                  {"lockin.tc": {"values": [0.1, 0.3], "measure": ["top.V"]}, "top.V": {"values": [0, 1]}},
+                  {"top.V": {"values": [0, 1], "with": {"bottom.V": [0, -1]}, "measure": ["bottom.V"]}}):
+        with pytest.raises(PlanError) as e:
+            load_plan({"plan": "x", "sweep": sweep})
+        assert "each point records the value it is set to" in str(e.value)
+    with pytest.raises(PlanError) as e:   # with: {from, to} follows numbers only
+        load_plan({"plan": "x", "sweep": {"a.b": {"values": [0, "mid", 1], "with": {"c.d": {"from": 0, "to": 1}}}}})
+    assert "give values: instead" in str(e.value)
+    names = {"Vbg": "bottom.V"}
+    for data in ({"plan": "x", "sweep": {"Vbg": {"values": [0, 1]}, "bottom.V": {"values": [0, 1]}}},
+                 {"plan": "x", "setup": {"Vbg": 1, "bottom.V": 2}},
+                 {"plan": "x", "measure": ["Vbg", "bottom.V"]}):
+        with pytest.raises(PlanError) as e:
+            with_names(data, names)
+        assert "Vbg and bottom.V are the same setting" in str(e.value)
+    kept = {"plan": "x", "sweep": {"E": {"values": [0, 1]}}, "sets": {"top.V": "2*E"}}
+    assert with_names(kept, {"E": "lockin.amplitude"}, keep={"E"}) == kept   # a kept plan's variable stays one
+    assert list(with_names(kept, {"E": "lockin.amplitude"})["sweep"]) == ["lockin.amplitude"]   # text coming in
+
+
+def test_a_name_the_lab_gives_later_never_changes_a_kept_scan(tmp_path):
+    pytest.importorskip("mcp")
+    from labharness.agent.approval import WebApprover
+    from labharness.agent.runtime import LabRuntime
+    from labharness.yamlio import load_yaml
+    rt = LabRuntime(build_virtual_lab(seed=1, config=TWO_GATES), WebApprover(timeout=5), tmp_path / "data")
+    kept = ('plan: d_map\nsetup: { top.output: on }\nsweep:\n  D: { from: 0, to: 0.2, points: 3 }\n'
+            'sets: { top.V: "2*D" }\nmeasure: [lockin.X]\n')
+    added = rt.queue_add(kept, by="human")
+    assert added.startswith("added plan d_map"), added
+    item = rt.queue.items[-1]
+    rt.lab.config.names["D"] = "lockin.amplitude"   # a name the lab gives after the scan was kept
+    try:
+        assert rt._plan(item.text).axes[0].kind == "variable"   # a kept plan is never put back again
+        assert rt._plan(kept, named=True).axes[0].key == "lockin.amplitude"   # a plan coming in: the lab's name
+        parts = scanedit.to_parts(load_yaml(item.text))
+        assert parts["variables"] == ["D"]
+        check = rt.scan_check(parts)
+        assert check["loads"] and "D:" in check["text"], check
+        said = rt.queue_edit(item.id, item.text.replace("points: 3", "points: 4"), by="human")
+        assert said.startswith("changed"), said
+        assert "D:" in rt.queue.find(item.id).text   # its variable stays its own
+        assert "lockin.X" in rt.add_watch("X_A", above=1.0)["rule"]   # a name: watched as its card has it
+    finally:
+        rt.lab.config.names.pop("D", None)

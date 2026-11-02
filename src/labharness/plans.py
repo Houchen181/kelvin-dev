@@ -588,7 +588,12 @@ def _withs(spec: Any, base: Optional[List[Any]], count: int, back: bool, path: s
                                   "that differ: give values: instead" % where)
                     continue
                 else:
-                    values = [a + (b - a) * (float(v) - first) / span for v in base]
+                    try:
+                        values = [a + (b - a) * (float(v) - first) / span for v in base]
+                    except (TypeError, ValueError):   # a loop of words, or a value left empty
+                        errors.append("%s: from and to follow the loop's own values, which are numbers for that: give "
+                                      "values: instead" % where)
+                        continue
                     values[0], values[-1] = a, b   # exactly as written at the ends
         else:
             errors.append("%s: use {from, to} (in step with the loop's own values) or {values: [...]}" % where)
@@ -675,52 +680,79 @@ def _worked_out(c: Computed, axes: List[Axis], known: Dict[str, Tuple[int, Optio
 _TOKEN = re.compile(r"(?<![\w.])([A-Za-z_]\w*)(?![\w.(])")   # a bare name, not part of instr.param nor a call
 
 
-def with_names(data: Any, names: Dict[str, str]) -> Any:
+def variables_of(data: Any) -> set:
+    """A plan's variables: its sweep keys that aren't instrument.parameter. In a plan Kelvin keeps (names put back
+    already) every bare sweep key is one."""
+    sweep = data.get("sweep") if isinstance(data, dict) else None
+    return {k for k in sweep if isinstance(k, str) and "." not in k} if isinstance(sweep, dict) else set()
+
+
+def with_names(data: Any, names: Dict[str, str], keep: Any = ()) -> Any:
     """A plan (a mapping) with the lab's own names for its settings and readings (the lab config's names:, such as a
     Special Measure rack's channel names Vbg or X_A) put back as instrument.parameter, so the plan Kelvin keeps, checks
     and runs names each setting as its card does: keys, lists of keys, conditions and expressions. A sweep key that is
-    not one of the names stays the plan's variable."""
+    not one of the names stays the plan's variable, and so does one in keep: the variables of the kept plan this one
+    was made from (variables_of), so a name the lab gives later never turns a kept scan's variable into a setting.
+    Kelvin keeps plans with names put back and never puts them back again. PlanError: a name and the setting it names
+    side by side (Vbg and bottom.V), which would be one setting written twice."""
     if not names or not isinstance(data, dict):
         return data
     sweep = data.get("sweep") if isinstance(data.get("sweep"), dict) else {}
-    variables = {k for k in sweep if isinstance(k, str) and "." not in k and k not in names}
+    variables = {k for k in sweep if isinstance(k, str) and "." not in k and (k not in names or k in keep)}
+    clashes: List[str] = []
 
     def key(k: Any) -> Any:
         return names.get(k, k) if isinstance(k, str) and k not in variables else k
+
+    def once(k: Any, seen: Dict[Any, Any], where: str) -> Any:
+        """k as kept, noting a clash with a key that names the same setting."""
+        kk = key(k)
+        if kk in seen and seen[kk] != k:
+            clashes.append("%s: %s and %s are the same setting, %s" % (where, seen[kk], k, kk))
+        seen.setdefault(kk, k)
+        return kk
 
     def text(t: Any) -> Any:
         if not isinstance(t, str):
             return t
         return _TOKEN.sub(lambda m: m.group(1) if m.group(1) in variables else names.get(m.group(1), m.group(1)), t)
 
-    def keyed(d: Any) -> Any:
-        return {key(k): v for k, v in d.items()} if isinstance(d, dict) else d
+    def keyed(d: Any, where: str) -> Any:
+        if not isinstance(d, dict):
+            return d
+        seen: Dict[Any, Any] = {}
+        return {once(k, seen, where): v for k, v in d.items()}
 
-    def listed(v: Any) -> Any:
-        return [key(x) for x in v] if isinstance(v, list) else key(v)
+    def listed(v: Any, where: str) -> Any:
+        if not isinstance(v, list):
+            return key(v)
+        seen: Dict[Any, Any] = {}
+        return [once(x, seen, where) for x in v]
 
     out = dict(data)
     for part in ("setup", "after", "on_abort"):
         if part in out:
-            out[part] = keyed(out[part])
+            out[part] = keyed(out[part], part)
     if "measure" in out:
-        out["measure"] = listed(out["measure"])
+        out["measure"] = listed(out["measure"], "measure")
     for part in ("until", "while"):
         if part in out:
             out[part] = text(out[part])
     if isinstance(out.get("preconditions"), list):
         out["preconditions"] = [text(t) for t in out["preconditions"]]
     if isinstance(out.get("sets"), dict):
-        out["sets"] = {key(k): text(v) for k, v in out["sets"].items()}
+        seen_sets: Dict[Any, Any] = {}
+        out["sets"] = {once(k, seen_sets, "sets"): text(v) for k, v in out["sets"].items()}
     if sweep:
-        moved = {}
+        moved: Dict[Any, Any] = {}
+        seen_sweep: Dict[Any, Any] = {}
         for k, spec in sweep.items():
             if isinstance(spec, dict):
                 spec = dict(spec)
                 if isinstance(spec.get("with"), dict):
-                    spec["with"] = keyed(spec["with"])
+                    spec["with"] = keyed(spec["with"], "sweep.%s.with" % k)
                 if "measure" in spec:
-                    spec["measure"] = listed(spec["measure"])
+                    spec["measure"] = listed(spec["measure"], "sweep.%s.measure" % k)
                 if isinstance(spec.get("stabilize"), dict) and "read" in spec["stabilize"]:
                     spec["stabilize"] = dict(spec["stabilize"], read=key(spec["stabilize"]["read"]))
                 if "read" in spec:
@@ -728,8 +760,10 @@ def with_names(data: Any, names: Dict[str, str]) -> Any:
                 for part in ("until", "while"):
                     if part in spec:
                         spec[part] = text(spec[part])
-            moved[key(k)] = spec
+            moved[once(k, seen_sweep, "sweep")] = spec
         out["sweep"] = moved
+    if clashes:
+        raise PlanError(clashes)
     return out
 
 
@@ -912,10 +946,14 @@ def load_plan(source: Any, names: Optional[Dict[str, str]] = None) -> Plan:
                 errors.append("sweep: %s moves in two loops (%s and %s)" % (k, moved[k], a.key))
             moved.setdefault(k, a.key)
     recorded = {"%s.%s" % m for m in measure}
+    setting = set(moved) | {c.key for c in sets}
     for a in axes:   # a reading is recorded once: at every point, or in one loop
         for m in a.measure:
             k = "%s.%s" % m
-            if k in recorded:
+            if k in setting:
+                errors.append("sweep.%s.measure: the sweep sets %s, and each point records the value it is set to" % (
+                    a.key, k))
+            elif k in recorded:
                 errors.append("sweep.%s.measure: %s is recorded once, at each point (measure:) or in one loop" % (
                     a.key, k))
             recorded.add(k)
