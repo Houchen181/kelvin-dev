@@ -62,6 +62,7 @@ def test_a_library_a_stopping_script_loads_is_still_refused(tmp_path, scripts): 
     rt = script_runtime(tmp_path, scripts, ScriptedApprover([]))
     job = scriptrun.ScriptRun.__new__(scriptrun.ScriptRun)
     job.stopping, job.allowed, job.prep = "stop requested", set(), type("P", (), {"name": "sweep.py"})()
+    job.rehearsal = False
     with pytest.raises(scriptrun._Refuse):   # its own clean-up brings nothing new in
         job._library("nidaqmx")
     assert rt.approver.requests == []

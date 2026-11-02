@@ -5,7 +5,8 @@ Kelvin starts the lab's Python with this file first:
     python -u kelvin_shim.py [--source FILE] SCRIPT [ARGS...]
 
 and the script runs as it always does (__name__ == "__main__", its folder first on sys.path, its arguments in
-sys.argv; --source: the text to run instead of the file's own, with the values Kelvin was asked to change), with
+sys.argv; --source: the text to run instead of the file's own, with the values Kelvin was asked to change), then an
+experiment's action, the one KELVIN_ACTION names (kelvin_api.action), with
 stand-ins for the instruments in Kelvin's lab:
 
     pyvisa      ResourceManager.open_resource of a lab instrument's address gives a stand-in resource that sends each
@@ -16,6 +17,9 @@ stand-ins for the instruments in Kelvin's lab:
     a maker's library (zhinst, nidaqmx, ...)   reaches instruments without Kelvin seeing the commands: Kelvin hears
                 of it before the script first imports it, and lets it through with the run
     time.sleep  in the main thread, ends at once when the run stops
+    kelvin      Kelvin's experiment API (kelvin_api.py, next to this file): the lab's instruments by name,
+                through the safety gate (from kelvin import lab; lab.set("smu.V", 0.5)). It is in place before the
+                script's own code runs, so a kelvin.py beside the script never takes its place
 
 A command the gate refuses ends the script with KelvinRefused; a person's stop with KeyboardInterrupt (once), so the
 script's own `finally:` runs. Its commands go through Kelvin too, and Kelvin brings what the script drove back to safe
@@ -699,7 +703,127 @@ def install():
     _patch_socket()
     sys.meta_path.insert(0, _Libraries())
     time.sleep = _LINK.sleep
+    if os.environ.get("KELVIN_REHEARSAL"):
+        _rehearsing()
+    _install_api()
     return _LINK
+
+
+def _rehearsing():
+    """A rehearsal on the simulated lab (KELVIN_REHEARSAL): a wait takes no time. Kelvin's simulated clock moves on by
+    it, and so do the script's clocks (time.time, monotonic, perf_counter), so a loop timed by them ends too."""
+    skipped = [0.0]
+    real_time, real_monotonic, real_perf = time.time, time.monotonic, time.perf_counter
+
+    def sleep(seconds):
+        if seconds < 0:
+            raise ValueError("sleep length must be non-negative")
+        _LINK.request("sleep", seconds=float(seconds))
+        skipped[0] += seconds
+
+    time.sleep = sleep
+    time.time = lambda: real_time() + skipped[0]
+    time.monotonic = lambda: real_monotonic() + skipped[0]
+    time.perf_counter = lambda: real_perf() + skipped[0]
+    _fence(os.environ.get("KELVIN_RUN_DIR") or os.getcwd())
+
+
+# what a rehearsal's process refuses: nobody approved it, so it reaches the simulated lab through Kelvin and nothing
+# else (labharness/scriptrun.py says the same of the script's text before it runs: PAST_THE_LAB)
+_FENCED_IMPORTS = ("cffi", "_cffi_backend", "win32com", "win32api", "win32process", "win32file", "win32event",
+                   "win32service", "pythoncom", "pywintypes", "comtypes", "clr", "pythonnet", "usb", "libusb_package",
+                   "libusb1", "hid", "ftd2xx", "pyftdi", "pylibftdi")
+_FENCED_EVENTS = ("subprocess.", "_posixsubprocess.", "_winapi.CreateProcess", "os.system", "os.exec", "os.spawn",
+                  "os.posix_spawn", "os.fork", "os.forkpty", "os.startfile", "os.kill", "os.killpg", "os.chdir",
+                  "os.fchdir", "os.add_dll_directory", "ctypes.", "winreg.", "pty.", "webbrowser.", "socket.connect",
+                  "socket.bind", "socket.sendto", "socket.sendmsg")
+# events that change the file system, and the positions of their paths (each must be in the rehearsal's folder)
+_FENCED_WRITES = {"os.remove": (0,), "os.rmdir": (0,), "os.mkdir": (0,), "os.rename": (0, 1), "os.link": (0, 1),
+                  "os.symlink": (0, 1), "os.chmod": (0,), "os.chown": (0,), "os.utime": (0,), "os.truncate": (0,),
+                  "shutil.rmtree": (0,), "shutil.copyfile": (1,), "shutil.copytree": (1,), "shutil.move": (0, 1),
+                  "tempfile.mkstemp": (0,), "tempfile.mkdtemp": (0,), "sqlite3.connect": (0,)}
+_REFUSED = []   # what the fence refused, said to Kelvin as the script ends (also when the script carried on)
+
+
+def _fence(folder):
+    """A rehearsal's fence, inside the script's process (an audit hook, PEP 578): no programs, native libraries, COM,
+    registry, USB or network (the connection to Kelvin is made already), no device files, and no writing outside the
+    rehearsal's own folder. What the experiment uses (NumPy) is loaded first. Like run_python's sandbox, it keeps
+    honest code and code an AI was talked into away from the instruments; it is not a wall against code written to get
+    around it. Python before 3.8 has no audit hooks, so it can't be rehearsed (Kelvin says so before it starts)."""
+    if not hasattr(sys, "addaudithook"):
+        raise RuntimeError("Python %s can't keep a rehearsal to the simulated lab: 3.8 or later" % sys.version.split()[0])
+    try:
+        import numpy  # noqa: F401  loaded before the fence: its own loading may use what the fence refuses
+    except Exception:
+        pass
+    if os.name == "nt":
+        import nt
+        full, fold, sep = nt._getfullpathname, str.lower, "\\"
+    else:
+        full, fold, sep = os.path.abspath, str, "/"
+    root = fold(full(folder)).rstrip("\\/")
+    null = fold(full(os.devnull))
+    write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC | getattr(os, "O_EXCL", 0)
+    imports = _FENCED_IMPORTS + tuple(_LINK.opaque if _LINK is not None else ())
+
+    def hook(event, args, _sw=str.startswith, _isinstance=isinstance, _str=str, _bytes=bytes, _int=int,
+             _fspath=os.fspath, _full=full, _fold=fold, _sep=sep, _root=root, _null=null, _flags=write_flags,
+             _imports=imports, _events=_FENCED_EVENTS, _writes=_FENCED_WRITES, _refused=_REFUSED,
+             _PE=PermissionError, _len=len):
+        def refuse(what):
+            if _len(_refused) < 20:
+                _refused.append(what)
+            raise _PE("a rehearsal reaches only the simulated lab: %s" % what)
+        if event == "import":
+            name = args[0] if args else ""
+            if _isinstance(name, _str):
+                for d in _imports:
+                    if name == d or _sw(name, d + "."):
+                        refuse("import %s" % name)
+            return
+        if event == "open" or event in _writes:
+            if event == "open":
+                mode, flags = (args[1] if _len(args) > 1 else None), (args[2] if _len(args) > 2 else 0)
+                writing = (_isinstance(mode, _str) and ("w" in mode or "a" in mode or "x" in mode or "+" in mode)) \
+                    or (_isinstance(flags, _int) and flags & _flags)
+                spots = ((args[0] if args else None, writing),)
+            else:
+                spots = tuple((args[i], True) for i in _writes[event] if i < _len(args))
+            for path, writing in spots:
+                if path is None or _isinstance(path, _int):
+                    continue   # no file, or one opened already (so already checked)
+                try:
+                    p = _fspath(path)
+                    if _isinstance(p, _bytes):
+                        p = p.decode("utf-8", "surrogateescape")
+                    p = _fold(_full(p))
+                except (OSError, ValueError, TypeError):
+                    refuse("%r is not a path a rehearsal may use" % (path,))
+                if p == _null:
+                    continue
+                if _sw(p, "\\\\.\\") or _sw(p, "\\\\?\\") or _sw(p, "//./") or _sw(p, "/dev/"):
+                    refuse("the device %s" % path)
+                if writing and not (p == _root or _sw(p, _root + _sep)):
+                    refuse("writing %s, outside its own folder" % path)
+            return
+        for d in _events:
+            if _sw(event, d):
+                refuse(event)
+
+    sys.addaudithook(hook)
+
+
+def _install_api():
+    """Kelvin's experiment API as the module kelvin, from the file next to this one (never one the script's folder
+    or its Python has under that name)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("kelvin", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                         "kelvin_api.py"))
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    api.attach(sys.modules[__name__])
+    sys.modules["kelvin"] = api
 
 
 def _save_figures(run_dir):
@@ -760,6 +884,9 @@ def main(argv):
     status, error = 0, ""
     try:
         exec(compile(text, script, "exec"), module.__dict__)
+        api = sys.modules.get("kelvin")
+        if getattr(api, "_ACTIONS", None):   # an experiment's action: the one Kelvin was asked to run
+            api._run(os.environ.get("KELVIN_ACTION", ""))
     except SystemExit as e:
         status = e.code
     except BaseException as e:
@@ -770,7 +897,7 @@ def main(argv):
         figures = _save_figures(os.environ.get("KELVIN_RUN_DIR"))
         try:
             link.request("bye", status=status if isinstance(status, int) or status is None else 1, error=error,
-                         figures=figures)
+                         figures=figures, refused=list(_REFUSED))
         except BaseException:
             pass
     return status

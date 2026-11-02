@@ -35,6 +35,7 @@ from ..lab import Lab
 from ..lablock import HELD, LabLock
 from ..labconfig import Allowed, ConfigError, Envelope, load_lab_config
 from .. import carddraft
+from .. import experiment
 from .. import protection
 from .. import rundata
 from ..literature import Literature
@@ -670,6 +671,8 @@ class LabRuntime:
         self.incident: Optional[Dict[str, Any]] = None
         self._incident_due = True
         self._acted = False   # Kelvin drove something since it started: what is on now may be its own doing
+        # the script running now (scriptrun.ScriptRun), whose live inputs set_live changes without the lab's lock
+        self._live_run: Any = None
         self.idle_off_s: Optional[float] = IDLE_OFF_S
         self.idle_off_all = False   # other outputs left idle go to safe too (Settings); else people are told
         self.last_active = time.monotonic()   # the last command, run or queue item: outputs left on idle go to safe
@@ -3457,7 +3460,8 @@ class LabRuntime:
         q = self.queue
         try:
             spec = load_script_item(item.text)
-            prep = self._prepare_script(spec.path, spec.params, spec.args, version=spec.version, python=spec.python)
+            prep = self._prepare_script(spec.path, spec.params, spec.args, version=spec.version, python=spec.python,
+                                        action=spec.action)
         except (scriptrun.ScriptError, PlanError, KeyError, OSError) as e:
             message = "script not run: %s" % (e.args[0] if e.args else e)
             q.mark(item, "failed", message[:300])
@@ -3895,13 +3899,14 @@ class LabRuntime:
         return rec, plan, "plan"
 
     def _script_ran(self, plan: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, Any]:
-        """A script run's script as it ran: {path, exists, changed, sha256, params, args, python}."""
+        """A script run's script as it ran: {path, exists, changed, sha256, params, args, python, action}."""
         from ..scanlibrary import params_from_changes
         path = str(plan.get("script") or meta.get("script"))
         now = self._script_now(path, plan.get("sha256"))
         params = plan["params"] if isinstance(plan.get("params"), dict) else params_from_changes(plan.get("changes"))
         return {"path": path, "exists": now["exists"], "changed": now["changed"], "sha256": plan.get("sha256"),
-                "params": params, "args": [str(a) for a in plan.get("args") or []], "python": plan.get("python")}
+                "params": params, "args": [str(a) for a in plan.get("args") or []], "python": plan.get("python"),
+                "action": plan.get("action") or ""}
 
     def run_again_view(self, run_id: str) -> Dict[str, Any]:
         """What running a run again runs, and how the lab differs now from when it started (GET
@@ -3959,6 +3964,8 @@ class LabRuntime:
         if version == "now" and not script["exists"]:
             raise ValueError("%s is no longer there: it can run again only as it ran then" % script["path"])
         item: Dict[str, Any] = {"script": script["path"]}
+        if script["action"]:   # an experiment's: the same action again
+            item["action"] = script["action"]
         if script["params"]:
             item["params"] = script["params"]
         if script["args"]:
@@ -5281,11 +5288,12 @@ class LabRuntime:
 
     def _prepare_script(self, path: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
                         drives: Optional[Dict[str, Any]] = None, version: Optional[str] = None,
-                        python: str = "") -> Any:
+                        python: str = "", action: str = "") -> Any:
         """A script from the lab's scripts folder, or one the person imported into their library, read and ready
         (nothing is run, no instrument is asked). version: a run of it whose script.py runs, as it ran then. python:
-        the Python to run it in, one Kelvin runs the lab's scripts with (scriptrun.python_named). scriptrun.ScriptError
-        (KeyError for a version that isn't there): why it can't run."""
+        the Python to run it in, one Kelvin runs the lab's scripts with (scriptrun.python_named). action: an
+        experiment's action to run (scriptrun.prepare). scriptrun.ScriptError (KeyError for a version that isn't
+        there): why it can't run."""
         from .. import scriptrun
         folder = self.scripts_folder()
         folders, chosen = [folder] if folder else [], self.library.chosen()
@@ -5294,7 +5302,7 @@ class LabRuntime:
             source, sha = self._script_as_run(version, scriptrun.locate(path, folders, chosen, missing=True))
         return scriptrun.prepare(self.lab, path, folders, params=params, args=args, drives=drives,
                                  python=self.scripts_python() or "", chosen=chosen, source=source, sha256=sha,
-                                 version=version, named=python)
+                                 version=version, named=python, action=action)
 
     def _script_as_run(self, run_id: str, path: Path) -> Tuple[str, Optional[str]]:
         """A run's script.py, the script as that run ran it, and the sha256 of the file as it read it then. Only from
@@ -5344,20 +5352,27 @@ class LabRuntime:
         except SyntaxError as e:
             raise scriptrun.ScriptError("%s does not parse as Python 3 (line %s: %s)" % (path.name, e.lineno, e.msg)) \
                 from None
+        if experiment.is_experiment(source):   # an action it doesn't have is said before it joins the queue
+            try:
+                experiment.choose(experiment.read(source), spec.action)
+            except ValueError as e:
+                raise scriptrun.ScriptError("%s: %s" % (path.name, e)) from None
+        elif spec.action:
+            raise scriptrun.ScriptError("%s doesn't use kelvin, so it has no actions" % path.name)
         return path, source
 
-    def check_script(self, path: str, params: Optional[Dict[str, Any]] = None) -> str:
+    def check_script(self, path: str, params: Optional[Dict[str, Any]] = None, action: str = "") -> str:
         """What running one of the lab's scripts would do, without running it: the Python that runs it, the settings
-        it takes, and the one approval a person would be asked (instruments, drive ranges, what Kelvin can't
-        check)."""
-        return self.script_check(path, params)["text"]
+        it takes, an experiment's actions, and the one approval a person would be asked (instruments, drive ranges,
+        what Kelvin can't check) for the action asked for (action; "": the main one)."""
+        return self.script_check(path, params, action)["text"]
 
-    def script_check(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def script_check(self, path: str, params: Optional[Dict[str, Any]] = None, action: str = "") -> Dict[str, Any]:
         """check_script's answer as {text, problems}: problems are what stops the script now (it can't be read or
         run here, or a drive it uses would be refused), for the Runs panel's import."""
         from .. import scriptrun
         try:
-            prep = self._prepare_script(path, params)
+            prep = self._prepare_script(path, params, action=action)
         except scriptrun.ScriptError as e:
             return {"text": "can't run it: %s" % e, "problems": [str(e)]}
         refused: List[str] = []
@@ -5369,6 +5384,10 @@ class LabRuntime:
             lines = ["%s in %s" % (prep.name, prep.path.parent)]
             if settings:
                 lines.append("settings it takes (params): " + "; ".join(p.text() for p in settings))
+            if prep.found.experiment:
+                exp = experiment.read(prep.source)
+                if exp.actions:
+                    lines.append("Actions: " + ", ".join(a + (" (main)" if a == exp.main else "") for a in exp.actions))
             lines += ["will be refused now: " + p for p in problems]
             lines.append("run_script asks a person once:")
             lines += ["  " + i for i in request.items]
@@ -5376,16 +5395,78 @@ class LabRuntime:
         return {"text": self._do("reading script %s" % prep.name, run), "problems": refused}
 
     def run_script(self, path: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
-                   drives: Optional[Dict[str, Any]] = None, mark: Callable[[str], str] = lambda text: text) -> str:
+                   drives: Optional[Dict[str, Any]] = None, mark: Callable[[str], str] = lambda text: text,
+                   action: str = "", dry_run: bool = False, background: bool = False) -> str:
         """Run one of the lab's scripts as it is, in the lab's Python, with every instrument command through the
         gate (scriptrun.py): one approval by a person, then its commands; a stopped or failed run sends what it drove
-        back to safe. mark: how the script's own output is marked for the model (text from outside the lab)."""
+        back to safe. mark: how the script's own output is marked for the model (text from outside the lab).
+        action: an experiment's action (its main one when none is named). dry_run: only a rehearsal of an experiment
+        on the simulated lab, never followed by the real run. background: through the queue (queue_run_now), so this
+        returns at once and set_live reaches the run while it goes on."""
         from .. import scriptrun
         try:
-            prep = self._prepare_script(path, params, args, drives)
+            prep = self._prepare_script(path, params, args, drives, action=action)
         except scriptrun.ScriptError as e:
             return "script not run: %s" % e
+        if dry_run:
+            return REHEARSAL % "run_script" + "\n" + self.rehearse_script(prep)
+        if background:
+            if drives:
+                return ("script not run: drives can't go with background (a queued script's ranges are read from it); "
+                        "run it without background to give them")
+            item: Dict[str, Any] = {"script": path}
+            if prep.action:
+                item["action"] = prep.action
+            if params:
+                item["params"] = dict(params)
+            if args:
+                item["args"] = [str(a) for a in args]
+            try:
+                said = self.queue_run_now([yaml.safe_dump(item, sort_keys=False, allow_unicode=True)],
+                                          by="agent")["message"]
+            except ValueError as e:
+                return "script not run: %s" % e
+            if prep.live:
+                said += "\nWhile it runs, set_live changes its live inputs: %s" % ", ".join(prep.live)
+            return said
         return self._do("running script %s" % prep.name, lambda: self._run_script(prep, mark), stoppable=True)
+
+    def rehearse_script(self, prep: Any) -> str:
+        """A prepared experiment rehearsed on a simulated copy of the lab (scriptrun.rehearse), in words: how it
+        ended, what went wrong, and what a person would be asked in the real run. Copying the lab reads its
+        instruments, so that waits for the lab (as a plan's dry run does); the rehearsal itself doesn't."""
+        from .. import scriptrun
+        made: Dict[str, Any] = {}
+
+        def copy() -> str:   # the simulated lab starts as the lab is: its instruments read with the lab held
+            made["twin"] = self.lab.make_twin()
+            return ""
+        try:
+            why = scriptrun.rehearsal_problem(prep) if prep.found.experiment else None
+            if why:
+                raise scriptrun.ScriptError("%s can't be rehearsed: %s" % (prep.name, why))
+            said = self._do("copying the lab to rehearse %s" % prep.name, copy)
+            if "twin" not in made:
+                return "not rehearsed: %s" % said
+            r = scriptrun.rehearse(self.lab, prep, envelope=self.gate.envelope, twin=made["twin"])
+        except scriptrun.ScriptError as e:
+            return "not rehearsed: %s" % e
+        return "\n".join([r.message] + ["problem: %s" % p for p in r.problems] +
+                         ["a person would be asked: %s" % a for a in r.asked])
+
+    def set_live(self, name: str, value: Any, run: str = "", by: str = "agent") -> str:
+        """Change a live input of the experiment running now (scriptrun.ScriptRun.set_live), never waiting for the
+        lab: the run holds it. run: the run it must be, when given."""
+        job = self._live_run
+        if job is None:
+            return "no experiment is running now: a live input changes only while its experiment runs"
+        if run and run != job.rec_id:
+            return "run %s isn't running now; run %s is" % (run, job.rec_id)
+        try:
+            before, after = job.set_live(name, value, by)
+        except (KeyError, ValueError, RuntimeError) as e:
+            return "not changed: %s" % (e.args[0] if e.args else e)
+        return "%s is now %r in run %s (it was %r)" % (name, after, job.rec_id, before)
 
     def _run_script(self, prep: Any, mark: Callable[[str], str]) -> str:
         return self._script_run(prep, mark)[0]
@@ -5436,7 +5517,9 @@ class LabRuntime:
         # said right under what runs: the person approves the file, and what it imports beside it, as they are now
         request.items[1:1] = self._changed_since(prep)
         if gate.auto:
-            request.items.append("Auto mode does not cover this run: a script can't be dry-run first")
+            request.items.append("Auto mode does not cover this run: a person approves each run of a script, "
+                                 "experiments too" if prep.found.experiment else
+                                 "Auto mode does not cover this run: a script can't be dry-run first")
         if not gate.ask(request):
             gate.log.write("run_declined", by=gate.operator, plan=prep.name)
             return "declined: script %s not run%s" % (prep.name, " (%s)" % request.note if request.note else ""), None
@@ -5450,9 +5533,11 @@ class LabRuntime:
             job = scriptrun.ScriptRun(gate, prep, self.engine.store, grants,
                                       set(prep.found.unknown) | set(prep.found.libraries), meta,
                                       self.attribution.get("folder"), busy, self.engine.progress)
+            self._live_run = job   # set_live reaches it while it runs
             try:
                 report = job.execute()
             finally:
+                self._live_run = None
                 self._live_ended(job.rec_id)
         for name in names if report.status != "done" else []:
             self.engine._healthy.pop(name, None)   # checked again before the next run on them
