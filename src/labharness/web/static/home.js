@@ -1,10 +1,11 @@
 "use strict";
-/* Home, the other side of the top bar's Chat | Home: the lab at a glance, as labMaster's Home, in Kelvin's colours.
-   A greeting and one line of what goes on now; three tiles (the sequence, the runs, the lab), each opening its panel;
-   under them the blocks Kelvin keeps for this person (homeboard.py: a result, a next step, a reading to watch, a note,
-   a checklist), which a person pins, ticks or takes off. It draws from the page's state poll (kelvin:state) and asks
-   the server only when something moved: the blocks when the state's home stamp changes, the runs when a run starts or
-   ends, and both when Home is shown. */
+/* Home, the other side of the top bar's Chat | Home: the lab at a glance, labMaster's Home in Kelvin's colours.
+   "Overview", a greeting and one line of what goes on now; three large tiles, two to a row (the sequence, the runs, and
+   the lab on a row of its own, with a line of its first watched reading over the last ten minutes), each opening its
+   panel; under them the blocks Kelvin keeps for this person (homeboard.py: a result, a next step, a reading to watch, a
+   note, a checklist), which a person pins, ticks or takes off. It draws from the page's state poll (kelvin:state) and
+   asks the server only when something moved: the blocks when the state's home stamp changes, the runs when a run starts
+   or ends, and both when Home is shown. */
 (() => {
   const SVGNS = "http://www.w3.org/2000/svg";
   // a block's kind: the edge of its card (the kit's kind colours), its small icon, and the icon's name
@@ -19,9 +20,17 @@
   const PIN = '<path d="M9.5 3.5h5l-.9 6.2 3.4 3.3v1.5H7v-1.5l3.4-3.3z"/><path d="M12 14.5V21"/>';
   const ENDED = new Set(["done", "failed", "stopped", "skipped"]);
   const RUNS_ASKED = 50;   // as many as the Runs pane asks for: enough to count today's
-  // what Home holds between state ticks: its parts, the blocks shown (by id), and what was last asked of the server
+  // the Lab tile's line: the first watched reading over the last ten minutes, as this page's state polls saw it, drawn in
+  // a box of SW x SH stretched to the tile's width (its stroke keeps its own), from three values on
+  const SPAN_S = 600, SW = 300, SH = 48;
+  // a reading's unit with its SI prefix (cards.si: "100 ms", "4.12 µs"): 999 mK and 1.001 K are on one line
+  const SI_UNITS = new Set(["V", "A", "Hz", "W", "s", "Ω", "T", "K", "F", "H", "S", "m"]);
+  const SI_PREFIX = { G: 1e9, M: 1e6, k: 1e3, m: 1e-3, "µ": 1e-6, n: 1e-9, p: 1e-12, f: 1e-15 };
+  // what Home holds between state ticks: its parts, the blocks shown (by id), what was last asked of the server, and the
+  // line's points ([time, value in the unprefixed unit], oldest first)
   const H = { parts: null, stamp: undefined, known: null, nodes: new Map(), blocksAsked: 0,
-              runs: null, runsKey: undefined, runsAsked: 0, runsSig: null, watchRows: new Map(), watchSig: null };
+              runs: null, runsKey: undefined, runsAsked: 0, runsSig: null, watchRows: new Map(), watchSig: null,
+              spark: { key: null, unit: null, pts: [] } };
   let K = null;   // window.Kelvin, once the page is ready
 
   const $ = (id) => document.getElementById(id);
@@ -77,11 +86,22 @@
     const row = Array.isArray(rows) ? rows.find((r) => r && r.name === k.slice(dot + 1)) : null;
     return row ? String(row.value) : null;
   }
+  function measure(text) {   // "1.598 K" → {x: 1.598, unit: "K"}, "100 ms" → {x: 0.1, unit: "s"}; a word ("off", "ERROR") → null
+    const m = /^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(\S*)\s*$/.exec(text == null ? "" : String(text));
+    if (!m) return null;
+    let x = Number(m[1]), unit = m[2];
+    if (!isFinite(x)) return null;
+    if (!SI_UNITS.has(unit) && unit.length > 1 && SI_PREFIX[unit[0]] && SI_UNITS.has(unit.slice(1))) {
+      x *= SI_PREFIX[unit[0]];
+      unit = unit.slice(1);
+    }
+    return { x, unit };
+  }
   // the alarms on now (a Got it does not end one: its reading is still out of range until it clears)
   const alarmsOn = (s) => ((s && s.alarms) || []).filter((a) => a && !a.cleared);
 
   // ------------------------------------------------------------------ the page: greeting, state line, tiles, blocks
-  function tile(name, title, go) {
+  function tile(name, title, foot, go) {   // a card that is its panel's button: title, number, what it holds, a quiet foot
     const h = K.h;
     const t = { name };
     t.go = h("button", { class: "home-tile-go", type: "button" }, title);
@@ -89,10 +109,24 @@
     t.chip = h("span", { class: "chip", hidden: true });
     t.kpi = h("span", { class: "home-kpi-n" }, "–");
     t.unit = h("span", { class: "home-kpi-unit" });
-    t.foot = h("div", { class: "home-tile-foot" });
+    t.body = h("div", { class: "home-tile-body" });
     t.el = h("div", { class: "home-tile home-tile-" + name },
-      h("div", { class: "home-tile-head" }, t.go, t.chip), h("div", { class: "home-kpi" }, t.kpi, t.unit), t.foot);
+      h("div", { class: "home-tile-head" }, t.go, t.chip), h("div", { class: "home-kpi" }, t.kpi, t.unit), t.body,
+      h("div", { class: "home-tile-foot", "aria-hidden": "true" }, foot));
     return t;
+  }
+  function sparkline() {   // the Lab tile's line (drawn in drawSpark): an area, and the line over it
+    const s = document.createElementNS(SVGNS, "svg"), fill = document.createElementNS(SVGNS, "path");
+    const line = document.createElementNS(SVGNS, "polyline");
+    s.setAttribute("class", "home-spark");
+    s.setAttribute("viewBox", "0 0 " + SW + " " + SH);
+    s.setAttribute("preserveAspectRatio", "none");
+    s.setAttribute("aria-hidden", "true");
+    fill.setAttribute("class", "home-spark-fill");
+    line.setAttribute("class", "home-spark-line");
+    line.setAttribute("vector-effect", "non-scaling-stroke");
+    s.append(fill, line);
+    return { svg: s, fill, line };
   }
   function build() {
     const h = K.h;
@@ -104,21 +138,23 @@
     p.open.addEventListener("click", safe(openApproval));
     p.lab = h("span", { class: "home-labname" });
     p.state = h("div", { class: "home-state", role: "status" }, p.dot, p.say, p.open, p.lab);
-    p.seq = tile("seq", "Sequence", () => K.toggleSeq(true));
+    p.seq = tile("seq", "Sequence", "open the sequence", () => K.toggleSeq(true));
     p.seqFill = h("span", { class: "home-bar-fill" });
     p.seqName = h("span", { class: "home-line-name" });
     p.seqNum = h("span", { class: "home-line-num" });
-    p.seq.foot.append(h("div", { class: "home-bar", "aria-hidden": "true" }, p.seqFill),
+    p.seq.body.append(h("div", { class: "home-bar", "aria-hidden": "true" }, p.seqFill),
       h("div", { class: "home-line" }, p.seqName, p.seqNum));
-    p.runs = tile("runs", "Runs", () => K.toggleRuns(true));
+    p.runs = tile("runs", "Runs", "open all runs", () => K.toggleRuns(true));
     p.runList = h("ul", { class: "home-mini" });
-    p.runs.foot.append(p.runList);
-    p.labt = tile("lab", "Lab", () => K.toggleLab(true));
-    p.watchList = h("ul", { class: "home-mini" });
-    p.labt.foot.append(p.watchList);
+    p.runs.body.append(p.runList);
+    p.labt = tile("lab", "Lab", "open the lab", () => K.toggleLab(true));
+    p.watchList = h("ul", { class: "home-mini home-watches" });
+    p.spark = sparkline();
+    p.sparkRow = h("li", { class: "home-spark-row", hidden: true }, p.spark.svg);   // under the first watched reading
+    p.labt.body.append(p.watchList);
     p.blocks = h("div", { class: "home-blocks", hidden: true });
     $("homeview").replaceChildren(h("div", { class: "home-col" },
-      h("header", { class: "home-hello" }, p.greet, p.state),
+      h("header", { class: "home-hello" }, h("div", { class: "home-eyebrow" }, "Overview"), p.greet, p.state),
       h("div", { class: "home-tiles" }, p.seq.el, p.runs.el, p.labt.el),
       p.blocks));
   }
@@ -255,13 +291,15 @@
     if (sig !== H.watchSig) {   // the rows again only when the watched readings change; their values in place
       H.watchSig = sig;
       H.watchRows = new Map();
-      H.parts.watchList.replaceChildren(...watched.map((w) => {
+      const rows = watched.map((w) => {
         const value = K.h("span", { class: "home-watch-val" });
         const row = K.h("li", { class: "home-watch", title: w.rules.join("; ") || w.key },
           K.h("span", { class: "home-watch-key" }, w.key), value);
         H.watchRows.set(w.key, { row, value });
         return row;
-      }));
+      });
+      if (rows.length) rows.splice(1, 0, H.parts.sparkRow);   // the line under the first one
+      H.parts.watchList.replaceChildren(...rows);
     }
     for (const w of watched) {
       const r = H.watchRows.get(w.key);
@@ -269,6 +307,7 @@
       put(r.value, reading(s, w.key) || "—");
       r.row.classList.toggle("alarm", w.alarm);
     }
+    drawSpark(watched[0]);
   }
   function watchedReadings(s) {   // each watched reading once (a reading may have several watches): in alarm if any is
     const seen = new Map();
@@ -280,6 +319,37 @@
       seen.set(w.key, r);
     }
     return [...seen.values()];
+  }
+
+  // ------------------------------------------------------------------ the line of the first watched reading
+  function sample(s) {   // every state, Home shown or not: its value now, kept for ten minutes
+    const sp = H.spark, first = watchedReadings(s)[0];
+    if (!first) { sp.key = null; sp.pts = []; return; }
+    if (first.key !== sp.key) { sp.key = first.key; sp.unit = null; sp.pts = []; }
+    const v = measure(reading(s, first.key));
+    if (!v) return;   // switched off, or not a number now: the line waits
+    if (v.unit !== sp.unit) { sp.unit = v.unit; sp.pts = []; }   // another unit: another line
+    const now = Date.now() / 1000;
+    sp.pts.push([now, v.x]);
+    while (sp.pts.length && (sp.pts[0][0] < now - SPAN_S || sp.pts.length > 1000)) sp.pts.shift();
+  }
+  function drawSpark(first) {
+    const row = H.parts.sparkRow, sp = H.spark, pts = sp.pts;
+    const on = !!first && first.key === sp.key && pts.length > 2;
+    row.hidden = !on;
+    if (!on) return;
+    row.classList.toggle("alarm", !!first.alarm);
+    const t1 = pts[pts.length - 1][0], span = Math.max(t1 - pts[0][0], 1e-3);
+    let lo = Infinity, hi = -Infinity;
+    for (const p of pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+    const pad = 4, xy = pts.map(([t, x]) => [(SW - (t1 - t) / span * SW).toFixed(1),
+      (hi > lo ? pad + (hi - x) / (hi - lo) * (SH - 2 * pad) : SH / 2).toFixed(1)]);   // a steady reading: a level line
+    const line = xy.map((p) => p[0] + "," + p[1]).join(" ");
+    const area = "M" + xy[0][0] + "," + SH + " L" + line.replace(/ /g, " L") + " L" + xy[xy.length - 1][0] + "," + SH + " Z";
+    if (H.parts.spark.line.getAttribute("points") !== line) {
+      H.parts.spark.line.setAttribute("points", line);
+      H.parts.spark.fill.setAttribute("d", area);
+    }
   }
 
   // ------------------------------------------------------------------ Kelvin's blocks
@@ -487,6 +557,7 @@
   }
   function onState(s) {
     if (!s || typeof s !== "object") return;
+    guard(() => sample(s));   // the Lab tile's line keeps its last ten minutes while Home is out of sight
     const visible = shown();
     // out of sight, nothing is asked: showing Home loads both
     if (s.home !== H.stamp) {   // Kelvin (or a person, elsewhere) changed the blocks

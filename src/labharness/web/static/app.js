@@ -8515,21 +8515,33 @@
       });
     }
   }
-  // Settings: an item with many settings (more than two fields) folds under its title, folded until opened
+  // Settings: an item with more than two fields folds under its title, folded until the title is clicked. An item is a
+  // title (a label, or the row a .field-label heads) and what follows it in its .field up to the next title: a whole
+  // .field (Email, Heartbeat) or a part of one (Webhook, after the Notifications row). Its fields: the boxes, lists and
+  // tick boxes in it, and a key's Remove. Folding only hides them: each keeps its id and its value, and Save reads every
+  // one, folded or not. A title the page hides (its first item's, said by the page's own title) never folds.
   function initSettingFolds() {
-    for (const field of document.querySelectorAll("#settings-dialog .set-page > .field")) {
-      const label = field.querySelector(".field-label");
-      const many = field.querySelectorAll("input:not([type=checkbox]):not([type=radio]), select, textarea").length > 2;
-      if (!label || !many || label.querySelector(".fold-btn")) continue;
-      let head = label;   // the part of the item its title is in: what stays shown when it is folded
-      while (head.parentElement && head.parentElement !== field) head = head.parentElement;
-      head.classList.add("fold-head");
-      const btn = h("button", { class: "fold-btn", type: "button", "aria-expanded": "false" }, icon("chev"), label.textContent.trim());
-      label.replaceChildren(btn);
-      field.classList.add("fold-field", "folded");
-      btn.addEventListener("click", () => {
-        const folded = !field.classList.toggle("folded");
-        btn.setAttribute("aria-expanded", String(folded));
+    const FIELDS = "input:not([type=hidden]):not([type=file]), select, textarea, [data-clear]";
+    const isTitle = (el) => el.matches("label:not(.check), .field-label")
+      || (el.matches(".field-row") && !!el.firstElementChild && el.firstElementChild.matches(".field-label:not(.small)"));
+    for (const field of document.querySelectorAll("#settings-dialog .set-page > div.field")) {
+      const kids = [...field.children];
+      kids.forEach((head, i) => {
+        if (!isTitle(head)) return;
+        const label = head.matches(".field-row") ? head.firstElementChild : head;
+        const part = [];   // what folds: up to the next title
+        for (let j = i + 1; j < kids.length && !isTitle(kids[j]); j++) part.push(kids[j]);
+        const fields = part.reduce((n, el) => n + (el.matches(FIELDS) ? 1 : 0) + el.querySelectorAll(FIELDS).length, 0);
+        if (fields <= 2 || label.querySelector(".fold-btn") || getComputedStyle(label).visibility === "hidden") return;
+        const btn = h("button", { class: "fold-btn", type: "button", "aria-expanded": "false" }, icon("chev"), label.textContent.trim());
+        label.replaceChildren(btn);
+        const fold = (folded) => {
+          head.classList.toggle("folded", folded);
+          btn.setAttribute("aria-expanded", String(!folded));
+          for (const el of part) el.classList.toggle("fold-hide", folded);
+        };
+        fold(true);
+        btn.addEventListener("click", () => fold(!head.classList.contains("folded")));
       });
     }
   }

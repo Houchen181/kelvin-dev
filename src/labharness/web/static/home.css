@@ -1,17 +1,24 @@
-/* Home (home.js): the lab at a glance, as labMaster's Home, in Kelvin's colours. The greeting and one line of what goes
-   on, three tiles (the sequence, the runs, the lab), and under them the blocks Kelvin keeps. Drawn with the kit at the
-   end of app.css (its tokens, .kcard, .chip); light and dark come from the tokens alone. */
+/* Home (home.js): the lab at a glance, labMaster's Home in Kelvin's colours. "Overview", the greeting and one line of
+   what goes on; three large tiles two to a row (the lab's on a row of its own, with the line of its first watched
+   reading); under them the blocks Kelvin keeps. Drawn with the kit at the end of app.css (its tokens, .kcard, .chip);
+   light and dark come from the tokens alone. */
 
 /* the conversation's place (as .scroller: from a zero basis, so the top bar keeps its own height when it wraps) */
-.homeview { flex: 1 1 0%; min-height: 0; overflow-y: auto; background: var(--page); }
+.homeview { flex: 1 1 0%; min-height: 0; overflow-y: auto; background: var(--page);
+  --home-shadow: 0 1px 2px rgba(20, 32, 44, 0.04), 0 12px 28px -18px rgba(20, 32, 44, 0.24); }   /* softer than a card's */
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .homeview {
+    --home-shadow: 0 1px 2px rgba(0, 0, 0, 0.32), 0 14px 30px -18px rgba(0, 0, 0, 0.7); }
+}
 #app.full .main > .homeview { display: none !important; }   /* a panel in full screen: Home is out of sight, as the chat is */
-.home-col { max-width: 1040px; margin: 0 auto; padding: 28px 32px 48px; display: flex; flex-direction: column; gap: 22px; }
+.home-col { max-width: 1040px; margin: 0 auto; padding: 34px 32px 56px; display: flex; flex-direction: column; gap: 26px; }
 
-/* ---------- the greeting, and one line of what goes on now ---------- */
-.home-hello { display: grid; gap: 4px; }
-.home-greet { margin: 0; font-size: 30px; line-height: 1.25; color: var(--text); }
-.home-state { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 9px; min-height: 30px; font-size: 15px; color: var(--text-2); }
-.home-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--line-strong); }
+/* ---------- Overview, the greeting, and one line of what goes on now ---------- */
+.home-hello { display: grid; gap: 6px; }
+.home-eyebrow { font-size: 14px; font-weight: 650; letter-spacing: .02em; color: var(--accent); }
+.home-greet { margin: 0; font-size: 34px; line-height: 1.2; color: var(--text); }
+.home-state { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; min-height: 30px; font-size: 16px; color: var(--text-2); }
+.home-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--line-strong); }
 .home-state.ok .home-dot { background: var(--ok); }
 .home-state.warn .home-dot { background: var(--warn); }
 .home-state.bad .home-dot { background: var(--danger); }
@@ -22,35 +29,39 @@
 .home-labname { color: var(--muted); }
 .home-labname::before { content: "· "; }
 
-/* ---------- the tiles: a card each, the whole card opens its panel ---------- */
-.home-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
-.home-tile { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 168px; padding: 18px 20px;
-  background: var(--card); border: 1px solid var(--card-line); border-radius: var(--radius); box-shadow: var(--card-shadow);
+/* ---------- the tiles: large cards, two to a row; the whole card opens its panel ---------- */
+.home-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.home-tile-lab { grid-column: 1 / -1; }   /* the third tile: a row of its own, room for its reading's line */
+.home-tile { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 210px; padding: 24px 26px 18px;
+  background: var(--card); border: 1px solid var(--card-line); border-radius: 16px; box-shadow: var(--home-shadow);
   cursor: pointer; transition: border-color .15s, box-shadow .15s; }
 .home-tile:hover, .home-tile:has(.home-tile-go:focus-visible) {
-  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--card-shadow); }
+  border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--home-shadow); }
 .home-tile.live { border-color: var(--accent); }
-.home-tile-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; min-width: 0; }
-.home-tile-foot { margin-top: auto; min-width: 0; }   /* the numbers line up across the tiles; their rows sit at the bottom */
+.home-tile-head { display: flex; align-items: center; gap: 10px; min-width: 0; margin-bottom: 14px; }
 .home-tile-go { flex: 1 1 auto; min-width: 0; margin: 0; padding: 0; border: 0; background: none; cursor: pointer; text-align: left;
-  font-size: 16px; font-weight: 650; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.home-tile-go::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }   /* the card is its button */
+  font-family: var(--display); font-size: 20px; font-weight: 600; line-height: 1.3; letter-spacing: -0.005em; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.home-tile-go::after { content: ""; position: absolute; inset: 0; border-radius: 16px; }   /* the card is its button */
 .home-tile-go:focus-visible { outline: none; }
-.home-kpi { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 8px; margin: 0 0 8px; }
-.home-kpi-n { font-size: 32px; font-weight: 650; line-height: 1.1; letter-spacing: -0.01em; color: var(--text);
-  font-variant-numeric: tabular-nums; }
-.home-kpi-unit { font-size: 13px; color: var(--muted); }
+.home-kpi { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 10px; margin: 0 0 14px; }
+.home-kpi-n { font-family: var(--display); font-size: 44px; font-weight: 600; line-height: 1.05; letter-spacing: -0.01em;
+  color: var(--text); font-variant-numeric: lining-nums tabular-nums; }   /* the display face's figures, not its old-style ones */
+.home-kpi-unit { font-size: 14px; color: var(--muted); }
 .home-kpi-unit:empty { display: none; }
-.home-bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; margin-bottom: 10px; }
+.home-tile-body { display: grid; gap: 10px; min-width: 0; margin-bottom: 18px; }
+.home-tile-foot { margin-top: auto; padding-top: 11px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* a hairline and a few quiet words, at the bottom */
+.home-bar { height: 5px; border-radius: 999px; background: var(--line); overflow: hidden; }
 .home-bar-fill { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--accent); transition: width .4s ease; }
-.home-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 14px; color: var(--text-2); }
+.home-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 15px; color: var(--text); }
 .home-line-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .home-line-num { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* the runs and the watched readings: short rows in a tile */
-.home-mini { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; min-width: 0; }
+.home-mini { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; min-width: 0; }
 .home-none { font-size: 14px; color: var(--muted); }
-.home-run { position: relative; z-index: 1; display: flex; align-items: center; gap: 8px; width: calc(100% + 12px); min-width: 0;
+.home-run { position: relative; z-index: 1; display: flex; align-items: center; gap: 9px; width: calc(100% + 12px); min-width: 0;
   margin: 0 -6px; padding: 4px 6px; border: 0; border-radius: var(--radius-s); background: none; cursor: pointer; text-align: left;
   font-size: 14px; color: var(--text); }
 .home-run:hover { background: var(--hover); }
@@ -62,15 +73,23 @@
 .home-st.warn { background: var(--warn); }
 .home-st.bad { background: var(--danger); }
 .home-st.run { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
-.home-watch { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 3px 0; font-size: 14px; }
-.home-watch-key { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.home-watch { display: flex; align-items: baseline; gap: 10px; min-width: 0; padding: 2px 0; font-size: 15px; }
+.home-watch-key { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
 .home-watch-val { flex: none; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
 .home-watch.alarm .home-watch-val { color: var(--danger); }
+/* the first watched reading over the last ten minutes: a line on a soft area, as labMaster's Temperature tile */
+.home-spark-row { padding: 2px 0 6px; }
+.home-spark { display: block; width: 100%; height: 48px; overflow: visible; }
+.home-spark-fill { fill: var(--accent-soft); stroke: none; }
+.home-spark-line { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+.home-spark-row.alarm .home-spark-fill { fill: var(--danger-soft); }
+.home-spark-row.alarm .home-spark-line { stroke: var(--danger); }
 
-/* ---------- Kelvin's blocks: a .kcard each, its edge the kind's colour ---------- */
-.home-blocks { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
-.home-block { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 14px 16px 10px; transition: box-shadow .5s ease; }
-.home-block.fresh { box-shadow: 0 0 0 2px var(--accent), var(--card-shadow); transition: none; }   /* it just arrived */
+/* ---------- Kelvin's blocks: a .kcard each, its thin edge the kind's colour ---------- */
+.home-blocks { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-top: 4px; }
+.kcard.home-block { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 18px 18px 14px; border-radius: 15px;
+  border-left-width: 3px; box-shadow: var(--home-shadow); transition: box-shadow .5s ease; }
+.kcard.home-block.fresh { box-shadow: 0 0 0 2px var(--accent), var(--home-shadow); transition: none; }   /* it just arrived */
 .hk-head { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
 .hk-kind { flex: none; display: grid; place-items: center; height: 22px; color: var(--kind); }
 .hk-kind svg { width: 17px; height: 17px; }
@@ -93,7 +112,7 @@
 .hk-value.ok { color: var(--ok); }
 .hk-value.warn { color: var(--warn); }
 .hk-value.bad, .hk-value.alarm { color: var(--danger); }
-.hk-text { font-size: 14px; line-height: 1.5; color: var(--text-2); overflow-wrap: anywhere; }
+.hk-text { font-size: 14px; line-height: 1.55; color: var(--text-2); overflow-wrap: anywhere; }
 .hk-text p, .hk-text ul, .hk-text ol, .hk-text pre, .hk-text table { margin: 0 0 6px; }
 .hk-text > :last-child { margin-bottom: 0; }
 .hk-text ul, .hk-text ol { padding-left: 20px; }
@@ -109,13 +128,14 @@
 
 @media (prefers-reduced-motion: reduce) {
   .home-st.run { animation: none; }
-  .home-bar-fill, .home-tile, .home-block { transition: none; }
+  .home-bar-fill, .home-tile, .kcard.home-block { transition: none; }
 }
 
 /* ---------- a narrow main column (a phone, or the panels beside it): one column ---------- */
-@container (max-width: 640px) {
-  .home-col { padding: 20px 16px 40px; gap: 18px; }
-  .home-greet { font-size: 26px; }
+@container (max-width: 699px) {
+  .home-col { padding: 22px 16px 40px; gap: 20px; }
+  .home-greet { font-size: 28px; }
   .home-tiles, .home-blocks { grid-template-columns: minmax(0, 1fr); }
-  .home-tile { min-height: 0; }
+  .home-tile { min-height: 0; padding: 20px 20px 14px; }
+  .home-kpi-n { font-size: 38px; }
 }

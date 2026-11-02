@@ -1600,16 +1600,31 @@ button.link.danger:hover { background: var(--danger-soft); }
 #labpanel .inst-row { grid-template-columns: 22px minmax(0, 1fr) 112px 18px 12px; }
 #labpanel .inst-model { display: none; }
 #labpanel .inst-headline { text-align: right; justify-self: end; }
-/* Settings: larger titles; an item with many settings folds under its title */
+/* Settings: larger titles, every item's alike; an item with more than two fields folds under its title (initSettingFolds
+   in app.js hides what follows the title, .fold-hide, and marks the title .folded) */
 .set-title { font-size: 20px; font-weight: 650; }
-.set-page > .field > .field-row:first-child > .field-label { font-size: 15px; font-weight: 650; color: var(--text); }
+.set-page > .field > .field-row:first-child > .field-label, .set-page > .field > :is(label:not(.check), .field-label):first-child,
+.set-page .fold-btn { font-size: 15px; font-weight: 650; color: var(--text); }
 .set-page > .field { padding-bottom: 14px; border-bottom: 1px solid var(--line); }
-.fold-field.folded > :not(.fold-head), .fold-field.folded > .fold-head > :not(.field-label) { display: none !important; }
-.set-page > .field .field-label .fold-btn { font-size: 15px; font-weight: 650; color: var(--text); }
-.fold-field .fold-btn svg { transform: rotate(90deg); }
-.fold-field.folded .fold-btn svg { transform: none; }
+.set-page .fold-btn { padding: 2px 0; text-align: left; }
+.set-page .fold-btn:hover, .set-page > details.field > summary:hover { color: var(--accent); }
+/* the Local model folds by itself (a <details>): its title as the others', with the same chevron */
+.set-page > details.field > summary { display: flex; align-items: center; gap: 6px; width: fit-content; margin: 0; padding: 2px 0;
+  list-style: none; font-size: 15px; font-weight: 650; color: var(--text); }
+.set-page > details.field > summary::-webkit-details-marker { display: none; }
+.set-page > details.field > summary::before { content: ""; flex: none; width: 13px; height: 13px; background: var(--muted);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 6l6 6-6 6'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 6l6 6-6 6'/%3E%3C/svg%3E") center / contain no-repeat;
+  transition: transform .15s; }
+.set-page > details.field[open] > summary { margin-bottom: 6px; }
+.set-page > details.field[open] > summary::before { transform: rotate(90deg); }
 /* Home takes the conversation's place */
 .app.home-on #scroller, .app.home-on .composer-wrap, .app.home-on #chat-title, .app.home-on #wake-bar { display: none !important; }
+/* the parts apart, by hairlines only: under the top bar at every width, between a conversation's turns, and between the
+   message being written and the composer's controls */
+.topbar { border-bottom: 1px solid var(--line); }
+.thread > :is(.msg.assistant, .turn-live, .compare) + .msg.user { margin-top: 30px; padding-top: 26px; border-top: 1px solid var(--line); }
+.composer-row { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
 /* the Runs pane is the runs, its History: the scans are the sequence's functions now, and the queue is the sequence, so
    the Schedule (the scans beside the queue) stays out of sight: its tab hidden, and what showed it opens the sequence */
 #open-schedule { display: none; }
