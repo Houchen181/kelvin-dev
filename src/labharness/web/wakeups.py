@@ -46,7 +46,7 @@ WAKE_ME = {
 @dataclass
 class Wake:
     chat_id: str
-    kind: str                       # time | until | run
+    kind: str                       # time | until | run | event (a person's change, at once: notices.py)
     note: str
     text: str                       # what it waits for, in words
     due: float                      # when to continue (time), or to give up (until, run)
@@ -112,6 +112,23 @@ class Waker:
         return ("Kelvin continues this chat when %s (at most %s from now)%s. End your answer now, saying what you are "
                 "waiting for." % (wake.text, _dur(wake.due - now), "; the earlier wake-up is replaced"
                                   if replaced else "")), False
+
+    def soon(self, chat_id: str, why: str) -> bool:
+        """Continue this chat at once about a person's change to the sequence (notices.py), unless it waits for
+        something already (that wake-up stays, and the change waits in the chat for it) or was continued too often
+        today. False when it won't be."""
+        if chat_id in self.pending:
+            return False
+        recent = [t for t in self.history.get(chat_id, []) if time.time() - t < 86400]
+        if len(recent) >= WAKES_PER_DAY:
+            return False
+        now = time.monotonic()
+        wake = Wake(chat_id, "event", "say in a sentence or two what this change means for what you were doing, or "
+                                      "nothing if it changes nothing", str(why)[:300], now)
+        wake.created, wake.root = now, self._root()
+        self.pending[chat_id] = wake
+        self._keep()
+        return True
 
     def cancel(self, chat_id: str) -> bool:
         gone = self.pending.pop(chat_id, None) is not None
@@ -186,6 +203,8 @@ class Waker:
     def _check(self, w: Wake) -> Optional[str]:
         """Why the chat continues now, or None to keep waiting."""
         now = time.monotonic()
+        if w.kind == "event":   # a person's change: at once
+            return "the person changed the sequence: %s" % w.text
         if w.kind == "time":
             return "%s" % w.text if now >= w.due else None
         if w.kind == "run":

@@ -1,0 +1,206 @@
+/* The Sequence pane (seq.js): the sequence as blocks on the page, the functions beside them (a column of their own
+   when the pane is wide). Drawn with the kit at the end of app.css: cards on --page, a kind's colour on the left
+   edge, chips for states. Light and dark through its tokens only. */
+
+svg.seq-solid { fill: currentColor; stroke: none; }
+
+/* ---------- the head: the sequence's name, a title one can edit, and its state */
+.seq-head-main { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; padding-left: 2px; }
+.seq-name { flex: 0 1 auto; min-width: 4ch; max-width: 100%; field-sizing: content; padding: 3px 7px; border: 1px solid transparent;
+  border-radius: var(--radius-s); background: none; font-size: 16px; font-weight: 600; color: var(--text); text-overflow: ellipsis; }
+.seq-name::placeholder { color: var(--muted); font-weight: 500; }
+.seq-name:hover { border-color: var(--line-strong); }
+.seq-name:focus { outline: none; border-color: var(--accent); background: var(--panel); box-shadow: 0 0 0 3px var(--accent-soft); }
+.seq-head-main .chip { flex: none; }
+
+/* ---------- the body: the page the blocks lie on */
+.seq-body { background: var(--page); }
+.seq-bar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  background: var(--page); box-shadow: 0 1px 0 var(--line); }
+.seq-bar .btn { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 14px; white-space: nowrap; }
+.seq-bar .btn[hidden] { display: none; }
+.seq-bar .btn svg { width: 14px; height: 14px; }
+.btn.seq-stop { background: transparent; border-color: var(--danger); color: var(--danger); }
+.btn.seq-stop:hover { background: var(--danger-soft); }
+.seq-msg { flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seq-more { flex: none; }
+.seq-spin { flex: none; width: 13px; height: 13px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent;
+  animation: seq-turn .8s linear infinite; }
+@keyframes seq-turn { to { transform: rotate(360deg); } }
+
+/* the sequence, and the functions under it (narrow) or beside it (wide) */
+.seq-cols { display: flex; flex-direction: column; }
+.seq-main { order: 1; min-width: 0; padding: 8px 12px 16px; }
+.seq-fns { order: 2; min-width: 0; padding: 4px 12px 20px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px;
+  align-content: start; }
+.seq-fns[hidden] { display: none; }
+.seqpane.seq-wide .seq-body { display: flex; flex-direction: column; overflow: hidden; }
+.seqpane.seq-wide .seq-cols { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 280px minmax(0, 1fr); }
+.seqpane.seq-wide .seq-fns { order: 0; overflow-y: auto; padding: 8px 12px 20px; border-right: 1px solid var(--line); }
+.seqpane.seq-wide .seq-main { order: 0; overflow-y: auto; padding: 8px 18px 20px; }
+.seqpane.seq-wide .seq-main > * { max-width: 920px; }
+
+/* ---------- the blocks */
+.seq-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.seq-list[hidden] { display: none; }
+.seq-card { --indent: 46px; min-width: 0; padding: 10px 12px; cursor: pointer; user-select: none; -webkit-user-select: none; }
+.seq-r1 { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 24px; }
+.seq-grip { flex: none; width: 14px; display: grid; place-items: center; color: var(--muted); opacity: .7; cursor: grab; touch-action: none; }
+.seq-grip svg { width: 14px; height: 14px; }
+.seq-card:hover .seq-grip { opacity: 1; }
+.seq-num { flex: none; min-width: 16px; text-align: right; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.seq-title { flex: 1 1 auto; min-width: 0; font-size: 15px; font-weight: 600; color: var(--text); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.seq-flag { flex: none; display: grid; place-items: center; color: var(--warn); }
+.seq-flag svg { width: 16px; height: 16px; stroke-width: 2.4; }
+.seq-card .seq-r1 .chip { flex: none; }
+.seq-r2 { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 22px; margin: 2px 0 0 var(--indent); }
+.seq-sub { flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seq-note { color: var(--muted); }
+.seq-card.done, .seq-card.skipped { opacity: .85; }
+.seq-card.running { border-top-color: var(--accent); border-right-color: var(--accent); border-bottom-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), var(--card-shadow); }
+.seq-err { margin: 3px 0 0 var(--indent); font-size: 13px; color: var(--danger); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* its tools: on hover or focus; on a touch screen always */
+.seq-acts { flex: none; display: flex; align-items: center; gap: 2px; margin: -4px -6px -4px 0; opacity: 0; transition: opacity .12s; }
+.seq-card:hover .seq-acts, .seq-card:focus-within .seq-acts, .seq-card.confirming .seq-acts { opacity: 1; }
+@media (hover: none) { .seq-acts { opacity: 1; } }
+@media (hover: hover) {   /* with a mouse they come over the end of the line, which keeps its whole width meanwhile */
+  .seq-r2 { position: relative; }
+  .seq-acts { position: absolute; right: -6px; top: 50%; transform: translateY(-50%); margin: 0; padding-left: 18px;
+    background: linear-gradient(to right, transparent, var(--card) 16px); }
+  /* a block whose name says it all is one line: its tools come over the end of that line */
+  .seq-card.bare .seq-r2 { position: absolute; top: 10px; right: 12px; width: 0; min-height: 24px; margin: 0; }
+}
+.seq-act { width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--radius-s); background: none; color: var(--text-2);
+  display: grid; place-items: center; cursor: pointer; }
+.seq-act:hover { background: var(--hover); color: var(--text); }
+.seq-act:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.seq-act svg { width: 16px; height: 16px; }
+.seq-act.ask { width: auto; padding: 0 10px; font-size: 13px; font-weight: 600; color: var(--danger); background: var(--danger-soft); }
+.seq-act.ask:hover { color: var(--danger); filter: brightness(.97); }
+
+/* the running block's progress */
+.seq-prog { display: flex; align-items: center; gap: 10px; margin: 8px 0 1px var(--indent); }
+.seq-track { position: relative; flex: 1 1 auto; height: 4px; border-radius: 999px; background: var(--muted-soft); overflow: hidden; }
+.seq-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: inherit; background: var(--accent); transition: width .5s ease; }
+.seq-track.indef .seq-bar-fill { width: 30%; transition: none; animation: seq-slide 1.6s ease-in-out infinite; }
+@keyframes seq-slide { from { left: -30%; } to { left: 100%; } }
+@media (prefers-reduced-motion: reduce) {
+  .seq-track.indef .seq-bar-fill { animation: none; left: 0; width: 100%; opacity: .4; }
+  .seq-spin { animation-duration: 2.4s; }
+}
+.seq-ptext { flex: none; font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ---------- a block's editor, in place */
+.seq-ed { margin: 10px 0 2px var(--indent); padding-top: 10px; border-top: 1px solid var(--line); display: grid;
+  grid-template-columns: minmax(0, 1fr); gap: 8px; cursor: default; user-select: text; -webkit-user-select: text; }
+.seq-field { display: grid; grid-template-columns: minmax(64px, min(36%, 180px)) minmax(0, 360px); align-items: center; gap: 10px;
+  font-size: 13px; }
+.seq-field > span:first-child { min-width: 0; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seq-field .kfield { width: 100%; padding: 5px 8px; font-size: 13px; }
+.seq-field input[type="checkbox"] { justify-self: start; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.seq-field .kfield:disabled, .seq-field input:disabled { opacity: .6; }
+.seq-unit { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.seq-unit .kfield { width: 96px; }
+.seq-unit span { color: var(--muted); }
+.seq-ed > .btn { justify-self: start; display: inline-flex; align-items: center; gap: 6px; }
+.seq-ed > .btn svg { width: 14px; height: 14px; }
+.seq-ed > .seq-none { justify-self: start; }
+.seq-yaml { margin: 0; padding: 8px 10px; max-height: 200px; overflow: auto; border-radius: var(--radius-s); background: var(--code);
+  color: var(--text-2); font: 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.seq-switch { justify-self: start; display: inline-flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-2); cursor: pointer; }
+.seq-switch input { appearance: none; -webkit-appearance: none; position: relative; flex: none; width: 34px; height: 20px; margin: 0;
+  border-radius: 999px; background: var(--line-strong); cursor: pointer; transition: background .15s; }
+.seq-switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--card); transition: transform .15s; }
+.seq-switch input:checked { background: var(--accent); }
+.seq-switch input:checked::after { transform: translateX(14px); }
+.seq-switch input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .seq-switch input::after { background: var(--text-2); }
+  :root:where(:not([data-theme="light"])) .seq-switch input:checked::after { background: var(--accent-ink); }
+}
+
+/* ---------- ＋ Add under the list; the dashed card of an empty sequence */
+.seq-add { width: 100%; min-height: 42px; margin-top: 8px; display: flex; align-items: center; justify-content: center; gap: 6px;
+  border: 1.5px dashed var(--line-strong); border-color: color-mix(in srgb, var(--muted) 60%, transparent);
+  border-radius: var(--radius); background: none; color: var(--text-2); font-size: 14px; font-weight: 600; cursor: pointer; }
+.seq-add:hover, .seq-add.on, .seq-add.drop-on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.seq-add:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.seq-add.empty { min-height: 104px; margin-top: 0; font-size: 15px; }
+.seqpane.seq-wide .seq-add:not(.empty) { display: none; }
+
+/* ---------- dragging: the block under the pointer, and where it lands */
+.seq-card.dragging { opacity: .35; }
+.seq-card.drop-before::before, .seq-card.drop-after::after { content: ""; position: absolute; left: 4px; right: 4px; height: 3px;
+  border-radius: 999px; background: var(--accent); pointer-events: none; }
+.seq-card.drop-before::before { top: -7px; }
+.seq-card.drop-after::after { bottom: -7px; }
+.seq-ghost { position: fixed; left: 0; top: 0; z-index: 90; display: block; margin: 0; list-style: none; pointer-events: none;
+  box-shadow: var(--shadow), 0 0 0 1px var(--accent); }
+body.seq-dragging, body.seq-dragging * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !important; }
+
+/* ---------- the functions: what goes into the sequence */
+.seq-search { width: 100%; }
+.seq-groups { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.seq-grp { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr)); gap: 6px; }
+.seq-gh { grid-column: 1 / -1; margin: 8px 2px 0; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); }
+.seq-fn { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 4px; min-height: 52px;
+  padding: 7px 6px 7px 11px; cursor: pointer; user-select: none; -webkit-user-select: none; }
+.seq-fn:hover { border-top-color: var(--line-strong); border-right-color: var(--line-strong); border-bottom-color: var(--line-strong); }
+.seq-fn-name { grid-column: 1; min-width: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seq-fn-sub { grid-column: 1; min-width: 0; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seq-fn > .seq-fn-more, .seq-fn > .ask { grid-column: 2; grid-row: 1 / span 2; }
+.seq-fn-more { padding: 4px; opacity: 0; transition: opacity .12s; }
+.seq-fn-more svg { width: 16px; height: 16px; }
+.seq-fn:hover .seq-fn-more, .seq-fn:focus-within .seq-fn-more { opacity: 1; }
+@media (hover: none) { .seq-fn-more { opacity: 1; } }
+.seq-fn-rename { grid-column: 1; width: 100%; padding: 2px 6px; font-size: 14px; font-weight: 600; }
+.seq-fn.fresh { box-shadow: 0 0 0 2px var(--accent), var(--card-shadow); }
+.seq-fn.sent { box-shadow: 0 0 0 2px var(--accent-soft), var(--card-shadow); }
+.seq-fn.missing .seq-fn-name { text-decoration: line-through; color: var(--muted); }
+.seq-fns-foot { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+
+/* the colour swatches, and the pop-over they come in */
+.seq-pop { position: fixed; z-index: 70; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--panel); box-shadow: var(--shadow); }
+.seq-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.seq-swatch { width: 24px; height: 24px; padding: 0; border: 2px solid var(--panel); border-radius: 50%; cursor: pointer;
+  box-shadow: 0 0 0 1px var(--line-strong); }
+.seq-swatch.on { box-shadow: 0 0 0 2px var(--text); }
+.seq-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- dialogs: New function, Sweep, Save as */
+.seq-dialog .seq-dlg { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.seq-lab { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; font-size: 13px; font-weight: 550; color: var(--text-2); }
+.seq-lab[hidden] { display: none; }
+.seq-lab .kfield { font-weight: 400; }
+.seq-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.seq-line .kfield { flex: 1 1 auto; }
+.seq-line .btn { flex: none; }
+.seq-files { max-height: 248px; overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-s); background: var(--panel); }
+.seq-file { padding: 6px 10px; border: 0; border-bottom: 1px solid var(--line); background: none; text-align: left; font-size: 13px;
+  font-weight: 400; color: var(--text); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seq-file:last-child { border-bottom: 0; }
+.seq-file:hover { background: var(--hover); }
+.seq-file.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.seq-file:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.seq-found { display: flex; flex-wrap: wrap; gap: 6px; }
+.seq-found:empty { display: none; }
+.seq-bad { font-size: 13px; color: var(--danger); overflow-wrap: anywhere; }
+.seq-ticks { max-height: 210px; overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 4px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--panel); }
+.seq-tick { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 5px 8px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+.seq-tick:hover { background: var(--hover); }
+.seq-tick input { flex: none; margin: 0; accent-color: var(--accent); }
+.seq-tick-name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seq-range { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.seq-unit-tag { flex: none; font-size: 13px; font-weight: 400; color: var(--muted); }
+.seq-unit-tag[hidden] { display: none; }
+.seq-count { font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.seq-count.bad { color: var(--danger); }

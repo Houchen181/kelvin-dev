@@ -143,7 +143,7 @@ Ask Kelvin to run one of your lab's scripts ("run sweep.py with VMAX at 2") and 
 
 ## The lab's experiments
 
-A VI translated into Python (**Lab** → **Set up…** → **From your LabVIEW…** → **Translate**, or `translate_vi` in a chat) becomes one of the lab's experiments once a person keeps it. It is the lab's, not one person's: everyone who signs in on this Kelvin sees and runs it, in **Runs** → **Lab experiments**, and the AI runs it by its name (`run_script(script="iv-scan")`).
+A VI translated into Python (**Lab** → **Set up…** → **From your LabVIEW…** → **Translate**, or `translate_vi` in a chat) becomes one of the lab's experiments once a person keeps it. It is the lab's, not one person's: everyone who signs in on this Kelvin sees and runs it, in **Sequence** → **＋ Add** → Experiments, and the AI runs it by its name (`run_script(script="iv-scan")`).
 - **What it is:** a Python file that reaches the instruments only through Kelvin (`from kelvin import lab`: `lab.set("smu.V", v)`, `lab.get("lockin.X")`), every command through the safety gate. Its actions are its modes (`initialize`, `scan`, …), each a run of its own; its rows are what it records; its live inputs (Break, a set point) are what you change while it runs, in the run's view or by asking the chat (`set_live`).
 - **Where it lives:** in Kelvin's own folder, `~/Kelvin/experiments/<name>/v1`, `v2` …: each version written whole and never changed, with where it came from (the VI, its checks, what wasn't translated). A version whose file changes on disk afterwards is no longer approved and never runs; save the change as a new version.
 - **Versions:** an edit (the AI's `save_experiment`, or a person's) is a new version, edited from the latest. A person approves it once, having seen what changed: on its first run's card, or with **Approve version** in **Versions**.
@@ -151,7 +151,7 @@ A VI translated into Python (**Lab** → **Set up…** → **From your LabVIEW�
 
 ## The queue
 
-Line up scans to run one after another, overnight or while you are away, as in Special Measure's queue. Open **Queue** in the Runs pane, or ask Kelvin ("queue a gate sweep at 2, 5 and 10 K"). An item is a plan, or a step between scans:
+Line up scans to run one after another, overnight or while you are away, as in Special Measure's queue. Open the **Sequence** pane (its button in the top bar), or ask Kelvin ("queue a gate sweep at 2, 5 and 10 K"). An item is a plan, or a step between scans:
 
 ```yaml
 step: warm to 10 K

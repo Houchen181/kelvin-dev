@@ -34,6 +34,7 @@ from .._version import __version__
 from ..accounts import Accounts, LabRoles, OwnerPin, RoleRefused, cipher_for, has_legacy
 from ..configversions import ConfigVersions, widens as config_widens
 from .. import central, edition, expstore
+from ..homeboard import FILE as HOME_FILE, HomeBoard
 from ..agent.approval import WebApprover
 from ..agent.runtime import SETUP_STEPS, KeptAlready, LabRuntime, Underway, Viewer, not_shown, writable_folder
 from ..agent.server import build_server
@@ -54,6 +55,7 @@ from ..homelab import build_lab, builtin_ids, collection_ids, kelvin_ids, lab_re
 from .agent import Busy, ChatAgent, runs_in, typed_stop
 from . import labops, review, rules as rulebook
 from .chatgpt import SignIn, SignInError
+from . import notices as person_notices
 from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
 from .relay import RelayLink
 from .remote import (API as PHONE_API, Remote, addresses, allow_through_firewall, allowed, firewall_state,
@@ -65,6 +67,10 @@ from .store import ChatStore
 log = logging.getLogger("kelvin")   # the desktop app writes this to ~/Kelvin/kelvin.log
 
 STATIC = Path(__file__).parent / "static"
+# the page's own files: its script and style (app.*), and the parts kept apart from them: Home (home.*), the sequence
+# (seq.*) and the first start (welcome.*)
+STATIC_FILES = ("app.js", "app.css", "home.js", "home.css", "seq.js", "seq.css", "welcome.js", "welcome.css",
+                "kelvin.svg")
 TRACE_POINTS = 400
 ATTACH_MAX = 40 * 2 ** 20   # a photo (the portal shrinks it first), a PDF or a data file
 TEXT_TAIL = 256 * 1024      # of a script run's own text files, the last part a person reads (X-Kelvin-Cut: the whole)
@@ -346,6 +352,28 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     runtime.experiments = expstore.Store(home / "experiments")   # the lab's experiments, from its VIs: everyone's
     runtime.labview_map = home / "labview-map.yaml"       # what the lab's LabVIEW calls become (vimap.py)
     runtime.lab_memory_dir = home                         # the lab's memory, everyone's (labmemory.py)
+    runtime.home_board = HomeBoard(lambda: runtime.data_dir / HOME_FILE)   # each person's Home, beside their queue
+
+    def queue_now() -> Dict[str, Any]:
+        """The queue as it is this instant, in the few words a Stop's notice needs: nothing read, no lock taken, so a
+        Stop never waits for it (it answers at once whatever the server's threads are doing)."""
+        q = runtime.queue
+        return {"state": q.state, "items": [{"id": i.id, "name": i.name, "kind": i.kind, "status": i.status,
+                                             "chat": i.chat} for i in list(q.items)]}
+
+    def tell_later(said: Any) -> None:
+        """A Stop's notice, told on a thread of its own once the Stop is done (notices.py): the chats it concerns."""
+        if said:
+            threading.Thread(target=agent.notices.tell, args=(said[0], said[1], "sequence", said[2]), daemon=True,
+                             name="kelvin-notice").start()
+
+    def failed_heard(item: Any, message: str) -> None:
+        """An item of the sequence failed: the chat that queued it and the one that started the sequence hear of it
+        (urgent: with the person's switch on, they answer at once)."""
+        n = next((k for k, i in enumerate(runtime.queue.items, 1) if i.id == item.id), "?")
+        agent.notices.tell("#%s %s failed: %s." % (n, item.name, str(message).split("\n")[0][:200]),
+                           [item.chat, runtime.queue_started_by], "sequence", urgent=True)
+    runtime.queue_heard = failed_heard
     team = TeamChat(home)                                 # the lab's team chat, everyone's (teamchat.py)
     runtime.scripts_folder = lambda: settings.lab_scripts or None   # run_script runs only the scripts in it
     runtime.scripts_python = lambda: settings.lab_scripts_python
@@ -609,14 +637,16 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def index(request: Request) -> Response:
         # version-stamp the assets so a browser never runs a stale copy after an update
-        version = str(int(max((STATIC / n).stat().st_mtime for n in ("app.js", "app.css"))))
         page = (STATIC / "index.html").read_text(encoding="utf-8")
-        page = page.replace("/static/app.js", "/static/app.js?v=" + version).replace("/static/app.css", "/static/app.css?v=" + version)
+        for name in STATIC_FILES:
+            if name.endswith((".js", ".css")) and (STATIC / name).exists():
+                stamp = str(int((STATIC / name).stat().st_mtime))
+                page = page.replace('"/static/%s"' % name, '"/static/%s?v=%s"' % (name, stamp))
         return Response(page, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
 
     async def static(request: Request) -> Response:
         name = request.path_params["name"]
-        if name not in ("app.js", "app.css", "kelvin.svg"):
+        if name not in STATIC_FILES or not (STATIC / name).exists():
             return error(404, "not found")
         return FileResponse(STATIC / name, headers={"Cache-Control": "no-cache"})
 
@@ -632,6 +662,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             "claude_code": claude_code_enabled(),
             "hub_sharing": HUB_SHARING,
             "update": update_summary(updater, settings.updates),
+            "version": __version__,
         }))
 
     # ------------------------------------------------------------------ people (accounts.py)
@@ -819,7 +850,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 if isinstance(i, dict) and runtime.unshared_work(i):
                     names.append(str(i.get("name") or ""))
                     i = dict(i, name="an item of unshared work", text="", note="", message="", run_id=None,
-                             folder=None)
+                             folder=None, summary="", params={}, settable={}, notes={}, set={}, stabilize=None,
+                             problem="",
+                             **({"progress": dict(i["progress"], run_id="unshared")}
+                                if isinstance(i.get("progress"), dict) and i["progress"].get("run_id") else {}))
                     hidden += 1
                 items.append(i)
             reason = str(queue.get("reason") or "")
@@ -827,7 +861,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             out["queue"] = dict(queue, items=items, reason="at an item of unshared work" if any(
                 n and n in reason for n in names) else reason, last=dict(last, lines=[
                     "The queue's account names unshared work. " + UNSHARED_CARD]) if isinstance(last, dict)
-                and last.get("unshared") else last)
+                and last.get("unshared") else last, name="" if names else queue.get("name"))   # a person's words
         if isinstance(data.get("watches"), list):
             out["watches"] = hub_watches(data["watches"])
         mounted = data.get("mounted")
@@ -3249,8 +3283,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         chat_id = body.get("chat_id")
         stopped = agent.stop(str(chat_id) if chat_id else None)
         if not chat_id or body.get("lab"):
+            before = queue_now()
             await own_thread(runtime.stop, person(request))
             stopped = True
+            tell_later(person_notices.stop_said(before, runtime.queue_started_by))
         return JSONResponse({"ok": stopped, "message": STOPPED if stopped and (not chat_id or body.get("lab")) else ""})
 
     async def safe_view(request: Request) -> Response:
@@ -3302,7 +3338,65 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         data["lab_memory"] = runtime.lab_memory_stamp()   # the Lab panel reloads the lab's memory when it changes
         data["team"] = team.last   # the team chat's newest message: the portal marks what you haven't read
         data["chats"] = await asyncio.to_thread(store.stamp)   # the sidebar reloads when a chat is made elsewhere
+        data["home"] = runtime.home_board.stamp()   # Home reloads its blocks when Kelvin or a person changes them
         return JSONResponse(data)
+
+    async def home_view(request: Request) -> Response:
+        """The person's Home (homeboard.py). GET: {blocks, changed}. POST {op: clear}: every unpinned block taken
+        off."""
+        board = runtime.home_board
+        if request.method == "GET":
+            return JSONResponse(await asyncio.to_thread(board.view))
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or body.get("op") != "clear":
+            return error(400, "send {op: clear}")
+        try:
+            going = [b for b in await asyncio.to_thread(board.blocks) if not b.get("pinned")]
+            n = await asyncio.to_thread(board.clear)
+        except OSError as e:
+            return error(500, str(e))
+        if going:   # the chats whose blocks went, told (notices.py)
+            await asyncio.to_thread(agent.notices.tell, "You cleared Home: %s." % ", ".join(
+                "'%s'" % b["title"] for b in going[:6]) + (" and %d more" % (len(going) - 6) if len(going) > 6 else ""),
+                [b.get("chat") for b in going], "home")
+        return JSONResponse(dict(await asyncio.to_thread(board.view),
+                                 message="%d block%s taken off Home" % (n, "" if n == 1 else "s")))
+
+    async def home_block(request: Request) -> Response:
+        """A person's change to a block on Home: POST {pin: bool}, or {tick: item index, done: bool} on a checklist;
+        DELETE takes the block off. Answers Home as it is then."""
+        board, ref = runtime.home_board, request.path_params["block_id"]
+        said = ""   # the change in words, for the chat that put the block there (notices.py)
+        try:
+            if request.method == "DELETE":
+                block = await asyncio.to_thread(board.remove, ref)
+                said = "You took '%s' off Home." % block["title"]
+            else:
+                body = await request.json()
+                if not isinstance(body, dict):
+                    return error(400, "send {pin} or {tick, done}")
+                if "pin" in body:
+                    block = await asyncio.to_thread(board.pin, ref, bool(body["pin"]))
+                    said = "You pinned '%s' on Home." % block["title"] if block.get("pinned") else ""
+                elif "tick" in body:
+                    i, done = int(body["tick"]), bool(body.get("done", True))
+                    block = await asyncio.to_thread(board.tick, ref, i, done)
+                    said = "You %s '%s' in '%s' on Home." % ("ticked" if done else "unticked",
+                                                             block["items"][i]["text"], block["title"])
+                else:
+                    return error(400, "send {pin} or {tick, done}")
+            if said:
+                await asyncio.to_thread(agent.notices.tell, said, [block.get("chat")], "home")
+        except KeyError as e:
+            return error(404, str(e.args[0]))
+        except (ValueError, TypeError) as e:
+            return error(400, str(e))
+        except OSError as e:
+            return error(500, str(e))
+        return JSONResponse(await asyncio.to_thread(board.view))
 
     async def scripts_folder(request: Request) -> Response:
         """POST {folder}: a person's answer to the first setup's question, the folder of the scripts the lab runs its
@@ -3425,6 +3519,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         except ValueError:
             body = {}
         with_queue, by = isinstance(body, dict) and body.get("queue"), person(request)
+        before = queue_now()   # what ran, for the chats the stop concerns
 
         def stopping() -> bool:
             if with_queue:
@@ -3436,16 +3531,29 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 runtime.stop(by)
                 return True
             return False
-        return JSONResponse({"ok": await own_thread(stopping)})
+        stopped = await own_thread(stopping)
+        if stopped:
+            tell_later(person_notices.stop_said(before, runtime.queue_started_by))
+        return JSONResponse({"ok": stopped})
 
     async def queue(request: Request) -> Response:
-        """GET: the scan queue. POST {op, ...}: a person's change to it. start asks for the queue's approval as usual
-        and returns once it is answered."""
+        """GET: the scan queue (the portal's Sequence). POST {op, ...}: a person's change to it, answered with the
+        queue and a message (400 {error} when refused). start asks for the queue's approval as usual and returns once
+        it is answered. The Sequence's own: rename {name}; skip {item} (a waiting item won't run, the running one
+        ends and the queue goes on); duplicate {item}; params {item, params: {name: value | null}} for a script, or
+        {item, wait: seconds} / {item, set: {instr.param: value | null}} for a step; ladder {items: [ids], key,
+        values: [...]} (one copy of the items per value, appended)."""
         if request.method == "GET":
-            return JSONResponse(runtime.queue_view())
-        body = await request.json()
+            return JSONResponse(await asyncio.to_thread(runtime.queue_view))
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return error(400, "send {op, ...}")
         op, by = str(body.get("op") or ""), "human"
         item = body.get("item")
+        before = await asyncio.to_thread(runtime.queue_view)   # what it was, for the change in words (notices.py)
 
         def persons(fn: Any, *args: Any) -> str:
             """A person's change, beside whatever Kelvin does (the check may read an instrument): filed under no
@@ -3487,11 +3595,36 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         elif op == "load":
             msg = await asyncio.to_thread(persons, runtime.queue_load, str(body.get("name") or ""), by)
             ok = msg.startswith("added")
+        elif op == "rename":
+            msg = runtime.queue_rename(body.get("name"), by)
+            ok = not msg.startswith("not changed")
+        elif op in ("skip", "duplicate"):
+            msg = await asyncio.to_thread(runtime.queue_change, op, item, None, by)
+            ok = not msg.startswith("not changed")
+        elif op == "params":   # a script's settings, or a step's wait and set values, checked as an edit is
+            msg = await asyncio.to_thread(persons, runtime.queue_params, item, body.get("params"), body.get("wait"),
+                                          body.get("set"), by)
+            ok = not msg.startswith("not changed")
+        elif op == "ladder":   # one copy of the items per value, each checked as an add is
+            msg = await asyncio.to_thread(persons, runtime.queue_ladder, body.get("items"), body.get("key"),
+                                          body.get("values"), by)
+            ok = not msg.startswith("not added")
         else:
             return error(400, "unknown queue operation %r" % op)
         if not ok:
             return error(400, msg)
-        return JSONResponse(dict(runtime.queue_view(), message=msg))
+        after = await asyncio.to_thread(runtime.queue_view)
+        said = person_notices.queue_said(op, body, before, after, runtime.queue_started_by)
+        block_id = body.get("from_block") if op == "add" else None
+        if said and block_id:   # a block's button on Home: the chat that put it there hears its suggestion was taken
+            taken = next((b for b in await asyncio.to_thread(runtime.home_board.blocks) if b["id"] == block_id), None)
+            if taken is not None:
+                where = said[0][len("You added "):].split(" ")[0]   # its number in the sequence, "#6"
+                said = ("You added '%s' from Home to the sequence as %s." % (taken["title"], where),
+                        [taken.get("chat")], False)
+        if said:
+            await asyncio.to_thread(agent.notices.tell, said[0], said[1], "sequence", said[2])
+        return JSONResponse(dict(after, message=msg))
 
     ON_THIS_COMPUTER = "Your library and running a run again are on the Kelvin computer."
 
@@ -3534,7 +3667,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         id?} → {id, name, edited_from, parts, lab, check}, a scan as its parts (a new one without id); {op: check,
         parts, editor?} → its check (points, time, problems, its plan's text), or {superseded: true} when the same
         editor asked for a newer one meanwhile; {op: save, parts, from?} → {entry, new, library}, an entry of its own;
-        {op: run, parts, from?, queue?} → {queue, message, entry, library}: saved, then run as above."""
+        {op: run, parts, from?, queue?} → {queue, message, entry, library}: saved, then run as above. The Sequence
+        pane's functions: {op: meta, id, name?, color?, note?} → {entry, library} (a colour is #rrggbb, "" for none);
+        {op: files} → {folder, files: [{path, rel, name, kind}], more}, the scripts in the lab's scripts folder
+        (folder null when none is set); {op: inspect, path} → {name, path, settable, notes, problem}, a script read
+        (never run)."""
         if role_of(request) != "owner":   # remote.py lists none of it either
             return error(403, ON_THIS_COMPUTER)
         if request.method == "GET":
@@ -3571,9 +3708,16 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 return JSONResponse(check if check is not None else {"superseded": True})
             elif op == "save":
                 out = await asyncio.to_thread(runtime.scan_save, body.get("parts"), base, by)
+            elif op == "meta":   # a function's name, colour and note, each only when given
+                out = {"entry": await asyncio.to_thread(runtime.library_meta, entry_id, body.get("name"),
+                                                        body.get("color"), body.get("note"), by)}
+            elif op == "files":   # read only: the list a new function is picked from
+                return JSONResponse(await asyncio.to_thread(runtime.library_files))
+            elif op == "inspect":   # read only, never run or imported
+                return JSONResponse(await asyncio.to_thread(runtime.library_inspect, body.get("path")))
             else:
-                return error(400, "unknown library operation %r (import, rename, remove, run, parts, check or save)"
-                             % op)
+                return error(400, "unknown library operation %r (import, rename, remove, run, parts, check, save, "
+                                  "meta, files or inspect)" % op)
         except KeyError as e:
             return error(404, e.args[0] if e.args else "nothing like that in the library")
         except ValueError as e:
@@ -3924,6 +4068,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/runs/stop", stop_run, methods=["POST"]),
         Route("/api/runs/live", runs_live, methods=["POST"]),
         Route("/api/queue", queue, methods=["GET", "POST"]),
+        Route("/api/home", home_view, methods=["GET", "POST"]),
+        Route("/api/home/blocks/{block_id}", home_block, methods=["POST", "DELETE"]),
         Route("/api/library", library, methods=["GET", "POST"]),
         Route("/api/runs/{run_id}/again", run_again, methods=["GET", "POST"]),
         Route("/api/runs/{run_id}", run_data),

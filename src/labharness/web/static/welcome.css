@@ -1,0 +1,65 @@
+/* the first start (welcome.js): a page over the app in AlphainZ's wizard form, drawn with the kit (app.css, at its
+   end): a column on the page, one card of rows (a title, its value under it, the control at the right), the way on
+   under it. Tokens only, so light and dark follow the computer's. */
+.welcome { position: fixed; inset: 0; z-index: 45; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--page); color: var(--text); }
+.wl-col { width: min(640px, calc(100% - 32px)); margin: 0 auto; padding-top: clamp(24px, 10vh, 112px); }
+
+/* the head: the mark in its tile, the name, the version */
+.wl-head { display: flex; align-items: flex-end; gap: 16px; margin: 0 0 18px; }
+.wl-head .logo { width: 64px; height: 64px; border-radius: 16px; box-shadow: var(--card-shadow); }
+.wl-titles { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; padding-bottom: 6px; }
+.wl-h1 { margin: 0; font-size: 26px; line-height: 1.2; }
+
+/* the steps: a dot each (the chosen one in the accent), then where this is */
+.wl-steps { display: flex; align-items: center; margin: 0 0 12px -6px; }
+.wl-dots { display: flex; align-items: center; }
+.wl-dot { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer;
+  display: grid; place-items: center; }
+.wl-dot::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); }
+.wl-dot:hover::before { background: var(--muted); }
+.wl-dot.on::before { background: var(--accent); }
+.wl-where { margin-left: 6px; font-size: 13px; color: var(--muted); }
+
+/* the step: one card of rows */
+.wl-group { background: var(--card); border: 1px solid var(--card-line); border-radius: var(--radius);
+  box-shadow: var(--card-shadow); overflow: hidden; }
+.wl-group > .wl-block:not([hidden]) ~ .wl-block:not([hidden]),
+.wl-block > .wl-row + .wl-row { border-top: 1px solid var(--line); }
+.wl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-height: 56px; padding: 12px 16px; }
+.wl-text { flex: 1 1 160px; min-width: 0; }
+.wl-title { font-size: 15px; font-weight: 550; line-height: 1.35; }
+.wl-value { margin-top: 2px; font-size: 13px; line-height: 1.4; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-value.wrap { white-space: normal; overflow-wrap: anywhere; }
+.wl-value.ok { color: var(--ok); font-weight: 600; }
+.wl-value.bad { color: var(--danger); }
+.wl-ctl { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; }
+.wl-row.wide .wl-ctl { flex: 1 1 300px; }
+.wl-ctl .kfield { flex: 1 1 auto; width: 100%; min-width: 0; }
+.wl-ctl .btn, .wl-ctl .chip, .wl-ctl .spinner { flex: none; }
+.wl-ctl .btn { white-space: nowrap; }
+
+/* a list in the card: the scripts to import, the instruments a scan found */
+.wl-item { flex-wrap: nowrap; gap: 12px; min-height: 44px; padding: 9px 16px; cursor: pointer; }
+.wl-item:hover { background: var(--hover); }
+.wl-item.off { cursor: default; }
+.wl-item.off:hover { background: none; }
+.wl-check { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: inherit; }
+.wl-label { flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-sub { flex: 1 1 0; min-width: 0; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-item .chip { flex: none; }
+.wl-more { width: 100%; min-height: 44px; border: 0; background: none; cursor: pointer; text-align: left;
+  font-size: 13px; font-weight: 600; color: var(--accent); }
+.wl-more:hover { background: var(--hover); }
+
+/* the way on: Skip or Back, then Next or Done; it stays in view under a long step */
+.wl-foot { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px;
+  padding: 18px 0 max(24px, env(safe-area-inset-bottom));
+  background: linear-gradient(to bottom, transparent, var(--page) 16px); }
+.wl-foot .btn { min-width: 84px; }
+
+@media (max-width: 480px) {
+  .wl-col { padding-top: 24px; }
+  .wl-head { gap: 14px; margin-bottom: 16px; }
+}

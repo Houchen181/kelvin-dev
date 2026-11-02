@@ -20,6 +20,7 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp.types import ToolAnnotations
 
 from .. import carddraft, datatools, expr, fitting, guide
+from ..homeboard import describe as describe_block
 from .._version import __version__
 from ..catalog import MAX_ROWS as QUERY_ROWS, SCHEMA_TEXT
 from ..collection import Collection
@@ -862,10 +863,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
-    def queue_change(action: str, item: Optional[str] = None, position: Optional[int] = None) -> str:
-        """Rearrange the queue. action: move (item to position), remove (item), again (put a finished item back in
-        line) or clear (remove every finished item). Items are named by their number in queue_show, or their id."""
-        return rt.queue_change(action, item, position)
+    def queue_change(action: str, item: Optional[str] = None, position: Optional[int] = None,
+                     name: Optional[str] = None) -> str:
+        """Rearrange the queue (the portal's Sequence). action: move (item to position), remove (item), again (put a
+        finished item back in line), clear (remove every finished item), skip (item: a waiting one won't run; the
+        running one ends now, as at a stop, and the queue goes on to the next without pausing), duplicate (item: a
+        copy right after it) or rename (the sequence's name: name). Items are named by their number in queue_show, or
+        their id."""
+        return rt.queue_change(action, item, position, name=name)
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
@@ -901,6 +906,96 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def queue_load(name: str) -> str:
         """Add a saved queue's items to the end of the queue."""
         return rt.queue_load(name)
+
+    # ------------------------------------------------------------------ Home: the person's page of blocks
+    def home_board() -> Any:
+        return getattr(rt, "home_board", None)
+
+    NO_HOME = "Home is a page of Kelvin's portal: this Kelvin has none (an agent over MCP has no Home)"
+
+    def block_fields(**given: Any) -> Dict[str, Any]:
+        """The fields a call gave (None: not given)."""
+        return {k: v for k, v in given.items() if v is not None}
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def home_add(title: str, kind: str = "result", text: str = "", value: Optional[Union[float, str]] = None,
+                 error: Optional[Union[float, str]] = None, unit: str = "", items: Optional[List[str]] = None,
+                 run_id: str = "", watch: str = "", actions: Optional[List[Dict[str, Any]]] = None, tone: str = "",
+                 key: str = "") -> str:
+        """Put a block on the person's Home: the page beside the chat (its Chat | Home switch) where they see the
+        lab at a glance. Add one when a run or a queue item gives a result worth keeping, or when you have a
+        concrete next step for them; never for a lookup, a refused or failed call, or a dry run. kind: result (the
+        key number a run gave: value, error, unit and its run_id), next (a step you suggest, with actions: a button
+        that adds its scan or step to the sequence, {"do": "queue", "text": <plan or step YAML>, "label": "..."},
+        or one that asks you, {"do": "ask", "text": <the question>}), watch (an instrument's reading, shown live:
+        watch="tc.T_sample"), note, or check (items: a short checklist the person ticks). Other buttons: {"do":
+        "run", "run_id"} opens a run, {"do": "pane", "pane": "sequence" | "runs" | "lab" | "analysis"} a panel. title:
+        a few words; text: one or two sentences (Markdown); tone: ok, warn or bad. key: a short name of your own
+        for a block you keep up to date: adding one with a key already on Home changes that block instead. Say in
+        your answer only what the block cannot (do not repeat it)."""
+        board = home_board()
+        if board is None:
+            return NO_HOME
+        viewer = rt.viewer
+        fields = block_fields(kind=kind, title=title, text=text, value=value, error=error, unit=unit, items=items,
+                              run_id=run_id, watch=watch, actions=actions, tone=tone, key=key)
+        try:
+            block, added = board.add(fields, by="kelvin", chat=getattr(viewer, "chat", None))
+        except ValueError as e:
+            return "not on Home: %s" % e
+        except OSError as e:
+            return "not on Home: Kelvin could not write it (%s)" % e
+        return "%s Home: %s" % ("on" if added else "changed on", describe_block(block))
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def home_update(block: str, title: Optional[str] = None, text: Optional[str] = None,
+                    value: Optional[Union[float, str]] = None, error: Optional[Union[float, str]] = None,
+                    unit: Optional[str] = None, items: Optional[List[str]] = None, run_id: Optional[str] = None,
+                    watch: Optional[str] = None, actions: Optional[List[Dict[str, Any]]] = None,
+                    tone: Optional[str] = None, kind: Optional[str] = None) -> str:
+        """Change a block on Home (by its id, b-..., or the key you gave it): only the fields given change; "" (or
+        []) empties one. A checklist keeps the person's ticks on the items still there."""
+        board = home_board()
+        if board is None:
+            return NO_HOME
+        fields = block_fields(kind=kind, title=title, text=text, value=value, error=error, unit=unit, items=items,
+                              run_id=run_id, watch=watch, actions=actions, tone=tone)
+        try:
+            changed = board.update(block, fields, by="kelvin")
+        except KeyError as e:
+            return "not changed: %s (home_list shows what is there)" % e.args[0]
+        except ValueError as e:
+            return "not changed: %s" % e
+        except OSError as e:
+            return "not changed: Kelvin could not write it (%s)" % e
+        return "changed on Home: %s" % describe_block(changed)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def home_remove(block: str) -> str:
+        """Take a block off Home (by its id or key), e.g. a suggestion that no longer holds."""
+        board = home_board()
+        if board is None:
+            return NO_HOME
+        try:
+            gone = board.remove(block)
+        except KeyError as e:
+            return "nothing removed: %s" % e.args[0]
+        except OSError as e:
+            return "nothing removed: Kelvin could not write it (%s)" % e
+        return "taken off Home: %s" % describe_block(gone)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def home_list() -> str:
+        """The blocks on the person's Home, pinned first, then the newest: id, kind, title, value, and what the
+        person ticked or pinned."""
+        board = home_board()
+        if board is None:
+            return NO_HOME
+        try:
+            blocks = board.blocks()
+        except OSError as e:
+            return "Kelvin could not read Home (%s)" % e
+        return "\n".join(describe_block(b) for b in blocks) if blocks else "Home has no blocks yet."
 
     @server.tool(annotations=ACT, structured_output=False)   # accept writes the run's fits (never an instrument)
     def analyze_run(run_id: str, column: Optional[str] = None, model: Optional[str] = None,

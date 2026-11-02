@@ -12,8 +12,8 @@ from labharness.web.app import STATIC  # noqa: E402
 PAGE = (STATIC / "index.html").read_text(encoding="utf-8")
 JS = (STATIC / "app.js").read_text(encoding="utf-8")
 CSS = (STATIC / "app.css").read_text(encoding="utf-8")
-PANELS = {"termpane": "close-term", "runpane": "close-runs", "edpane": "close-editor", "anpane": "close-analysis",
-          "labpanel": "close-lab", "teampanel": "close-team"}
+PANELS = {"termpane": "close-term", "seqpane": "close-seq", "runpane": "close-runs", "edpane": "close-editor",
+          "anpane": "close-analysis", "labpanel": "close-lab", "teampanel": "close-team"}
 
 
 def _js(name):

@@ -105,6 +105,9 @@ def user_text(message: Dict[str, Any]) -> str:
         text = "%s\n\n%s" % (text, message["attached_text"])
     if message.get("brief"):   # the word budget, with the latest message only (brevity.py), set when the request is built
         text = "%s\n\n%s" % (text, message["brief"])
+    if message.get("events"):   # the person's changes to the sequence or Home meanwhile (notices.py)
+        from ..notices import block as events_block
+        text = "%s\n\n%s" % (events_block(message["events"]), text) if text else events_block(message["events"])
     review = message.get("review")
     if review:   # a second opinion on the previous answer, asked for by the user
         text = '<second_opinion model="%s" verdict="%s">\n%s\n</second_opinion>\n\n%s' % (

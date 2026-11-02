@@ -1,0 +1,121 @@
+/* Home (home.js): the lab at a glance, as labMaster's Home, in Kelvin's colours. The greeting and one line of what goes
+   on, three tiles (the sequence, the runs, the lab), and under them the blocks Kelvin keeps. Drawn with the kit at the
+   end of app.css (its tokens, .kcard, .chip); light and dark come from the tokens alone. */
+
+/* the conversation's place (as .scroller: from a zero basis, so the top bar keeps its own height when it wraps) */
+.homeview { flex: 1 1 0%; min-height: 0; overflow-y: auto; background: var(--page); }
+#app.full .main > .homeview { display: none !important; }   /* a panel in full screen: Home is out of sight, as the chat is */
+.home-col { max-width: 1040px; margin: 0 auto; padding: 28px 32px 48px; display: flex; flex-direction: column; gap: 22px; }
+
+/* ---------- the greeting, and one line of what goes on now ---------- */
+.home-hello { display: grid; gap: 4px; }
+.home-greet { margin: 0; font-size: 30px; line-height: 1.25; color: var(--text); }
+.home-state { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 9px; min-height: 30px; font-size: 15px; color: var(--text-2); }
+.home-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--line-strong); }
+.home-state.ok .home-dot { background: var(--ok); }
+.home-state.warn .home-dot { background: var(--warn); }
+.home-state.bad .home-dot { background: var(--danger); }
+.home-state.ok .home-say { color: var(--text); }
+.home-state.warn .home-say { color: var(--warn); }
+.home-state.bad .home-say { color: var(--danger); font-weight: 600; }
+.home-say { min-width: 0; overflow-wrap: anywhere; }
+.home-labname { color: var(--muted); }
+.home-labname::before { content: "· "; }
+
+/* ---------- the tiles: a card each, the whole card opens its panel ---------- */
+.home-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.home-tile { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 168px; padding: 18px 20px;
+  background: var(--card); border: 1px solid var(--card-line); border-radius: var(--radius); box-shadow: var(--card-shadow);
+  cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.home-tile:hover, .home-tile:has(.home-tile-go:focus-visible) {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--card-shadow); }
+.home-tile.live { border-color: var(--accent); }
+.home-tile-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; min-width: 0; }
+.home-tile-foot { margin-top: auto; min-width: 0; }   /* the numbers line up across the tiles; their rows sit at the bottom */
+.home-tile-go { flex: 1 1 auto; min-width: 0; margin: 0; padding: 0; border: 0; background: none; cursor: pointer; text-align: left;
+  font-size: 16px; font-weight: 650; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.home-tile-go::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }   /* the card is its button */
+.home-tile-go:focus-visible { outline: none; }
+.home-kpi { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 8px; margin: 0 0 8px; }
+.home-kpi-n { font-size: 32px; font-weight: 650; line-height: 1.1; letter-spacing: -0.01em; color: var(--text);
+  font-variant-numeric: tabular-nums; }
+.home-kpi-unit { font-size: 13px; color: var(--muted); }
+.home-kpi-unit:empty { display: none; }
+.home-bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; margin-bottom: 10px; }
+.home-bar-fill { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--accent); transition: width .4s ease; }
+.home-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 14px; color: var(--text-2); }
+.home-line-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-line-num { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* the runs and the watched readings: short rows in a tile */
+.home-mini { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; min-width: 0; }
+.home-none { font-size: 14px; color: var(--muted); }
+.home-run { position: relative; z-index: 1; display: flex; align-items: center; gap: 8px; width: calc(100% + 12px); min-width: 0;
+  margin: 0 -6px; padding: 4px 6px; border: 0; border-radius: var(--radius-s); background: none; cursor: pointer; text-align: left;
+  font-size: 14px; color: var(--text); }
+.home-run:hover { background: var(--hover); }
+.home-run:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.home-run-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-run-time { flex: none; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.home-st { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--line-strong); }
+.home-st.ok { background: var(--ok); }
+.home-st.warn { background: var(--warn); }
+.home-st.bad { background: var(--danger); }
+.home-st.run { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+.home-watch { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 3px 0; font-size: 14px; }
+.home-watch-key { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.home-watch-val { flex: none; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.home-watch.alarm .home-watch-val { color: var(--danger); }
+
+/* ---------- Kelvin's blocks: a .kcard each, its edge the kind's colour ---------- */
+.home-blocks { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.home-block { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 14px 16px 10px; transition: box-shadow .5s ease; }
+.home-block.fresh { box-shadow: 0 0 0 2px var(--accent), var(--card-shadow); transition: none; }   /* it just arrived */
+.hk-head { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.hk-kind { flex: none; display: grid; place-items: center; height: 22px; color: var(--kind); }
+.hk-kind svg { width: 17px; height: 17px; }
+.hk-title { flex: 1 1 auto; min-width: 0; margin: 0; font-size: 15px; font-weight: 600; line-height: 22px; color: var(--text);
+  overflow-wrap: anywhere; }
+.hk-tools { flex: none; display: flex; gap: 2px; margin: -3px -8px 0 0; }
+.hk-btn { display: grid; place-items: center; min-width: 28px; height: 28px; padding: 0 6px; border: 0; border-radius: var(--radius-s);
+  background: none; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; opacity: 0;
+  transition: opacity .12s; }
+.hk-btn svg { width: 16px; height: 16px; }
+.hk-btn:hover { background: var(--hover); color: var(--text); }
+.hk-btn:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
+.home-block:hover .hk-btn, .home-block:focus-within .hk-btn, .hk-pin[aria-pressed="true"], .hk-del.confirm { opacity: 1; }
+.hk-pin[aria-pressed="true"] { color: var(--accent); }
+.hk-pin[aria-pressed="true"] svg { fill: currentColor; }
+.hk-del.confirm { color: var(--danger); background: var(--danger-soft); }
+@media (hover: none) { .hk-btn { opacity: 1; } }
+.hk-value { font-size: 26px; font-weight: 650; line-height: 1.2; color: var(--text); font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere; }
+.hk-value.ok { color: var(--ok); }
+.hk-value.warn { color: var(--warn); }
+.hk-value.bad, .hk-value.alarm { color: var(--danger); }
+.hk-text { font-size: 14px; line-height: 1.5; color: var(--text-2); overflow-wrap: anywhere; }
+.hk-text p, .hk-text ul, .hk-text ol, .hk-text pre, .hk-text table { margin: 0 0 6px; }
+.hk-text > :last-child { margin-bottom: 0; }
+.hk-text ul, .hk-text ol { padding-left: 20px; }
+.hk-text a { color: var(--accent); }
+.hk-check { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.hk-check label { display: flex; align-items: flex-start; gap: 9px; padding: 3px 0; font-size: 14px; color: var(--text); cursor: pointer; }
+.hk-check input { flex: none; width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--accent); cursor: pointer; }
+.hk-check li.done span { color: var(--muted); text-decoration: line-through; }
+.hk-acts { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 2px; }
+.hk-acts .btn.ghost:first-child { margin-left: -10px; }   /* a quiet button alone: its words in line with the text above */
+.hk-foot { display: flex; justify-content: flex-end; margin-top: auto; }
+.hk-ago { font-size: 12px; color: var(--muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  .home-st.run { animation: none; }
+  .home-bar-fill, .home-tile, .home-block { transition: none; }
+}
+
+/* ---------- a narrow main column (a phone, or the panels beside it): one column ---------- */
+@container (max-width: 640px) {
+  .home-col { padding: 20px 16px 40px; gap: 18px; }
+  .home-greet { font-size: 26px; }
+  .home-tiles, .home-blocks { grid-template-columns: minmax(0, 1fr); }
+  .home-tile { min-height: 0; }
+}

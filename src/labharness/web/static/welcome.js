@@ -1,0 +1,713 @@
+"use strict";
+// The first start (welcome.js). A lab with nothing in it yet (no lab.yaml, no instruments) opens on this page, over the
+// app, in AlphainZ's wizard form: three steps, each one card of rows (a title, its value under it, the control at the
+// right), with no sentences. Workspace: the lab's scripts folder, the data folder, and the scripts to import as
+// functions. Model: an API key, ChatGPT, Claude Code, a local model. Instruments: a scan, and the ones found added to
+// the lab. Done or Skip: never again in this browser (lh.welcome), and Home shows. While it shows, body has the class
+// welcome-on (app.js's setupWait waits for it) and the app behind it is inert.
+(() => {
+  let K = null;   // window.Kelvin, from kelvin:ready
+  const SETUP_BUSY = new Set(["connecting", "scanning", "drafting", "reading"]);
+  const STEPS = [["workspace", "Workspace"], ["model", "Model"], ["instruments", "Instruments"]];
+  const KEYS = [["anthropic_api_key", "Claude"], ["openai_api_key", "OpenAI"], ["gemini_api_key", "Gemini"]];
+  const SHOWN = 12;   // the scripts listed before "N more"
+  const W = {
+    boot: null, state: null, gated: false, open: false, step: 0, busy: 0, moving: false, els: {}, setupKey: "",
+    changed: false,   // a key, the local model or ChatGPT is new: the page's list of models is redone at the end
+    scripts: { folder: "", counts: null, typed: "", editing: false, msg: "", full: "" },
+    data: { path: null, typed: "", editing: false, msg: "", full: "" },
+    files: { list: null, all: false, ticked: new Set(), have: new Set(), failed: new Map(), done: 0, todo: 0, running: false },
+    keys: {}, typed: {}, keyMsg: {},
+    gpt: { signed: null, waiting: false, timer: 0, msg: "" },
+    cc: null,
+    local: { url: "", typed: "", msg: "" },
+    scan: { phase: "idle", found: [], ticked: new Set(), added: new Set(), msg: "", full: "" },
+  };
+
+  // ------------------------------------------------------------------ helpers
+  const warn = (e) => { try { console.warn("welcome:", e); } catch (x) { /* nowhere to say it */ } };
+  function safe(fn, ...args) {   // what a person does here never throws into the page
+    try {
+      const r = fn(...args);
+      if (r && typeof r.catch === "function") r.catch(warn);
+      return r;
+    } catch (e) { warn(e); return null; }
+  }
+  const plural = (n, one) => n + " " + one + (n === 1 ? "" : "s");
+  const norm = (p) => String(p || "").trim().replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+  const unquote = (p) => String(p || "").trim().replace(/^"(.*)"$/, "$1").trim();
+  const short = (e) => {   // a refusal in a few words where it can be (the whole of it is the line's title)
+    const text = String((e && e.message) || e || "");
+    return /does not exist|no such file|cannot find/i.test(text) ? "Not found" : text;
+  };
+  const setupBusy = () => SETUP_BUSY.has((((W.state || {}).setup) || {}).state);
+  const ownKeys = () => !(W.boot && W.boot.settings && W.boot.settings.own_keys === false);
+
+  function btn(label, cls, onclick, opts) {
+    const o = opts || {};
+    const b = K.h("button", { class: "btn" + (cls ? " " + cls : ""), type: "button", "data-f": o.f || null }, label);
+    b.disabled = !!o.disabled;
+    if (onclick) b.addEventListener("click", (e) => safe(onclick, b, e));
+    return b;
+  }
+  const chip = (text, tone, title) => K.h("span", { class: "chip" + (tone ? " " + tone : ""), title: title || null }, text);
+  const spinner = () => K.h("span", { class: "spinner", "aria-hidden": "true" });
+  const value = (text, tone, title, wrap) =>
+    K.h("div", { class: "wl-value" + (tone ? " " + tone : "") + (wrap ? " wrap" : ""), title: title || null }, text);
+  function row(title, val, ctl, cls) {   // a title, its value under it, the controls at the right
+    const kids = (ctl || []).filter(Boolean);
+    return K.h("div", { class: "wl-row" + (cls ? " " + cls : "") },
+      K.h("div", { class: "wl-text" }, K.h("div", { class: "wl-title" }, title), val || null),
+      kids.length ? K.h("div", { class: "wl-ctl" }, ...kids) : null);
+  }
+  function block(key, ...rows) {   // the rows redrawn together, by key; hidden when there are none
+    const kids = rows.filter(Boolean);
+    return K.h("div", { class: "wl-block", "data-row": key, hidden: !kids.length }, ...kids);
+  }
+  function item(box, label, sub, end, title) {   // a ticked line of a list: a script to import, an instrument found
+    return K.h("label", { class: "wl-row wl-item" + (box.disabled ? " off" : ""), title: title || null },
+      box, K.h("span", { class: "wl-label" }, label), K.h("span", { class: "wl-sub" }, sub || ""), end || null);
+  }
+  function tick(checked, disabled, label, onchange) {
+    const box = K.h("input", { type: "checkbox", class: "wl-check", "aria-label": label });
+    box.checked = !!checked;
+    box.disabled = !!disabled;
+    if (onchange) box.addEventListener("change", () => safe(onchange, box.checked));
+    return box;
+  }
+  // one block drawn again in place; the person's focus stays on the same control when it is still there
+  function redraw(key) {
+    const group = W.els.group;
+    const old = group && group.querySelector('[data-row="' + key + '"]');
+    if (!old || !BLOCKS[key]) return;
+    let fresh;
+    try { fresh = BLOCKS[key](); } catch (e) { warn(e); return; }
+    const active = document.activeElement;
+    const had = old.contains(active) ? (active.getAttribute("data-f") || "") : null;
+    old.replaceWith(fresh);
+    if (had === null) return;
+    const same = had && fresh.querySelector('[data-f="' + had + '"]');
+    const to = same && !same.disabled ? same : W.els.next;
+    if (to && !to.disabled) to.focus({ preventScroll: true });
+  }
+  // after an action whose button waited (a disabled button loses the focus): the focus back on this page, on the
+  // control named (when it is there) or on Next; never taken from where the person has put it meanwhile
+  function refocus(f) {
+    if (!W.open || !W.els.root || document.querySelector("dialog[open]")) return;
+    const a = document.activeElement;
+    if (a && a !== document.body) return;
+    const el = (f && W.els.group.querySelector('[data-f="' + f + '"]')) || W.els.next;
+    if (el && !el.disabled) el.focus({ preventScroll: true });
+  }
+  function field(key) { return W.els.group && W.els.group.querySelector('[data-f="' + key + '-field"]'); }
+  function focusField(key) {
+    const el = field(key);
+    if (el) { el.focus(); if (el.select) el.select(); }
+  }
+  function markBad(key) {
+    const el = field(key);
+    if (el) { el.classList.add("bad"); el.focus(); }
+  }
+  function begin(button) {   // an action under way: its button waits, and so does the way on
+    W.busy += 1;
+    footer();
+    if (button) { button.disabled = true; button.before(spinner()); }
+  }
+  function end() { W.busy = Math.max(0, W.busy - 1); footer(); }
+
+  // ------------------------------------------------------------------ step 1: Workspace
+  function pathField(st, key, use, label) {   // in a browser (no folder picker): the path typed, then Use
+    const input = K.h("input", { class: "kfield", type: "text", spellcheck: "false", autocomplete: "off",
+                                 placeholder: "Folder path", "aria-label": label + " folder", "data-f": key + "-field" });
+    input.value = st.typed;
+    const useBtn = btn("Use", "small", (b) => use(input.value, b), { f: key + "-use" });
+    input.addEventListener("input", () => { st.typed = input.value; input.classList.remove("bad"); });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); e.stopPropagation(); safe(use, input.value, useBtn); }
+      else if (e.key === "Escape" && st.editing) {   // the folder as it was, and Change… again
+        e.preventDefault(); e.stopPropagation();
+        Object.assign(st, { editing: false, typed: "", msg: "", full: "" });
+        redraw(key);
+        const change = W.els.group.querySelector('[data-f="' + key + '-change"]');
+        if (change) change.focus();
+      }
+    });
+    return [input, useBtn];
+  }
+  function scriptsBlock() {
+    const st = W.scripts, picker = K.hasPicker();
+    let val;
+    if (st.msg) val = value(st.msg, "bad", st.full);
+    else if (st.folder) {   // the folder · its scripts (the runnable ones listed, else the survey's) · the instruments in them
+      const parts = [st.folder], listed = W.files.list;
+      if (listed || st.counts) parts.push(plural(listed ? listed.length : st.counts.scripts, "script"));
+      if (st.counts && st.counts.instruments) parts.push(plural(st.counts.instruments, "instrument"));
+      val = value(parts.join(" · "), "", st.folder, true);
+    } else val = value("—");
+    let ctl, wide = false;
+    if (picker) ctl = [btn(st.folder ? "Change…" : "Choose…", "small", chooseScripts, { f: "scripts-pick" })];
+    else if (!st.folder || st.editing) { ctl = pathField(st, "scripts", useScripts, "Scripts"); wide = true; }
+    else {
+      ctl = [btn("Change…", "small", () => {
+        Object.assign(st, { editing: true, typed: st.folder, msg: "", full: "" });
+        redraw("scripts");
+        focusField("scripts");
+      }, { f: "scripts-change" })];
+    }
+    return block("scripts", row("Scripts", val, ctl, wide ? "wide" : ""));
+  }
+  async function chooseScripts(button) {
+    const path = await K.pickFolder(W.scripts.folder || "");
+    if (path) await useScripts(path, button);
+  }
+  // the lab's scripts: Kelvin reads them (never runs them) for its instruments; then the runnable ones to import
+  async function useScripts(typed, button) {
+    const st = W.scripts, folder = unquote(typed);
+    if (!folder) { markBad("scripts"); return false; }
+    let ok = false;
+    begin(button);
+    try {
+      const r = await K.api("/api/instruments/scripts-folder", { body: { folder } });
+      Object.assign(st, { folder: r.folder || folder, counts: { scripts: r.scripts || 0, instruments: r.instruments || 0 },
+                          typed: "", editing: false, msg: "", full: "" });
+      Object.assign(W.files, { list: null, all: false });
+      W.files.failed.clear();
+      ok = true;
+    } catch (e) {
+      Object.assign(st, { msg: short(e), full: e.message, typed: folder });
+    } finally {
+      end();
+      redraw("scripts");
+      refocus(ok ? "" : K.hasPicker() ? "scripts-pick" : "scripts-field");
+    }
+    if (ok) await loadFiles();
+    return ok;
+  }
+  function dataBlock() {
+    const st = W.data, picker = K.hasPicker();
+    const val = st.msg ? value(st.msg, "bad", st.full)
+      : value(st.path === null ? "…" : st.path || "—", "", st.path || null, true);
+    let ctl = [], wide = false;
+    if (st.path === null) ctl = [];
+    else if (picker) ctl = [btn("Change…", "small", chooseData, { f: "data-pick" })];
+    else if (st.editing) { ctl = pathField(st, "data", useData, "Data"); wide = true; }
+    else {
+      ctl = [btn("Change…", "small", () => {
+        Object.assign(st, { editing: true, typed: st.path || "", msg: "", full: "" });
+        redraw("data");
+        focusField("data");
+      }, { f: "data-change" })];
+    }
+    return block("data", row("Data", val, ctl, wide ? "wide" : ""));
+  }
+  async function loadData() {
+    const st = W.data;
+    try {
+      const r = await K.api("/api/data-folder");
+      st.path = r.path || "";
+      if (r.problem) Object.assign(st, { msg: String(r.problem), full: String(r.problem) });
+    } catch (e) { Object.assign(st, { path: "", msg: short(e), full: e.message }); }
+    redraw("data");
+  }
+  async function chooseData(button) {
+    const path = await K.pickFolder(W.data.path || "");
+    if (path) await useData(path, button);
+  }
+  async function useData(typed, button) {
+    const st = W.data, path = unquote(typed);
+    if (!path) { markBad("data"); return false; }
+    if (norm(path) === norm(st.path)) { Object.assign(st, { editing: false, typed: "", msg: "", full: "" }); redraw("data"); return true; }
+    let ok = false;
+    begin(button);
+    try {
+      const r = await K.api("/api/data-folder", { body: { path, move: false } });
+      Object.assign(st, { path: r.path || path, typed: "", editing: false, msg: "", full: "" });
+      ok = true;
+    } catch (e) {
+      Object.assign(st, { msg: short(e), full: e.message, typed: path });
+    } finally {
+      end();
+      redraw("data");
+      refocus(ok ? "" : K.hasPicker() ? "data-pick" : "data-field");
+    }
+    return ok;
+  }
+  // the runnable scripts under the scripts folder (library op files), all ticked; Next imports the ticked ones
+  async function loadFiles() {
+    const f = W.files, seq = (f.seq = (f.seq || 0) + 1);   // only the latest folder's list is kept
+    if (!W.scripts.folder) return;
+    try {
+      const [r, lib] = await Promise.all([K.api("/api/library", { body: { op: "files" } }),
+        K.api("/api/library").catch(() => null)]);
+      if (seq !== f.seq) return;
+      f.list = Array.isArray(r.files) ? r.files : [];
+      f.have = new Set(((lib && lib.scripts) || []).map((s) => norm(s.path)));
+      f.ticked = new Set(f.list.filter((x) => !f.have.has(norm(x.path))).map((x) => x.path));
+    } catch (e) {   // no list from this Kelvin: nothing offered to import here
+      if (seq !== f.seq) return;
+      f.list = null;
+      warn(e);
+    }
+    redraw("files");
+    redraw("scripts");   // its count of scripts is the list's now
+  }
+  function filesCount() {   // the Import row's value: what Next imports, or what came in
+    const f = W.files, list = f.list || [];
+    if (f.running) return [f.done + " / " + f.todo, ""];
+    if (!list.length) return ["None", ""];
+    const fresh = list.filter((x) => !f.have.has(norm(x.path)));
+    const n = fresh.filter((x) => f.ticked.has(x.path)).length, added = list.length - fresh.length;
+    if (!n && added) return [added + " added", "ok"];
+    return [n === fresh.length ? plural(n, "file") : n + " of " + fresh.length, ""];
+  }
+  function setFilesCount() {
+    const el = W.els.group && W.els.group.querySelector('[data-row="files"] [data-v="count"]');
+    if (!el) return;
+    const [text, tone] = filesCount();
+    el.textContent = text;
+    el.className = "wl-value" + (tone ? " " + tone : "");
+  }
+  function filesBlock() {
+    const f = W.files;
+    if (!W.scripts.folder || !f.list) return block("files");
+    const [text, tone] = filesCount();
+    const count = value(text, tone);
+    count.setAttribute("data-v", "count");
+    const shown = f.all ? f.list : f.list.slice(0, SHOWN);
+    const more = f.list.length - shown.length;
+    return block("files", row("Import", count), ...shown.map(fileItem),
+      more > 0 ? K.h("button", { class: "wl-row wl-more", type: "button", "data-f": "files-more",
+        onclick: () => {   // the rest of the list, the focus on the first of them
+          f.all = true;
+          redraw("files");
+          const first = W.els.group.querySelectorAll('[data-row="files"] .wl-check')[SHOWN];
+          if (first) first.focus({ preventScroll: true });
+        } }, more + " more") : null);
+  }
+  function fileItem(x) {
+    const f = W.files, done = f.have.has(norm(x.path)), failed = f.failed.get(x.path);
+    const rel = String(x.rel || x.name || x.path || "").replace(/\\/g, "/");
+    const cut = rel.lastIndexOf("/");
+    const name = x.name || rel.slice(cut + 1);
+    const box = tick(done || f.ticked.has(x.path), done || f.running, name, (on) => {
+      if (on) f.ticked.add(x.path); else f.ticked.delete(x.path);
+      setFilesCount();
+    });
+    return item(box, name, cut > 0 ? rel.slice(0, cut) : "",
+      done ? chip("Added", "ok") : failed ? chip("Failed", "bad", failed) : null, x.path);
+  }
+  async function importTicked() {   // false: one failed, shown on its line (Next again goes on)
+    const f = W.files;
+    if (!W.scripts.folder || !f.list || f.running) return !f.running;
+    const todo = f.list.filter((x) => f.ticked.has(x.path) && !f.have.has(norm(x.path)));
+    if (!todo.length) return true;
+    Object.assign(f, { running: true, done: 0, todo: todo.length });
+    f.failed.clear();
+    W.busy += 1;
+    footer();
+    redraw("files");
+    for (const x of todo) {
+      try {
+        await K.api("/api/library", { body: { op: "import", path: x.path } });
+        f.have.add(norm(x.path));
+      } catch (e) {
+        f.failed.set(x.path, e.message || "Failed");
+        f.ticked.delete(x.path);
+      }
+      f.done += 1;
+      setFilesCount();
+    }
+    f.running = false;
+    end();
+    redraw("files");
+    return !f.failed.size;
+  }
+
+  // ------------------------------------------------------------------ step 2: Model
+  function keyBlock(name, label) {
+    const key = "key-" + name;
+    if (!ownKeys()) return block(key);
+    if (W.keys[name]) return block(key, row(label, null, [chip("Set ✓", "ok")]));
+    const input = K.h("input", { class: "kfield", type: "password", autocomplete: "off", spellcheck: "false",
+                                 placeholder: "API key", "aria-label": label + " API key", "data-f": key + "-field" });
+    input.value = W.typed[name] || "";
+    const save = btn("Save", "small", (b) => saveKey(name, b), { f: key + "-save" });
+    input.addEventListener("input", () => { W.typed[name] = input.value; input.classList.remove("bad"); });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); e.stopPropagation(); safe(saveKey, name, save); }
+    });
+    const msg = W.keyMsg[name];
+    return block(key, row(label, msg ? value(msg, "bad", msg) : null, [input, save], "wide"));
+  }
+  async function saveKey(name, button, quiet) {
+    const text = String(W.typed[name] || "").trim();
+    if (!text) { if (!quiet) markBad("key-" + name); return true; }
+    let ok = false;
+    begin(button);
+    try {
+      const r = await K.api("/api/settings", { body: { [name]: text } });
+      W.keys = Object.assign({}, W.keys, (r.settings && r.settings.keys) || {});
+      if (!W.keys[name]) throw new Error("Not saved");   // this Kelvin takes no keys of its own
+      delete W.typed[name];
+      delete W.keyMsg[name];
+      W.changed = true;
+      ok = true;
+    } catch (e) {
+      W.keyMsg[name] = e.message;
+    } finally {
+      end();
+      redraw("key-" + name);
+      if (!quiet) refocus(ok ? "" : "key-" + name + "-field");
+    }
+    return ok;
+  }
+  function gptBlock() {
+    const g = W.gpt;
+    if (g.signed) return block("gpt", row("ChatGPT", null, [chip("Signed in ✓", "ok")]));
+    return block("gpt", row("ChatGPT", g.msg ? value(g.msg, "bad", g.msg) : null,
+      [g.waiting ? spinner() : null, btn("Continue", "small", gptStart, { f: "gpt-go" })]));
+  }
+  async function gptStatus() {
+    try { W.gpt.signed = !!(await K.api("/api/chatgpt")).signed_in; } catch (e) { W.gpt.signed = false; }
+    redraw("gpt");
+  }
+  // Kelvin opens OpenAI's sign-in page in this computer's browser itself (app.py chatgpt_signin): a tab opened here
+  // as well would be a second one. Then the sign-in is asked after every 2 s, for up to 10 minutes.
+  async function gptStart() {
+    const g = W.gpt;
+    g.msg = "";
+    try { await K.api("/api/chatgpt/signin", { body: {} }); } catch (e) { g.msg = e.message; redraw("gpt"); return; }
+    g.waiting = true;
+    redraw("gpt");
+    clearInterval(g.timer);
+    const until = Date.now() + 10 * 60 * 1000;
+    g.timer = setInterval(async () => {
+      if (!W.open || Date.now() > until) {
+        clearInterval(g.timer);
+        g.waiting = false;
+        redraw("gpt");
+        return;
+      }
+      let st;
+      try { st = await K.api("/api/chatgpt"); } catch (e) { return; }
+      if (!st.signed_in || !W.open) return;
+      clearInterval(g.timer);
+      Object.assign(g, { waiting: false, signed: true });
+      W.changed = true;
+      redraw("gpt");
+    }, 2000);
+  }
+  function ccBlock() {
+    if (!(W.boot && W.boot.claude_code)) return block("cc");
+    const c = W.cc;
+    const state = !c ? null : c.signed_in ? chip("Signed in ✓", "ok") : c.enabled === false ? chip("Off", "line")
+      : !c.cli ? chip("Not found", "line") : chip("Not signed in", "warn");
+    return block("cc", row("Claude Code", null, [state]));
+  }
+  async function ccStatus() {
+    try { W.cc = await K.api("/api/claude-code"); } catch (e) { W.cc = { enabled: true, cli: null, signed_in: false }; }
+    redraw("cc");
+  }
+  function localBlock() {
+    const l = W.local;
+    if (l.url) return block("local", row("Local", value(l.url, "", l.url), [chip("Set ✓", "ok")]));
+    const input = K.h("input", { class: "kfield", type: "url", autocomplete: "off", spellcheck: "false",
+                                 placeholder: "http://localhost:11434/v1", "aria-label": "Local model address",
+                                 "data-f": "local-field" });
+    input.value = l.typed;
+    const save = btn("Save", "small", (b) => saveLocal(b), { f: "local-save" });
+    input.addEventListener("input", () => { l.typed = input.value; input.classList.remove("bad"); });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); e.stopPropagation(); safe(saveLocal, save); }
+    });
+    return block("local", row("Local", l.msg ? value(l.msg, "bad", l.msg) : null, [input, save], "wide"));
+  }
+  async function saveLocal(button, quiet) {
+    const l = W.local, url = String(l.typed || "").trim();
+    if (!url) { if (!quiet) markBad("local"); return true; }
+    let ok = false;
+    begin(button);
+    try {
+      const r = await K.api("/api/settings", { body: { local_base_url: url } });
+      Object.assign(l, { url: (r.settings && r.settings.local_base_url) || url, typed: "", msg: "" });
+      W.changed = true;
+      ok = true;
+    } catch (e) {
+      l.msg = e.message;
+    } finally {
+      end();
+      redraw("local");
+      if (!quiet) refocus(ok ? "" : "local-field");
+    }
+    return ok;
+  }
+
+  // ------------------------------------------------------------------ step 3: Instruments
+  const canAdd = (f) => !!f.card_id && !f.in_lab;
+  const toAdd = () => W.scan.found.filter((f) => canAdd(f) && W.scan.ticked.has(f.address) && !W.scan.added.has(f.address));
+  function setupBlock() {   // Kelvin's own setup at work (connecting, scanning, writing a card, reading settings)
+    const st = ((W.state || {}).setup) || {};
+    if (!SETUP_BUSY.has(st.state)) return block("setup");
+    const msg = String(st.message || "");
+    return block("setup", row("Setting up", msg ? value(msg, "", msg) : null, [spinner()]));
+  }
+  function scanBlock() {
+    const s = W.scan, busy = s.phase === "scanning" || s.phase === "adding", setup = setupBusy();
+    let val = null;
+    if (s.msg) val = value(s.msg, "bad", s.full);
+    else if (s.phase === "none") val = value("None found");
+    else if (s.phase === "found") val = value(s.found.length + " found");
+    else if (s.phase === "added") val = value(s.added.size + " added", "ok");
+    const ctl = [busy ? spinner() : null];
+    if (s.phase === "idle" || s.phase === "scanning") {
+      ctl.push(btn("Scan", "small primary", scan, { f: "scan", disabled: busy || setup }));
+    } else ctl.push(btn("Scan again", "small", scan, { f: "scan", disabled: busy || setup }));
+    if (s.phase !== "scanning" && s.found.some((f) => canAdd(f) && !s.added.has(f.address))) {
+      ctl.push(btn("Add", "small primary", (b) => addFound(b), { f: "add", disabled: busy || !toAdd().length }));
+    }
+    return block("scan", row("Instruments", val, ctl));
+  }
+  function foundBlock() {
+    const s = W.scan;
+    if (s.phase === "scanning" || !s.found.length) return block("found");
+    return block("found", ...s.found.map((f) => {
+      const added = s.added.has(f.address);
+      const label = f.in_lab || (f.card_id ? f.model || f.card_id
+        : String(f.idn || "").split(",").slice(0, 2).join(" ").trim() || "Unknown");
+      const box = tick(added || !!f.in_lab || (canAdd(f) && s.ticked.has(f.address)),
+        added || !canAdd(f) || s.phase === "adding", label + " " + f.address, (on) => {
+          if (on) s.ticked.add(f.address); else s.ticked.delete(f.address);
+          const add = W.els.group.querySelector('[data-f="add"]');
+          if (add) add.disabled = !toAdd().length;
+        });
+      return item(box, label, f.address, added ? chip("Added", "ok") : f.in_lab ? chip("In lab", "line") : null,
+        f.idn || f.how || null);
+    }));
+  }
+  async function scan() {
+    const s = W.scan;
+    Object.assign(s, { phase: "scanning", found: [], added: new Set(), msg: "", full: "" });
+    W.busy += 1;
+    footer();
+    redraw("scan");
+    redraw("found");
+    try {
+      const r = await K.api("/api/instruments/scan", { body: {} });
+      s.found = Array.isArray(r.found) ? r.found : [];
+      s.ticked = new Set(s.found.filter(canAdd).map((f) => f.address));
+      s.phase = s.found.length ? "found" : "none";
+    } catch (e) {   // 503: no VISA on this computer, so nothing to find
+      s.phase = e.status === 503 ? "none" : "error";
+      if (e.status !== 503) Object.assign(s, { msg: short(e), full: e.message });
+    }
+    end();
+    redraw("scan");
+    redraw("found");
+    refocus(toAdd().length ? "add" : "scan");
+  }
+  // the ticked ones into the lab config (draft), saved and connected (POST /api/lab, the owner's PIN asked if set)
+  async function addFound(button) {
+    const s = W.scan, chosen = toAdd();
+    if (!chosen.length) return true;
+    const items = chosen.map((f) => ({ name: f.suggested || "instr", card: f.card_id, address: f.address,
+                                       note: String(f.idn || "").slice(0, 60) }));
+    s.phase = "adding";
+    Object.assign(s, { msg: "", full: "" });
+    begin(button);
+    redraw("scan");
+    redraw("found");
+    try {
+      const lab = await K.api("/api/lab");
+      const draft = await K.api("/api/instruments/draft", { body: { items, base: lab.yaml || "" } });
+      await K.api("/api/lab", { body: { yaml: draft.yaml, why: "first start" } });
+      for (const f of chosen) s.added.add(f.address);
+      s.phase = "added";
+      safe(K.pollState);
+      return true;
+    } catch (e) {
+      Object.assign(s, { phase: "found", msg: short(e), full: e.message });
+      return false;
+    } finally { end(); redraw("scan"); redraw("found"); refocus(button ? (s.phase === "added" ? "" : "add") : null); }
+  }
+
+  // ------------------------------------------------------------------ the page
+  const BLOCKS = {
+    scripts: scriptsBlock, data: dataBlock, files: filesBlock,
+    gpt: gptBlock, cc: ccBlock, local: localBlock,
+    setup: setupBlock, scan: scanBlock, found: foundBlock,
+  };
+  for (const [name, label] of KEYS) BLOCKS["key-" + name] = () => keyBlock(name, label);
+  const ORDER = {
+    workspace: ["scripts", "data", "files"],
+    model: KEYS.map(([name]) => "key-" + name).concat(["gpt", "cc", "local"]),
+    instruments: ["setup", "scan", "found"],
+  };
+  function build(root) {
+    const h = K.h;
+    const dots = STEPS.map(([, title], i) => h("button", { class: "wl-dot", type: "button", role: "tab", title,
+                                                          "aria-label": title, onclick: () => safe(go, i) }));
+    const where = h("span", { class: "wl-where" });
+    const group = h("div", { class: "wl-group", role: "group" });
+    const back = btn("Skip", "ghost", () => (W.step === 0 ? finish() : go(W.step - 1)), { f: "back" });
+    const next = btn("Next", "primary", () => go(W.step + 1), { f: "next" });
+    const spin = spinner();
+    spin.hidden = true;
+    root.setAttribute("role", "dialog");
+    root.setAttribute("aria-modal", "true");
+    root.setAttribute("aria-labelledby", "wl-title");
+    root.replaceChildren(h("div", { class: "wl-col" },
+      h("header", { class: "wl-head" },
+        h("span", { class: "logo", "aria-hidden": "true", html: K.MARK }),
+        h("div", { class: "wl-titles" }, h("h1", { class: "display wl-h1", id: "wl-title" }, "Welcome to Kelvin"),
+          W.boot && W.boot.version ? chip("v" + W.boot.version, "line") : null)),
+      h("div", { class: "wl-steps" }, h("div", { class: "wl-dots", role: "tablist", "aria-label": "Steps" }, ...dots), where),
+      group,
+      h("footer", { class: "wl-foot" }, back, h("span", { class: "spacer" }), spin, next)));
+    W.els = { root, dots, where, group, back, next, spin };
+  }
+  function footer() {
+    const e = W.els;
+    if (!e.next) return;
+    const busy = W.busy > 0 || W.moving;
+    e.back.textContent = W.step === 0 ? "Skip" : "Back";
+    e.next.textContent = W.step === STEPS.length - 1 ? "Done" : "Next";
+    e.back.disabled = e.next.disabled = busy;
+    e.spin.hidden = !W.moving;   // an action in the card shows its own
+  }
+  function render() {
+    const [id, title] = STEPS[W.step];
+    W.els.dots.forEach((d, i) => {
+      d.classList.toggle("on", i === W.step);
+      d.setAttribute("aria-selected", String(i === W.step));
+    });
+    W.els.where.textContent = (W.step + 1) + " / " + STEPS.length + " · " + title;
+    W.els.group.setAttribute("aria-label", title);
+    W.els.group.replaceChildren(...ORDER[id].map((key) => BLOCKS[key]()));
+    footer();
+    if (id === "model") {
+      if (W.gpt.signed === null) gptStatus();
+      if (W.boot && W.boot.claude_code && !W.cc) ccStatus();
+    }
+  }
+  // leaving a step: what was typed and not yet used is used; going on, the ticked scripts are imported and the ticked
+  // instruments added. false: stay (something to see first, or a refusal on its row)
+  async function leave(forward) {
+    const id = STEPS[W.step][0];
+    if (id === "workspace") {
+      const sc = W.scripts, dt = W.data;
+      if (!K.hasPicker() && (!sc.folder || sc.editing) && unquote(sc.typed) && norm(sc.typed) !== norm(sc.folder)) {
+        const used = await useScripts(sc.typed, null);
+        return used && !(W.files.list && W.files.list.length);   // its scripts show first; Next again imports them
+      }
+      if (dt.editing && unquote(dt.typed) && !(await useData(dt.typed, null))) return false;
+      return forward ? importTicked() : true;
+    }
+    if (id === "model") {
+      let ok = true;
+      for (const [name] of KEYS) if (!W.keys[name]) ok = (await saveKey(name, null, true)) && ok;
+      if (!W.local.url) ok = (await saveLocal(null, true)) && ok;
+      return ok;
+    }
+    return forward && toAdd().length ? addFound(null) : true;
+  }
+  async function go(target) {
+    if (!W.open || W.moving || W.busy || target === W.step || target < 0) return;
+    W.moving = true;
+    footer();
+    let ok = false;
+    try { ok = await leave(target > W.step); } catch (e) { warn(e); }
+    W.moving = false;
+    footer();
+    if (ok && W.open && target >= STEPS.length) { finish(); return; }
+    if (ok && W.open) {
+      W.step = target;
+      render();
+      W.els.root.scrollTop = 0;
+    }
+    refocus();
+  }
+  function show() {
+    const root = document.getElementById("welcome");
+    if (!root) return;
+    const set = (W.boot && W.boot.settings) || {};
+    W.keys = Object.assign({}, set.keys || {});
+    W.local.url = set.local_base_url || "";
+    W.scripts.folder = set.lab_scripts || "";
+    W.open = true;
+    build(root);
+    document.body.classList.add("welcome-on");
+    // the same state opened the setup's own dialog a moment ago (pollState asks setupWait before it tells the parts
+    // kept apart): closed in the same task, so it is never seen, and closed it stays closed; this page asks instead
+    const wait = document.getElementById("setup-wait");
+    if (wait && wait.open) wait.close();
+    const app = document.getElementById("app");
+    if (app) app.inert = true;   // the app behind the page: no focus, no clicks
+    root.hidden = false;
+    render();
+    W.els.next.focus({ preventScroll: true });
+    loadData();
+    if (W.scripts.folder) loadFiles();
+  }
+  function hide() {
+    W.open = false;
+    clearInterval(W.gpt.timer);
+    const root = W.els.root || document.getElementById("welcome");
+    if (root) { root.hidden = true; root.replaceChildren(); }
+    document.body.classList.remove("welcome-on");
+    const app = document.getElementById("app");
+    if (app) app.inert = false;
+  }
+  // Done or Skip: not again in this browser; Home. With no scripts folder chosen, the first setup's question about
+  // the lab's scripts is answered "none", as here, so it doesn't come back as a dialog. A new key, local model or
+  // ChatGPT sign-in: the page's list of models is redone (Kelvin.refreshModels when the page lends it, else a reload)
+  async function finish() {
+    if (!W.open || W.finishing) return;
+    W.finishing = true;
+    K.store("lh.welcome", "done");
+    W.typed = {};
+    W.local.typed = "";
+    clearInterval(W.gpt.timer);
+    if (W.state && W.state.ask_scripts && !W.scripts.folder) {
+      try { await K.api("/api/instruments/scripts-folder", { body: { folder: "" } }); } catch (e) { warn(e); }
+    }
+    safe(K.setMode, "home");
+    if (W.changed && typeof K.refreshModels !== "function") { location.reload(); return; }
+    hide();
+    if (W.changed) K.api("/api/bootstrap").then((b) => K.refreshModels(b)).catch(warn);
+  }
+  function wanted(s) {
+    const info = s.lab_info || {};
+    return info.kind === "none" && !info.has_file && !(s.instruments || []).length && K.store("lh.welcome") !== "done";
+  }
+  function onState(s) {
+    W.state = s;
+    if (!K) return;   // before kelvin:ready: kept for it
+    if (!W.gated) {
+      W.gated = true;
+      if (wanted(s)) show();
+      return;
+    }
+    if (!W.open) return;
+    const st = s.setup || {};
+    const key = [st.state, st.message, st.step].join("|");
+    if (key === W.setupKey) return;
+    W.setupKey = key;
+    redraw("setup");   // in place; nothing else is drawn again
+    redraw("scan");    // a scan waits while Kelvin's own setup runs
+  }
+
+  document.addEventListener("kelvin:ready", (e) => safe(() => {
+    K = window.Kelvin;
+    W.boot = e.detail || {};
+    if (W.state && !W.gated) onState(W.state);
+  }));
+  document.addEventListener("kelvin:state", (e) => safe(onState, e.detail || {}));
+  document.addEventListener("keydown", (e) => {   // Enter: Next, wherever the person is not typing or on a button
+    if (!W.open || e.key !== "Enter" || e.isComposing || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const t = e.target;
+    if (t && t.closest && t.closest("button, a, textarea, select, [contenteditable], input:not([type=checkbox])")) return;
+    if (document.querySelector("dialog[open]")) return;   // a PIN asked meanwhile
+    e.preventDefault();
+    safe(go, W.step + 1);
+  });
+})();

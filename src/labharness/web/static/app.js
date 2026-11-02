@@ -197,7 +197,7 @@
     $("roles-edit").disabled = !r.pin;
     $("owner-notify-state").textContent = r.owner_notify.length
       ? "To " + r.owner_notify.join(" and ") + ", and the list in the app."
-      : "Only to the list in the app. The owner can send them where their own notifications go (Notifications).";
+      : "Only to the list in the app.";
     $("owner-notify-off").hidden = !r.owner_notify.length;
   }
   function editRoles() {
@@ -1243,12 +1243,12 @@
         queueFromState(r.queue);
         renderQueue();
         msg.textContent = r.message || "";
-        if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }   // its run gets its tab
+        if (!queue) { showQueue((r.message || "").split("\n")[0]); pollState(); }   // its run gets its tab
       } catch (e) { msg.classList.add("bad"); msg.textContent = e.message; }
     });
     const key = "again:" + encodeURIComponent(tab.runId);
     const run = h("button", { class: "btn small primary", type: "button", "data-busy": "start " + key }, "Run again");
-    const later = h("button", { class: "btn small ghost", type: "button", "data-busy": key }, "Add to the queue");
+    const later = h("button", { class: "btn small ghost", type: "button", "data-busy": key }, "Add to sequence");
     run.addEventListener("click", () => go(false, ["start", key]));
     later.addEventListener("click", () => go(true, [key]));
     if (cannot) { msg.textContent = cannot; parts.push(msg); return parts; }
@@ -1358,6 +1358,7 @@
   // (app.css), below 820 px the sidebar too.
   const CHAT_MIN = 520, SIDEBAR_W = 264;
   const PANES = {   // id: [open?, its column, its least width, where its width is kept]
+    seqpane: [() => !$("seqpane").hidden, "workcol", 340, "lh.seqWidth"],
     runpane: [() => RUNS.open, "workcol", 340, "lh.runsWidth"],
     edpane: [() => ED.open, "workcol", 360, "lh.edWidth"],
     anpane: [() => ANA.open, "workcol", 340, "lh.anWidth"],
@@ -1520,6 +1521,7 @@
   function initPanes() {
     const kept = (key) => Number(store(key)) || 0;
     PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(720, Math.max(420, window.innerWidth * 0.42)));
+    PANE_W.seqpane = kept("lh.seqWidth") || 460;
     PANE_W.anpane = kept("lh.anWidth") || PANE_W.runpane;   // until it has its own: the one it shared with Runs
     PANE_W.edpane = kept("lh.edWidth") || 460;
     PANE_W.labpanel = kept("lh.labWidth") || 380;
@@ -1542,6 +1544,8 @@
   function initRunsPane() {
     $("toggle-runs").addEventListener("click", () => pillClick("runpane", toggleRuns));
     $("close-runs").addEventListener("click", () => toggleRuns(false));
+    $("toggle-seq").addEventListener("click", () => pillClick("seqpane", toggleSeq));
+    $("close-seq").addEventListener("click", () => toggleSeq(false));
     $("open-runs").addEventListener("click", () => showView("runs"));
     $("open-scans").addEventListener("click", () => showView("scans"));
     $("open-queue").addEventListener("click", showQueue);
@@ -1804,7 +1808,7 @@
         JSON.stringify([c.project, d.id])));
       return g;
     });
-    sel.replaceChildren(new Option(groups.length ? "Nothing mounted" : "No devices yet: add one with New device…", ""), ...groups);
+    sel.replaceChildren(new Option(groups.length ? "Nothing mounted" : "No devices", ""), ...groups);
     MOUNT.key = null;   // new options: choose the mounted one again
     showMounted(r.mounted);
   }
@@ -2420,7 +2424,7 @@
       this.reviewData = r;
       this.el.append(this.reviewEl);
     }
-    error(text) { this.endText(); this.el.append(h("div", { class: "callout" }, text)); }
+    error(text) { this.endText(); this.el.append(h("div", { class: "callout bad" }, text)); }
     finish() {
       this.endText(); this.endThinking();
       for (const step of this.steps.values()) if (!step.done && step.unknown) { step.unknown(); step.done = true; }
@@ -2524,13 +2528,27 @@
       }
     }
   }
+  // a person's change to the sequence or Home, told to this chat (notices.py): a quiet line in the thread
+  function eventLine(m) {
+    const when = m.at ? new Date(m.at * 1000) : null;
+    return h("div", { class: "event-line", title: when ? when.toLocaleString() : "" },
+      when ? h("time", {}, when.toTimeString().slice(0, 5)) : null, h("span", {}, m.text));
+  }
   function renderChat(chat) {
     thread.replaceChildren();
     let reply = null, recalled = null, skip = 0;
     const lastUser = chat.messages.map((m) => m.role).lastIndexOf("user");
     S.lastReply = null;
+    S.chatUpdated = chat.updated || 0;
     chat.messages.forEach((m, at) => {
       if (skip > 0) { skip--; return; }
+      if (m.role === "event") {
+        if (reply) reply.finish();
+        reply = null;
+        thread.append(eventLine(m));
+        return;
+      }
+      if (m.role === "user" && m.notice) return;   // the same changes, as the model read them while it answered
       if (m.role === "user") {
         if (reply) reply.finish();
         reply = null;
@@ -3074,6 +3092,14 @@
     try { S.chats = await api("/api/chats"); } catch (e) { return; }
     renderChats();
     setTitle(currentTitle(), currentProject());
+    // the open chat changed while it wasn't answering (a change told to it, a phone): drawn again
+    const id = S.chatId, open = S.chats.find((c) => c.id === id);
+    if (open && !S.streaming && open.updated > (S.chatUpdated || 0)) {
+      try {
+        const chat = await api("/api/chats/" + id);
+        if (S.chatId === id && !S.streaming) { renderChat(chat); S.chatUpdated = open.updated; }
+      } catch (e) { /* the next change tries again */ }
+    }
   }
   // an incognito chat is forgotten as soon as you leave it
   function leaveIncognito() {
@@ -3112,6 +3138,7 @@
     let chat;
     try { chat = await api("/api/chats/" + id); } catch (e) { toast(e.message); return; }
     exitFull();
+    setMode("chat", true);
     leaveIncognito();
     S.chatId = id;
     S.unread.delete(id);
@@ -3138,6 +3165,7 @@
   const titleOf = (id) => (S.chats.find((c) => c.id === id) || {}).title || "a chat";
   function newChat(projectId, ask) {   // ask: the person started it, so the folder picker opens (in the app)
     exitFull();
+    setMode("chat", true);
     leaveIncognito();
     S.chatId = null;
     if (S.defaultModel && S.labels[S.defaultModel]) { $("model").value = S.defaultModel; updateSend(); }
@@ -3950,7 +3978,7 @@
       offerRecheck(reply);
       $("input").placeholder = "Reply — Kelvin will see the second opinion";
     } catch (e) {
-      pending.replaceWith(h("div", { class: "callout" }, e.message));
+      pending.replaceWith(h("div", { class: "callout bad" }, e.message));
       wrap.hidden = false;
     }
   }
@@ -4105,7 +4133,7 @@
     const running = answering.some((t) => t.wake && t.chat_id === S.chatId);
     const mine = (s.wakes || []).find((w) => w.chat_id === S.chatId);
     if (answering.some((t) => t.wake) && !s.busy) {
-      $("agent-state").textContent = "Kelvin is continuing “" + (woke.title || "a chat") + "”";
+      $("agent-state").textContent = "Continuing “" + (woke.title || "a chat") + "”";
       $("agent-state").classList.add("busy");
     }
     $("wake-text").textContent = running ? "Kelvin is continuing this chat: " + (woke.why || "")
@@ -4128,7 +4156,7 @@
   async function pollState() {
     let s;
     try { s = await api("/api/state"); } catch (e) { return; }
-    $("agent-state").textContent = s.busy ? "Kelvin is " + s.busy : "Kelvin is idle";
+    $("agent-state").textContent = s.busy ? String(s.busy).charAt(0).toUpperCase() + String(s.busy).slice(1) : "Idle";
     $("agent-state").classList.toggle("busy", !!s.busy);
     PANEL.instruments = s.instruments;
     renderInstruments();
@@ -4205,6 +4233,8 @@
     showMounted(s.mounted);
     showHands(s.hands_on);
     PROT.busy = s.busy;
+    S.last = s;
+    emit("state", s);
   }
   // ------------------------------------------------------------------ alarms, watches, notifications
   function incidentCard(i) {   // what the last stop left behind: outputs on, runs or a queue cut short (runtime.py)
@@ -4279,7 +4309,7 @@
         h("span", { class: "watch-rule" }, w.rule, w.paused ? h("span", { class: "watch-then" }, " (paused: instrument off)")
           : w.then.length ? h("span", { class: "watch-then" }, " → " + w.then.join(", ")) : null),
         h("span", { class: "watch-src" }, w.source === "agent" ? "Kelvin" : ""), remove);
-    }) : [h("li", { class: "inst-empty" }, "Nothing is watched. Add a reading to be told when it leaves its range.")]));
+    }) : [h("li", { class: "inst-empty" }, "None")]));
     const sel = $("watch-key");
     if (document.activeElement !== sel && status) {
       const keep = sel.value;
@@ -4332,7 +4362,7 @@
           try { renderLabMemory(await api("/api/lab-memory/" + encodeURIComponent(n.id), { method: "DELETE" })); }
           catch (e) { toast(e.message); }
         }));
-    }) : [h("li", { class: "inst-empty" }, "Nothing kept yet. Tell Kelvin how the lab is wired, where a reference comes from or a lesson learned, or add it here: every chat sees it.")]));
+    }) : [h("li", { class: "inst-empty" }, "None")]));
   }
   function editLabNote(n) {   // null: a new note
     LABMEM.editing = n ? n.id : null;
@@ -4577,12 +4607,19 @@
     $("queue-load").addEventListener("click", () => { if ($("queue-saved").value) queueOp({ op: "load", name: $("queue-saved").value }); });
     QUEUE.built = true;
   }
-  function showQueue() {
+  function showQueue(message) {   // the queue is the Sequence pane (seq.js); its old view stays built, out of sight
     if (!QUEUE.built) buildQueueView();
-    showView("queue");
-    toggleRuns(true);
-    renderQueue();
-    api("/api/queue").then((q) => { QUEUE.data = q; renderQueue(); }, () => {});
+    toggleSeq(true, message);
+  }
+  function toggleSeq(open, message) {
+    const pane = $("seqpane"), was = !pane.hidden;
+    const now = open === undefined ? !was : !!open;
+    pane.hidden = !now;
+    $("toggle-seq").setAttribute("aria-pressed", String(now));
+    $("toggle-seq").classList.toggle("on", now);
+    fitLayout();
+    if (now && FULL.length) fullShow("seqpane");
+    emit("seq", { open: now, opened: now && !was, message: message || "" });
   }
   async function queueOp(body, quiet) {
     try {
@@ -4752,7 +4789,7 @@
       queueFromState(r.queue);
       renderQueue();
       scansSay(r.message || "");
-      if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }
+      if (!queue) { showQueue((r.message || "").split("\n")[0]); pollState(); }
     });
   }
   function translateButton(v) {
@@ -5142,7 +5179,7 @@
       queueFromState(r.queue);
       renderQueue();
       scansSay(r.message || "");
-      if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }   // its run gets its tab
+      if (!queue) { showQueue((r.message || "").split("\n")[0]); pollState(); }   // its run gets its tab
     });
   }
   // Import a script…: the computer's own file picker in the Kelvin app; in a browser, its path typed
@@ -5170,7 +5207,7 @@
     const problems = check.problems || [];
     const close = h("button", { class: "icon-btn", type: "button", "aria-label": "Close" }, icon("x"));
     close.addEventListener("click", () => { $("scans-check").hidden = true; });
-    $("scans-check").className = "callout small scans-check" + (problems.length ? "" : " calm");
+    $("scans-check").className = "callout small scans-check" + (problems.length ? " bad" : " calm");
     $("scans-check").replaceChildren(...[h("div", { class: "sc-head" }, h("b", {}, r.entry ? r.entry.name : path), close),
       problems.length ? h("ul", {}, ...problems.map((p) => h("li", {}, p))) : null,
       check.text ? h("div", { class: "sc-text" }, check.text) : null].filter(Boolean));
@@ -5570,7 +5607,7 @@
       queueFromState(r.queue);
       renderQueue();
       edSay((r.message || "").split("\n")[0]);
-      if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }   // its run gets its tab
+      if (!queue) { showQueue((r.message || "").split("\n")[0]); pollState(); }   // its run gets its tab
     });
   }
   function edRevert() {
@@ -5657,6 +5694,7 @@
   // named too late to shape the first lab config, opened in Set up once the setup is done
   const WAIT = { shown: false, closed: false, later: "", said: "" };
   function setupWait(s) {
+    if (document.body.classList.contains("welcome-on")) return;   // the first start's page (welcome.js) asks instead
     const setup = s.setup || {}, busy = SETUP_BUSY.has(setup.state), ask = !!s.ask_scripts, dlg = $("setup-wait");
     if (!busy && WAIT.later) {
       const folder = WAIT.later;
@@ -6918,7 +6956,7 @@
     if (!rows.length) { list.replaceChildren(h("li", { class: "muted small" }, "Nothing yet.")); return; }
     list.replaceChildren(...rows.map((r) => {
       const pkgs = Object.entries(r.packages).map(([n, v]) => n + " " + v).concat(r.files).join(", ") || "no packages";
-      const remove = h("button", { class: "link", type: "button" }, "Remove");
+      const remove = h("button", { class: "link danger", type: "button" }, "Remove");
       remove.addEventListener("click", async () => {
         if (!confirm("Remove " + r.name + " (" + pkgs + ")? Instruments that use it stop connecting until it is installed again.")) return;
         remove.disabled = true;
@@ -6953,7 +6991,7 @@
     fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
     $("reviewer").options[0].textContent = "Off";
     const words = S.settings ? S.settings.answer_words : 200, length = $("answer-words"), chosen = words ? String(words) : "off";
-    if (![...length.options].some((o) => o.value === chosen)) length.append(h("option", { value: chosen }, "At most " + words + " words"));
+    if (![...length.options].some((o) => o.value === chosen)) length.append(h("option", { value: chosen }, "Up to " + words + " words"));
     length.value = chosen;
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
@@ -6968,8 +7006,7 @@
     loadCollection();
     $("scripts-python").value = (S.settings && S.settings.lab_scripts_python) || "";
     const scriptsFolder = S.settings && S.settings.lab_scripts;
-    $("scripts-folder").textContent = scriptsFolder ? "Scripts folder: " + scriptsFolder
-      : "No scripts folder yet: name it in Lab → Set up → From your scripts…";
+    $("scripts-folder").textContent = scriptsFolder ? "Scripts folder: " + scriptsFolder : "No scripts folder";
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
     ownerPinState();
     rolesState();
@@ -6997,7 +7034,7 @@
     $("smtp-from").value = mail.from || ""; $("smtp-to").value = mail.to || ""; $("smtp-security").value = mail.security || "starttls";
     pickOption($("heartbeat-minutes"), String((S.settings && S.settings.heartbeat_minutes) || 5), (v) => "Every " + v + " minutes");
     const wait = S.settings && S.settings.approval_wait !== undefined ? S.settings.approval_wait : 60;
-    pickOption($("approval-wait"), wait ? String(wait) : "off", (v) => "After 5 minutes, ask your phone and wait " + v + " minutes more");
+    pickOption($("approval-wait"), wait ? String(wait) : "off", (v) => "After 5 min, ask my phone: " + v + " min more");
     $("allow-notify").hidden = !("Notification" in window) || Notification.permission !== "default";
     $("settings-msg").textContent = "";
     renderGlobalNotes(null);
@@ -7915,6 +7952,56 @@
   ];
 
   // ------------------------------------------------------------------ start
+  // ------------------------------------------------------------------ Chat | Home, and the parts kept apart
+  // Home (home.js), the sequence (seq.js) and the first start (welcome.js) are files of their own: they hear the page
+  // through kelvin:* events on document (ready, state, mode, seq) and use what it lends them on window.Kelvin
+  function emit(name, detail) { document.dispatchEvent(new CustomEvent("kelvin:" + name, { detail })); }
+  // the top bar's switch: Home takes the conversation's place; the panels beside them stay as they are
+  function setMode(mode, quiet) {
+    const home = mode === "home";
+    if (S.mode && (S.mode === "home") === home) return;
+    S.mode = home ? "home" : "chat";
+    store("lh.mode", S.mode);
+    $("app").classList.toggle("home-on", home);
+    $("homeview").hidden = !home;
+    for (const [id, on] of [["mode-chat", !home], ["mode-home", home]]) {
+      const b = $(id);
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-selected", String(on));
+      b.tabIndex = on ? 0 : -1;
+    }
+    emit("mode", { mode: S.mode });
+    if (!home && !quiet) $("input").focus();
+  }
+  // words for Kelvin from Home: the conversation, with them in the message box, or sent at once (send)
+  function ask(text, send) {
+    setMode("chat", true);
+    if (send) { sendMessage(text); return; }
+    $("input").value = text;
+    autosize();
+    updateSend();
+    $("input").focus();
+  }
+  function initMode() {
+    $("mode-chat").addEventListener("click", () => setMode("chat"));
+    $("mode-home").addEventListener("click", () => setMode("home"));
+    $("mode-seg").addEventListener("keydown", (e) => {   // a tab list: the arrows, Home and End move along it
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+      e.preventDefault();
+      setMode(e.key === "ArrowLeft" || e.key === "Home" ? "chat" : "home");
+      $(S.mode === "home" ? "mode-home" : "mode-chat").focus();
+    });
+    setMode(store("lh.mode") === "home" ? "home" : "chat", true);
+  }
+  // what the parts kept apart may use: the page's helpers, its state, and the panels and dialogs they open
+  window.Kelvin = {
+    $, h, api, icon, md, toast, fmt, store, S, MARK,
+    setMode, ask, sendMessage, newChat, openChat, pollState,
+    toggleSeq, toggleRuns, toggleLab, toggleAnalysis, openRun, fitLayout, exitFull,
+    openEditor, openVersions, openLabSetup, openSettings, settingsPage, openCards,
+    pickFolder, hasPicker, hasFilePicker, popMenu, closeMenu, lineChart, getRun, runCharts,
+  };
+
   async function init() {
     if (!token) { $("nokey").hidden = false; return; }
     let session = null;
@@ -7963,6 +8050,7 @@
     }));
     applyModels(boot.models.groups, boot.default_model, boot.auto_model, boot.models.hub);
     initPanes();
+    initMode();
     initRunsPane();
     initTeam();
     initAnalysis();
@@ -7974,7 +8062,6 @@
     loadNewFolder();
     loadStartChecklist();
 
-    $("open-help").addEventListener("click", () => openHelp());
     $("help-go").addEventListener("click", helpSearch);
     $("help-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); helpSearch(); } });
     $("eln-day-go").addEventListener("click", () => fetchDownload("/api/eln?day=" + encodeURIComponent($("eln-day").value || "today")
@@ -8198,14 +8285,15 @@
     for (const b of document.querySelectorAll("[data-clear]")) {
       b.addEventListener("click", () => {
         const input = document.querySelector('#settings-form input[name="' + b.dataset.clear + '"]');
-        input.value = ""; input.dataset.clear = "1"; input.placeholder = "Will be removed when you save";
+        input.value = ""; input.dataset.clear = "1"; input.placeholder = "Removed on Save";
       });
     }
     window.addEventListener("resize", syncScrim);
     setInterval(() => { if (S.labOpen || TEAM.open || S.live.size || S.answering.size || !$("lab-badge").hidden) pollState(); }, 1500);
     setInterval(pollState, 4000);   // often enough that an alarm shows within seconds
+    emit("ready", boot);
     pollState();
-    $("input").focus();
+    if (S.mode !== "home") $("input").focus();
   }
   init();
 })();
