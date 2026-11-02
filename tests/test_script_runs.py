@@ -117,16 +117,20 @@ def output(report):
     return (Path(report.path) / "output.txt").read_text(encoding="utf-8")
 
 
-def run(lab, folder, tmp_path, script, answers=(True,), params=None, drives=None, stop_after=None):
+def run(lab, folder, tmp_path, script, answers=(True,), params=None, drives=None, stop_after=None, action="",
+        during=None, progress=None):
     gate = SafetyGate(lab, ScriptedApprover(list(answers)), EventLog(None, lab.clock))
-    prep = scriptrun.prepare(lab, script, [folder], params=params, drives=drives, choose_python=_python)
+    prep = scriptrun.prepare(lab, script, [folder], params=params, drives=drives, choose_python=_python,
+                             action=action)
     request, grants, problems = scriptrun.approval(gate, prep)
     assert not problems
     assert gate.ask(request)
     allowed = set(prep.found.unknown) | set(prep.found.libraries)   # named in the approval, as the runtime does
-    job = scriptrun.ScriptRun(gate, prep, RunStore(tmp_path / "runs"), grants, allowed)
+    job = scriptrun.ScriptRun(gate, prep, RunStore(tmp_path / "runs"), grants, allowed, progress=progress)
     if stop_after is not None:
         threading.Timer(stop_after, gate.request_abort).start()
+    if during is not None:   # (seconds, fn): fn(job) while it runs, as a person or the chat would
+        threading.Timer(during[0], during[1], args=(job,)).start()
     report = job.execute()
     return gate, request, report
 

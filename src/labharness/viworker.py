@@ -71,6 +71,24 @@ def read_all(files: Sequence[Tuple[str, str]], folder: Any, own: Iterable[Any] =
     return results, notes
 
 
+def describe_all(paths: Sequence[Any], folder: Any, own: Iterable[Any] = ()) -> Tuple[List[Dict[str, Any]],
+                                                                                       List[str]]:
+    """Each VI's full description (videsc.describe), read in a process of its own as read_all reads summaries,
+    with the same limits: (a description for each path, in order; notes on the whole). A file that hung or stopped
+    the reader, or whose description is too big to say, gets a description that says so."""
+    from . import videsc
+    results, notes = read_all([("describe", str(p)) for p in paths], folder, own)
+    out = []
+    for path, got in zip(paths, results):
+        d = next((x for x in got if isinstance(x, dict) and x.get("description") == videsc.DESCRIPTION), None)
+        if d is None:
+            d = videsc._empty(path)
+            d["unread"] = [u for x in got[:1] for u in x.get("unread") or []] or ["not read: the reader said nothing"]
+            d["unread"] = [u.replace("its summary is", "its description is") for u in d["unread"]]
+        out.append(d)
+    return out, notes
+
+
 def _took(seconds: float) -> str:
     return "%d minutes" % (seconds // 60) if seconds >= 120 else "%g s" % seconds
 
@@ -150,7 +168,7 @@ def _read_some(files: Sequence[Tuple[str, str]], start: int, folder: Any, own: L
                 continue   # nothing it would say: it reads in order
             if msg.get("too_big") or msg.get("unreadable"):
                 results[at].append(_not_read(files[at][1], "its summary is bigger than Kelvin keeps"))
-                msg["done"] = files[at][0] == "vi"
+                msg["done"] = files[at][0] != "llb"   # a library's next VI may still come
             for s in msg.get("s") or []:
                 if isinstance(s, dict):
                     results[at].append(s)
@@ -239,6 +257,9 @@ def serve(job: Dict[str, Any], out: Any) -> None:
                 for s in vigraph.each_summary(path, labview.link, folder, own):
                     say({"i": i, "s": [s], "done": False})
                 say({"i": i, "s": [], "done": True})
+            elif kind == "describe":
+                from . import videsc
+                say({"i": i, "s": [videsc.describe(path, labview.link, folder, own)], "done": True})
             else:
                 say({"i": i, "s": [vigraph.summary(path, labview.link, folder, own)], "done": True})
         except MemoryError:

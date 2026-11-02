@@ -36,13 +36,14 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
-from . import prologix
+from . import experiment, prologix
 from . import scripts as lab_scripts
 from .adapters import resource_name
 from .eventlog import RunStore
@@ -66,6 +67,15 @@ MAX_GRACE_S = 120.0  # and how long its own clean-up may take at most
 PROBE_S = 30.0
 PROBE_KEEP_S = 600.0
 OUTPUT_TAIL = 12     # lines of the script's output in the answer
+REHEARSE_S = 60.0    # real seconds a rehearsal may take before Kelvin presses Stop on it
+# what reaches past the simulated lab, so a rehearsal (which nobody approves) never runs code that uses it: native
+# libraries, programs, COM and .NET, the registry, USB. The script's process refuses them too, as it rehearses
+# (kelvin_shim._fence); this says so in words before anything runs
+PAST_THE_LAB = ("ctypes", "_ctypes", "cffi", "_cffi_backend", "subprocess", "multiprocessing", "_winapi",
+                "_posixsubprocess", "pty", "winreg", "win32com", "win32api", "win32process", "win32file", "win32event",
+                "win32service", "pythoncom", "pywintypes", "comtypes", "clr", "pythonnet", "usb", "libusb_package",
+                "libusb1", "hid", "ftd2xx", "pyftdi", "pylibftdi")
+PROGRAMS = ("system", "popen", "startfile", "posix_spawn", "posix_spawnp", "fork", "forkpty", "kill", "killpg")
 _PLACE = re.compile(r"\{([^{}]*)\}")
 
 
@@ -447,8 +457,8 @@ def python_named(script: Path, roots: Sequence[Path], configured: str, named: st
 def python_for(script: Path, source: str, roots: Sequence[Path], configured: str = "", named: str = "") -> Python:
     """The Python that runs the script: the one named (python_named), when given; else the one a person set for the
     lab's scripts; else the first, best first (an environment beside the scripts, this computer's, Kelvin's own),
-    that has every module the script imports."""
-    wanted = imports(source)
+    that has every module the script imports (kelvin, Kelvin's experiment API, comes with Kelvin's stand-in)."""
+    wanted = [m for m in imports(source) if m != experiment.API]
     if named:
         pick = python_named(script, roots, configured, named)
         if pick is None:
@@ -540,6 +550,9 @@ class Found:
     unknown: List[str] = field(default_factory=list)            # addresses it opens that aren't in the lab
     libraries: List[str] = field(default_factory=list)          # makers' libraries that reach instruments past the gate
     notes: List[str] = field(default_factory=list)
+    experiment: bool = False   # it uses Kelvin's experiment API (from kelvin import lab: experiment.py)
+    named: List[str] = field(default_factory=list)     # lab instruments it uses by name, through kelvin.lab
+    actions: List[str] = field(default_factory=list)   # instr.action it does that drives the sample, read ahead
 
 
 def _setter(card: Any, command: str) -> Tuple[Optional[Any], Optional[str]]:
@@ -602,9 +615,10 @@ def _local_modules(path: Path, source: str) -> List[Path]:
     return out
 
 
-def read_ahead(lab: Any, path: Path, source: str) -> Found:
+def read_ahead(lab: Any, path: Path, source: str, action: str = "") -> Found:
     """What a script will do, read from its text and the lab's own modules it imports (scripts.py; nothing is run):
-    the lab instruments it opens, the drive values it sets, and what Kelvin can't check."""
+    the lab instruments it opens, the drive values it sets, and what Kelvin can't check. An experiment's use of
+    kelvin.lab too (experiment.py), for the action that runs (action; "": all of it)."""
     found = Found()
     found.libraries = [m for m in imports(source) if m in OPAQUE]
     with tempfile.TemporaryDirectory(prefix="kelvin-read-") as tmp:
@@ -646,21 +660,101 @@ def read_ahead(lab: Any, path: Path, source: str) -> Found:
                 if spec.set_cmd is not None:
                     found.open.setdefault("%s.%s" % (name, spec.name), "set through its driver, %s" % driver)
         for c in si.commands:
-            if c.query:
-                continue
-            for part in split_compound(c.text) or [c.text]:
-                spec, _ = _setter(inst.card, _PLACE.sub(lambda m: lab_scripts._num(
-                    (c.values.get(m.group(1)) or [1])[0]), part))
-                if spec is None or not spec.is_drive:
-                    continue
-                key = "%s.%s" % (name, spec.name)
-                values = _part_values(spec, part, c.values)
-                if values is None:
-                    found.open.setdefault(key, "set from values the script works out as it runs")
-                else:
-                    found.drives.setdefault(key, [])
-                    found.drives[key] += [v for v in values if v not in found.drives[key]]
+            if not c.query:
+                _note_command(found, name, inst, c.text, c.values)
+    if experiment.is_experiment(source):
+        _read_experiment(lab, found, source, action)
     return found
+
+
+def _note_command(found: Found, name: str, inst: Any, text: str, values: Dict[str, List[float]]) -> None:
+    """The drive values one command the script sends sets, into found (its fill-ins' numbers: values)."""
+    for part in split_compound(text) or [text]:
+        spec, _ = _setter(inst.card, _PLACE.sub(lambda m: lab_scripts._num(
+            (values.get(m.group(1)) or [1])[0]), part))
+        if spec is None or not spec.is_drive:
+            continue
+        key = "%s.%s" % (name, spec.name)
+        got = _part_values(spec, part, values)
+        if got is None:
+            found.open.setdefault(key, "set from values the script works out as it runs")
+        else:
+            found.drives.setdefault(key, [])
+            found.drives[key] += [v for v in got if v not in found.drives[key]]
+
+
+def _read_experiment(lab: Any, found: Found, source: str, action: str) -> None:
+    """What an experiment does through kelvin.lab, read ahead (experiment.py), into found: the instruments it uses by
+    name, the drive values it sets, the actions it does that drive the sample, and what can't be read ahead."""
+    found.experiment = True
+    try:
+        used = experiment.uses(experiment.read(source), action)
+    except SyntaxError:
+        return
+
+    def by_name(name: str) -> Optional[Any]:
+        ic = lab.config.instruments.get(name)
+        if ic is None or name not in lab.instruments:
+            return None
+        found.instruments.setdefault(name, ic.address)
+        if name not in found.named:
+            found.named.append(name)
+        return lab.instruments[name]
+
+    def resolve(key: str) -> Optional[Tuple[Any, Any]]:
+        try:
+            inst, spec = lab.resolve(key)
+        except KeyError as e:
+            found.notes.append("%s names no instrument parameter in this lab (%s): the safety gate refuses it"
+                               % (key, e.args[0] if e.args else e))
+            return None
+        by_name(inst.name)
+        return inst, spec
+
+    for key, values in used.sets.items():
+        got = resolve(key)
+        if got is None or not got[1].is_drive:
+            continue
+        spec = got[1]
+        if values is None:
+            found.open.setdefault(key, "set from values the experiment works out as it runs")
+            continue
+        found.drives.setdefault(key, [])
+        for v in values:
+            try:
+                v = spec.coerce(v)
+            except ValueError as e:
+                found.notes.append("%s: %s" % (key, e))
+                continue
+            if v not in found.drives[key]:
+                found.drives[key].append(v)
+    for key in used.gets:
+        resolve(key)
+    for key in used.acts:
+        name, _, act = key.partition(".")
+        inst = by_name(name)
+        if inst is None:
+            found.notes.append("%s names no instrument in this lab: the safety gate refuses it" % key)
+            continue
+        card_action = inst.card.actions.get(act)
+        if card_action is None:
+            found.notes.append("%s: %s has no action %s, so the safety gate refuses it" % (key, name, act))
+        elif card_action.drives and key not in found.actions:
+            found.actions.append(key)
+    for name, commands in used.raw.items():
+        inst = by_name(name)
+        if inst is None:
+            found.notes.append("lab.raw(%r, ...) names no instrument in this lab: the safety gate refuses it" % name)
+            continue
+        for text in commands:
+            if text is not None:
+                _note_command(found, name, inst, text, {})
+                continue
+            for spec in inst.card.drives:
+                if spec.set_cmd is not None:
+                    found.open.setdefault("%s.%s" % (name, spec.name),
+                                          "sent as commands the experiment works out as it runs")
+    found.notes += used.unread
 
 
 # ------------------------------------------------------------------ getting it ready
@@ -679,10 +773,12 @@ class Prepared:
     params: Dict[str, Any] = field(default_factory=dict)           # the values asked for (changes says them)
     version: Optional[str] = None   # the run whose script.py this runs, as it ran then (None: the file as it is)
     near: Dict[str, str] = field(default_factory=dict)   # the Python files beside it as it starts, hashed (beside)
+    action: str = ""          # an experiment's action this run runs ("": it has none; experiment.choose)
+    live: Dict[str, Any] = field(default_factory=dict)   # an experiment's live inputs and their defaults
 
     @property
     def name(self) -> str:
-        return self.path.name
+        return self.path.name + (" (%s)" % self.action if self.action else "")
 
     def drive_values(self, lab: Any) -> Tuple[Dict[str, List[Any]], Dict[str, str], List[str]]:
         """Every drive value the run may use, for the approval; for each drive whose values aren't known before the
@@ -731,12 +827,13 @@ def prepare(lab: Any, path: str, folders: Sequence[Any], params: Optional[Dict[s
             args: Optional[Sequence[Any]] = None, drives: Optional[Dict[str, Any]] = None,
             python: str = "", choose_python: Callable[..., Python] = python_for, chosen: Sequence[Any] = (),
             source: Optional[str] = None, sha256: Optional[str] = None, version: Optional[str] = None,
-            named: str = "") -> Prepared:
+            named: str = "", action: str = "") -> Prepared:
     """A script read and ready to run. chosen: the scripts a person imported (locate). source: the text to run in
     place of the file's own (version: the run whose script.py it is, as it ran then; sha256: of the file as that run
     read it), in the file's own folder and under its own name, which may be gone by now. named: the Python to run it
     in (python_named). params: only those that change the file's own values count (changed_params); a version's
-    text has its run's values in it already."""
+    text has its run's values in it already. action: the experiment's action to run (experiment.choose: the one marked
+    main when none is named)."""
     script = locate(path, folders, chosen, missing=source is not None)
     original = source if source is not None else source_of(script)
     params = dict(params or {}) if source is not None else changed_params(original, dict(params or {}))
@@ -745,11 +842,22 @@ def prepare(lab: Any, path: str, folders: Sequence[Any], params: Optional[Dict[s
         compile(text, str(script), "exec")
     except SyntaxError as e:
         raise ScriptError("%s does not parse as Python 3 (line %s: %s)" % (script.name, e.lineno, e.msg)) from None
+    live: Dict[str, Any] = {}
+    if experiment.is_experiment(text):
+        try:
+            exp = experiment.read(text)
+            action = experiment.choose(exp, action)
+        except ValueError as e:
+            raise ScriptError("%s: %s" % (script.name, e)) from None
+        live = dict(exp.live)
+    elif action:
+        raise ScriptError("%s doesn't use kelvin, so it has no actions" % script.name)
     roots = [Path(f).expanduser().resolve() for f in folders if f]
     py = choose_python(script, text, roots, python, named) if named else choose_python(script, text, roots, python)
     return Prepared(script, original, text, changes, [str(a) for a in (args or [])], py,
-                    read_ahead(lab, script, text), sha256 or hashlib.sha256(original.encode("utf-8")).hexdigest(),
-                    declared_drives(lab, drives), params, version, beside(script))
+                    read_ahead(lab, script, text, action),
+                    sha256 or hashlib.sha256(original.encode("utf-8")).hexdigest(),
+                    declared_drives(lab, drives), params, version, beside(script), action, live)
 
 
 def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[str, Allowed], List[str]]:
@@ -772,15 +880,31 @@ def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[st
     if prep.args:
         head += "; arguments: " + " ".join(prep.args)
     lines = [head]
-    if found.instruments:
+    opened = {n: a for n, a in found.instruments.items() if n not in found.named}
+    if opened:
         lines.append("It opens %s; every command goes through the safety gate as it is sent" % ", ".join(
-            "%s (%s)" % (n, a) for n, a in found.instruments.items()))
+            "%s (%s)" % (n, a) for n, a in opened.items()))
+    if found.named:
+        lines.append("It uses %s through kelvin.lab; every command goes through the safety gate as it is sent"
+                     % ", ".join(n for n in found.instruments if n in found.named))
+    for key in found.actions:
+        name, _, act = key.partition(".")
+        lines.append("It does %s (%s), which drives the sample: this approval covers it"
+                     % (key, lab.instruments[name].card.actions[act].label))
     lines += items + open_lines
     lines += ["It also opens " + outside(lab, a) for a in found.unknown]
     lines += ["It uses %s, which reaches instruments without Kelvin seeing the commands" % m for m in found.libraries]
     lines += found.notes
-    lines.append("A script can't be rehearsed on the simulated lab, so a person approves each run; a maker's library "
-                 "it loads on the way comes with it, and anything else beyond this asks again, or is refused")
+    if prep.live:
+        lines.append("While it runs, these may change (set_live): %s; a change that moves a drive still passes the "
+                     "safety gate" % ", ".join(k if v is None else "%s (now %s)" % (k, v) for k, v in prep.live.items()))
+    if found.experiment:
+        lines.append("A person approves each run of a script, this experiment too, in auto mode as well; run_script "
+                     "with dry_run rehearses it on the simulated lab first")
+    else:
+        lines.append("A script can't be rehearsed on the simulated lab, so a person approves each run; a maker's "
+                     "library it loads on the way comes with it, and anything else beyond this asks again, or is "
+                     "refused")
     return ApprovalRequest("Run script %s?" % prep.name, lines), grants, problems
 
 
@@ -901,8 +1025,11 @@ class ScriptRun:
     def __init__(self, gate: SafetyGate, prep: Prepared, store: RunStore, grants: Dict[str, Allowed],
                  allowed: Set[str], meta: Optional[Dict[str, Any]] = None, folder: Any = None,
                  busy: Optional[Callable[[str], None]] = None,
-                 progress: Optional[Callable[[Dict[str, Any]], None]] = None):
+                 progress: Optional[Callable[[Dict[str, Any]], None]] = None, rehearsal: bool = False):
         self.gate, self.lab, self.prep = gate, gate.lab, prep
+        # a rehearsal on the simulated lab (rehearse): nothing outside it, in a folder of its own, its waits skipped
+        self.rehearsal = rehearsal
+        self.killed = False   # it did not end after its stop, so Kelvin ended it
         self.store, self.grants, self.meta, self.folder = store, grants, dict(meta or {}), folder
         # unknown addresses a person allowed, as VISA resources however they are spelled (the approval's serial://COM5
         # is the script's COM5 or ASRL5::INSTR), and makers' libraries, by name
@@ -924,8 +1051,21 @@ class ScriptRun:
         self.read_keys: Dict[str, None] = {}
         self.first: Dict[str, str] = {}      # each setting's value in the first row it is in
         self.changed: Dict[str, None] = {}   # the settings a later row has another value of: the run's axes
-        self.units: Dict[str, str] = {}
+        self.units: Dict[str, str] = {}      # each column's unit: its card's, or the one an experiment names
         self.rows: List[Dict[str, Any]] = []
+        # an experiment's rows are its own (kelvin's record), never Kelvin's from its settings and readings
+        self.explicit = prep.found.experiment
+        self.kinds: Dict[str, str] = {}             # its recorded columns, each scalar, trace, image or text
+        self.axes: Optional[List[str]] = None       # its axes, as it named them (kelvin's columns)
+        # an experiment's live inputs, as they are now: a person or the chat changes them while it runs (set_live)
+        self.live: Dict[str, Any] = dict(prep.live)
+        # read ahead, but not read by the experiment yet: its own default (the value its code gives) takes over at its
+        # first read, unless a person changed it before then
+        self._unread_live: Set[str] = set(prep.live)
+        self.live_changes: List[Dict[str, Any]] = []
+        self._live_lock = threading.Lock()
+        self._log_lock = threading.Lock()   # commands.jsonl: the script's requests, and set_live from elsewhere
+        self.ended = False
         self.held: Dict[str, List[str]] = {}   # errors the gate read from an instrument, for the script's own query
         self.reported = 0                      # commands an instrument reported an error for
         self.rec: Any = None
@@ -939,7 +1079,7 @@ class ScriptRun:
     # ---------------------------------------------------------------- recording
 
     def _flush(self) -> None:
-        if not self.reading:
+        if not self.reading or self.explicit:
             return
         row = {"i": len(self.rows), "t": self.reading.pop("_t")}
         row.update((k, v) for k, v in self.state.items() if _number(v))
@@ -968,6 +1108,8 @@ class ScriptRun:
         self.state[key] = value
 
     def _note_read(self, inst: Any, command: str, reply: str) -> None:
+        if self.explicit:
+            return
         for spec in inst.card.getters:
             try:
                 hit = spec.get_cmd.match(command)
@@ -993,6 +1135,13 @@ class ScriptRun:
             return
 
     def _columns(self) -> Dict[str, Any]:
+        if self.explicit:   # an experiment's: the axes it named, else the first column it recorded
+            scalars = [k for k, kind in self.kinds.items() if kind == "scalar"]
+            axes = [k for k in (self.axes if self.axes is not None else scalars[:1]) if k in self.kinds]
+            return {"axes": [{"key": k, "unit": self.units.get(k, ""), "kind": "instrument"} for k in axes],
+                    "measures": [{"key": k, "unit": self.units.get(k, ""), "kind": kind}
+                                 for k, kind in self.kinds.items() if kind != "text" and k not in axes]}
+
         def unit(key: str) -> str:
             if key not in self.units:
                 try:
@@ -1005,14 +1154,51 @@ class ScriptRun:
 
     def _log(self, **entry: Any) -> None:
         self.n_commands += 1
-        if self.commands_file is not None:
-            entry["t"] = round(time.monotonic() - self.t0, 4)
-            self.commands_file.write(json.dumps(entry, default=str) + "\n")
+        self._write(entry)
         now = time.monotonic()
         if now - self._shown > 0.5:
             self._shown = now
             self.busy("script %s: %d commands%s" % (self.prep.name, self.n_commands,
                                                    ", " + self._last if self._last else ""))
+
+    def _write(self, entry: Dict[str, Any]) -> None:
+        with self._log_lock:
+            if self.commands_file is not None and not self.commands_file.closed:
+                entry["t"] = round(time.monotonic() - self.t0, 4)
+                self.commands_file.write(json.dumps(entry, default=str) + "\n")
+
+    # ---------------------------------------------------------------- live inputs
+
+    def set_live(self, name: str, value: Any, by: str = "agent") -> Tuple[Any, Any]:
+        """Change one of the experiment's live inputs while it runs (the experiment reads it with kelvin's live): (what
+        it was, what it is now). Never touches the gate or the lab: a value that moves a drive passes the gate when the
+        experiment applies it. KeyError: no such input; ValueError: a value it can't take; RuntimeError: the run is
+        over."""
+        if self.ended:
+            raise RuntimeError("run %s has ended" % (self.rec_id or self.prep.name))
+        with self._live_lock:
+            if name not in self.live:
+                raise KeyError("%s has no live input %s (it has: %s)" % (
+                    self.prep.name, name, ", ".join(self.live) or "none"))
+            before = self.live[name]
+            after = _live_value(name, before, value)
+            self.live[name] = after
+            self._unread_live.discard(name)   # the experiment reads this, not its own default
+            change = {"name": name, "value": after, "before": before, "by": by,
+                      "t": round(time.monotonic() - self.t0, 4)}
+            self.live_changes.append(change)
+        self._write({"action": "live", "live": name, "value": after, "before": before, "by": by, "ok": True})
+        self.gate.log.write("live", by=by, run=self.rec_id, plan=self.prep.name, name=name, value=after,
+                            before=before)
+        return before, after
+
+    def _live(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        name = str(msg.get("name") or "")
+        with self._live_lock:
+            if name not in self.live or name in self._unread_live:   # its first read: the experiment's own default
+                self.live[name] = msg.get("default")
+                self._unread_live.discard(name)
+            return {"value": self.live[name]}
 
     # ---------------------------------------------------------------- what the stand-ins ask
 
@@ -1080,7 +1266,9 @@ class ScriptRun:
         return self.lab.instrument(name)
 
     def _command(self, msg: Dict[str, Any]) -> Dict[str, Any]:
-        inst = self._instrument(msg)
+        return self._command_to(self._instrument(msg), msg)
+
+    def _command_to(self, inst: Any, msg: Dict[str, Any]) -> Dict[str, Any]:
         text = str(msg.get("command") or "").strip()
         if not text:
             return {"reply": None}
@@ -1165,8 +1353,146 @@ class ScriptRun:
                     % (command, inst.name, spec.name))
         return None
 
+    # ---------------------------------------------------------------- kelvin's record: an experiment's own rows
+
+    def _record(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        given = msg.get("row")
+        if not isinstance(given, dict):
+            raise _Refuse("record takes columns: record(V=v, I=i)", stop=False)
+        n = len(self.rows)
+        row: Dict[str, Any] = {"i": n, "t": round(time.monotonic() - self.t0, 6)}
+        for key, value in given.items():
+            key = str(key)
+            if key in ("i", "t"):
+                raise _Refuse("i and t are Kelvin's own columns", stop=False)
+            if isinstance(value, dict) and value.get("kelvin") == "trace":
+                row[key], kind = list(value.get("values") or []), "trace"
+                if value.get("x") is not None:
+                    row[key + ".x"] = value["x"]
+            elif isinstance(value, list) and value and all(isinstance(r, list) for r in value):
+                row[key], kind = self._image(value, key, n), "image"
+            elif isinstance(value, list):
+                row[key], kind = value, "trace"
+            else:
+                row[key], kind = value, "text" if isinstance(value, str) else "scalar"
+            self.kinds.setdefault(key, kind)
+        self.rows.append(row)
+        if self.rec is not None:
+            self.rec.add(row)
+            self._emit(event="point", run_id=self.rec_id, done=len(self.rows), total=None, row=row, eta_s=None,
+                       columns=self._columns())
+        return {}
+
+    def _image(self, value: List[List[Any]], key: str, n: int) -> Any:
+        """An image the experiment recorded, kept in the run's frames/ as a camera's frame is (frames.keep); as it came
+        when the run has no folder, or there is no numpy to keep it with."""
+        if self.rec is None or not self.rec.path:
+            return value
+        try:
+            import numpy as np
+        except ImportError:
+            return value
+        from . import frames
+        folder = Path(self.rec.path)
+        made = folder / ("recorded-%d.npy" % n)
+        np.save(made, np.asarray(value, dtype=float))
+        return frames.keep(made, folder, key, n)
+
+    def _columns_named(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        axes, units = msg.get("axes"), msg.get("units")
+        if axes is not None:
+            self.axes = [str(a) for a in axes]
+        if isinstance(units, dict):
+            self.units.update((str(k), str(v)) for k, v in units.items())
+        return {}
+
+    # ---------------------------------------------------------------- kelvin.lab: instruments by name
+
+    def _named(self, name: str) -> Any:
+        """A lab instrument the experiment uses by name (kelvin.lab), as _open checks one the script opens."""
+        if name not in self.lab.instruments:
+            raise _Refuse("refused: the lab has no instrument %s" % name)
+        away = self.lab.away(name)
+        if away:
+            raise _Refuse("refused: %s is %s" % (name, away))
+        self.opened.setdefault(name, "kelvin.lab")
+        return self.lab.instrument(name)
+
+    @staticmethod
+    def _key(msg: Dict[str, Any]) -> Tuple[str, str]:
+        key = str(msg.get("key") or "")
+        name, dot, rest = key.partition(".")
+        if not dot or not name or not rest:
+            raise _Refuse("refused: %r is not instrument.parameter" % key)
+        return name, rest
+
+    def _spec_of(self, key: str) -> Any:
+        try:
+            return self.lab.resolve(key)[1]
+        except KeyError:
+            return None
+
+    def _get(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        name, param = self._key(msg)
+        self._named(name)
+        r = self.gate.get(name, param)
+        self._log(instrument=name, key=r.target, action=r.action, value=_plain(r.value) if r.ok else None, ok=r.ok,
+                  message=r.message)
+        if not r.ok:
+            raise _Refuse(r.message, stop=r.action in STOPS)
+        return {"value": _plain(r.value)}
+
+    def _set(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        name, param = self._key(msg)
+        self._named(name)
+        with self._quiet():
+            r = self.gate.set(name, param, msg.get("value"), bool(msg.get("wait", True)))
+        self._log(instrument=name, key=r.target, action=r.action, value=_plain(r.value), ok=r.ok, message=r.message)
+        spec = self._spec_of(r.target)
+        if r.ok:
+            if r.action in ("set", "no-change") and spec is not None:
+                if spec.is_drive:
+                    self.touched[r.target] = None
+                self._note_set(r.target, r.value)
+                self._last = r.message
+            return {"value": _plain(r.value)}
+        raise _Refuse(r.message, stop=r.action in STOPS or (spec is not None and spec.is_drive))
+
+    def _act(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        name, act = self._key(msg)
+        inst = self._named(name)
+        key = "%s.%s" % (name, act)
+        with self._quiet():   # an action read ahead is approved with the run, but never while it stops
+            r = self.gate.act(name, act, in_plan=key in self.prep.found.actions and not self.stopping)
+        self._log(instrument=name, key=key, action=r.action, value=_plain(r.value), ok=r.ok, message=r.message)
+        if not r.ok:
+            raise _Refuse(r.message, stop=r.action in STOPS)
+        card_action = inst.card.actions.get(act)
+        if card_action is not None and card_action.drives:
+            self.unparsed[name] = None   # a stopped or failed run sends it to its safe state
+        return {"reply": _plain(r.value)}
+
     def handle(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         op = msg.get("op")
+        if op == "get":
+            return self._get(msg)
+        if op == "set":
+            return self._set(msg)
+        if op == "act":
+            return self._act(msg)
+        if op == "raw":
+            return self._command_to(self._named(str(msg.get("instrument") or "")), msg)
+        if op == "live":
+            return self._live(msg)
+        if op == "sleep":   # a rehearsal's wait: the simulated lab's clock moves on, at once
+            if not self.rehearsal:
+                raise _Refuse("Kelvin's stand-in waits on the lab's clock only in a rehearsal", stop=False)
+            self.lab.clock.sleep(max(0.0, float(msg.get("seconds") or 0)))
+            return {}
+        if op == "record":
+            return self._record(msg)
+        if op == "columns":
+            return self._columns_named(msg)
         if op == "open":
             return self._open(str(msg.get("address") or ""), str(msg.get("kind") or "visa"))
         if op == "lookup":   # is this address a lab instrument? (pyvisa's resource_info); nothing opens
@@ -1254,6 +1580,8 @@ class ScriptRun:
                 raise _Refuse("refused: %s is %s" % (name, away))
             self.opened.setdefault(name, address)
             return {"instrument": name}
+        if self.rehearsal:
+            raise _Refuse("refused: a rehearsal reaches only the simulated lab, not %s" % address)
         if canonical(address) in self.allowed or kind == "socket" and not behind(self.lab, address):
             return {}   # a person allowed it, or a socket that reaches no lab instrument
         request = ApprovalRequest("Let %s open %s?" % (self.prep.name, address), [
@@ -1268,7 +1596,10 @@ class ScriptRun:
     def _library(self, module: str) -> Dict[str, Any]:
         """A maker's library the reading missed (one another loads, as pylablib loads pyusb and nidaqmx, or an import
         the script builds): it drives nothing itself, and the run a person approved is what uses it, so Kelvin lets it
-        through with the run, in the chat and the record, never waiting for anyone. Not while the run stops."""
+        through with the run, in the chat and the record, never waiting for anyone. Not while the run stops, and never
+        in a rehearsal (nobody approved one)."""
+        if self.rehearsal:
+            raise _Refuse("refused: a rehearsal reaches only the simulated lab, so it may not use %s" % module)
         if module in self.allowed:
             return {}
         if self.stopping:
@@ -1342,14 +1673,18 @@ class ScriptRun:
         from .envs import clean_environ
         env = clean_environ()
         env.update(KELVIN_IPC="127.0.0.1:%d" % port, KELVIN_IPC_TOKEN=self.token, KELVIN_RUN_DIR=str(run_dir),
-                   KELVIN_SCRIPT=str(self.prep.path), MPLBACKEND="Agg", PYTHONUNBUFFERED="1",
-                   PYTHONIOENCODING="utf-8")
+                   KELVIN_SCRIPT=str(self.prep.path), KELVIN_ACTION=self.prep.action, MPLBACKEND="Agg",
+                   PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+        if self.rehearsal:   # its own folder for what Matplotlib keeps, and no bytecode written beside the lab's code
+            env.update(KELVIN_REHEARSAL="1", PYTHONDONTWRITEBYTECODE="1", MPLCONFIGDIR=str(run_dir / ".matplotlib"))
         env["PYTHONPATH"] = os.pathsep.join([str(SHIM_DIR)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
         return env
 
     def _files_now(self) -> Dict[str, float]:
         """The files in the script's folder (to see what it wrote), up to a few thousand, run folders left out."""
         out: Dict[str, float] = {}
+        if self.rehearsal:   # it works in a folder of its own, thrown away after
+            return out
         root = self.prep.path.parent
         own = os.path.normcase(str(self.rec.path)) if self.rec is not None and self.rec.path else None
         for dirpath, dirnames, filenames in os.walk(root):
@@ -1369,7 +1704,7 @@ class ScriptRun:
         gate, lab, prep = self.gate, self.lab, self.prep
         plan = {"plan": prep.name, "script": str(prep.path), "sha256": prep.sha256, "python": prep.python.text,
                 "changes": prep.changes or None, "params": prep.params or None, "args": prep.args or None,
-                "version": prep.version}
+                "version": prep.version, "action": prep.action or None}
         # script_sha256: the text that runs (script.py), kept in the record from its start, so a run again "as it
         # ran" runs exactly that text, or nothing; beside: the Python files beside it then, for the next card
         meta = dict({"lab": lab.config.name, "simulated": all(i.simulated for i in lab.instruments.values())},
@@ -1410,7 +1745,7 @@ class ScriptRun:
         approved.__enter__()
         try:
             try:
-                proc = subprocess.Popen(self._command_line(run_dir, source_file), cwd=str(prep.path.parent),
+                proc = subprocess.Popen(self._command_line(run_dir, source_file), cwd=str(run_dir if self.rehearsal else prep.path.parent),
                                         env=self._environ(server.getsockname()[1], run_dir),
                                         stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -1468,7 +1803,9 @@ class ScriptRun:
             server.close()
             out.close()
             self._flush()
-            self.commands_file.close()
+            self.ended = True
+            with self._log_lock:
+                self.commands_file.close()
         duration = time.monotonic() - self.t0
         code = proc.returncode if proc is not None else None
         stopped_by_person = self.stopping == "stop requested" and not self.failed
@@ -1481,6 +1818,7 @@ class ScriptRun:
             reason = self.bye.get("error") or "it ended with exit code %s" % code
         else:
             status, reason = "done", None
+        self.killed = killed
         if killed:
             reason = "%s; it did not end within %s of the stop, so Kelvin ended it" % (reason, _dur(GRACE_S))
         cleanup: List[str] = []
@@ -1509,6 +1847,8 @@ class ScriptRun:
         meta = dict(status=status, reason=reason, points=len(self.rows), duration_s=round(duration, 3),
                     cleanup=cleanup, warnings=report.warnings, exit_code=code, commands=self.n_commands,
                     files=files, figures=report.figures, sets=sorted(self.state))   # sets: what the script set
+        if self.live_changes:
+            meta["live"] = self.live_changes   # each change of a live input while it ran, and whose
         if self.rows and report.columns["axes"] and report.columns["measures"]:
             try:
                 from .analysis import analyze_run
@@ -1572,8 +1912,190 @@ class ScriptRun:
         return [ln[:300] for ln in text.splitlines()[-OUTPUT_TAIL:]]
 
 
+@dataclass
+class Rehearsal:
+    ok: bool                 # it ended (by itself, or on Stop) and nothing was refused
+    ended: str               # "by itself" | "on Stop" | "failed" | "not on Stop"
+    message: str
+    lab_seconds: float       # the simulated lab's time it took
+    problems: List[str] = field(default_factory=list)
+    asked: List[str] = field(default_factory=list)            # what a person would be asked in the real run
+    commands: List[Dict[str, Any]] = field(default_factory=list)   # its commands.jsonl entries, in order
+    rows: List[Dict[str, Any]] = field(default_factory=list)
+    columns: Dict[str, Any] = field(default_factory=dict)
+
+
+ENDED = {"by itself": "it ended by itself", "on Stop": "it ended on Stop", "failed": "it failed",
+         "not on Stop": "it did not end on Stop"}
+
+
+def _reaches_past(source: str) -> Optional[str]:
+    """What in this Python reaches past the simulated lab, in words, or None: a module of PAST_THE_LAB it imports (the
+    standard library's too), or a program it starts through os."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    aliases = {"os"}
+    found: List[Tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                top = a.name.partition(".")[0]
+                if top in PAST_THE_LAB:
+                    found.append((node.lineno, "it imports %s, which reaches past the simulated lab" % top))
+                elif a.name == "os":
+                    aliases.add(a.asname or "os")
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            top = node.module.partition(".")[0]
+            if top in PAST_THE_LAB:
+                found.append((node.lineno, "it imports %s, which reaches past the simulated lab" % top))
+            elif node.module == "os":
+                for a in node.names:
+                    if a.name in PROGRAMS or a.name.startswith(("spawn", "exec")):
+                        found.append((node.lineno, "it calls os.%s, which starts a program" % a.name))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+                isinstance(node.func.value, ast.Name) and node.func.value.id in aliases and \
+                (node.func.attr in PROGRAMS or node.func.attr.startswith(("spawn", "exec"))):
+            found.append((node.lineno, "it calls os.%s, which starts a program" % node.func.attr))
+    return min(found)[1] if found else None
+
+
+def rehearsal_problem(prep: Prepared) -> Optional[str]:
+    """Why Kelvin won't rehearse this experiment, in words; None when it may. A rehearsal is approved by nobody, so
+    it runs only an experiment whose code, and the lab's own modules it imports, reach no further than kelvin.lab and
+    the lab's instruments through Kelvin, in a Python that can fence it (3.8 or later: audit hooks)."""
+    if tuple(prep.python.version[:2]) < (3, 8):
+        return ("its Python is %d.%d, and a rehearsal needs Python 3.8 or later to keep it to the simulated lab"
+                % tuple(prep.python.version[:2]))
+    if prep.found.libraries:
+        return "it uses %s, which reaches instruments past the gate" % ", ".join(prep.found.libraries)
+    texts = [prep.source]
+    for m in _local_modules(prep.path, prep.source):
+        for f in (sorted(m.rglob("*.py")) if m.is_dir() else [m]):
+            try:
+                texts.append(f.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+    for text in texts:
+        why = _reaches_past(text)
+        if why:
+            return why
+    return None
+
+
+def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: Any = None,
+             twin: Any = None) -> Rehearsal:
+    """An experiment run on a simulated copy of the lab (lab.make_twin), as it would run on the lab: every command
+    through the twin's gate, which says yes to whatever a person would be asked (and lists it), its waits skipped on the
+    simulated clock, nothing outside the simulated lab, and nothing written beside the script. Kelvin presses Stop on
+    it after `seconds`: an experiment that then ends counts as one that ends. ScriptError: it can't be rehearsed (a
+    script that doesn't use kelvin.lab may reach what the simulated lab can't stand in for; rehearsal_problem). twin:
+    the simulated copy, made by the caller while it holds the lab (making one reads every instrument); else made here.
+    Nothing it runs reaches past the simulated lab: its process refuses programs, native libraries, COM, the network
+    and writing outside its own folder (kelvin_shim._fence). (No job object stops it starting a process, as run_python's
+    has: a venv's python.exe on Windows starts the real Python as a second process.)"""
+    if not prep.found.experiment:
+        raise ScriptError("%s doesn't use kelvin.lab, so Kelvin can't rehearse it: it may reach what the simulated lab "
+                          "can't stand in for" % prep.name)
+    why = rehearsal_problem(prep)
+    if why:
+        raise ScriptError("%s can't be rehearsed: %s" % (prep.name, why))
+    from .eventlog import EventLog
+    from .gate import SimulationApprover
+    twin = twin if twin is not None else lab.make_twin()
+    gate = SafetyGate(twin, SimulationApprover(), EventLog(None, twin.clock), envelope=envelope, operator="dry-run")
+    _, grants, problems = approval(gate, prep)
+    if problems:
+        return Rehearsal(False, "failed", "rehearsal on the simulated lab: %s before it started" % ENDED["failed"],
+                         0.0, problems)
+    job = ScriptRun(gate, prep, RunStore(None), grants, set(), rehearsal=True)
+    t0 = twin.clock.now()
+    timer = threading.Timer(seconds, gate.request_abort, args=("the rehearsal's time ran out",))
+    timer.daemon = True
+    timer.start()
+    try:
+        report = job.execute()
+    finally:
+        timer.cancel()
+    lab_seconds = twin.clock.now() - t0
+    commands: List[Dict[str, Any]] = []
+    try:
+        with open(Path(report.path) / "commands.jsonl", encoding="utf-8") as f:
+            commands = [json.loads(line) for line in f if line.strip()]
+    except (OSError, ValueError):
+        pass
+    finally:
+        shutil.rmtree(report.path, ignore_errors=True)   # its own folder, made for it (RunStore(None))
+    problems = []
+    if report.status == "done":
+        ended = "by itself"
+    elif job.failed:
+        ended, problems = "failed", [job.failed]
+    elif job.killed:
+        ended, problems = "not on Stop", ["it did not end within %s of Stop" % _dur(GRACE_S)]
+    elif job.stopping == "stop requested":
+        ended = "on Stop"
+    else:
+        ended, problems = "failed", [job.bye.get("error") or report.message]
+    for refused in job.bye.get("refused") or []:   # what its process refused, also when the experiment carried on
+        line = "its process refused: %s" % refused
+        if line not in problems:
+            problems.append(line)
+    message = "rehearsal on the simulated lab: %s after %s of lab time, %d commands, %d rows" % (
+        ENDED[ended], _dur(lab_seconds), len(commands), len(report.rows))
+    return Rehearsal(ended in ("by itself", "on Stop") and not problems, ended, message, lab_seconds, problems,
+                     [str(r) for r in gate.approver.requests], commands, report.rows, report.columns)
+
+
 def _number(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+TRUE = ("true", "on", "yes", "1")
+FALSE = ("false", "off", "no", "0")
+
+
+def _live_value(name: str, now: Any, value: Any) -> Any:
+    """A live input's new value, as the type of its value now. ValueError: one it can't take, in words."""
+    if isinstance(now, bool):
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in TRUE or text in FALSE:
+            return text in TRUE
+        raise ValueError("%s takes true or false, not %r" % (name, value))
+    if isinstance(now, int):
+        try:
+            x = float(value)
+        except (TypeError, ValueError):
+            x = None
+        if x is None or isinstance(value, bool) or x != int(x):
+            raise ValueError("%s takes a whole number, not %r" % (name, value))
+        return int(x)
+    if isinstance(now, float):
+        try:
+            if isinstance(value, bool):
+                raise ValueError
+            return float(value)
+        except (TypeError, ValueError):
+            raise ValueError("%s takes a number, not %r" % (name, value)) from None
+    if isinstance(now, str):
+        return str(value)
+    return value
+
+
+def _plain(value: Any) -> Any:
+    """A value as it goes to the script: numpy's numbers and arrays as Python's own, tuples as lists."""
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist) and not isinstance(value, (str, bytes)):
+        return _plain(tolist())
+    return value
 
 
 class _Refuse(Exception):

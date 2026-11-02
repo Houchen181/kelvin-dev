@@ -475,7 +475,15 @@ CLASSES = {1: "textHair", 0: "fontRun", 10: "label", 13: "multiLabel", 14: "bigM
            326: "initFeedback", 328: "sharedVariable", 330: "hiddenFBNode", 333: "decomposeRecomposeStructure",
            359: "genIUse", 361: "parForWorkers", 362: "sharedVariableDynamicOpen", 363: "sharedVariableDynamicRead",
            364: "sharedVariableDynamicWrite", 367: "chunkSize", 370: "mergeErrors", 929: "EventSpec",
-           930: "SelectorRange"}
+           930: "SelectorRange",
+           # a local or global variable, two kinds of event node, and the data objects (DCO) of nodes' terminals,
+           # named as pylabview's heap classes name them (SL_CLASS_TAGS)
+           50: "gRef", 244: "eventRegCallback", 368: "slaveFBInputNode",
+           53: "mxDCO", 55: "dmxDCO", 59: "aBuildDCO", 63: "concatDCO", 65: "decimateDCO", 69: "aIDCO",
+           73: "subsetDCO", 103: "gRefDCO", 109: "cpdArithDCO", 142: "hGrowCItem", 144: "scanfArg", 145: "printfArg",
+           183: "ctlRefDCO", 186: "aRepDCO", 188: "aInsDCO", 190: "aDelDCO", 215: "eventDynDCO",
+           245: "eventRegCBItem", 277: "aInitDCO", 279: "aReshapeDCO", 331: "overridableParm",
+           371: "mergeErrorsDCO"}
 
 
 @dataclass

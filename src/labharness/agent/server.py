@@ -458,18 +458,19 @@ def build_server(rt: LabRuntime) -> MCPServer:
             return "not read now: %s" % e
 
     @server.tool(annotations=READ, structured_output=False)
-    def check_script(script: str, params: Optional[Dict[str, Any]] = None) -> str:
+    def check_script(script: str, params: Optional[Dict[str, Any]] = None, action: str = "") -> str:
         """What run_script would do with one of the lab's own scripts, without running it: the Python that runs it,
         the settings it takes (its module constants such as VMAX = 5, and main()'s defaults: params changes them
-        for a run), and the one approval a person would be asked (the lab instruments it opens, the drive ranges it
-        uses, what Kelvin can't check). Only to see a script's settings, or when the person asks: run_script checks
-        by itself."""
-        return outside(rt, "the lab's scripts", rt.check_script(script, params or {}))
+        for a run), an experiment's actions, and the one approval a person would be asked (the lab instruments it
+        opens, the drive ranges it uses, what Kelvin can't check) for that action (action; "": its main one). Only to
+        see a script's settings, or when the person asks: run_script checks by itself."""
+        return outside(rt, "the lab's scripts", rt.check_script(script, params or {}, action))
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
     def run_script(script: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[str]] = None,
-                   drives: Optional[Dict[str, Any]] = None) -> str:
+                   drives: Optional[Dict[str, Any]] = None, action: str = "", dry_run: bool = False,
+                   background: bool = False) -> str:
         """Run one of the lab's own measurement scripts (Python or a notebook) as it is, in the lab's own Python:
         script is its file name or path in the lab's scripts folder (the one the person named in Set up), or one the
         person imported in the Runs panel; Kelvin runs nothing from elsewhere. Every command it sends to a lab
@@ -480,9 +481,24 @@ def build_server(rt: LabRuntime) -> MCPServer:
         args: its command-line arguments; drives: the range of a drive the script works out as it runs, when you
         know it ({"smu.V": [0, 5]}), else such a drive is approved within its limits. A refusal, a person's no or
         Stop ends the script (its own finally: still runs), and Kelvin brings what it drove back to safe. Returns
-        what it did, its readings as a run (get_run_data, analyze_run), the files it wrote and its last output."""
+        what it did, its readings as a run (get_run_data, analyze_run), the files it wrote and its last output.
+        An experiment (a script that uses Kelvin's own API: from kelvin import lab, action, live, record) reaches the
+        instruments by their names in the lab, and may hold several actions: action names the one to run (its main
+        one when left out). dry_run: true only rehearses an experiment on the simulated lab (nothing is sent to the
+        instruments, nobody is asked; one that reaches past kelvin.lab, through ctypes, COM, a program or a maker's
+        library, is not rehearsed); background: true runs it through the queue and returns at once, so set_live
+        can change its live inputs from this chat while it runs."""
         return rt.run_script(script, params or {}, args or [], drives or {},
-                             mark=lambda text: outside(rt, "the lab's script output", text))
+                             mark=lambda text: outside(rt, "the lab's script output", text), action=action,
+                             dry_run=dry_run, background=background)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def set_live(name: str, value: Any, run: str = "") -> str:
+        """Change a live input of the experiment running now (an input it reads with live(), such as Stop, Break or
+        a set point), without waiting for the lab: the experiment reads the new value the next time it asks. A value
+        that moves a drive still passes the safety gate when the experiment applies it. run: the run it must be,
+        when you know it. To change inputs from this chat while it runs, start it with run_script(background=true)."""
+        return rt.set_live(name, value, run)
 
     @server.tool(annotations=READ, structured_output=False)
     def try_card(card: str, instrument: str) -> str:

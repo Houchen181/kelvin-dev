@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import heapq
 import math
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
@@ -34,6 +36,9 @@ CALLS = {"iUse", "polyIUse", "dynIUse", "callParentDynIUse", "genIUse", "dynPoly
 MAX_DEPTH = 40            # structures inside structures, values followed back through nodes
 MAX_SUBVI_DEPTH = 2       # sub-VIs read for the commands they send: a driver's VI, and the VIs it calls
 MAX_SUBVIS = 60           # sub-VI files read for one summary
+INDEX_LOOKED = 200_000    # files and folders looked through under the folder for a sub-VI its link doesn't lead to
+INDEX_WALK = 10.0         # and for at most this long
+INDEX_SECONDS = 120.0     # a folder's VIs, once looked for, are used for this long
 MAX_STEPS = 3_000_000     # work for one summary, its sub-VIs' included: objects gone through, values followed
 MAX_WORDS = 400           # characters of a value said in words ("computed")
 MAX_TEXT = 4096           # characters of a command's text, filled in
@@ -48,7 +53,7 @@ ADD, SUBTRACT, INCREMENT, EQUAL, ARRAY_SIZE = 1050, 1051, 1057, 1102, 1809
 ARITHMETIC = {1050: "+", 1051: "-", 1052: "*", 1053: "/"}
 PRIMS = {1050: "Add", 1051: "Subtract", 1052: "Multiply", 1053: "Divide", 1057: "Increment", 1102: "Equal?",
          1166: "Type Cast", 1300: "Tick Count", 1302: "Wait (ms)", 1303: "Get Date/Time In Seconds",
-         1340: "One Button Dialog", 1341: "Two Button Dialog", 1502: "Decimal String To Number",
+         1340: "One Button Dialog", 1341: "Two Button Dialog", 1502: "String Length",
          1503: "String Subset", 1506: "Number To Fractional String", 1510: "Pick Line",
          1511: "Append True/False String", 1512: "Format Value", 1535: "Match Pattern",
          1539: "Spreadsheet String To Array", 1540: "Array To Spreadsheet String", 1600: "Get Date/Time String",
@@ -56,7 +61,25 @@ PRIMS = {1050: "Add", 1051: "Subtract", 1052: "Multiply", 1053: "Divide", 1057: 
          1922: "VISA Close", 1923: "VISA Find Resource", 1925: "VISA Read", 1926: "VISA Write", 1927: "VISA Clear",
          1928: "VISA Read STB", 2010: "TDMS Write", 2011: "TDMS Read", 2012: "TDMS Open", 2013: "TDMS Close",
          2301: "VISA Set I/O Buffer Size", 2302: "VISA Flush I/O Buffer", 8070: "Read from Text File",
-         8080: "Write to Text File"}
+         8080: "Write to Text File",
+         # found on labs' VIs (tools/vi_census.py); each name as lvkit's clean-room table of LabVIEW's functions has
+         # it, and the function's terminals on those VIs the same as there
+         1054: "Absolute Value", 1055: "Round To Nearest", 1056: "Quotient & Remainder", 1058: "Decrement",
+         1061: "And", 1062: "Or", 1064: "Not", 1076: "Round Toward +Infinity", 1077: "Path To String",
+         1078: "String To Path", 1103: "Greater Or Equal?", 1104: "Less Or Equal?", 1105: "Not Equal?",
+         1108: "Max & Min", 1110: "Greater?", 1111: "Less?", 1112: "Empty String/Path?", 1113: "Equal To 0?",
+         1114: "Greater Or Equal To 0?", 1115: "Less Or Equal To 0?", 1116: "Not Equal To 0?",
+         1128: "Not A Number/Path/Refnum?", 1142: "To Long Integer", 1144: "To Unsigned Word Integer",
+         1145: "To Unsigned Long Integer", 1147: "To Double Precision Float", 1155: "To Quad Integer",
+         1169: "Cluster To Array", 1170: "Split Number", 1171: "Join Numbers", 1180: "Number To Decimal String",
+         1183: "Number To Engineering String", 1184: "Decimal String To Number",
+         1187: "Fract/Exp String To Number", 1207: "Inverse Cosine", 1419: "Build Path", 1516: "Select",
+         1609: "Byte Array To String", 1900: "Reverse 1D Array", 1902: "Transpose 2D Array",
+         1903: "Add Array Elements", 2076: "Unregister For Events", 2308: "VISA Open", 3913: "Replace Substring",
+         8003: "Variant To Data", 8011: "Close Reference", 8016: "To More Specific Class",
+         8017: "To More Generic Class", 8050: "Open/Create/Replace File", 8051: "Read from Binary File",
+         8052: "Close File", 8055: "Create Folder", 8056: "Delete", 8073: "Set File Position", 8201: "To Variant",
+         9108: "Obtain Queue", 9111: "Enqueue Element"}
 # VIs that handle errors, the panel, files' paths or text (LabVIEW's own, and drivers' error queries): no step of a
 # measurement (a serial port's settings are the instrument's connection, which Kelvin's lab config keeps)
 QUIET_VIS = ("simple error handler", "general error handler", "merge errors", "clear errors", "error cluster from",
@@ -208,6 +231,13 @@ class Graph:
 def _set(o: Optional[Obj]) -> bool:
     """Whether a flag the heap keeps is set: there, with content that isn't all zeros."""
     return o is not None and (o.value is True or (isinstance(o.value, (bytes, bytearray)) and any(o.value)))
+
+
+def indexing(dco: Obj) -> bool:
+    """Whether a loop's tunnel takes an array's elements one by one (or builds an array of the loop's values): its
+    flags say so (0x01000000). A plain tunnel into a For loop has the same inner data object, without the flag."""
+    return dco.kind == "lpTun" and dco.get("innerLpTunDCO") is not None and \
+        bool((dco.number("objFlags", signed=False) or 0) & 0x01000000)
 
 
 def bounds(o: Obj) -> Tuple[int, int, int, int]:
@@ -451,6 +481,9 @@ class _Shared:
     graphs: Dict[int, "Graph"] = field(default_factory=dict)
     paths: Dict[Tuple[str, Tuple[str, ...]], Optional[Path]] = field(default_factory=dict)
     steps: int = field(default_factory=lambda: MAX_STEPS)
+    max_files: int = MAX_SUBVIS                            # sub-VI files read at most (a description reads more)
+    index: Optional[Dict[str, List[Path]]] = None          # the folder's VIs by file name, once looked for
+    ambiguous: Dict[str, List[str]] = field(default_factory=dict)   # a name found in more than one place
 
     def spend(self, n: int = 1) -> None:
         self.steps -= n
@@ -470,6 +503,97 @@ class _Shared:
         if key not in self.paths:
             self.paths[key] = vifile.within(self.folder, names, under)
         return self.paths[key]
+
+    def find(self, names: List[str], library: Optional[str] = None,
+             library_of: Optional[Callable[[Path], Optional[str]]] = None) -> Optional[Path]:
+        """A sub-VI's file anywhere under the folder when the path its link keeps doesn't lead to it (the lab moved
+        it, or the VI was saved on another computer): of the files with its name and of its library (library: the
+        link's, "Keithley 24XX.lvlib", or "" for a VI of none; library_of: a file's), the one whose folders end the
+        way the link's do. A VI of no library must share a folder with its link's path, if that has any (Reset.vi
+        is in many drivers). None when there is none, or when two or more match as well: never guessed between
+        (said in ambiguous, by the file's name)."""
+        if not names or not self.folder:
+            return None
+        name = str(names[-1]).lower()
+        found = [p for p in self._indexed().get(name, []) if self._inside(p) is not None]
+        if library is not None and library_of is not None:
+            mine = library.rpartition(":")[2].lower()
+            found = [p for p in found if (library_of(p) or "").lower() == mine]
+        if not found:
+            return None
+        want = [str(p).lower() for p in names[:-1] if p and p not in (".", "..") and not str(p).startswith("<")]
+        base = Path(os.path.normpath(os.path.abspath(self.folder)))   # as the index has its files
+
+        def score(p: Path) -> int:
+            have = [x.lower() for x in p.relative_to(base).parts[:-1]]
+            n = 0
+            while n < min(len(want), len(have)) and want[-1 - n] == have[-1 - n]:
+                n += 1
+            return n
+        scores = {p: score(p) for p in found}
+        best = max(scores.values())
+        if not library and want and best == 0:
+            return None
+        winners = [p for p in found if scores[p] == best]
+        if len(winners) > 1:
+            self.ambiguous.setdefault(name, [p.relative_to(base).as_posix() for p in winners])
+            return None
+        return winners[0]
+
+    def _inside(self, p: Path) -> Optional[Path]:
+        try:
+            return vifile.within(self.folder, p.relative_to(os.path.normpath(os.path.abspath(self.folder))).parts)
+        except ValueError:
+            return None
+
+    def _indexed(self) -> Dict[str, List[Path]]:
+        """The folder's VIs and controls by file name (lower case), looked for once in this process for a while
+        (INDEX_SECONDS: a survey reads hundreds of VIs in one folder)."""
+        if self.index is None:
+            key = (os.path.normpath(os.path.abspath(self.folder)), tuple(str(o) for o in self.own))
+            at, index = _INDEXES.get(key, (0.0, {}))
+            if time.monotonic() - at > INDEX_SECONDS:
+                index, _ = _walk_vis(key[0], self.own)
+                _INDEXES[key] = (time.monotonic(), index)
+            self.index = index
+        return self.index
+
+
+_INDEXES: Dict[Tuple[str, Tuple[str, ...]], Tuple[float, Dict[str, List[Path]]]] = {}
+
+
+def _walk_vis(folder: str, own: Any) -> Tuple[Dict[str, List[Path]], bool]:
+    """A folder's VIs and controls by file name (lower case), found the way a LabVIEW survey looks (labview._walk):
+    never inside the folders a survey skips, a hidden folder, or a link to a folder (a junction either); no file
+    whose name is a device's (COM3.vi: looking at it opens it), a file of sign-ins or Kelvin's own; through at most
+    INDEX_LOOKED files and folders, for at most INDEX_WALK seconds (a VI's reading has its own time limit).
+    (the index, whether it stopped short)."""
+    from .folderfiles import mine, secret
+    from .labview import SKIP_DIRS
+    index: Dict[str, List[Path]] = {}
+    looked, end = 0, time.monotonic() + INDEX_WALK
+    junction = getattr(os.path, "isjunction", lambda p: False)
+    try:
+        for top, dirs, names in os.walk(folder):   # followlinks=False: a link to a folder isn't gone into
+            dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")
+                             and not junction(os.path.join(top, d)))
+            looked += len(dirs) + len(names)
+            if looked > INDEX_LOOKED or time.monotonic() > end:
+                return index, True
+            for name in names:
+                if os.path.splitext(name)[1].lower() not in (".vi", ".vit", ".ctl", ".ctt") or \
+                        not vifile.plain_name(name):
+                    continue
+                p = Path(top, name)
+                try:
+                    if not p.is_file() or secret(p) or mine(p, own) is not None:
+                        continue
+                except OSError:
+                    continue
+                index.setdefault(name.lower(), []).append(p)
+    except OSError:
+        pass
+    return index, False
 
 
 class _Reader:
@@ -534,7 +658,7 @@ class _Reader:
         terminal."""
         for t in loop.items("termList"):
             dco = self.g.resolve(t.get("dco"))
-            if dco is None or dco.kind != "lpTun" or dco.get("innerLpTunDCO") is None:
+            if dco is None or not indexing(dco):
                 continue
             ends = self.g.ends(dco)
             if ends and ends[-1] in self.g.source:
@@ -674,18 +798,18 @@ class _Reader:
         if src != ends[-1]:   # its inside: what comes in from outside the structure
             outer = ends[-1]
             loop = self.g.dco_owner.get(dco.uid)
-            if dco.kind == "lpTun" and dco.get("innerLpTunDCO") is not None and loop is not None and \
+            if indexing(dco) and loop is not None and \
                     self.loop_values.get(loop.uid) == outer and loop.uid in self.loop_vars:
                 return Val("loop", self.loop_vars[loop.uid])
             v = self.origin(outer, seen, level + 1)
-            if dco.kind == "lpTun" and dco.get("innerLpTunDCO") is not None:
+            if indexing(dco):
                 return computed("each value of %s in turn" % v.words()) if v.kind != "loop" else v
             return v
         inside = [self.origin(e, seen, level + 1) for e in ends[:-1] if e in self.g.source]
         if not inside:
             return computed("a value from inside a structure")
         if all(v.source() == inside[0].source() for v in inside):
-            if dco.kind == "lpTun" and dco.get("innerLpTunDCO") is not None:
+            if indexing(dco):
                 return computed("every value of %s, one per step" % inside[0].words())
             return inside[0]
         return computed("a value that depends on the case")
@@ -1371,7 +1495,10 @@ class _Reader:
             if missing:
                 out["sends_unread"] = missing
         else:
-            out["sends_unread"] = "%s isn't beside the VI, so the commands it sends weren't read" % name
+            places = self.shared.ambiguous.get(str(link.path[-1]).lower()) if link.path else None
+            out["sends_unread"] = ("%s is in more than one place under the folder (%s); none was read" % (
+                name, ", ".join(places[:4])) if places else
+                "%s isn't beside the VI, so the commands it sends weren't read" % name)
         return [out]
 
     def _terminals(self, sub: Optional[vifile.VI]) -> Dict[int, vifile.Control]:
@@ -1417,10 +1544,12 @@ class _Reader:
             candidates = [(vi_file.parent, parts[1:]), (vi_file.parent, [folder] + parts[1:])]
         else:   # relative to the VI's file: each empty part is up one (the first, to the VI's folder)
             candidates = [(vi_file, [".." if p == "" else p for p in parts]), (vi_file.parent, parts[-1:])]
-        for under, names in candidates:
-            c = self.shared.within(under, names)
-            if c is None:
-                continue
+        places = [self.shared.within(under, names) for under, names in candidates]
+        for c in [p for p in places if p is not None] + [None]:
+            if c is None:   # not where its link says: anywhere under the folder, by its name and library
+                c = self.shared.find(parts, link.name.rpartition(":")[0], self._library_of)
+                if c is None:
+                    return None
             key = str(c)
             if key in self.files:
                 return self.files[key]
@@ -1430,7 +1559,7 @@ class _Reader:
                 exists = False
             if not exists:
                 continue
-            if len(self.files) >= MAX_SUBVIS:
+            if len(self.files) >= self.shared.max_files:
                 return None
             self.shared.spend()
             try:
@@ -1439,6 +1568,20 @@ class _Reader:
                 self.files[key] = None
             return self.files[key]
         return None
+
+    def _library_of(self, p: Path) -> Optional[str]:
+        """The library a VI file found by its name belongs to (read once, as any sub-VI is); None if unreadable."""
+        key = str(p)
+        if key not in self.files:
+            if len(self.files) >= self.shared.max_files:
+                return None
+            self.shared.spend()
+            try:
+                self.files[key] = vifile.read(p)
+            except (vifile.ReadError, OSError):
+                self.files[key] = None
+        vi = self.files[key]
+        return vi.library if vi is not None else None
 
     def sends(self, sub: vifile.VI, n: Obj, names: Dict[int, vifile.Control]) -> Tuple[List[Dict[str, Any]], str]:
         """The commands a sub-VI sends whatever its inputs (its writes and queries outside loops and cases), read

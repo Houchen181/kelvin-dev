@@ -40,7 +40,7 @@ from .plans import PlanError, Stabilize, _split, _stabilize, load_plan
 
 STATES = ("waiting", "running", "done", "failed", "stopped", "skipped")
 STEP_KEYS = {"step", "set", "stabilize", "wait", "note"}
-SCRIPT_KEYS = {"script", "params", "args", "python", "version", "note"}
+SCRIPT_KEYS = {"script", "params", "args", "python", "version", "note", "action"}
 KINDS = {"plan": "scan", "step": "step", "script": "script"}   # each kind of item, in words
 MAX_WAIT = 7 * 24 * 3600.0
 
@@ -97,11 +97,13 @@ class ScriptItem:
     python: str = ""              # the Python to run it in (scriptrun.python_named); "" for the one Kelvin picks
     version: Optional[str] = None   # a run whose script.py runs, as it ran then; None: the file as it is
     note: str = ""
+    action: str = ""              # an experiment's action to run (experiment.py); "": the one marked main
 
     @property
     def name(self) -> str:
         base = re.split(r"[\\/]", self.path.strip().strip('"'))[-1] or self.path
-        return base + (" as it ran in %s" % self.version if self.version else "")
+        return base + (" (%s)" % self.action if self.action else "") + (
+            " as it ran in %s" % self.version if self.version else "")
 
 
 def load_script_item(source: Any) -> ScriptItem:
@@ -133,10 +135,14 @@ def load_script_item(source: Any) -> ScriptItem:
     if version is not None and not (isinstance(version, str) and RUN_NAME.match(version)):
         errors.append("version: the id of a run of this script, whose script.py runs as it ran then")
         version = None
+    action = data.get("action") or ""
+    if not isinstance(action, str):
+        errors.append("action: the name of one of the experiment's actions")
+        action = ""
     if errors:
         raise PlanError(errors)
     return ScriptItem(path.strip(), dict(params), [str(a) for a in args], python.strip(), version,
-                      str(data.get("note") or ""))
+                      str(data.get("note") or ""), action.strip())
 
 
 @dataclass
