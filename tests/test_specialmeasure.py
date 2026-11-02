@@ -332,3 +332,136 @@ switch ic(2)
 end
 """
     assert specialmeasure.driver_commands(driver) == {1: ["SOUR1:VOLT %f"], 2: ["FREQ %f"], 3: ["*RST"]}
+
+
+GALVO_SETUP = r"""
+Scanner_Use = 1;
+if Scanner_Use == 1
+    ind = smloadinst('Scanner', [], 'None');
+    Initial_Scanner;
+    smdata.inst(ind).name = 'Galvo';
+    smaddchannel('Galvo', 'X', 'GX  ', [0, 200, Inf, 1]);
+    smaddchannel('Galvo', 'Y', 'GY', [0, 200, Inf, 1]);
+end
+ind = smloadinst('PEM200', [], 'serial', 'COM7');
+smdata.inst(ind).data.retardance = 0.5;
+smaddchannel('PEM200', 'wavelength', 'lambda_pem', [400, 1100, Inf, 1]);
+ind = smloadinst('OPTC', [], 'None');
+smaddchannel('OPTC', 'Field', 'B', [-9, 9, 0.01, 10000]);
+"""
+
+GALVO_DRIVER = r"""% a galvo's control function, as Special Measure labs write them: a DAQ's voltages
+function val = smcScanner(ico, val, rate)
+global smdata;
+switch ico(2)
+    case 1
+        switch ico(3)
+            case 1
+                Vx = val/20 - 5;
+                outputSingleScan(smdata.inst(ico(1)).data.OutX, Vx);
+            case 0
+                val = 0;
+        end
+    case 2
+        if ico(3) == 1
+            outputSingleScan(smdata.inst(ico(1)).data.OutY, val/20 - 5);
+        end
+end
+"""
+
+GALVO_INIT = r"""
+smdata.inst(ind).data.OutX = daq.createSession('ni');
+smdata.inst(ind).data.OutX.addAnalogOutputChannel('Dev3', 'ao0', 'Voltage');
+smdata.inst(ind).data.OutY = daq.createSession('ni');
+addAnalogOutputChannel(smdata.inst(ind).data.OutY, 'Dev3', 'ao1', 'Voltage');
+"""
+
+PEM_DRIVER = r"""function val = smcPEM200(ic, val, rate)
+global smdata;
+switch ic(2)
+    case 1
+        switch ic(3)
+            case 0
+                fprintf(smdata.inst(ic(1)).data.inst, ':MOD:AMP?');
+                val = str2double(fscanf(smdata.inst(ic(1)).data.inst)) / smdata.inst(ic(1)).data.retardance;
+            case 1
+                smdata.inst(ic(1)).data.wavelength = val;
+                fprintf(smdata.inst(ic(1)).data.inst, [':MOD:AMP ' num2str(smdata.inst(ic(1)).data.wavelength * smdata.inst(ic(1)).data.retardance)]);
+        end
+end
+"""
+
+
+def test_what_a_driver_sends_of_its_value_and_a_daq_driven_scanner_are_read_from_its_code(tmp_path):
+    pytest.importorskip("numpy")
+    import matfiles
+    (tmp_path / "setups").mkdir()
+    (tmp_path / "setups" / "smsetup_galvo.m").write_text(GALVO_SETUP, encoding="utf-8")
+    (tmp_path / "channels").mkdir()
+    for name, text in (("smcScanner.m", GALVO_DRIVER), ("Initial_Scanner.m", GALVO_INIT), ("smcPEM200.m", PEM_DRIVER)):
+        (tmp_path / "channels" / name).write_text(text, encoding="utf-8")
+    (tmp_path / "instruments").mkdir()
+    matfiles.write(tmp_path / "instruments" / "sminst_Scanner.mat",
+                   {"inst": {"channels": matfiles.Chars(["X", "Y"]), "cntrlfn": "@smcScanner", "device": "Scanner"}})
+    matfiles.write(tmp_path / "instruments" / "sminst_PEM200.mat",
+                   {"inst": {"channels": matfiles.Cell(["wavelength", "retardance"]), "cntrlfn": "@smcPEM200",
+                             "data": {"retardance": 0.25, "wavelength": 633.0}}})
+    found = specialmeasure.survey(tmp_path, homelab.builtin_registry())
+    rack = {ri.name: ri for ri in found.setup.instruments}
+    galvo, pem, optc = rack["Galvo"], rack["PEM200"], rack["OPTC"]
+    assert galvo.daq == "Dev3" and galvo.inst.address == "nidaq://Dev3" and galvo.inst.card["id"] == "ni/daqmx"
+    gx, gy = galvo.channels
+    assert (gx.name, gx.param, gx.multiplier(), gx.offset) == ("GX", "ao0", 0.05, -5)   # V = x/20 - 5, on Dev3/ao0
+    assert (gy.param, gy.multiplier(), gy.offset) == ("ao1", 0.05, -5)   # an if on the operation, the value in place
+    assert "Dev3/ao0" in gx.how
+    assert pem.inst.card["id"] == "hinds/pem200" and pem.channels[0].param == "amplitude"
+    assert pem.channels[0].multiplier() == 0.5   # wavelength × retardance, the setup's 0.5 over the sminst file's
+    b = optc.channels[0]
+    assert optc.inst.card["id"] == "qd/multivu" and (b.param, b.set_param) == ("B", "B_set")
+    assert b.native and b.multiplier() == 1   # Kelvin's card takes tesla: sm's 10000 is its driver's Oe
+    keys, functions = specialmeasure.channel_map(found.setup, {"Galvo": "galvo", "PEM200": "pem", "OPTC": "ppms"})
+    scan = {"name": "map", "loops": [{"npoints": 3, "setchan": ["GX"], "setchanranges": [[0, 200]]},
+                                     {"npoints": 2, "setchan": ["B"], "setchanranges": [[-1, 1]]}],
+            "consts": [{"setchan": "lambda_pem", "val": 800, "set": 1}]}
+    t = translate(scan, keys, functions=functions)
+    assert not t["gaps"], t["gaps"]
+    assert t["plan"]["sweep"] == {"ppms.B_set": {"from": -1, "to": 1, "points": 2},
+                                  "galvo.ao0": {"from": -5, "to": 5, "points": 3}}
+    assert t["plan"]["setup"] == {"pem.amplitude": 400}   # 800 nm at half a wave
+    assert "B_set in T" in found.text()
+
+
+def test_drivers_switch_on_their_channel_by_any_name_and_say_what_they_send():
+    switched = """% the operation first, then the channel
+function v = smcBox(chan, v, rate)
+switch chan(3)
+    case 1
+        switch chan(2)
+            case 1
+                fprintf(dev, sprintf(':VOLT %g', v*1000));
+            case 2
+                fprintf(dev, ':CURR %f', v);
+        end
+end
+"""
+    cases = specialmeasure.driver_cases(switched)
+    assert set(cases) == {1, 2} and set(cases[1]) == {1}
+    assert specialmeasure.driver_commands(switched) == {1: [":VOLT %g"], 2: [":CURR %f"]}
+    name = specialmeasure.driver_value(switched)   # its value is v here
+    one = specialmeasure.sent_value(cases[1][1], {}, name)
+    assert name == "v" and one["to"] == ("command", ":VOLT %g") and (one["scale"], one["offset"]) == (1000, 0)
+    assert specialmeasure.sent_value(cases[2][1], {}, name)["scale"] == 1
+    assert specialmeasure.sent_value(["outputSingleScan(s, val^2)"], {}) is None   # not a scale and an offset
+    assert specialmeasure.sent_value(["fprintf(dev, [':FREQ ' num2str(val*k)])"], {}) is None   # k unknown
+
+
+def test_the_pem200s_card_reads_its_bracketed_replies():
+    reg = homelab.builtin_registry()
+    card = reg.get("hinds/pem200")
+    assert card.params["amplitude"].from_wire("[AMP](3.165000E+2)") == 316.5
+    assert card.params["amplitude_min"].from_wire("[AMPR](1.000000E+1,5.50000E+2)") == 10
+    assert card.params["amplitude_max"].from_wire("[AMPR](1.000000E+1,5.50000E+2)") == 550
+    assert card.params["frequency"].from_wire("[FREQUENCY](5.01930899E+4)") == pytest.approx(50193.0899)
+    assert card.params["stable"].from_wire("[STABLE](1)") is True
+    assert not card.params["amplitude"].is_drive   # it modulates the light, never drives the sample
+    assert card.connection["set_reply"] == "^\\[" and specialmeasure._known("PEM200", reg)["id"] == "hinds/pem200"

@@ -1083,6 +1083,16 @@ class RunEngine:
                 for instr, param, start, target, _ in paired:
                     apply(instr, param, target if s == steps else start + (target - start) * s / steps)
 
+        def ramped_by_gate(step: Step) -> bool:
+            """A step together() can move with others: a numeric drive the gate ramps, not one of the card's actions."""
+            if action_of(lab, step.instr, step.param) is not None:
+                return False
+            try:
+                spec = lab.resolve(step.key)[1]
+            except KeyError:
+                return False
+            return spec.is_drive and spec.numeric and spec.ramp == "gate"
+
         def set_axis(axis: Axis, j: int, k: int, v: Any, at: Dict[str, Any]) -> Dict[str, Any]:
             """Loop j at its k-th value: its setting, what moves with it and what sets: works out from it, together;
             then its stabilize, its settle (first_settle for its first value) and the readings it takes once per
@@ -1264,8 +1274,16 @@ class RunEngine:
                                     "level" % "; ".join(late))
                 if plan.after:
                     self._emit(event="phase", run_id=rec.run_id, phase="after", eta_s=time_left(n))
-                for step in plan.after:
-                    apply(step.instr, step.param, step.value)
+                side: List[Tuple[str, str, Any]] = []   # gate-ramped drives written side by side: together
+                for step in plan.after + [None]:
+                    if step is not None and ramped_by_gate(step):
+                        side.append((step.instr, step.param, step.value))
+                        continue
+                    if side:
+                        together(side)
+                        side = []
+                    if step is not None:
+                        apply(step.instr, step.param, step.value)
         except _Abort as e:
             status, reason = "aborted", str(e)
         except Stopped:   # a stop that came while an instrument was still taking a reading

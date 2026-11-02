@@ -6519,10 +6519,16 @@
     return h("p", { class: "hint sm-head" }, "In " + r.folder + ": ", r.setups.length > 1 ? pick : h("code", {}, r.setup || "no setup script"),
       " · " + r.scans.length + " scan" + (r.scans.length === 1 ? "" : "s") + " · " + runs + " run" + (runs === 1 ? "" : "s") + "; none run.");
   }
-  function smChannels(it) {   // Vbg → V [-10, 10] at 1/s · Ibg → I · …
-    return (it.channels || []).map((c) => c.name + (c.param ? " → " + c.param : " (not on the card)") +
-      (c.low != null || c.high != null ? " [" + (c.low == null ? "−∞" : c.low) + ", " + (c.high == null ? "∞" : c.high) + "]" : "") +
-      (c.rate != null ? " at " + c.rate + "/s" : "") + (c.factor !== 1 ? " ×" + c.factor : "")).join(" · ");
+  function smChannels(it) {   // Vbg → V [-10, 10] at 1/s · NP2X → ao0 [0, 200] ×0.05 −5 · …
+    return (it.channels || []).map((c) => {
+      // what the instrument gets of the channel's value: sm's multiplier and its driver's (none: the card's own unit)
+      const times = c.native || !c.param ? 1 : (c.factor == null ? 1 : c.factor) * (c.scale == null ? 1 : c.scale);
+      const plus = c.native || !c.param ? 0 : c.offset || 0;
+      return c.name + (c.param ? " → " + c.param : " (not on the card)") +
+        (c.low != null || c.high != null ? " [" + (c.low == null ? "−∞" : c.low) + ", " + (c.high == null ? "∞" : c.high) + "]" : "") +
+        (c.rate != null ? " at " + c.rate + "/s" : "") + (times !== 1 ? " ×" + +times.toPrecision(6) : "") +
+        (plus ? (plus < 0 ? " −" : " +") + Math.abs(plus) : "");
+    }).join(" · ");
   }
   // Kelvin's own words, never a lab's name (labconfig.NOT_NAMES)
   const NOT_NAMES = new Set(["i", "t", "time", "repeat", "stabilizing", "gap_s", "on", "off", "true", "false", "and", "or",

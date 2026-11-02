@@ -5509,22 +5509,25 @@ class LabRuntime:
         rates: Dict[str, float] = {}
         taken: Dict[str, str] = {}
         for view_ch, ch in zip(item["channels"], ri.channels):
-            param, why = specialmeasure.param_of(card, ch.channel, ri.numbered.get(ch.channel, []))
+            param, why = specialmeasure.param_of(card, ch.channel, ri.numbered.get(ch.channel, []), ch.send)
             if param and param in taken:
                 param, why = None, "%s is %s's already: a second channel is an entry of its own" % (param,
                                                                                                     taken[param])
             elif param:
                 taken[param] = ch.name
             view_ch.update(param=param, why=why, set_param=specialmeasure.set_param_of(card, param))
+            ch.param, ch.set_param = param, view_ch["set_param"]
+            specialmeasure.card_units(ch, card)   # on this card: sm's multiplier, or the card's own unit
+            view_ch.update(native=ch.native, how=ch.how)
             drive = view_ch["set_param"] or param
             spec = card.params.get(drive) if card is not None and drive else None
             if spec is None or not spec.numeric or not spec.is_drive:
                 continue
-            ends = sorted(v * ch.factor for v in (ch.low, ch.high))
+            ends = sorted(ch.to_instrument(v) for v in (ch.low, ch.high))   # as the instrument gets them
             if all(math.isfinite(v) for v in ends):
                 limits[drive] = ends
             if math.isfinite(ch.rate) and ch.rate > 0 and spec.ramp == "gate":
-                rate = ch.rate * abs(ch.factor)
+                rate = ch.rate * abs(ch.multiplier())
                 rates[drive] = min(rate, spec.max_rate) if spec.max_rate else rate
         if item.get("card") is not None:
             item["card"]["limits"] = limits
@@ -5552,8 +5555,11 @@ class LabRuntime:
             name = item.get("in_lab") or item.get("name")
             for ch in item.get("channels") or []:
                 if name and ch.get("param"):
-                    keys[ch["name"]] = ("%s.%s" % (name, ch["param"]), float(ch.get("factor") or 1.0),
-                                        "%s.%s" % (name, ch["set_param"]) if ch.get("set_param") else None)
+                    native = bool(ch.get("native"))   # its card takes the channel's own unit: no conversion
+                    keys[ch["name"]] = ("%s.%s" % (name, ch["param"]), 1.0 if native else
+                                        float(ch.get("factor") or 1.0) * float(ch.get("scale") or 1.0),
+                                        "%s.%s" % (name, ch["set_param"]) if ch.get("set_param") else None,
+                                        0.0 if native else float(ch.get("offset") or 0.0))
         functions = specialmeasure.channel_map(setup, {})[1] if setup is not None else {}
         return keys, functions
 

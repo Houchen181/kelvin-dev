@@ -1,0 +1,70 @@
+card: 1
+id: hinds/pem200
+model: Hinds Instruments PEM-200 photoelastic modulator controller
+vendor: Hinds Instruments
+kind: modulator
+status: community
+manual: "PEM200 Photoelastic Modulator User Manual (P/N 010-0000-095 UM Rev C), chapter 7 Communication Protocol (pp. 32-42): the SCPI-derived commands, their short forms and their replies"
+notes:
+  - "USB, as a serial COM port: serial://COM6 (any baud rate from 9600 to 250000 works). Commands are case sensitive and end with a line feed; every command, a set too, is answered [NAME](values), an error <NAME>(message). Close Hinds' PEM Control software first: one program at a time holds the port."
+  - "amplitude is the peak retardation in nm, the wavelength times the retardation in waves: a quarter wave at 633 nm is 158.25, a half wave 316.5. The range your optical head takes is amplitude_min to amplitude_max (10 to 550 nm on a fused silica head); the controller refuses the rest."
+  - "Only the PEM-200: the PEM-100 has another command set (a command line on RS-232) and needs a card of its own. The synchronous detector's commands (:DET:...) need the SD option and aren't on this card."
+identify:
+  idn: "Hinds PEM ?200"
+  example: "[IDN](Hinds PEM 200 controller V01)"
+connection: { baud_rate: 250000, read_termination: "\n", write_termination: "\n", timeout_ms: 3000, set_reply: '^\[' }
+
+parameters:
+  amplitude:
+    label: Retardation amplitude
+    kind: measure
+    unit: nm
+    set: ":MOD:AMP {value}"
+    get: ":MOD:AMP?"
+    parse: '\[AMP\]\(\s*([-+0-9.eE]+)'
+    limits: [0, 20000]
+    description: The peak retardation it modulates at, in nm (the wavelength times the retardation in waves)
+  drive_level:
+    label: Drive level
+    kind: measure
+    set: ":MOD:DRV {value}"
+    get: ":MOD:DRV?"
+    parse: '\[DRIVE\]\(\s*([-+0-9.eE]+)'
+    limits: [0, 1]
+    description: The modulator's drive on its own scale, 0 (least) to 1 (most); amplitude sets it from the retardation
+  frequency:
+    label: Modulation frequency
+    kind: measure
+    unit: Hz
+    get: ":MOD:FREQ?"
+    parse: '\[FREQUENCY\]\(\s*([-+0-9.eE]+)'
+    description: Its optical head's resonance, near its nominal 20 to 84 kHz
+  stable:
+    label: Stable
+    kind: measure
+    type: bool
+    get: ":MOD:STABLE?"
+    parse: '\[STABLE\]\(\s*([01])'
+    description: Whether the modulation has settled at its amplitude
+  amplitude_min:
+    label: Lowest amplitude
+    kind: measure
+    unit: nm
+    get: ":MOD:AMPR?"
+    parse: '\[AMPR\]\(([^)]*)\)'
+    field: 0
+  amplitude_max:
+    label: Highest amplitude
+    kind: measure
+    unit: nm
+    get: ":MOD:AMPR?"
+    parse: '\[AMPR\]\(([^)]*)\)'
+    field: 1
+  output:
+    label: Modulator on
+    kind: measure
+    type: bool
+    set: ":SYS:PEMO {value}"
+    description: Switches the modulation on or off; it can't be read back, so Kelvin knows it once it has set it
+display:
+  headline: amplitude

@@ -112,7 +112,7 @@ More instruments with a library of their own:
   - **The client:** `qick` and `Pyro4` on the computer that runs Kelvin, which Kelvin installs (the app does not carry them). The board's QICK and this computer's should be the same version: the instrument's identity shows both, and Kelvin installs the board's.
   - **What Kelvin does:** it plays one generator as a continuous tone or as pulses, and reads I/Q from one readout. A tone keeps playing after a program ends, so Kelvin stops every generator (`reset_gens`) when the output goes off and when it disconnects.
 
-**DAQ cards, spectrometers, monochromators, cameras and nanopositioners.**
+**DAQ cards, spectrometers, monochromators, modulators, cameras and nanopositioners.**
 
 | Instrument | Address | What the computer needs | Card |
 |---|---|---|---|
@@ -120,6 +120,7 @@ More instruments with a library of their own:
 | Teledyne Princeton Instruments camera (PyLoN, PIXIS, ProEM, BLAZE, KURO, SOPHIA) | `picam://<serial>` | PICam, or LightField which installs it | `princeton/picam` |
 | The same cameras with their spectrograph (IsoPlane, SpectraPro, HRS), through LightField | `lightfield://<experiment>` | LightField, with its license | `princeton/lightfield` (Kelvin's lab status says so when LightField is installed and not in the lab yet: Kelvin drives it, never its window) |
 | Princeton Instruments (Acton) SpectraPro monochromator | `serial://COM4` | nothing (text commands) | `princeton/spectrapro` |
+| Hinds Instruments PEM-200 photoelastic modulator controller | `serial://COM6` (its USB COM port) | nothing (text commands) | `hinds/pem200` |
 | Andor Shamrock / Kymera spectrograph | `shamrock://0` | Andor Solis or the Andor SDK | `andor/shamrock` |
 | Andor sCMOS camera (Zyla, Neo, Sona, Marana) | `andor://0?sdk=3` | Andor SDK3 and its pyAndorSDK3 | `andor/scmos` (draft) |
 | Andor CCD / EMCCD camera (iXon, Newton, iDus) | `andor://0?sdk=2` (on one of several spectrographs: `&spectrograph=1`) | Andor SDK2 and its pyAndorSDK2 | `andor/ccd` (draft) |
@@ -132,7 +133,7 @@ More instruments with a library of their own:
 | USB webcam, microscope or inspection camera (UVC) | `uvc://0` | `opencv-python-headless`, which Kelvin installs | `generic/usb-camera` |
 | GenICam industrial camera (Teledyne FLIR, Allied Vision, IDS, The Imaging Source, Lucid) | `genicam://<serial>?cti=<the maker's .cti file>` | the maker's SDK, and `harvesters`, which Kelvin installs | `generic/genicam-camera` |
 
-- **The app brings no maker's library:** Kelvin installs the Python package an instrument needs (nidaqmx, seabreeze, pypylon, pylablib) on this computer the first time. LightField's automation uses pythonnet, which the app has for its own window. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text.
+- **The app brings no maker's library:** Kelvin installs the Python package an instrument needs (nidaqmx, seabreeze, pypylon, pylablib) on this computer the first time. LightField's automation uses pythonnet, which the app has for its own window. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PEM-200, PI and Thorlabs controllers speak text.
 
 - **Frames as pictures:** a camera's frame is kept as a file (in its run's run.h5 once the run ends). `look_at` shows Kelvin one as a picture, from a run or read now, with its numbers (size, range, the brightest pixel, where the bright part is centered), so a model that sees can judge a spot, a beam or an image by eye.
 

@@ -337,3 +337,27 @@ def test_a_name_the_lab_gives_later_never_changes_a_kept_scan(tmp_path):
         assert "lockin.X" in rt.add_watch("X_A", above=1.0)["rule"]   # a name: watched as its card has it
     finally:
         rt.lab.config.names.pop("D", None)
+
+
+def test_the_end_moves_its_gates_together_too_in_the_order_written(tmp_path):
+    engine, lab, gate, approver = _engine(tmp_path)
+    log = []
+    real = gate._set
+
+    def watched(instr, param, value, *a, **k):
+        log.append(("%s.%s" % (instr, param), value))
+        return real(instr, param, value, *a, **k)
+    gate._set = watched
+    report = engine.run("""
+plan: to_zero
+setup: { top.output: on, bottom.output: on }
+sweep: { top.V: { from: 0, to: 2, points: 3, with: { bottom.V: { from: 0, to: -2 } } } }
+measure: [lockin.X]
+after: { top.V: 0, bottom.V: 0, top.output: off }
+""")
+    assert report.ok, report.message
+    end = log[log.index(("top.V", 2.0)) + 2:]   # past the last point: the end, as Special Measure's escape function
+    gates = [(k, v) for k, v in end if k in ("top.V", "bottom.V")]
+    assert len(gates) == 80 and [k for k, _ in gates] == ["top.V", "bottom.V"] * 40   # in turn, a ramp step each
+    assert all(abs(t + b) < 1e-9 for (_, t), (_, b) in zip(gates[::2], gates[1::2]))   # along the line to 0, 0
+    assert end[-1][0] == "top.output"   # switched off after its gates, as written

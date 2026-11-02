@@ -43,7 +43,8 @@ MAX_SCANS = 80              # scans the review lists: the newest, one per layout
 KNOWN_CARDS = {"andorixon": "andor/ccd", "andor": "andor/ccd", "optc": "qd/multivu", "ppms": "qd/multivu",
                "dynacool": "qd/multivu", "rigoldg1022z": "rigol/dg1000z", "sp150": "princeton/spectrapro",
                "sp300": "princeton/spectrapro", "sp2150": "princeton/spectrapro", "sp2300": "princeton/spectrapro",
-               "sp2500": "princeton/spectrapro", "sp2750": "princeton/spectrapro", "thorkdc101": "thorlabs/kdc101"}
+               "sp2500": "princeton/spectrapro", "sp2750": "princeton/spectrapro", "thorkdc101": "thorlabs/kdc101",
+               "pem200": "hinds/pem200"}
 # the words a channel's name and a card parameter's name or label share, for a channel no command says
 SYNONYMS = {"theta": ("phase", "theta"), "phas": ("phase",), "freq": ("frequency", "freq"),
             "vref": ("amplitude", "sine_out", "level", "slvl"), "slvl": ("amplitude", "level"),
@@ -67,6 +68,19 @@ class Channel:
     param: Optional[str] = None   # its card parameter, once a card fits
     set_param: Optional[str] = None   # what sets it, where the card sets it through a set point (T_set for T)
     why: str = ""                 # how that was found
+    scale: float = 1.0            # its driver sends value x factor x scale + offset (its own conversion, read from its
+    offset: float = 0.0           # code: a PEM's wavelength x its retardance, a DAQ's position / 20 - 5 V)
+    send: str = ""                # the DAQ channel its driver writes (ao0): the card parameter it is
+    how: str = ""                 # that conversion, in words
+    native: bool = False          # its card takes it in the channel's own unit (card_units): no conversion
+
+    def multiplier(self) -> float:
+        """A value of the scan's times this is the card's (plus the offset): sm's multiplier and its driver's."""
+        return 1.0 if self.native else self.factor * self.scale
+
+    def to_instrument(self, v: float) -> float:
+        """A value as the scan has it (sm's units), as the card takes it."""
+        return v * self.multiplier() + (0.0 if self.native else self.offset)
 
 
 @dataclass
@@ -85,6 +99,8 @@ class RackInstrument:
     numbered: Dict[str, List[str]] = field(default_factory=dict)   # its driver's commands, by its channels' names
     sends: List[Command] = field(default_factory=list)   # what its driver can send: only to find its card
     order: List[str] = field(default_factory=list)   # its channels in its sminst file's order (channel 1 first)
+    data: Dict[str, float] = field(default_factory=dict)   # its data's numbers (its sminst file's, then the setup's)
+    daq: str = ""              # the NI DAQ device its driver writes through MATLAB's DAQ toolbox (Dev2)
 
     @property
     def function(self) -> bool:
@@ -199,7 +215,7 @@ def _channel_view(ch: Channel) -> Dict[str, Any]:
     for k in ("low", "high", "rate"):
         v = getattr(ch, k)
         out[k] = v if math.isfinite(v) else None
-    out["factor"] = ch.factor
+    out.update(factor=ch.factor, scale=ch.scale, offset=ch.offset, send=ch.send, how=ch.how, native=ch.native)
     return out
 
 
@@ -209,8 +225,11 @@ def _range_words(ch: Channel) -> str:
         bits.append("limits [%s, %s]" % (_num(ch.low), _num(ch.high)))
     if math.isfinite(ch.rate):
         bits.append("ramps at %s/s" % _num(ch.rate))
-    if ch.factor != 1:
-        bits.append("the instrument gets %s × the value" % _num(ch.factor))
+    if ch.how:
+        bits.append(ch.how)
+    elif ch.multiplier() != 1 or ch.offset:
+        bits.append("the instrument gets %s × the value%s" % (_num(ch.factor * ch.scale), " %s %s" % (
+            "-" if ch.offset < 0 else "+", _num(abs(ch.offset))) if ch.offset else ""))
     return " (%s)" % ", ".join(bits) if bits else ""
 
 
@@ -335,6 +354,10 @@ class _Setup(scripts._Matlab):
                 else:
                     self.current.formulas = [c.strip() for c in cells if c.strip()]
             return
+        m = re.match(r"^smdata\.inst\(\s*\w+\s*\)\.data\.(\w+)\s*=\s*([^;]+)$", code, re.S)
+        if m and self.current is not None and self.number(m.group(2)) is not None:
+            self.current.data[m.group(1)] = self.number(m.group(2))   # a number its driver may convert with
+            return
         args = _call_args(code, "set")
         if args is not None and code.startswith("set") and args and args[0].startswith("smdata.inst(") \
                 and self.current is not None:
@@ -453,45 +476,202 @@ def _vector(text: str, reader: Any) -> List[float]:
 
 # ------------------------------------------------------------------ drivers: the command each channel sends
 
+def _code(text: str) -> str:
+    """A MATLAB file's code: comments out, continued lines joined."""
+    code = "\n".join(_matlab_code(line)[0] for line in text.splitlines())
+    return re.sub(r"\.\.\.\s*\n", " ", code)
+
+
 def driver_commands(text: str) -> Dict[int, List[str]]:
     """A control function's commands by channel number: a cmds = {'OUTP 1', 'FREQ', ...} list (SR830's form: a
-    channel's command, its query being the same with ?), and the strings each case of switch ic(2) sends."""
-    code = "\n".join(_matlab_code(line)[0] for line in text.splitlines())
-    code = re.sub(r"\.\.\.\s*\n", " ", code)
+    channel's command, its query being the same with ?), and the strings each case of its switch on the channel
+    sends (driver_cases)."""
     out: Dict[int, List[str]] = {}
-    m = re.search(r"\bcmds\s*=\s*\{(.*?)\}", code, re.S)
+    m = re.search(r"\bcmds\s*=\s*\{(.*?)\}", _code(text), re.S)
     if m:
         for k, cell in enumerate(_matlab_args(m.group(1).replace("\n", " ")), 1):
             s = re.fullmatch(r"\s*'([^']*)'\s*", cell)
             if s and s.group(1).strip():
                 out.setdefault(k, []).append(s.group(1).strip())
-    depth, at, current = 0, None, []   # the switch on the channel: its depth, and the case being read
-    statements = [t.strip() for line in code.split("\n") for t in _top_split(line, ";,")]
-    for t in statements:   # one at a time: if x, fprintf(...), end on one line opens and ends a block
-        m = re.match(r"^else\s+(if\b.*)$", t)
-        if m:   # else if: an if of its own, with its own end
-            t = m.group(1)
-        if at is None and re.match(r"^switch\s+ic\s*\(\s*2\s*\)", t):
-            at = depth
-            depth += 1
-            continue
-        if re.match(r"^(if|for|parfor|while|switch|try|function)\b", t):
-            depth += 1
-        elif re.match(r"^end\b", t):
-            depth -= 1
-            if at is not None and depth <= at:   # the switch on the channel is over
-                at, current = None if depth < at else -1, []
-            continue
-        if at is not None and at >= 0 and depth == at + 1 and re.match(r"^(case|otherwise)\b", t):
-            group = re.match(r"^case\s+(\{[^}]*\}|[\d\s,]+)", t)
-            current = [int(x) for x in re.findall(r"\d+", group.group(1))] if group else []
-            continue
-        if at is not None and at >= 0 and current:   # what this channel's case sends, the inner cases' too
-            for sent in re.findall(r"'([^'\n]{1,80})'", t):
-                if _command_like(sent):
-                    for n in current:
+    for n, ops in driver_cases(text).items():   # what this channel's case sends, the inner cases' too
+        for statements in ops.values():
+            for t in statements:
+                for sent in re.findall(r"'([^'\n]{1,80})'", t):
+                    if _command_like(sent):
                         out.setdefault(n, []).append(sent.strip())
     return out
+
+
+def driver_cases(text: str) -> Dict[int, Dict[Any, List[str]]]:
+    """A control function's statements by the channel each case of its switch on the channel is for (switch ic(2),
+    by whatever name its first argument has: ico), and within that case by the operation (switch ic(3), or if
+    ic(3) == 1): 1 sets, 0 reads, None either. Read a statement at a time: if x, fprintf(...), end on one line opens
+    and ends a block; else if is an if of its own, with its own end."""
+    code = _code(text)
+    m = re.search(r"\bfunction\b[^(\n]*\(\s*(\w+)", code)
+    first = re.escape(m.group(1) if m else "ic")
+    on_channel = re.compile(r"^switch\s*\(?\s*%s\s*\(\s*2\s*\)" % first)
+    on_op = re.compile(r"^switch\s*\(?\s*%s\s*\(\s*3\s*\)" % first)
+    if_op = re.compile(r"^(if|elseif)\s*\(?\s*%s\s*\(\s*3\s*\)\s*==\s*(\d+)" % first)
+    out: Dict[int, Dict[Any, List[str]]] = {}
+    stack: List[List[Any]] = []   # each open block: [what it is (channel, op, if-op, other), its case now]
+
+    def one(t: str) -> None:
+        if on_channel.match(t):
+            stack.append(["channel", []])
+            return
+        if on_op.match(t):
+            stack.append(["op", None])
+            return
+        m = if_op.match(t)
+        if m and m.group(1) == "if":
+            stack.append(["if-op", int(m.group(2))])
+            return
+        if re.match(r"^(elseif|else)\b", t):
+            if stack and stack[-1][0] == "if-op":   # another operation, or the rest of them
+                stack[-1][1] = int(m.group(2)) if m else -1
+            return
+        if re.match(r"^(if|for|parfor|while|switch|try|function)\b", t):
+            stack.append(["other", None])
+            return
+        if re.match(r"^end\b", t):
+            if stack:
+                stack.pop()
+            return
+        if re.match(r"^(case|otherwise)\b", t):
+            if stack and stack[-1][0] in ("channel", "op"):
+                group = re.match(r"^case\s+(\{[^}]*\}|[\d\s,]+)", t)
+                numbers = [int(x) for x in re.findall(r"\d+", group.group(1))] if group else []
+                if stack[-1][0] == "channel":
+                    stack[-1][1] = numbers
+                else:
+                    stack[-1][1] = numbers[0] if len(numbers) == 1 else None
+            return
+        # the innermost channel case, and the innermost operation (inside it, or around it: switch ic(3) first)
+        chans = next((now for kind, now in reversed(stack) if kind == "channel"), None)
+        what = next((now for kind, now in reversed(stack) if kind in ("op", "if-op")), None)
+        for n in chans or []:
+            out.setdefault(n, {}).setdefault(what, []).append(t)
+
+    for line in code.split("\n"):
+        for t in _top_split(line, ";,"):
+            m = re.match(r"^(else|try)\s+(\S.*)$", t)
+            for part in ([m.group(1), m.group(2)] if m else [t]):
+                one(part.strip())
+    return out
+
+
+_DATA_PATH = re.compile(r"smdata\.inst\((?:[^()]|\([^()]*\))*\)\.data\.(\w+)")
+
+
+def driver_value(text: str) -> str:
+    """The name a control function gives the value it sets (function val = smcSR830(ic, val, rate): val)."""
+    m = re.search(r"\bfunction\b[^(\n]*\(\s*\w+\s*,\s*(\w+)", _code(text))
+    return m.group(1) if m else "val"
+
+
+def sent_value(statements: List[str], data: Dict[str, float], value_name: str = "val") -> Optional[Dict[str, Any]]:
+    """What a channel's set code sends of the value it is given (value_name: val), when that is val x scale +
+    offset: {to: ("daq", the session it writes) or ("command", its text), scale, offset, text: the expression}, worked
+    out from the assignments before it and the instrument's data (data.retardance); None when it can't be told."""
+    known: Dict[str, str] = {}
+    for raw in statements:
+        st = _DATA_PATH.sub(lambda mm: "data_" + mm.group(1), raw).strip().rstrip(";").strip()
+        to: Optional[Tuple[str, str]] = None
+        value: Optional[str] = None
+        m = re.match(r"^outputSingleScan\s*\((.*)\)$", st, re.S)
+        if m:
+            args = _matlab_args(m.group(1))
+            if len(args) >= 2:   # the session by its own name (data.OutX: OutX), as daq_sessions has it
+                session = re.sub(r"^.*?(\w+)\s*$", r"\1", args[0])
+                to, value = ("daq", session[5:] if session.startswith("data_") else session), args[1]
+        else:
+            m = re.match(r"^(?:fprintf|fwrite|writeline|write)\s*\((.*)\)$", st, re.S)
+            if m:
+                args = _matlab_args(m.group(1))
+                got = _sent_in(args[1:], known)
+                if got:
+                    to, value = ("command", got[0]), got[1]
+        if value is not None:
+            text = _resolved(value, known, data, value_name)
+            conv = _affine(text, value_name) if text is not None else None
+            return dict(to=to, scale=conv[0], offset=conv[1], text=text) if conv else None
+        m = re.match(r"^([A-Za-z_]\w*)\s*=(?!=)\s*(.+)$", st, re.S)
+        if m:
+            known[m.group(1)] = m.group(2).strip()
+    return None
+
+
+def _sent_in(args: List[str], known: Dict[str, str]) -> Optional[Tuple[str, str]]:
+    """A write's command and the value in it: [cmd num2str(x, '%f')], sprintf(fmt, ..., x), or fmt, ..., x."""
+    if not args:
+        return None
+    s = args[0].strip()
+    words = " ".join(w for w in re.findall(r"'([^']*)'", s + " " + " ".join(
+        known.get(n, "") for n in re.findall(r"[A-Za-z_]\w*", s))) if not w.startswith("%")).strip()
+    if len(args) >= 2:
+        value = args[-1]
+    elif s.startswith("sprintf"):
+        inner = _call_args(s, "sprintf") or []
+        value = inner[-1] if len(inner) >= 2 else None
+    else:
+        m = re.search(r"num2str\s*\(", s)
+        inner = _call_args(s[m.start():], "num2str") if m else None
+        value = inner[0] if inner else None
+    if value is None or "{" in value or value.strip().startswith(("'", '"')):
+        return None
+    return words, value
+
+
+def _resolved(value: str, known: Dict[str, str], data: Dict[str, float], value_name: str = "val") -> Optional[str]:
+    """value with what it names put in: the code's own assignments, then the instrument's data as numbers."""
+    text = value
+    for _ in range(8):
+        def put(m: "re.Match[str]") -> str:
+            name = m.group(0)
+            if name != value_name and name in known:
+                return "(%s)" % known[name]
+            if name.startswith("data_") and name[5:] in data:
+                return "(%r)" % float(data[name[5:]])
+            return name
+        new = re.sub(r"(?<![\w.'])[A-Za-z_]\w*(?!\s*\()", put, text)
+        if new == text:
+            return text
+        text = new
+    return None
+
+
+def _affine(text: str, value_name: str = "val") -> Optional[Tuple[float, float]]:
+    """(scale, offset) when text is the value x scale + offset, checked at three values; None for anything else."""
+    kelvin = expression("@(%s) %s" % (value_name, text), ["val"])
+    if kelvin is None:
+        return None
+    try:
+        f0, f1, f7 = (expr.scalar(kelvin, {"val": v}) for v in (0.0, 1.0, 7.0))
+    except expr.ExprError:
+        return None
+    scale, offset = f1 - f0, f0
+    if not scale or abs(f7 - (offset + 7 * scale)) > 1e-9 * max(1.0, abs(f7)):
+        return None
+    return _round(scale), _round(offset)
+
+
+def daq_sessions(text: str) -> Tuple[Dict[str, List[Tuple[str, str, str]]], bool]:
+    """The DAQ sessions a MATLAB file makes with the Data Acquisition Toolbox, by the name the driver writes them by
+    (smdata.inst(ind).data.OutX: OutX): each one's channels (device, channel, out or in); and whether they are NI's
+    (daq.createSession('ni'), daq("ni"))."""
+    code = _code(text)
+    out: Dict[str, List[Tuple[str, str, str]]] = {}
+    pats = (r"([\w.()]+?)\s*\.\s*addAnalog(Output|Input)Channel\s*\(\s*'([^']+)'\s*,\s*'([^']+)'",
+            r"addAnalog(Output|Input)Channel\s*\(\s*([\w.()]+?)\s*,\s*'([^']+)'\s*,\s*'([^']+)'",
+            r"add(output|input)\s*\(\s*([\w.()]+?)\s*,\s*[\"']([^\"']+)[\"']\s*,\s*[\"']([^\"']+)[\"']")
+    for k, pat in enumerate(pats):
+        for m in re.finditer(pat, code):
+            session, way = (m.group(1), m.group(2)) if k == 0 else (m.group(2), m.group(1))
+            name = re.sub(r"^.*?(\w+)\s*$", r"\1", session)
+            out.setdefault(name, []).append((m.group(3), m.group(4).lower(), "out" if way.lower() == "output" else "in"))
+    ni = bool(re.search(r"daq\s*\.\s*createSession\s*\(\s*'ni'|\bdaq\s*\(\s*[\"']ni[\"']", code, re.I))
+    return out, ni
 
 
 def _top_split(code: str, seps: str) -> List[str]:
@@ -574,11 +754,16 @@ def set_param_of(card: Any, param: Optional[str]) -> Optional[str]:
     return drive.name if drive is not None else None
 
 
-def param_of(card: Any, channel: str, commands: List[str]) -> Tuple[Optional[str], str]:
-    """The card parameter one of the instrument's channels is: by the command its driver sends for it, else by its
-    name (THETA is a lock-in's phase, FREQ its frequency). (None, why) when neither says."""
+def param_of(card: Any, channel: str, commands: List[str], send: str = "") -> Tuple[Optional[str], str]:
+    """The card parameter one of the instrument's channels is: the DAQ channel its driver writes (send), else by the
+    command its driver sends for it, else by its name (THETA is a lock-in's phase, FREQ its frequency). (None, why)
+    when none says."""
     if card is None:
         return None, ""
+    if send:
+        if send in card.params:
+            return send, "its driver writes %s" % send
+        return None, "its driver writes %s, which the card hasn't: add it to your version of the card" % send
     for c in _samples(commands):
         spec, _, part = scripts._param_for(card, c.text)
         if spec is not None and not part:
@@ -653,8 +838,8 @@ def survey(path: Any, registry: Any = None, own: Iterable[Any] = (), read_mat: b
             texts[p] = p.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             out.skipped.append("%s (%s)" % (p.name, e))
-    for p, text in texts.items():   # control functions: function val = smcSR830(ic, val, rate)
-        m = re.match(r"\s*function\s+[^=\n]*=\s*(smc\w+)\s*\(", text)
+    for p, text in texts.items():   # control functions: function val = smcSR830(ic, val, rate), after comments too
+        m = re.search(r"(?m)^\s*function\s+[^=\n]*=\s*(smc\w+)\s*\(", _code(text))
         if p.stem.lower().startswith("smc") and m:
             out.drivers[m.group(1).lower()] = str(p)
     for p, text in texts.items():
@@ -682,10 +867,10 @@ def survey(path: Any, registry: Any = None, own: Iterable[Any] = (), read_mat: b
             if registry is not None and ri.model.lower() not in DUMMIES and not ri.function:
                 started = ri.inst.commands
                 ri.inst.commands = started + ri.sends   # its driver's commands help name its card
-                key = (tuple(sorted(set(ri.inst.hints))), tuple(c.text for c in ri.inst.commands))
+                key = (tuple(sorted(set(ri.inst.hints))), tuple(c.text for c in ri.inst.commands), ri.daq)
                 if key not in matched:
-                    matched[key] = scripts.match(ri.inst, registry, named_in="the rack (its sminst file)") or \
-                        _known(ri.model, registry)
+                    matched[key] = _daq_card(ri, registry) or scripts.match(
+                        ri.inst, registry, named_in="the rack (its sminst file)") or _known(ri.model, registry)
                 ri.inst.card = dict(matched[key]) if matched[key] else None
                 ri.inst.commands = started
                 if ri.inst.card:
@@ -712,11 +897,14 @@ def _known(model: str, registry: Any) -> Optional[Dict[str, Any]]:
 
 def _driver(ri: RackInstrument, drivers: Dict[str, str], library: Dict[str, Path], texts: Dict[Path, str]) -> None:
     """The control function of an instrument (its sminst file names it; else smc<model>), and the commands its
-    driver sends, which help name its card. The sminst file also gives the channels' order (by number)."""
+    driver sends, which help name its card. The sminst file also gives the channels' order (by number) and its data's
+    numbers. What each channel's case sends of its value (sent_value): its conversion, and for a DAQ session (one
+    the scripts its setup block runs make, Initial_NanoPositioner2) the NI DAQ channel it writes."""
     fn = ""
     info = _sminst(library.get(ri.model.lower()))
     order = [c.strip() for c in info.get("channels") or []]
     ri.order = order
+    ri.data = dict(info.get("data") or {}, **ri.data)   # what the setup script sets over its sminst file's
     if info.get("cntrlfn"):
         fn = str(info["cntrlfn"]).lower()
     if not fn or fn not in drivers:
@@ -728,10 +916,60 @@ def _driver(ri: RackInstrument, drivers: Dict[str, str], library: Dict[str, Path
     by_number = driver_commands(text)
     ri.inst.hints += scripts._hints(Path(ri.driver).stem[3:])
     ri.numbered = {name: by_number.get(i + 1, []) for i, name in enumerate(order)}
+    _conversions(ri, text, texts)
     sent = [c for cs in by_number.values() for c in cs]
     for c in list(dict.fromkeys(sent))[:12]:   # what it can send: matched against the cards, never sent
         for s in _samples([c])[:1]:
             ri.sends.append(Command(s.text, s.query, ri.driver))
+
+
+def _conversions(ri: RackInstrument, text: str, texts: Dict[Path, str]) -> None:
+    """Each channel's conversion, from what its driver's case sends; a channel whose case writes a DAQ session gets
+    the session's channel (send), and the instrument the NI DAQ device they are on (daq), with its address."""
+    cases, value_name = driver_cases(text), driver_value(text)
+    helpers = {h.lower() for h in ri.helpers}
+    sessions: Dict[str, List[Tuple[str, str, str]]] = {}
+    ni = False
+    for t in [text] + [t for p, t in texts.items() if p.stem.lower() in helpers]:
+        found, theirs = daq_sessions(t)
+        sessions.update(found)
+        ni = ni or theirs
+    devices = set()
+    for i, name in enumerate(ri.order):
+        ops = cases.get(i + 1) or {}
+        sent = sent_value(ops.get(1) or ops.get(None) or [], ri.data, value_name)
+        if sent is None:
+            continue
+        outs = [(d, c) for d, c, way in sessions.get(sent["to"][1], []) if way == "out"] if sent["to"][0] == "daq" \
+            else []
+        for ch in ri.channels:
+            if ch.channel != name:
+                continue
+            ch.scale, ch.offset = sent["scale"], sent["offset"]
+            change = "%s × the value%s" % (_num(sent["scale"]), " %s %s" % ("-" if sent["offset"] < 0 else "+",
+                                                                           _num(abs(sent["offset"]))) if sent["offset"]
+                                           else "")
+            if len(outs) == 1 and ni:
+                ch.send = outs[0][1]
+                devices.add(outs[0][0])
+                ch.how = "its driver writes %s/%s: %s" % (outs[0][0], outs[0][1], change)
+            elif sent["scale"] != 1 or sent["offset"]:
+                ch.how = "its driver sends %s%s" % (sent["to"][1] + " " if sent["to"][0] == "command" and
+                                                    sent["to"][1] else "", change)
+    if len(devices) == 1:
+        ri.daq = devices.pop()
+        if not ri.inst.address:
+            ri.inst.address, ri.inst.expression = "nidaq://%s" % ri.daq, ""
+
+
+def _daq_card(ri: RackInstrument, registry: Any) -> Optional[Dict[str, Any]]:
+    """Kelvin's NI DAQ card, for an instrument its driver drives as an NI DAQ device's channels."""
+    if not ri.daq or registry is None or "ni/daqmx" not in registry:
+        return None
+    card = registry.get("ni/daqmx")
+    chans = ", ".join(sorted({ch.send for ch in ri.channels if ch.send}))
+    return {"id": card.id, "model": card.model, "kind": card.kind, "sure": True, "mapped": [], "limits": {},
+            "why": "its driver writes %s of the NI DAQ %s through MATLAB's DAQ toolbox" % (chans, ri.daq)}
 
 
 def _sminst(path: Optional[Path]) -> Dict[str, Any]:
@@ -753,8 +991,40 @@ def _sminst(path: Optional[Path]) -> Dict[str, Any]:
     names = inst.get("channels")
     if isinstance(names, str):
         names = [names]
+    elif not isinstance(names, list) and hasattr(names, "ravel"):   # a cell of names, as an array
+        names = [str(n) for n in names.ravel()]
+    data = inst.get("data")
+    numbers: Dict[str, float] = {}
+    for k, v in (data.items() if isinstance(data, dict) else []):   # one number each, as the reader gives it ([[0.25]])
+        got = [] if isinstance(v, (bool, str)) else _numbers(v)
+        if len(got) == 1 and math.isfinite(got[0]):
+            numbers[str(k)] = got[0]
     return {"cntrlfn": re.sub(r"^@", "", str(text or "")).strip(),
-            "channels": [str(n) for n in names] if isinstance(names, list) else []}
+            "channels": [str(n) for n in names] if isinstance(names, list) else [], "data": numbers}
+
+
+def card_units(ch: Channel, card: Any) -> None:
+    """Whether the card the channel is on takes it in the channel's own unit, so sm's multiplier stays out (native): a
+    power of ten (a unit, not a gain), with the rack's limits inside the card's own while the same limits times it
+    fall a hundred times past them. Special Measure sends MultiVu a field in Oe, 10000 x the tesla the channel shows;
+    Kelvin's card takes tesla."""
+    if ch.native:
+        ch.native, ch.how = False, ""
+    total = ch.factor * ch.scale
+    spec = card.params.get(ch.set_param or ch.param) if card is not None and ch.param else None
+    if spec is None or not spec.limits or total in (0, 1) or ch.offset or \
+            not (math.isfinite(ch.low) and math.isfinite(ch.high)):
+        return
+    power = math.log10(abs(total))
+    lo, hi = float(spec.limits[0]), float(spec.limits[1])
+    most = max(abs(lo), abs(hi))
+    if abs(power - round(power)) > 1e-9 or not most:
+        return
+    inside = lo - 1e-9 * most <= min(ch.low, ch.high) and max(ch.low, ch.high) <= hi + 1e-9 * most
+    if inside and max(abs(ch.low), abs(ch.high)) * abs(total) > 100 * most:
+        ch.native = True
+        ch.how = "Kelvin's card takes %s in %s, as the channel shows it: Special Measure's × %s is its driver's" % (
+            spec.name, spec.unit or "its own unit", _num(total))
 
 
 def _params(ri: RackInstrument, registry: Any, texts: Dict[Path, str]) -> None:
@@ -763,8 +1033,9 @@ def _params(ri: RackInstrument, registry: Any, texts: Dict[Path, str]) -> None:
     card = registry.get(card_id) if card_id else None
     taken: Dict[str, str] = {}
     for ch in ri.channels:
-        ch.param, ch.why = param_of(card, ch.channel, ri.numbered.get(ch.channel, []))
+        ch.param, ch.why = param_of(card, ch.channel, ri.numbered.get(ch.channel, []), ch.send)
         ch.set_param = set_param_of(card, ch.param)
+        card_units(ch, card)
         if ch.param and ch.param in taken:   # V2 beside V1: the instrument's second channel, another entry
             ch.why = "%s is %s's already: a second channel is an entry of its own" % (ch.param, taken[ch.param])
             ch.param = None
@@ -1042,7 +1313,9 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
     """A Special Measure scan as a Kelvin plan, by fixed rules: {plan (a mapping, None when it can't be translated),
     text (its YAML), title, summary, gaps (what didn't translate, in words)}.
 
-    channels: each sm channel name → (its Kelvin key, sm's multiplier: Kelvin's value is the scan's × it).
+    channels: each sm channel name → (its Kelvin key, its multiplier, the key that sets it where the card has one
+    apart (None), its offset): the instrument gets the scan's value × the multiplier + the offset (sm's own
+    multiplier, and its driver's conversion).
     functions: each function channel's name → {variables: its Function's channels in order, sets: {sm channel:
     formula}}; a scan that sweeps one becomes a plan with variables and sets:.
 
@@ -1059,26 +1332,28 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
     if not loops:
         return {"plan": None, "text": "", "title": title, "summary": "", "gaps": ["it has no loops"]}
 
-    def key(ch: str, setting: bool = False) -> Tuple[Optional[str], float]:
-        """A channel's Kelvin key; setting: as a loop, a constant or the end sets it (its set point, where the card
-        has one apart: channels' third item)."""
+    def key(ch: str, setting: bool = False) -> Tuple[Optional[str], float, float]:
+        """A channel's Kelvin key, and how a value of the scan's becomes the instrument's: x its multiplier, + its
+        offset; setting: as a loop, a constant or the end sets it (its set point, where the card has one apart)."""
         hit = channels.get(ch)
         if not hit:
-            return None, 1.0
-        return (hit[2] if setting and len(hit) > 2 and hit[2] else hit[0]), hit[1]
+            return None, 1.0, 0.0
+        return (hit[2] if setting and len(hit) > 2 and hit[2] else hit[0]), hit[1], \
+            float(hit[3]) if len(hit) > 3 and hit[3] else 0.0
 
     missing: List[str] = []
     sweep: Dict[str, Any] = {}
     sets: Dict[str, str] = {}
     measure: List[str] = []
-    scaled: List[str] = []   # readings sm records divided by a multiplier
+    scaled: Dict[str, Tuple[str, float, float]] = {}   # readings sm records converted: key → (channel, ×, +)
     repeat = None
     time_axis = None
     for depth, lp in enumerate(reversed(loops)):   # outer first
         inner = depth == len(loops) - 1
         setchans = _names(lp.get("setchan"))
         getchans = [c for c in _names(lp.get("getchan")) if c != "time"]   # sm's clock: every Kelvin point has t
-        scaled += [c for c in getchans if key(c)[0] and key(c)[1] != 1]
+        scaled.update({key(c)[0]: (c, key(c)[1], key(c)[2]) for c in getchans
+                       if key(c)[0] and (key(c)[1] != 1 or key(c)[2])})
         npoints = _one(lp.get("npoints"))
         if npoints is not None and not (math.isfinite(npoints) and npoints >= 1 and npoints == int(npoints)):
             return {"plan": None, "text": "", "title": title, "summary": "", "gaps": [
@@ -1138,7 +1413,7 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
         if fn is not None:   # a function channel: a variable of the plan, and what its Function sets
             loop_key = first
         else:
-            loop_key, factor = key(first, True)
+            loop_key = key(first, True)[0]
             if loop_key is None:
                 missing.append(first)
                 continue
@@ -1146,22 +1421,22 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
             return {"plan": None, "text": "", "title": title, "summary": "", "gaps": [
                 "two loops step %s: a Kelvin scan steps a setting in one loop" % first]}
         a, b = spans[0]
-        factor0 = 1.0 if fn is not None else key(first, True)[1]
+        _, factor0, offset0 = (None, 1.0, 0.0) if fn is not None else key(first, True)
         if not npoints and rng and len(rng) == n and n > 2 and not ranges:
-            own["values"] = [_round(v * factor0) for v in rng]   # rng as a vector: its values
+            own["values"] = [_round(v * factor0 + offset0) for v in rng]   # rng as a vector: its values
         else:
-            own.update({"from": _round(a * factor0), "to": _round(b * factor0), "points": n})
+            own.update({"from": _round(a * factor0 + offset0), "to": _round(b * factor0 + offset0), "points": n})
         moved: Dict[str, Any] = {}
         for k, ch in enumerate(setchans[1:], 1):
             if ch in functions:
                 gaps.append("%s, a function channel, moves with %s: Kelvin moves settings with a loop, not "
                             "variables" % (ch, first))
                 return {"plan": None, "text": "", "title": title, "summary": "", "gaps": gaps}
-            kk, f = key(ch, True)
+            kk, f, o = key(ch, True)
             if kk is None:
                 missing.append(ch)
                 continue
-            moved[kk] = {"from": _round(spans[k][0] * f), "to": _round(spans[k][1] * f)}
+            moved[kk] = {"from": _round(spans[k][0] * f + o), "to": _round(spans[k][1] * f + o)}
         if moved:
             own["with"] = moved
         if step_time and any(t > 0 for t in step_time):
@@ -1180,7 +1455,7 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
             own["measure"] = reads
         if fn is not None:
             for dep, formula in fn["sets"].items():
-                kk, f = key(dep, True)
+                kk, f, o = key(dep, True)
                 if kk is None:
                     missing.append(dep)
                     continue
@@ -1188,7 +1463,7 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
                 if text is None:
                     gaps.append("%s's formula for %s (%s) isn't one Kelvin can work out" % (first, dep, formula))
                     return {"plan": None, "text": "", "title": title, "summary": "", "gaps": gaps}
-                sets[kk] = text if f == 1 else "(%s) * %s" % (text, _num(f))
+                sets[kk] = _scaled(text, f, o)
         sweep[loop_key] = own
     if missing:
         return {"plan": None, "text": "", "title": title, "summary": "", "gaps": [
@@ -1202,11 +1477,11 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
             s["measure"] = [k for k in s["measure"] if k not in setting]
             if not s["measure"]:
                 del s["measure"]
-    if scaled:
-        gaps.append("%s %s recorded as the instrument reads %s; Special Measure records %s divided by %s rack's "
-                    "multiplier" % (", ".join(dict.fromkeys(scaled)), "is" if len(set(scaled)) == 1 else "are",
-                                    "it" if len(set(scaled)) == 1 else "them", "it" if len(set(scaled)) == 1 else
-                                    "them", "its" if len(set(scaled)) == 1 else "their"))
+    recorded = set(measure) | {k for s in sweep.values() for k in s.get("measure") or []}
+    for k, (ch, f, o) in scaled.items():
+        if k in recorded:
+            gaps.append("%s is recorded as the instrument reads it; Special Measure records %s divided by %s" % (
+                ch, "(it %s %s)" % ("+" if o < 0 else "-", _num(abs(o))) if o else "it", _num(f)))
     for v in variables:   # a Function's other variables: as the scan's constants set them
         fn = functions[v]
         for other in fn["variables"]:
@@ -1232,15 +1507,15 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
             if fn.get("function") not in swept_fns:
                 fixed.setdefault(fn.get("function"), fn)
             continue
-        kk, f = key(c["setchan"], True)
+        kk, f, o = key(c["setchan"], True)
         if kk is None:
             gaps.append("the constant %s isn't a channel of the rack read" % c["setchan"])
         else:
-            setup[kk] = _round(c["val"] * f)
+            setup[kk] = _round(c["val"] * f + o)
     for fn in fixed.values():   # as sm sets them: its formulas at the constants' values, before the loops
         known = {v: _const(scan, v) for v in fn["variables"] if _const(scan, v) is not None}
         for dep, formula in fn["sets"].items():
-            kk, f = key(dep, True)
+            kk, f, o = key(dep, True)
             if kk is None:
                 missing.append(dep)
                 continue
@@ -1256,7 +1531,7 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
                     "had before the scan: Kelvin can't know it, give it as a constant" % (
                         fn.get("function") or "a Function", dep, ", ".join(unknown))]}
             try:
-                setup[kk] = _round(expr.scalar(text, known) * f)
+                setup[kk] = _round(expr.scalar(text, known) * f + o)
             except expr.ExprError as e:
                 return {"plan": None, "text": "", "title": title, "summary": "", "gaps": [
                     "the constants set %s's channels, and its formula for %s can't be worked out at them: %s" % (
@@ -1280,11 +1555,11 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
     if escape:
         after: Dict[str, Any] = {}
         for ch, v in escape.items():
-            kk, f = key(ch, True)
+            kk, f, o = key(ch, True)
             if kk is None:
                 gaps.append("the escape function sets %s, which isn't a channel of the rack read" % ch)
             else:
-                after[kk] = _round(v * f)
+                after[kk] = _round(v * f + o)
         if after:
             plan["after"] = after
             plan["on_abort"] = dict(after)
@@ -1303,6 +1578,12 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: 
     summary = " × ".join("%s %s" % (k, "%s values" % len(s["values"]) if "values" in s else "%s → %s (%s)" % (
         _num(s["from"]), _num(s["to"]), s["points"])) for k, s in sweep.items())
     return {"plan": plan, "text": text, "title": title, "summary": summary, "gaps": gaps}
+
+
+def _scaled(text: str, f: float, o: float) -> str:
+    """An expression as its instrument gets it: x f, + o."""
+    out = text if f == 1 else "(%s) * %s" % (text, _num(f))
+    return out if not o else "%s %s %s" % (out, "-" if o < 0 else "+", _num(abs(o)))
 
 
 def _round(v: float) -> Any:
@@ -1364,8 +1645,9 @@ def channel_map(setup: Setup, named: Dict[str, str]) -> Tuple[Dict[str, Tuple[An
             continue
         for ch in ri.channels:
             if ch.param:
-                keys[ch.name] = ("%s.%s" % (name, ch.param), ch.factor,
-                                 "%s.%s" % (name, ch.set_param) if ch.set_param else None)
+                keys[ch.name] = ("%s.%s" % (name, ch.param), ch.multiplier(),
+                                 "%s.%s" % (name, ch.set_param) if ch.set_param else None,
+                                 0.0 if ch.native else ch.offset)
     return keys, functions
 
 
