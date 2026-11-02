@@ -580,6 +580,21 @@ def read_vi(path: Any) -> Dict[str, Any]:
 _OWN_READER = read_vi   # the survey reads with it in a process of its own; a reader put in its place, in this one
 
 
+def describe_vi(path: Any, folder: Any = None, own: Iterable[Any] = ()) -> Dict[str, Any]:
+    """A VI's full description for translating it (videsc.describe: every node, wire and frame, its calls by kind,
+    the lab's own sub-VIs found anywhere under folder, default the VI's own folder), read in a process of its own
+    with the survey's limits (viworker.describe_all). own: Kelvin's own folders, never read: a VI in one is refused
+    (ValueError), as the survey refuses one."""
+    from . import viworker
+    from .folderfiles import mine
+    vi = Path(str(path)).expanduser()
+    kelvins = mine(vi.resolve(), list(own))
+    if kelvins is not None:
+        raise ValueError("%s is in Kelvin's own folder (%s): Kelvin's AI never reads there" % (vi, kelvins))
+    out, _ = viworker.describe_all([str(vi)], folder or vi.parent, own)
+    return out[0]
+
+
 def read_library(path: Any) -> List[Dict[str, Any]]:
     """The summary of each VI a VI library (.llb) holds; its path is the library's, then the VI's name."""
     from .vigraph import summaries
