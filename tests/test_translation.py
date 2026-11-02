@@ -202,3 +202,81 @@ def test_the_second_opinion_is_a_warning_and_a_broken_one_says_so():
     def broken(system, prompt):
         raise ValueError("no model")
     assert "failed" in vicheck.review(broken, "VI ...", GOOD)[0].text
+
+
+# ------------------------------------------------------------------ the translator (Task 5)
+
+import json  # noqa: E402
+
+from labharness import vitranslate  # noqa: E402
+
+TABLE = vimap.Table([{"call": "Smu.lvlib:Set V.vi", "becomes": "card", "card": "virtual/source-meter", "sets": ["V"]},
+                     {"call": "Lia.lvlib:Read X.vi", "becomes": "card", "card": "virtual/lock-in", "gets": ["X"]}])
+
+
+def fenced(code, notes):
+    return "```python\n%s\n```\n```json\n%s\n```" % (code, json.dumps(notes))
+
+
+def scripted(*answers):
+    said = []
+
+    def ask(system, prompt):
+        said.append(prompt)
+        return answers[min(len(said), len(answers)) - 1], "test:model"
+    ask.said = said
+    return ask
+
+
+def translated(lab, folder, ask, **kw):
+    return vitranslate.translate(DESC, lab, ask, TABLE, folder, lab.make_twin, prepare=prepare_for(lab), **kw)
+
+
+def test_the_prompt_carries_the_description_the_map_and_the_lab(lab):
+    p = vitranslate.prompt('VI "x.vi"\n...', '"Time Delay" -> time.sleep(seconds)', vitranslate.lab_text(lab))
+    assert 'VI "x.vi"' in p and "time.sleep" in p and "smu" in p and "virtual/source-meter" in p
+    assert "# VI:" in vitranslate.system() and "kelvin.lab" in vitranslate.system()
+
+
+def test_a_good_answer_is_kept_after_one_round(lab, folder):
+    t = translated(lab, folder, scripted(fenced(GOOD, NOTES)))
+    assert t.rounds == 1 and t.report.ok_to_keep and t.source.strip() == GOOD.strip(), t.report.text()
+    assert t.notes == NOTES and t.model == "test:model" and t.mappings["Smu.lvlib:Set V.vi"]["card"]
+
+
+def test_a_broken_answer_is_repaired_with_kelvins_words(lab, folder):
+    ask = scripted("no code here", fenced(GOOD + "import os\n", NOTES), fenced(GOOD, NOTES))
+    t = translated(lab, folder, ask)
+    assert t.rounds == 3 and t.report.ok_to_keep, t.report.text()
+    assert "```python" in ask.said[1] and "imports os" in ask.said[2]
+
+
+def test_after_its_rounds_the_last_attempt_comes_back_with_what_blocks(lab, folder):
+    t = translated(lab, folder, scripted(fenced(GOOD + "import os\n", NOTES)))
+    assert t.rounds == vitranslate.ROUNDS and not t.report.ok_to_keep
+
+
+@pytest.mark.parametrize("answer", ["", "```python\ndef f(:\n```", "```python\nx = 1\n```\n```json\n{broken\n```",
+                                    "```python\n" + GOOD[:60], "text\n```python\n" + GOOD + "\n```\n```python\nimport os\n```"])
+def test_odd_answers_never_crash(lab, folder, answer):
+    t = translated(lab, folder, scripted(answer))
+    assert isinstance(t.report, vicheck.Report)            # the first python block counts; broken notes are {}
+
+
+def test_the_second_opinion_comes_on_the_last_attempt_only(lab, folder):
+    reviewed = scripted('{"findings": [{"problem": "a wait is missing", "severity": "low"}]}')
+    t = translated(lab, folder, scripted(fenced(GOOD + "import os\n", NOTES), fenced(GOOD, NOTES)),
+                   review_ask=reviewed)
+    assert len(reviewed.said) == 1 and any(f.kind == "review" for f in t.report.findings)
+
+
+def test_a_description_too_large_is_refused_before_the_model_hears_of_it(lab, folder, monkeypatch):
+    monkeypatch.setattr(vitranslate, "MAX_PROMPT", 100)
+    ask = scripted(fenced(GOOD, NOTES))
+    with pytest.raises(ValueError, match="sub-VIs first"):
+        translated(lab, folder, ask)
+    assert ask.said == []
+
+
+def test_the_translators_rules_ship_with_kelvin():
+    assert "translate.md" in (ROOT / "packaging" / "kelvin.spec").read_text(encoding="utf-8")
