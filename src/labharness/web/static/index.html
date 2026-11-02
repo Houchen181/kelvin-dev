@@ -319,6 +319,11 @@
           <label class="ed-f"><span id="ed-for-label">for</span><input id="ed-for" class="ed-in ed-short" inputmode="decimal" autocomplete="off"><i id="ed-for-unit">s</i></label>
         </div>
       </section>
+      <section class="ed-sec" aria-labelledby="ed-sets-h">
+        <div class="ed-sec-head"><h3 id="ed-sets-h">Computed</h3><span class="hint" title="Settings worked out at each point from the loops' variables and values, as Special Measure's function channels">from the loops</span><div class="spacer"></div>
+          <button id="ed-add-sets" class="link soft" type="button">+ Add</button></div>
+        <div id="ed-sets" class="ed-rows"></div>
+      </section>
       <section class="ed-sec" aria-labelledby="ed-measure-h">
         <div class="ed-sec-head"><h3 id="ed-measure-h">Record</h3><span class="hint">at each point</span></div>
         <div class="ed-chips"><span id="ed-measure" class="ed-chip-list"></span>
@@ -909,10 +914,11 @@
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Find instruments</span>
-        <span class="field-actions"><button id="lab-scripts" class="btn small" type="button">From your scripts…</button><button id="lab-labview" class="btn small" type="button">From your LabVIEW…</button><button id="lab-scan" class="btn small" type="button">Scan</button></span></div>
+        <span class="field-actions"><button id="lab-scripts" class="btn small" type="button">From your scripts…</button><button id="lab-labview" class="btn small" type="button">From your LabVIEW…</button><button id="lab-sm" class="btn small" type="button" title="Your Special Measure (MATLAB) rack, scans and runs: read, never run">From Special Measure…</button><button id="lab-scan" class="btn small" type="button">Scan</button></span></div>
       <span class="hint">Scanning sets nothing. Scripts and VIs are read, never run.</span>
       <div id="lab-from-scripts" class="found-list" hidden></div>
       <div id="lab-vis" class="found-list" hidden></div>
+      <div id="lab-sm-extra" class="found-list" hidden></div>
       <div class="field-actions" id="lab-scripts-actions" hidden>
         <button id="lab-add-scripts" class="btn small" type="button">Add the checked ones to the lab config</button>
         <button id="lab-recipes" class="btn small" type="button">Turn the measurement scripts into recipes…</button>

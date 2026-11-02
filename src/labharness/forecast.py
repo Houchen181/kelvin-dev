@@ -34,7 +34,7 @@ from .timing import away as away_from_safe, modeled_read_s, steps as timing_step
 RUN_WORDS = {"run", "start", "do", "go", "yes", "on", "true", "1"}
 # the parts of a plan this walk knows; another (a newer kind of step or condition) is shown with its time unknown
 PLAN_KEYS = {"plan", "description", "device", "requires", "preconditions", "setup", "sweep", "repeat", "time", "settle",
-             "measure", "after", "on_abort", "trigger", "until", "while", "retry"}
+             "measure", "after", "on_abort", "trigger", "until", "while", "retry", "sets"}
 # words in a setting's name or label that say it decides how an output applies its levels
 _MODE_WORDS = ("function", "func", "mode", "wave", "shape", "source", "polarity")
 
@@ -428,7 +428,9 @@ class Forecast:
         return self
 
     def _walk(self, plan: Any) -> None:
-        for key in [s.key for s in plan.setup] + [a.key for a in plan.axes if a.kind in ("instrument", "ramp")] \
+        swept = [k for k, _ in plan.swept_settings()] if hasattr(plan, "swept_settings") else \
+            [a.key for a in plan.axes if a.kind == "instrument"]
+        for key in [s.key for s in plan.setup] + [a.key for a in plan.axes if a.kind == "ramp"] + swept \
                 + [s.key for s in plan.after]:
             self._note(key)
         for step in self.engine.ordered(plan.setup):
@@ -436,8 +438,11 @@ class Forecast:
         outer = 1
         for axis in plan.axes:
             n = len(axis.values)
-            if axis.kind == "instrument":
+            if axis.kind in ("instrument", "variable"):
                 self._axis(plan, axis, outer)
+                for w in getattr(axis, "with_", None) or []:   # they travel as it does, in turn a step at a time
+                    self._travel_all(w.key, list(w.values), outer)
+                self._loop_reads(axis, outer)
             elif axis.kind == "ramp":   # always the innermost loop
                 self._ramp(axis, outer)
             elif axis.kind == "time":
@@ -447,6 +452,8 @@ class Forecast:
             elif axis.kind != "repeat":
                 self._unknown_axis(axis)
             outer *= max(n, 1)
+        for c in getattr(plan, "sets", None) or []:   # every value it takes, in the run's order: its whole path
+            self._travel_all(c.key, list(c.values), 1)
         self._ends(plan, "the sweep%s ends" % self._in())
         retry = getattr(plan, "retry", None)
         if retry is not None:   # only when a reading fails: how often, nobody can tell
@@ -537,12 +544,14 @@ class Forecast:
 
     def _axis(self, plan: Any, axis: Any, outer: int) -> None:
         """A sweep axis: set at each of its values once per pass, a pass for every point of the axes outside it, each
-        followed by its stabilize and its settle (its own for a step that has one: settle_at). It travels its values
-        in order, and back to the first between passes. A value the same as the one before is not set again, so it
-        doesn't settle again either."""
+        followed by its stabilize and its settle (its own for a step that has one: settle_at; first_settle for its
+        first value). It travels its values in order, and back to the first between passes. A value the same as the
+        one before is not set again, so it doesn't settle again either. A variable (a plan's own, which sets: works
+        settings out from) settles and waits as a loop does; what it sets travels as sets: does."""
+        variable = axis.kind == "variable"
         try:
-            inst, spec = self.lab.resolve(axis.key)
-            values = coerced(spec, list(axis.values))
+            inst, spec = (None, None) if variable else self.lab.resolve(axis.key)
+            values = list(axis.values) if variable else coerced(spec, list(axis.values))
         except (KeyError, ValueError):
             return
         if not values:
@@ -554,11 +563,16 @@ class Forecast:
             self.seconds += outer * sum(h if h is not None else (plan.settle or 0.0) for h in holds)
         else:
             self.seconds += outer * moves * (axis.settle if axis.settle is not None else (plan.settle or 0.0))
+        if getattr(axis, "first_settle", None) is not None:   # its first value's own hold, in place of its settle
+            usual = axis.settle_at(0)
+            self.seconds += outer * (axis.first_settle - (usual if usual is not None else (plan.settle or 0.0)))
         if axis.stabilize is not None:
             st = axis.stabilize
             self.seconds += outer * moves * st.duration
             self.waits.append(self._wait_words(st, " at each point"))
         self._ends(axis, "%s%s skips its other values" % (axis.key, self._in()))
+        if variable:
+            return
         if not spec.numeric:   # a switch or a choice: set as the gate does, once per value
             for v in values:
                 self.seconds += self._set(inst, spec, v)
@@ -572,6 +586,38 @@ class Forecast:
         self._record_all(inst, spec, values, t, timed)
         if spec.is_drive:
             self._asked[axis.key] = values[-1]
+
+    def _travel_all(self, key: str, values: List[Any], passes: int) -> None:
+        """A setting that moves with a loop (with:) or that sets: works out: its values in order, once per pass,
+        and back to the first between passes; no settle of its own (its loop's is counted once)."""
+        try:
+            inst, spec = self.lab.resolve(key)
+            values = coerced(spec, values)
+        except (KeyError, ValueError):
+            return
+        if not values:
+            return
+        if not spec.numeric:
+            for v in values:
+                self.seconds += self._set(inst, spec, v)
+            return
+        first, timed = self.travel(inst, spec, self.value(key), values[0])
+        steps, counted = self._travels(inst, spec, values)
+        back = self.travel(inst, spec, values[-1], values[0]) if len(values) > 1 else (0.0, True)
+        t = first + passes * steps + (passes - 1) * back[0]
+        self.seconds += t
+        self._record_all(inst, spec, values, t, timed and counted and back[1])
+        if spec.is_drive:
+            self._asked[key] = values[-1]
+
+    def _loop_reads(self, axis: Any, outer: int) -> None:
+        """The readings a loop takes once per value (its measure:): each as long as read_s says, at every value."""
+        keys = ["%s.%s" % m for m in getattr(axis, "measure", None) or []]
+        if not keys:
+            return
+        values = list(axis.values)
+        moves = len(values) - sum(map(operator.eq, values[1:], values[:-1]))
+        self.seconds += outer * moves * sum(self.read_s(k) or 0.0 for k in keys)
 
     def _ramp(self, axis: Any, outer: int) -> None:
         """A ramp: sweep, the innermost loop, once per pass of the loops outside it. Each leg sets its rate on the

@@ -4928,7 +4928,7 @@
     };
     const more = h("button", { type: "button", tabindex: "-1", "aria-label": "More: " + e.name, "aria-haspopup": "menu" }, icon("dots"));
     more.addEventListener("click", (ev) => { ev.stopPropagation(); scanMenu(more, e); });
-    const tag = !script ? (e.source === "labview" ? h("span", { class: "tag", title: "From " + (e.path || e.vi) }, "LabVIEW") : null)
+    const tag = !script ? (e.source === "labview" || e.source === "specialmeasure" ? h("span", { class: "tag", title: "From " + (e.path || e.vi) }, e.source === "labview" ? "LabVIEW" : "Special Measure") : null)
       : !e.exists ? h("span", { class: "tag warn", title: "The file is gone" }, "missing")
       : e.changed ? h("span", { class: "tag", title: "Edited since its last run" }, "changed") : null;
     const used = e.count ? "ran " + e.count + "×" + (e.used ? " · last " + dayText(new Date(e.used * 1000)) : "") : "not run yet";
@@ -5286,7 +5286,8 @@
   }
   function blankLoop() {
     return { key: "", mode: "range", from: null, to: null, step: null, points: null, by: "points", log: false, back: false,
-             values: [], form: "", legs: [], one: false, every: null, settle: null, kept: "", fixed: [], order: [] };
+             values: [], form: "", legs: [], one: false, every: null, settle: null, first_settle: null, with: [],
+             measure: [], kept: "", fixed: [], order: [] };
   }
 
   // a labelled box of the editor: set(value) on each change
@@ -5330,6 +5331,7 @@
     $("ed-add-loop").hidden = !loops;
     $("ed-loops").replaceChildren(...(loops ? loops.map(edLoop) : [h("li", { class: "hint" }, "As written below.")]));
     renderEdMeasure();
+    edRows("sets");
     edRows("setup");
     edRows("after");
     $("ed-kept").textContent = p.kept || "";
@@ -5355,7 +5357,8 @@
       body = [h("pre", { class: "ed-kept" }, loop.text || "")];
     } else {
       const key = h("input", { class: "ed-in ed-key", list: "ed-set-keys", value: loop.key, spellcheck: "false", autocomplete: "off",
-        placeholder: "instrument.parameter", "aria-label": name + ": what it steps" });
+        placeholder: "instrument.parameter", "aria-label": name + ": what it steps",
+        title: "A setting, or a name of your own (a variable) that Computed works settings out from" });
       const unit = h("span", { class: "ed-unit" }, ED.units.get(loop.key) || "");
       key.addEventListener("input", () => { loop.key = key.value.trim(); unit.textContent = ED.units.get(loop.key) || ""; edChanged(); });
       const mode = h("select", { class: "ed-mode", "aria-label": name + ": how it steps" }, ...ED_MODES.map(([v, t]) => h("option", { value: v }, t)));
@@ -5375,18 +5378,62 @@
       h("div", { class: "ed-loop-head" }, ...head, count, acts), h("div", { class: "ed-loop-body" }, ...body),
       h("ul", { class: "ed-problems ed-loop-problems" }));
   }
+  // the settings that move with a loop's own (Special Measure's channels of one loop), each from → to in step with it
+  // (or its own values), and what the loop reads once per value
+  function edLoopExtras(loop, name) {
+    const out = [];
+    const rows = loop.with || (loop.with = []);
+    rows.forEach((row, j) => {
+      const label = name + ", with " + (j + 1);
+      const key = h("input", { class: "ed-in ed-key", list: "ed-set-keys", value: row.key, spellcheck: "false", autocomplete: "off",
+        placeholder: "instrument.parameter", "aria-label": label + ": what moves" });
+      const unit = h("span", { class: "ed-unit" }, ED.units.get(row.key) || "");
+      key.addEventListener("input", () => { row.key = key.value.trim(); unit.textContent = ED.units.get(row.key) || ""; edChanged(); });
+      const x = h("button", { class: "icon-btn", type: "button", "aria-label": label + ": remove", title: "Remove" }, icon("x"));
+      x.addEventListener("click", () => { rows.splice(j, 1); edChanged(true); });
+      const own = row.form === "list" || row.form === "values"
+        ? [(() => { const b = edBox("", (row.values || []).map(edShow).join(", "), (v) => v, "", { class: "ed-in ed-values", inputmode: "text", "aria-label": label + ": values" });
+          b.input.addEventListener("input", () => { row.values = edList(b.input.value); edChanged(); }); return b; })()]
+        : [edBox("from", row.from, (v) => { row.from = v; edChanged(); }, "", { class: "ed-in ed-short", "aria-label": label + ": from" }),
+           edBox("to", row.to, (v) => { row.to = v; edChanged(); }, "", { class: "ed-in ed-short", "aria-label": label + ": to" })];
+      out.push(h("div", { class: "ed-line ed-with" }, h("span", { class: "ed-eq", title: "Moves with " + (loop.key || "the loop") }, "with"), key, ...own, unit, x));
+    });
+    const add = h("button", { class: "link soft", type: "button", title: "A setting that moves with this one, from → to in step with it" }, "+ Channel");
+    add.addEventListener("click", () => {
+      rows.push({ key: "", from: null, to: null, values: [], form: "range", order: [] });
+      edChanged(true);
+      const li = $("ed-loops").children[ED.parts.loops.indexOf(loop)];
+      const keys = li ? li.querySelectorAll(".ed-with .ed-key") : [];
+      if (keys.length) keys[keys.length - 1].focus();
+    });
+    const reads = loop.measure || (loop.measure = []);
+    const chips = reads.map((m, j) => {
+      const x = h("button", { class: "icon-btn", type: "button", "aria-label": name + ": don't record " + m, title: "Remove" }, icon("x"));
+      x.addEventListener("click", () => { reads.splice(j, 1); edChanged(true); });
+      return h("span", { class: "an-chip ed-chip", title: m + ": read once per value of this loop" }, h("span", {}, m), x);
+    });
+    const read = h("input", { class: "ed-in ed-add", list: "ed-read-keys", placeholder: "Record once per value", spellcheck: "false",
+      autocomplete: "off", "aria-label": name + ": a reading to record once per value" });
+    const take = () => { const k = read.value.trim(); if (!k) return; if (!reads.includes(k)) reads.push(k); edChanged(true); };
+    read.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); take(); } });
+    read.addEventListener("change", () => { if (ED.readKeys.has(read.value.trim())) take(); });
+    out.push(h("div", { class: "ed-line" }, add), h("div", { class: "ed-chips ed-loop-reads" }, h("span", { class: "ed-chip-list" }, ...chips), read));
+    return out;
+  }
   function edModeFields(loop, name, recount) {
     const fixed = new Set(loop.fixed || []);
     const unit = ED.units.get(loop.key) || "";
     const changed = () => { recount(); edChanged(); };
     const settle = edBox("settle", loop.settle, (v) => { loop.settle = v; changed(); }, "s",
       { class: "ed-in ed-short", "aria-label": name + ": settle (s)", disabled: fixed.has("settle"), title: fixed.has("settle") ? "A hold per value, as written below" : "After setting each value" });
+    const first = edBox("first", loop.first_settle, (v) => { loop.first_settle = v; changed(); }, "s",
+      { class: "ed-in ed-short", "aria-label": name + ": settle after its first value (s)", title: "After its first value, each time the loop starts again (in place of settle)" });
     if (loop.mode === "values") {
       const vals = edBox("", (loop.values || []).map(edShow).join(", "), (v) => v, unit,
         { class: "ed-in ed-values", inputmode: "text", "aria-label": name + ": values", placeholder: "0, 0.5, 1" });
       vals.input.addEventListener("input", () => { loop.values = edList(vals.input.value); changed(); });
       const back = edCheckBox("and back", loop.back, (on) => { loop.back = on; changed(); }, { "aria-label": name + ": there and back" });
-      return [h("div", { class: "ed-line" }, vals), h("div", { class: "ed-line" }, back, settle)];
+      return [h("div", { class: "ed-line" }, vals), h("div", { class: "ed-line" }, back, settle, first), ...edLoopExtras(loop, name)];
     }
     if (loop.mode === "ramp") {
       const legs = (loop.legs || []).map((leg, j) => {
@@ -5422,7 +5469,8 @@
       follow();
     }, { "aria-label": name + ": log spaced" });
     const back = edCheckBox("and back", loop.back, (on) => { loop.back = on; changed(); }, { "aria-label": name + ": there and back" });
-    return [h("div", { class: "ed-line" }, from, to, step, pts), h("div", { class: "ed-line" }, log, back, settle)];
+    return [h("div", { class: "ed-line" }, from, to, step, pts), h("div", { class: "ed-line" }, log, back, settle, first),
+            ...edLoopExtras(loop, name)];
   }
   function edMoveLoop(i, j) {
     const loops = ED.parts.loops;
@@ -5451,19 +5499,20 @@
     renderEdMeasure();
     edChanged();
   }
-  function edRows(which) {   // setup or after: instrument.parameter = value
-    const rows = ED.parts[which], box = $("ed-" + which);
+  function edRows(which) {   // setup, after or sets (Computed): instrument.parameter = a value, or an expression
+    const rows = ED.parts[which] === undefined ? (ED.parts[which] = []) : ED.parts[which], box = $("ed-" + which);
     $("ed-add-" + which).hidden = !Array.isArray(rows);
     if (!Array.isArray(rows)) { box.replaceChildren(h("p", { class: "hint" }, "As written below.")); return; }
-    const what = which === "setup" ? "Setup" : "At the end";
+    const what = which === "setup" ? "Setup" : which === "sets" ? "Computed" : "At the end", expr = which === "sets";
     box.replaceChildren(...rows.map((row, i) => {
       const key = h("input", { class: "ed-in ed-key", list: "ed-set-keys", value: row.key, spellcheck: "false", autocomplete: "off",
         placeholder: "instrument.parameter", "aria-label": what + " " + (i + 1) + ": what it sets" });
       const unit = h("span", { class: "ed-unit" }, ED.units.get(row.key) || "");
       key.addEventListener("input", () => { row.key = key.value.trim(); unit.textContent = ED.units.get(row.key) || ""; edChanged(); });
-      const value = h("input", { class: "ed-in ed-short", value: edShow(row.value), spellcheck: "false", autocomplete: "off",
-        "aria-label": what + " " + (i + 1) + ": its value" });
-      value.addEventListener("input", () => { row.value = edParse(value.value); edChanged(); });
+      const value = h("input", { class: "ed-in " + (expr ? "ed-expr" : "ed-short"), value: edShow(row.value), spellcheck: "false",
+        autocomplete: "off", "aria-label": what + " " + (i + 1) + (expr ? ": its expression" : ": its value"),
+        placeholder: expr ? "1.2*n - 8*E" : "", inputmode: expr ? "text" : "decimal" });
+      value.addEventListener("input", () => { row.value = expr ? value.value.trim() : edParse(value.value); edChanged(); });
       const x = h("button", { class: "icon-btn", type: "button", "aria-label": what + " " + (i + 1) + ": remove", title: "Remove" }, icon("x"));
       x.addEventListener("click", () => {
         rows.splice(i, 1);
@@ -5596,7 +5645,7 @@
       edChanged(true);
       $("ed-loops").lastChild.querySelector(".ed-key").focus();
     });
-    for (const which of ["setup", "after"]) {
+    for (const which of ["sets", "setup", "after"]) {
       $("ed-add-" + which).addEventListener("click", () => {
         ED.parts[which].push({ key: "", value: null });
         edRows(which);
@@ -6082,10 +6131,10 @@
       $("lab-msg").textContent = e.message;
     }
   }
-  async function addToConfig(items) {
+  async function addToConfig(items, names) {
     if (!items.length) { $("lab-msg").textContent = "Nothing chosen."; return; }
     try {
-      const r = await api("/api/instruments/draft", { body: { items, base: $("lab-yaml").value } });
+      const r = await api("/api/instruments/draft", { body: { items, base: $("lab-yaml").value, names: names || null } });
       $("lab-yaml").value = r.yaml;
       renderLabConfig();
       const already = r.already || [], there = new Set(already.map((a) => a.item));
@@ -6131,6 +6180,111 @@
         : "No instruments in NI MAX or the LabVIEW there.") + (k === 1 ? " 1 VI can become a scan." : k ? " " + k + " VIs can become scans." : "");
     } catch (e) { $("lab-msg").textContent = e.message; }
     finally { btn.disabled = false; btn.textContent = "From your LabVIEW…"; }
+  }
+  // ------------------------------------------------------------------ setting up from the lab's Special Measure
+  // A setup script's rack (its instruments, their named channels with limits and ramp rates), read (no MATLAB is run)
+  // into the same review; its channels' names go into the lab config (names:), its scans become scans to keep, its
+  // run files runs to import
+  async function fromSpecialMeasure(setup) {
+    const folder = typeof setup === "string" && LAB.scripts && LAB.scripts.kind === "specialmeasure" ? LAB.scripts.folder
+      : await pickFolder(store("lh.smFolder") || "", "The folder with your Special Measure (its setup scripts, sm, scans and data):");
+    if (!folder) return;
+    store("lh.smFolder", folder);
+    const btn = $("lab-sm");
+    btn.disabled = true; btn.textContent = "Reading Special Measure…";
+    $("lab-msg").textContent = "Reading the setup scripts, drivers and scans in " + folder + " (never running MATLAB), then asking each instrument who it is…";
+    try {
+      LAB.scripts = await api("/api/instruments/specialmeasure", { body: { folder, setup: typeof setup === "string" ? setup : null } });
+      renderScripts();
+      const r = LAB.scripts, n = r.instruments.length, k = r.scans.filter((s) => s.text).length;
+      $("lab-msg").textContent = (n ? "The rack of " + r.setup + ": " + n + " instrument" + (n === 1 ? "" : "s") + ". Check the cards and limits, then add the ones you want."
+        : "No setup script (smloadinst, smaddchannel) there.") + (k === 1 ? " 1 scan translates." : k ? " " + k + " scans translate." : "");
+    } catch (e) { $("lab-msg").textContent = e.message; }
+    finally { btn.disabled = false; btn.textContent = "From Special Measure…"; }
+  }
+  function smHead(r) {   // In C:\SM: smsetup_optics1.m ▾ · 31 instruments · 12 scans · 16484 runs; none run
+    const runs = Object.values(r.runs || {}).reduce((a, b) => a + b, 0);
+    const pick = h("select", { "aria-label": "The setup script" }, ...r.setups.map((s) => h("option", { value: s.path }, s.path)));
+    pick.value = r.setup;
+    pick.addEventListener("change", () => fromSpecialMeasure(pick.value));
+    return h("p", { class: "hint sm-head" }, "In " + r.folder + ": ", r.setups.length > 1 ? pick : h("code", {}, r.setup || "no setup script"),
+      " · " + r.scans.length + " scan" + (r.scans.length === 1 ? "" : "s") + " · " + runs + " run" + (runs === 1 ? "" : "s") + "; none run.");
+  }
+  function smChannels(it) {   // Vbg → V [-10, 10] at 1/s · Ibg → I · …
+    return (it.channels || []).map((c) => c.name + (c.param ? " → " + c.param : " (not on the card)") +
+      (c.low != null || c.high != null ? " [" + (c.low == null ? "−∞" : c.low) + ", " + (c.high == null ? "∞" : c.high) + "]" : "") +
+      (c.rate != null ? " at " + c.rate + "/s" : "") + (c.factor !== 1 ? " ×" + c.factor : "")).join(" · ");
+  }
+  function smNames() {   // each checked (or in-lab) instrument's channels: their sm names for instrument.parameter
+    const r = LAB.scripts, names = {}, taken = new Set();
+    for (const it of r.instruments) taken.add(it.in_lab || (it.ui ? it.ui.name.value.trim() : it.name));
+    for (const it of r.instruments) {
+      const name = it.in_lab || (it.ui && it.ui.check.checked ? it.ui.name.value.trim() : "");
+      if (!name || (!it.in_lab && it.ui.model.value !== (it.card || {}).id)) continue;   // another card: other parameters
+      for (const c of it.channels || []) if (c.param && /^[A-Za-z_]\w*$/.test(c.name) && !taken.has(c.name)) names[c.name] = name + "." + c.param;
+    }
+    return names;
+  }
+  function renderSm() {   // the function channels, the scans to keep, the runs to import
+    const r = LAB.scripts, box = $("lab-sm-extra");
+    const sm = !!r && r.kind === "specialmeasure";
+    box.hidden = !sm;
+    if (!sm) return;
+    const rows = [];
+    if (r.functions.length) rows.push(h("p", { class: "hint" }, "Function channels: " + r.functions.map((f) =>
+      f.variables.join(", ") + " → " + f.sets.join(", ")).join("; ") + " (their scans become scans with Computed settings)."));
+    for (const s of r.scans) {
+      const can = !!s.text;
+      const check = h("input", { type: "checkbox", "aria-label": "Keep " + s.name + " as a scan", disabled: !can });
+      check.checked = s.ui ? s.ui.check.checked : can && !s.gaps.length;
+      s.ui = { check };
+      const how = h("details", { class: "lv-how" }, h("summary", {}, can ? "Plan" : "Why no scan"),
+        can ? h("pre", { class: "mono lv-plan" }, s.text) : h("p", { class: "muted small" }, s.gaps.join("; ")));
+      rows.push(h("div", { class: "found-wrap" },
+        h("label", { class: "found lv-vi" }, check, h("span", { class: "found-name", title: s.path }, s.name),
+          h("span", { class: "found-model", title: s.path }, can ? s.summary : "no scan"),
+          h("span", { class: "muted small" }, s.source === "run" ? (s.runs > 1 ? "ran " + s.runs + "×" : "ran") : "saved")),
+        can && s.gaps.length ? h("div", { class: "found-write muted small" }, "Not translated: " + s.gaps.join("; ")) : null,
+        h("div", { class: "found-write" }, how)));
+    }
+    const folders = Object.entries(r.runs || {});
+    if (folders.length) {
+      rows.push(h("details", { class: "found-wrap", open: folders.length <= 6 }, h("summary", {}, "Runs to import"),
+        ...folders.map(([folder, n]) => {
+          const go = h("button", { class: "btn small", type: "button" }, "Import");
+          const said = h("span", { class: "muted small" });
+          go.addEventListener("click", () => importSmRuns(folder, go, said));
+          return h("div", { class: "found sm-runs" }, h("code", { class: "found-name" }, folder), h("span", { class: "found-model" }, n + " run" + (n === 1 ? "" : "s")), go, said);
+        })));
+    }
+    box.replaceChildren(...rows);
+  }
+  async function importSmRuns(folder, btn, said) {
+    btn.disabled = true;
+    said.textContent = "Importing…";
+    try {
+      const k = await api("/api/instruments/specialmeasure/runs", { body: { folder: LAB.scripts.folder, runs: [folder] } });
+      said.textContent = [k.imported.length ? k.imported.length + " imported" : "", k.left ? k.left + " already" : "",
+        k.failed.length ? k.failed.length + " not (" + k.failed.slice(0, 2).map((f) => f.file + ": " + f.why).join("; ") + ")" : "",
+        k.more ? k.more + " more: Import again" : ""].filter(Boolean).join(" · ") || "nothing new";
+    } catch (e) { said.textContent = e.message; }
+    finally { btn.disabled = false; }
+  }
+  async function keepSmScans() {   // the checked scans, translated with the names and cards chosen above
+    const r = LAB.scripts;
+    const scans = r.scans.filter((s) => s.ui && s.ui.check.checked).map((s) => ({ path: s.path, index: s.index || 0 }));
+    if (!scans.length) { $("lab-msg").textContent = "No scan checked."; return; }
+    const instruments = r.instruments.filter((it) => !it.in_lab && it.ui && it.ui.check.checked).map((it) => ({
+      rack: it.rack_name, name: it.ui.name.value.trim(), card: it.ui.model.value }));
+    const btn = $("lab-keep-scans");
+    btn.disabled = true;
+    try {
+      const k = await api("/api/instruments/specialmeasure/scans", { body: { folder: r.folder, setup: r.setup, scans, instruments } });
+      if (k.library) SCANS.data = k.library;
+      $("lab-msg").textContent = [k.kept.length ? "Kept " + andList(k.kept.map((x) => x.name)) + " in Runs → Scans." : "",
+        ...k.not.map((x) => x.scan + ": " + x.gaps.join("; "))].filter(Boolean).join(" ");
+    } catch (e) { $("lab-msg").textContent = e.message; }
+    finally { btn.disabled = false; }
   }
   function labviewHead(r) {   // In C:\Lab: 2 projects, 14 VIs, 3 NI MAX aliases; none run.
     const count = (n, one) => n + " " + one + (n === 1 ? "" : one.endsWith("s") ? "es" : "s");
@@ -6189,18 +6343,20 @@
   }
   function renderScripts() {
     const r = LAB.scripts, box = $("lab-from-scripts");
-    const labview = !!r && r.kind === "labview";
-    const scans = labview && r.vis.some((v) => v.scan && v.scan.text);
-    box.hidden = !r || (!r.instruments.length && !labview);
-    $("lab-scripts-actions").hidden = !r || (!r.instruments.length && !(labview ? scans : r.scripts.length));
+    const labview = !!r && r.kind === "labview", sm = !!r && r.kind === "specialmeasure";
+    const scans = labview ? r.vis.some((v) => v.scan && v.scan.text) : sm && r.scans.some((s) => s.text);
+    box.hidden = !r || (!r.instruments.length && !labview && !sm);
+    $("lab-scripts-actions").hidden = !r || (!r.instruments.length && !(labview || sm ? scans : r.scripts.length));
     $("lab-add-scripts").hidden = !r || !r.instruments.some((it) => !it.in_lab);
-    $("lab-recipes").hidden = !r || labview || !r.scripts.length;
+    $("lab-recipes").hidden = !r || labview || sm || !r.scripts.length;
     $("lab-keep-scans").hidden = !scans;
+    $("lab-keep-scans").textContent = sm ? "Keep the checked scans" : "Keep the checked VIs as scans";
     renderVis();
+    renderSm();
     if (!r) return;
     const span = (lim) => Object.entries(lim || {}).map(([p, v]) => p + " " + v[0] + " to " + v[1]).join(", ");
-    const head = labview ? labviewHead(r) : "In " + r.folder + ": " + r.scripts.length + " script" + (r.scripts.length === 1 ? "" : "s") + " read, none run.";
-    box.replaceChildren(h("p", { class: "hint" }, head),
+    const head = sm ? smHead(r) : h("p", { class: "hint" }, labview ? labviewHead(r) : "In " + r.folder + ": " + r.scripts.length + " script" + (r.scripts.length === 1 ? "" : "s") + " read, none run.");
+    box.replaceChildren(head,
       ...r.instruments.map((it) => {
         if (it.in_lab) {
           const row = h("div", { class: "found in-lab" }, h("span", { class: "found-name" }, it.in_lab),
@@ -6208,7 +6364,7 @@
           const lim = it.card && Object.keys(it.card.limits || {}).length ? it.card.limits : null;
           if (!lim) return row;
           const use = h("button", { class: "link soft", type: "button" }, "Use these limits");
-          const note = h("div", { class: "found-write muted small" }, "Limits from the values your " + (labview ? "VIs" : "scripts") + " use: " + span(lim) + " ", use);
+          const note = h("div", { class: "found-write muted small" }, (sm ? "Limits from the rack: " : "Limits from the values your " + (labview ? "VIs" : "scripts") + " use: ") + span(lim) + " ", use);
           use.addEventListener("click", async () => {   // a person's choice, like Save limits in Limits…
             try {
               await api("/api/instruments/" + encodeURIComponent(it.in_lab) + "/limits", { body: { limits: lim } });
@@ -6222,7 +6378,7 @@
         const was = it.ui && { check: it.ui.check.checked, name: it.ui.name.value, card: it.ui.model.value,
           addr: it.address ? "" : it.ui.addr.value };   // what the person changed, kept when the list is drawn again
         const check = h("input", { type: "checkbox", "aria-label": "Add " + (it.address || it.name) });
-        check.checked = was ? was.check : !!(card && card.id && it.address);
+        check.checked = was ? was.check : !!(card && card.id && it.address && it.used !== false);
         const name = h("input", { class: "found-input", value: was ? was.name : it.name || "", placeholder: "name", spellcheck: "false", "aria-label": "Name" });
         const model = cardSelect(was ? was.card : card ? card.id : "", "Choose its card…");
         model.addEventListener("change", () => { if (model.value && (it.address || it.ui.addr.value.trim())) check.checked = true; });
@@ -6230,26 +6386,31 @@
           : h("input", { class: "found-input found-addr-in", placeholder: "its address", spellcheck: "false", "aria-label": "Address",
             title: labview ? "The VIs set it" : "The scripts set it as " + (it.expression || "?"), value: was ? was.addr : "" });
         it.ui = { check, name, model, addr };
-        const why = [card ? card.why : "no card of Kelvin's fits: choose one, or make one under Cards",
+        const why = [sm ? it.model + (it.used === false ? ", not loaded by " + r.setup : "") : "",
+          card ? card.why : "no card of Kelvin's fits: choose one, or make one under Cards" + (it.driver ? " (from its driver " + it.driver.split(/[\\/]/).pop() + ")" : ""),
           it.idn && !(card && card.why.includes("answered")) ? "answered " + it.idn.slice(0, 60) : it.asked || "",
-          card && Object.keys(card.limits || {}).length ? "limits from the values used: " + span(card.limits) : "",
-          it.address ? "" : "address set at run time (" + (it.expression || "?") + "): type it",
-          "in " + it.where.slice(0, 2).join(", ")].filter(Boolean).join(" · ");
+          card && Object.keys(card.limits || {}).length ? (sm ? "limits: " : "limits from the values used: ") + span(card.limits) : "",
+          it.address ? "" : sm ? "no address in the rack" + ((it.helpers || []).length ? " (" + it.helpers.join(", ") + " connects it)" : "") + ": type it"
+            : "address set at run time (" + (it.expression || "?") + "): type it",
+          sm ? "" : "in " + it.where.slice(0, 2).join(", ")].filter(Boolean).join(" · ");
         return h("div", { class: "found-wrap" }, h("label", { class: "found" }, check, name, model, addr),
-          h("div", { class: "found-write muted small" }, why));
+          h("div", { class: "found-write muted small" }, why),
+          sm && (it.channels || []).length ? h("div", { class: "found-write muted small sm-chans" }, smChannels(it)) : null);
       }));
   }
   function addScripts() {
-    const items = [], labview = (LAB.scripts || {}).kind === "labview";
+    const items = [], kind = (LAB.scripts || {}).kind, labview = kind === "labview", sm = kind === "specialmeasure";
     for (const it of (LAB.scripts || {}).instruments || []) {
       if (!it.ui || !it.ui.check.checked) continue;
       const address = it.address || it.ui.addr.value.trim(), card = it.ui.model.value;
       if (!address || !card) { $("lab-msg").textContent = (it.ui.name.value || "An instrument") + " needs its address and its card."; return; }
+      const same = it.card && it.card.id === card;   // the rack's limits and rates are on the card it was read for
       items.push({ name: it.ui.name.value.trim() || "instr", card, address, connection: it.connection,
-        limits: it.card && it.card.id === card ? it.card.limits : null, from: labview ? "labview" : null,
-        note: (it.idn || (it.card && it.card.why) || (labview ? "from your LabVIEW" : "from your scripts")).slice(0, 60) });
+        limits: same ? it.card.limits : null, rates: sm && same ? it.card.rates : null,
+        from: labview ? "labview" : sm ? "specialmeasure" : null,
+        note: (it.idn || (sm ? it.model + " in your rack" : "") || (it.card && it.card.why) || (labview ? "from your LabVIEW" : "from your scripts")).slice(0, 60) });
     }
-    addToConfig(items);
+    addToConfig(items, sm ? smNames() : null);
   }
   function recipesFromScripts() {   // in a new chat: Kelvin proposes a recipe per script, and keeps each one you agree to
     const folder = LAB.scripts && LAB.scripts.folder;
@@ -8129,7 +8290,8 @@
     $("lab-labview").addEventListener("click", fromLabview);
     $("exp-keep").addEventListener("click", () => keepDraft());
     $("exp-approve").addEventListener("click", approveVersion);
-    $("lab-keep-scans").addEventListener("click", keepScans);
+    $("lab-keep-scans").addEventListener("click", () => ((LAB.scripts || {}).kind === "specialmeasure" ? keepSmScans() : keepScans()));
+    $("lab-sm").addEventListener("click", () => fromSpecialMeasure());
     $("setup-scripts-choose").addEventListener("click", () => answerScripts(false));
     $("setup-scripts-none").addEventListener("click", () => answerScripts(true));
     $("setup-wait").addEventListener("close", () => { WAIT.closed = true; });

@@ -40,21 +40,44 @@ of its parameters:
 
     technique: { pstat.cv: { start: -0.2, vertex: 0.6, cycles: 2 } }
     sweep:     { pstat.cv.rate: { values: [0.02, 0.05, 0.1] } }
+
+As Special Measure's loops do, a stepped loop can move other settings with its own, read something once per value,
+and wait longer after its first value (where it lands after jumping back from its last):
+
+    sweep:
+      dac.Vbg: { from: 5, to: -5, points: 21, measure: [smu.I] }      # smu.I read once per value of dac.Vbg
+      stage.y: { from: 70, to: 72, points: 101, with: { stage.x: { from: 93, to: 81 } }, first_settle: 3 }
+
+with: gives each setting {from, to} in step with the loop's own values (or values: one per value), and they move
+together, in turn a ramp step at a time. A sweep key without a dot is a variable of the plan's own, and sets: works
+out settings from the variables and the settings swept (Special Measure's function channels, such as a density n and
+a displacement field E for two gates); every value it gives them is worked out first, checked and approved with the
+rest:
+
+    sweep: { E: { from: -0.3, to: 0.3, points: 7 }, n: { from: 0, to: 2, points: 101 } }
+    sets:  { dac.Vbg: "1.18*n - 8.4*E + 2.4", dac.Vtg: "0.95*n + 7.6*E + 2.6" }
 """
 from __future__ import annotations
 
+import itertools
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from . import expr
 from .conditions import Condition, Rule, parse_condition, parse_rule
 from .labconfig import read_yaml
 
 MAX_POINTS = 1_000_000
+MAX_COMPUTED = 200_000   # the combinations of a plan's values its sets: are worked out at before it runs
 STALL_S = 600.0     # a ramp whose reading stops getting closer to its target for this long stops the run
 _KEYS = {"plan", "description", "device", "requires", "preconditions", "setup", "sweep", "repeat", "time",
-         "settle", "measure", "after", "on_abort", "trigger", "until", "while", "retry", "technique"}
-_STEPPED = {"values", "from", "to", "step", "points", "log", "back", "settle", "stabilize", "until", "while"}
+         "settle", "measure", "after", "on_abort", "trigger", "until", "while", "retry", "technique", "sets"}
+_STEPPED = {"values", "from", "to", "step", "points", "log", "back", "settle", "stabilize", "until", "while", "with",
+            "measure", "first_settle"}
+VARIABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+RESERVED = {"i", "t", "time", "repeat", "stabilizing", "gap_s"}   # a run's own columns: never a variable's name
 _RAMPED = {"ramp", "rate", "every", "read", "within", "stall", "until", "while"}
 
 
@@ -123,12 +146,42 @@ class Retry:
 
 
 @dataclass
+class With:
+    """A setting that moves with a loop's own (Special Measure's channels set together in one loop: a stage's x and
+    y along a line, a monochromator and the modulator tuned to its wavelength): a value of its own at each of the
+    loop's points."""
+    instr: str
+    param: str
+    values: List[Any]
+
+    @property
+    def key(self) -> str:
+        return "%s.%s" % (self.instr, self.param)
+
+
+@dataclass
+class Computed:
+    """A setting the plan works out at each point (sets:) from its variables and the settings it sweeps, as Special
+    Measure's function channels do (two gates from a density and a field). It reads nothing, so every value it takes
+    is known before the run: values, in the order the run takes them (made when there are few enough)."""
+    instr: str
+    param: str
+    text: str
+    names: List[str]
+    values: List[Any] = field(default_factory=list)
+
+    @property
+    def key(self) -> str:
+        return "%s.%s" % (self.instr, self.param)
+
+
+@dataclass
 class Axis:
     instr: str
     param: str
     values: List[Any]                   # a ramp: its legs' targets
     settle: Optional[float] = None
-    kind: str = "instrument"            # instrument | ramp | repeat | time
+    kind: str = "instrument"            # instrument | ramp | repeat | time | technique | variable
     every: float = 0.0                  # time axis: seconds between points; a ramp: between points while it ramps
     stabilize: Optional[Stabilize] = None
     settles: Optional[List[Optional[float]]] = None   # a hold of its own for each value (None: the axis's settle)
@@ -139,10 +192,18 @@ class Axis:
     within: Optional[float] = None      # how close to a leg's target counts as there (None: its card's tol)
     stall: float = STALL_S              # a ramp stops the run after this long without getting closer (0: never)
     estimate: Optional[int] = None      # a ramp: how many points it is expected to record (the engine works it out)
+    with_: List[With] = field(default_factory=list)   # settings that move with it, a value each at each of its points
+    measure: List[Tuple[str, str]] = field(default_factory=list)   # read once at each of its values, before the
+    # loops inside it, and kept on each point inside (Special Measure's readings in an outer loop)
+    first_settle: Optional[float] = None   # the hold after its first value, each time the loop starts again
 
     @property
     def key(self) -> str:
         return "%s.%s" % (self.instr, self.param) if self.kind in ("instrument", "ramp", "technique") else self.param
+
+    def settle_first(self, i: int) -> Optional[float]:
+        """The hold after setting value i as the run takes it: first_settle for its first value, else settle_at."""
+        return self.first_settle if i == 0 and self.first_settle is not None else self.settle_at(i)
 
     @property
     def count(self) -> int:
@@ -174,6 +235,17 @@ class Plan:
     while_: Optional[Rule] = None     # ... or once this no longer holds
     retry: Optional[Retry] = None
     techniques: List[TechniqueStep] = field(default_factory=list)   # run at every point (techniques.py)
+    sets: List[Computed] = field(default_factory=list)   # settings worked out at each point (sets:)
+
+    def swept_settings(self) -> List[Tuple[str, List[Any]]]:
+        """Every setting the stepped sweep moves, with each value it takes: each loop's own (a variable is the plan's,
+        no setting), what moves with it (with:) and what sets: works out. A ramp's targets are its own (Plan.ramp)."""
+        out: List[Tuple[str, List[Any]]] = []
+        for a in self.axes:
+            if a.kind == "instrument":
+                out.append((a.key, a.values))
+            out += [(w.key, w.values) for w in a.with_]
+        return out + [(c.key, c.values) for c in self.sets]
 
     @property
     def points(self) -> int:
@@ -457,6 +529,210 @@ def _time_axis(spec: Any, errors: List[str], make: bool = True) -> Optional[Tupl
                 while_=_rule(spec.get("while"), "time.while", errors)), n
 
 
+def _keys(spec: Any, path: str, errors: List[str]) -> List[Tuple[str, str]]:
+    """A list of instrument.parameter keys (or one), as (instrument, parameter)."""
+    if spec is None:
+        return []
+    out = []
+    for key in spec if isinstance(spec, list) else [spec]:
+        ip = _split(key, path, errors)
+        if ip:
+            out.append(ip)
+    return out
+
+
+def _withs(spec: Any, base: Optional[List[Any]], count: int, back: bool, path: str, errors: List[str]) -> List[With]:
+    """The settings that move with a stepped loop's own (with:): each {from, to} in step with the loop's own values
+    (as Special Measure maps a loop's range onto each of its channels'), or values: one per value as written; back:
+    true brings them back with it. base: the loop's values as written (None: too many to make)."""
+    if not isinstance(spec, dict) or not spec:
+        errors.append("%s: a mapping of instrument.parameter: {from, to} or {values: [...]}, each a setting that "
+                      "moves with the loop's own" % path)
+        return []
+    out = []
+    for key, own in spec.items():
+        where = "%s.%s" % (path, key)
+        ip = _split(key, path, errors)
+        if not ip:
+            continue
+        values: List[Any] = []
+        if isinstance(own, list) or isinstance(own, dict) and set(own) == {"values"}:
+            try:
+                values = list(own if isinstance(own, list) else own["values"])
+            except TypeError:
+                errors.append("%s: values: is a list" % where)
+                continue
+            if len(values) != count:
+                errors.append("%s: give one value per value of the loop (%d values, %d here)" % (where, count,
+                                                                                                 len(values)))
+                continue
+        elif isinstance(own, dict) and set(own) == {"from", "to"}:
+            try:
+                a, b = float(own["from"]), float(own["to"])
+                if not (math.isfinite(a) and math.isfinite(b)) or isinstance(own["from"], bool) or \
+                        isinstance(own["to"], bool):
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors.append("%s: from and to are numbers" % where)
+                continue
+            if base is not None:
+                try:
+                    first, last = float(base[0]), float(base[-1])
+                    span = last - first
+                except (TypeError, ValueError, IndexError):
+                    first, last, span = 0.0, 0.0, 0.0
+                if len(base) == 1:
+                    values = [a]
+                elif not span:
+                    errors.append("%s: from and to follow the loop's own values, which need a first and a last value "
+                                  "that differ: give values: instead" % where)
+                    continue
+                else:
+                    values = [a + (b - a) * (float(v) - first) / span for v in base]
+                    values[0], values[-1] = a, b   # exactly as written at the ends
+        else:
+            errors.append("%s: use {from, to} (in step with the loop's own values) or {values: [...]}" % where)
+            continue
+        if back and len(values) > 1:
+            values = values + values[-2::-1]
+        out.append(With(ip[0], ip[1], values if base is not None else []))
+    return out
+
+
+def _sets(spec: Any, axes: List[Axis], errors: List[str], make: bool) -> List[Computed]:
+    """sets: the settings a plan works out at each point, instrument.parameter: expression (expr.py's language) of
+    its variables and the settings it sweeps (each stepped loop's own and its with:). Every value each takes is
+    worked out before the run (Computed.values, made when make), so the run is checked and approved on them."""
+    if spec is None:
+        return []
+    if not isinstance(spec, dict) or not spec:
+        errors.append('sets: a mapping of instrument.parameter: expression, e.g. {dac.Vbg: "1.2*n - 8*E"}')
+        return []
+    known: Dict[str, Tuple[int, Optional[With]]] = {}   # a name an expression may use: its loop, and its with:
+    for i, a in enumerate(axes):
+        if a.kind in ("instrument", "variable"):
+            known[a.key] = (i, None)
+            for w in a.with_:
+                known[w.key] = (i, w)
+    out = []
+    for key, text in spec.items():
+        where = "sets.%s" % key
+        ip = _split(key, "sets", errors)
+        if not ip:
+            continue
+        if key in known:
+            errors.append("%s: the sweep sets %s already; sets: works out settings the sweep doesn't" % (where, key))
+            continue
+        if isinstance(text, bool) or not isinstance(text, (str, int, float)):
+            errors.append('%s: an expression in quotes, e.g. "1.2*n - 8*E"' % where)
+            continue
+        try:
+            names = expr.names_in(str(text))
+        except expr.ExprError as e:
+            errors.append("%s: %s" % (where, e))
+            continue
+        unknown = [n for n in names if n not in known]
+        if unknown:
+            errors.append("%s: %s %s not swept: an expression uses the plan's variables and the settings its loops "
+                          "step" % (where, ", ".join(unknown), "is" if len(unknown) == 1 else "are"))
+            continue
+        c = Computed(ip[0], ip[1], str(text), names)
+        if make:
+            c.values = _worked_out(c, axes, known, where, errors)
+        out.append(c)
+    return out
+
+
+def _worked_out(c: Computed, axes: List[Axis], known: Dict[str, Tuple[int, Optional[With]]], where: str,
+                errors: List[str]) -> List[Any]:
+    """Every value a sets: expression gives, at each combination of the loops it uses, outer first (the run's
+    order)."""
+    loops = sorted({known[n][0] for n in c.names})
+    sizes = [len(axes[i].values) for i in loops]
+    total = 1
+    for s in sizes:
+        total *= s
+    if total > MAX_COMPUTED:
+        errors.append("%s: it would be worked out at %d combinations of the loops' values, more than the %d Kelvin "
+                      "checks before a run" % (where, total, MAX_COMPUTED))
+        return []
+    out = []
+    for ks in itertools.product(*[range(s) for s in sizes]):
+        at: Dict[str, Any] = {}
+        for i, k in zip(loops, ks):
+            a = axes[i]
+            at[a.key] = a.values[k]
+            for w in a.with_:
+                at[w.key] = w.values[k]
+        try:
+            out.append(expr.scalar(c.text, at))
+        except expr.ExprError as e:
+            errors.append("%s: %s" % (where, e))
+            return []
+    return out
+
+
+_TOKEN = re.compile(r"(?<![\w.])([A-Za-z_]\w*)(?![\w.(])")   # a bare name, not part of instr.param nor a call
+
+
+def with_names(data: Any, names: Dict[str, str]) -> Any:
+    """A plan (a mapping) with the lab's own names for its settings and readings (the lab config's names:, such as a
+    Special Measure rack's channel names Vbg or X_A) put back as instrument.parameter, so the plan Kelvin keeps, checks
+    and runs names each setting as its card does: keys, lists of keys, conditions and expressions. A sweep key that is
+    not one of the names stays the plan's variable."""
+    if not names or not isinstance(data, dict):
+        return data
+    sweep = data.get("sweep") if isinstance(data.get("sweep"), dict) else {}
+    variables = {k for k in sweep if isinstance(k, str) and "." not in k and k not in names}
+
+    def key(k: Any) -> Any:
+        return names.get(k, k) if isinstance(k, str) and k not in variables else k
+
+    def text(t: Any) -> Any:
+        if not isinstance(t, str):
+            return t
+        return _TOKEN.sub(lambda m: m.group(1) if m.group(1) in variables else names.get(m.group(1), m.group(1)), t)
+
+    def keyed(d: Any) -> Any:
+        return {key(k): v for k, v in d.items()} if isinstance(d, dict) else d
+
+    def listed(v: Any) -> Any:
+        return [key(x) for x in v] if isinstance(v, list) else key(v)
+
+    out = dict(data)
+    for part in ("setup", "after", "on_abort"):
+        if part in out:
+            out[part] = keyed(out[part])
+    if "measure" in out:
+        out["measure"] = listed(out["measure"])
+    for part in ("until", "while"):
+        if part in out:
+            out[part] = text(out[part])
+    if isinstance(out.get("preconditions"), list):
+        out["preconditions"] = [text(t) for t in out["preconditions"]]
+    if isinstance(out.get("sets"), dict):
+        out["sets"] = {key(k): text(v) for k, v in out["sets"].items()}
+    if sweep:
+        moved = {}
+        for k, spec in sweep.items():
+            if isinstance(spec, dict):
+                spec = dict(spec)
+                if isinstance(spec.get("with"), dict):
+                    spec["with"] = keyed(spec["with"])
+                if "measure" in spec:
+                    spec["measure"] = listed(spec["measure"])
+                if isinstance(spec.get("stabilize"), dict) and "read" in spec["stabilize"]:
+                    spec["stabilize"] = dict(spec["stabilize"], read=key(spec["stabilize"]["read"]))
+                if "read" in spec:
+                    spec["read"] = key(spec["read"])
+                for part in ("until", "while"):
+                    if part in spec:
+                        spec[part] = text(spec[part])
+            moved[key(k)] = spec
+        out["sweep"] = moved
+    return out
+
+
 def _axes(data: Dict[Any, Any], errors: List[str], make: bool = True) -> Tuple[List[Axis], int]:
     """The plan's loops, outer first (repeat:, sweep:'s keys, time:), and the points they make, counted from their
     shape. make=False: no value is made (they make more points than a plan may have)."""
@@ -477,9 +753,14 @@ def _axes(data: Dict[Any, Any], errors: List[str], make: bool = True) -> Tuple[L
         errors.append("sweep: must be a mapping (several keys = nested, outer first)")
         sweep = {}
     for key, spec in sweep.items():
-        ip = _split(key, "sweep", errors)
         path = "sweep.%s" % key
+        variable = isinstance(key, str) and "." not in key and bool(VARIABLE.match(key)) and key not in RESERVED
+        ip = ("", key) if variable else _split(key, "sweep", errors)   # a variable: sets: works out what it sets
         if isinstance(spec, dict) and "ramp" in spec:
+            if variable:
+                errors.append("%s: a variable is stepped (from, to, step or values); ramp: goes on an instrument's "
+                              "set point" % path)
+                continue
             axis = _ramp_axis(ip[0], ip[1], spec, path, errors) if ip else None
             if axis:
                 axes.append(axis)
@@ -503,12 +784,25 @@ def _axes(data: Dict[Any, Any], errors: List[str], make: bool = True) -> Tuple[L
             until = _rule(spec.get("until"), path + ".until", errors) if isinstance(spec, dict) else None
             while_ = _rule(spec.get("while"), path + ".while", errors) if isinstance(spec, dict) else None
             # instrument.technique.parameter: one of a technique's parameters, stepped (techniques.py)
-            kind = "technique" if "." in ip[1] else "instrument"
+            kind = "variable" if variable else "technique" if "." in ip[1] else "instrument"
             if kind == "technique" and stab is not None:
                 errors.append("%s: a technique's parameter is stepped as the technique runs; stabilize: goes on "
                               "an instrument's own setting" % path)
+            own = spec if isinstance(spec, dict) else {}
+            withs: List[With] = []
+            if own.get("with") is not None:
+                if kind == "technique":
+                    errors.append("%s: with: moves settings with an instrument's setting or a variable, not with a "
+                                  "technique's parameter" % path)
+                else:
+                    count = _base_shape(spec, path, [])[0]
+                    withs = _withs(own["with"], _base_values(spec, path, []) if make else None, count,
+                                   bool(own.get("back")), path + ".with", errors)
+            first = _seconds(own["first_settle"], path + ".first_settle", errors) \
+                if own.get("first_settle") is not None else None
             axes.append(Axis(ip[0], ip[1], shape[1]() if make else [], settle_s, kind=kind, stabilize=stab,
-                             settles=settles, until=until, while_=while_))
+                             settles=settles, until=until, while_=while_, with_=withs,
+                             measure=_keys(own.get("measure"), path + ".measure", errors), first_settle=first))
             points *= shape[0]
     if data.get("time") is not None:
         t = _time_axis(data["time"], errors, make) if isinstance(data["time"], dict) else None
@@ -536,12 +830,15 @@ def _retry(spec: Any, errors: List[str]) -> Optional[Retry]:
     return Retry(n, w)
 
 
-def load_plan(source: Any) -> Plan:
-    """From a mapping, a .yaml path or YAML text."""
+def load_plan(source: Any, names: Optional[Dict[str, str]] = None) -> Plan:
+    """From a mapping, a .yaml path or YAML text. names: the lab's own names for its settings (the lab config's
+    names:), put back as instrument.parameter first (with_names)."""
     data, _ = read_yaml(source)
     errors: List[str] = []
     if not isinstance(data, dict):
         raise PlanError(["a plan must be a mapping"])
+    if names:
+        data = with_names(data, names)
     for key in data:
         if key not in _KEYS:
             errors.append("unknown key %r (allowed: %s)" % (key, ", ".join(sorted(_KEYS))))
@@ -599,16 +896,37 @@ def load_plan(source: Any) -> Plan:
         errors.append("settle: must be seconds")
         settle = 0.0
 
+    sets = _sets(data.get("sets"), axes, errors, make=points <= MAX_POINTS)
     plan = Plan(name=name, description=str(data.get("description", "")), preconditions=preconditions,
                 setup=setup, axes=axes, measure=measure, trigger=trigger, settle=settle, after=after,
                 on_abort=on_abort,
                 source=data, device=" ".join(str(data.get("device") or "").split())[:60],
                 until=_rule(data.get("until"), "until", errors), while_=_rule(data.get("while"), "while", errors),
-                retry=_retry(data.get("retry"), errors), techniques=techniques)
+                retry=_retry(data.get("retry"), errors), techniques=techniques, sets=sets)
     if points > MAX_POINTS:
         errors.append("plan has %d points (max %d)" % (points, MAX_POINTS))
+    moved: Dict[str, str] = {}   # each setting the sweep moves, and the loop that moves it
+    for a in axes:
+        for k in ([a.key] if a.kind in ("instrument", "ramp") else []) + [w.key for w in a.with_]:
+            if k in moved:
+                errors.append("sweep: %s moves in two loops (%s and %s)" % (k, moved[k], a.key))
+            moved.setdefault(k, a.key)
+    recorded = {"%s.%s" % m for m in measure}
+    for a in axes:   # a reading is recorded once: at every point, or in one loop
+        for m in a.measure:
+            k = "%s.%s" % m
+            if k in recorded:
+                errors.append("sweep.%s.measure: %s is recorded once, at each point (measure:) or in one loop" % (
+                    a.key, k))
+            recorded.add(k)
+    uses = {n for c in sets for n in c.names}
+    for a in axes:
+        if a.kind == "variable" and a.key not in uses:
+            errors.append("sweep.%s: a sweep key is instrument.parameter, or a variable that sets: works settings out "
+                          "from" % a.key)
     used = [s.instr for s in plan.all_steps()] + [t.instr for t in techniques] \
         + [a.instr for a in plan.axes if a.kind in ("instrument", "ramp", "technique")] \
+        + [w.instr for a in axes for w in a.with_] + [i for a in axes for i, _ in a.measure] + [c.instr for c in sets] \
         + [a.read[0] for a in axes if a.read] \
         + [a.stabilize.instr for a in axes if a.stabilize] + [i for i, _ in measure] + [c.instr for c in preconditions] \
         + [i for i, _ in trigger] + [k.split(".")[0] for r in plan.rules() for k in r.keys]

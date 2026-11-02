@@ -144,6 +144,9 @@ You are connected to a physics lab through Kelvin.
 - A lab that runs its instruments from LabVIEW: survey_labview on its LabVIEW folder reads NI MAX and its projects
   and VIs the same way (never running a VI) and translates each VI it could read into a scan, saying what didn't
   translate; a scan is a plan, run with run_plan once the person agrees. Never guess what a VI not read does.
+- A lab that runs Special Measure (MATLAB): survey_specialmeasure on its folder reads the rack its setup scripts
+  build (instruments, addresses, named channels with limits and ramp rates, function channels), its drivers, scans
+  and runs, never running MATLAB, and translates each scan into a plan.
 - An instrument the scan doesn't find or doesn't identify: find out what it is yourself. find_on_network for one on
   the network whose address nobody knows (it sweeps this computer's networks, or the range named, for the ports
   instruments and their gateways use, and asks each who it is), inspect_address for one at a known address (what its
@@ -454,6 +457,19 @@ def build_server(rt: LabRuntime) -> MCPServer:
         nothing is sent to an instrument."""
         try:
             return outside(rt, "the lab's LabVIEW files", rt.survey_labview(path))
+        except Underway as e:   # Set up reads one now: Kelvin's own words, nothing from the files
+            return "not read now: %s" % e
+
+    @server.tool(annotations=READ, structured_output=False)
+    def survey_specialmeasure(path: str) -> str:
+        """Read a lab's Special Measure (MATLAB; the folder of its setup scripts, sm drivers, scans and runs the
+        person named), to switch the lab to Kelvin as its rack has it: each setup script's instruments (model,
+        address, the Kelvin card that fits), its named channels (Vbg, X_A: the card parameter each is, with its
+        limits, ramp rate and multiplier), function channels' formulas, the commands sent at start-up, the scans
+        saved and run, and the run files by folder. Only reads: no MATLAB is run (it needn't be installed), and
+        nothing is sent to an instrument."""
+        try:
+            return outside(rt, "the lab's Special Measure files", rt.survey_specialmeasure(path))
         except Underway as e:   # Set up reads one now: Kelvin's own words, nothing from the files
             return "not read now: %s" % e
 

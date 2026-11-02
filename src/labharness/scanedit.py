@@ -7,12 +7,14 @@ as it was; so is a part whose value isn't of the kind its field takes (a loop's 
 reads or drives an instrument: an edited scan runs through the queue, its gate and its approval as any scan does.
 
     parts = {name, description, loops: [loop, ...], measure: [key, ...], setup: [{key, value}], after: [{key, value}],
-             settle, repeat, time: {every, for, points, order} | None,
+             sets: [{key, value: its expression}], settle, repeat, time: {every, for, points, order} | None,
              kept: YAML text of the plan's other keys, fixed: those keys (the editor's fields for them are read-only),
              order: the plan's keys as written}
     loop  = {key, mode: range | values | ramp | kept, its fields, kept: YAML text of its other keys, fixed, order}
       range:  from, to, and step or points (by: the one the loop gives), log, back, settle
       values: values, back, settle; form: "list" for a bare list of values
+      both:   first_settle; with: [{key, from, to} | {key, values, form: list | values}], the settings that move with
+              it, as Special Measure's loops set several channels; measure: what it reads once per value
       ramp:   legs [{to, rate, hold, bare: a target alone, order}], every; one: a single leg, not a list
       kept:   text, the whole loop as written
 
@@ -28,15 +30,17 @@ import yaml
 from .yamlio import dump_yaml, load_yaml
 
 # the plan's keys in the order Kelvin writes them: where a part the editor adds goes among those the plan has
-ORDER = ("plan", "description", "device", "requires", "preconditions", "setup", "sweep", "repeat", "time", "settle",
-         "trigger", "technique", "measure", "until", "while", "retry", "after", "on_abort")
-SPEC_ORDER = ("values", "from", "to", "step", "points", "log", "back", "ramp", "rate", "every", "settle")
+ORDER = ("plan", "description", "device", "requires", "preconditions", "setup", "sweep", "sets", "repeat", "time",
+         "settle", "trigger", "technique", "measure", "until", "while", "retry", "after", "on_abort")
+SPEC_ORDER = ("values", "from", "to", "step", "points", "log", "back", "with", "ramp", "rate", "every", "settle",
+              "first_settle", "measure")
 TIME_ORDER = ("every", "for", "points")
 LEG_ORDER = ("to", "rate", "hold")
 MODES = ("range", "values", "ramp", "kept")
 FIELDS = {"plan": "name", "description": "description", "sweep": "loops", "measure": "measure", "setup": "setup",
-          "after": "after", "settle": "settle", "repeat": "repeat", "time": "time"}
-_LOOP_KEYS = {"values", "from", "to", "step", "points", "log", "back", "ramp", "every", "settle"}   # a field, in a mode
+          "after": "after", "settle": "settle", "repeat": "repeat", "time": "time", "sets": "sets"}
+_LOOP_KEYS = {"values", "from", "to", "step", "points", "log", "back", "ramp", "every", "settle", "with", "measure",
+              "first_settle"}   # a field, in a mode
 _KEPT = object()
 
 
@@ -70,7 +74,7 @@ def to_parts(data: Any) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("a plan is a mapping of its keys")
     parts: Dict[str, Any] = {"name": "", "description": "", "loops": [], "measure": [], "setup": [], "after": [],
-                             "settle": None, "repeat": None, "time": None, "order": [str(k) for k in data]}
+                             "sets": [], "settle": None, "repeat": None, "time": None, "order": [str(k) for k in data]}
     kept: Dict[Any, Any] = {}
     for key, value in data.items():
         shown = _shown(key, value)
@@ -90,7 +94,7 @@ def _shown(key: Any, value: Any) -> Any:
     """A key of the plan as its field shows it, or _KEPT."""
     if key in ("plan", "description"):
         return value if isinstance(value, str) else _KEPT
-    if key in ("setup", "after"):
+    if key in ("setup", "after", "sets"):   # sets: an expression for each, as text
         if isinstance(value, dict) and all(isinstance(k, str) and _plain(v) for k, v in value.items()):
             return [{"key": k, "value": v} for k, v in value.items()]
         return _KEPT
@@ -112,7 +116,30 @@ def _shown(key: Any, value: Any) -> Any:
 def _blank(key: str, mode: str) -> Dict[str, Any]:
     return {"key": key, "mode": mode, "from": None, "to": None, "step": None, "points": None, "by": "step",
             "log": False, "back": False, "values": [], "form": "", "legs": [], "one": False, "every": None,
-            "settle": None, "kept": "", "fixed": [], "order": []}
+            "settle": None, "first_settle": None, "with": [], "measure": [], "kept": "", "fixed": [], "order": []}
+
+
+def _with_rows(spec: Any) -> Optional[List[Dict[str, Any]]]:
+    """A loop's with: as rows (key, from and to, or values); None when one isn't {from, to} of numbers or plain
+    values."""
+    if not isinstance(spec, dict) or not spec:
+        return None
+    rows = []
+    for key, own in spec.items():
+        if not isinstance(key, str):
+            return None
+        if isinstance(own, dict) and set(own) == {"from", "to"} and _number(own["from"]) and _number(own["to"]):
+            rows.append({"key": key, "from": own["from"], "to": own["to"], "values": [], "form": "range",
+                         "order": list(own)})
+        elif isinstance(own, (list, dict)):
+            values = own if isinstance(own, list) else own.get("values") if set(own) == {"values"} else None
+            if not isinstance(values, list) or not all(map(_plain, values)):
+                return None
+            rows.append({"key": key, "from": None, "to": None, "values": list(values),
+                         "form": "list" if isinstance(own, list) else "values", "order": []})
+        else:
+            return None
+    return rows
 
 
 def _loop(key: str, spec: Any) -> Dict[str, Any]:
@@ -146,6 +173,20 @@ def _take(loop: Dict[str, Any], mode: str, k: str, v: Any, spec: Dict[str, Any])
             loop["settle"] = v
             return True
         return False                                  # a hold per value: kept
+    if k == "first_settle" and mode != "ramp":
+        loop["first_settle"] = v
+        return _number(v) or None
+    if k == "measure" and mode != "ramp":            # read once per value
+        if isinstance(v, list) and all(isinstance(m, str) for m in v):
+            loop["measure"] = list(v)
+            return True
+        return False                                  # one key alone, as written: kept
+    if k == "with" and mode != "ramp":
+        rows = _with_rows(v)
+        if rows is None:
+            return False                              # kept as written
+        loop["with"] = rows
+        return True
     if mode == "range":
         if k in ("from", "to"):
             loop[k] = v
@@ -230,7 +271,7 @@ def _to_plan(parts: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(parts.get("measure"), list):
         measure = [m for m in parts["measure"] if m not in (None, "")]
         put("measure", measure, bool(measure) or "measure" in order)
-    for key in ("setup", "after"):
+    for key in ("setup", "after", "sets"):
         if isinstance(parts.get(key), list):
             rows = _rows(parts[key], key)
             put(key, rows, bool(rows) or key in order)
@@ -278,6 +319,11 @@ def _spec(loop: Dict[str, Any]) -> Any:
         fields.update({"ramp": _ramp(loop.get("legs") or [], bool(loop.get("one"))), "every": loop.get("every")})
     if mode != "ramp":
         fields["settle"] = loop.get("settle")
+        fields["first_settle"] = loop.get("first_settle")
+        moved = _with_spec(loop.get("with") or [], loop.get("key"))
+        fields["with"] = moved or None
+        measure = [m for m in loop.get("measure") or [] if m not in (None, "")]
+        fields["measure"] = measure or None
     fields = {k: v for k, v in fields.items() if v not in (None, "")}
     for flag in ("log", "back") if mode == "range" else ("back",) if mode == "values" else ():
         if loop.get(flag) or flag in order:
@@ -286,6 +332,25 @@ def _spec(loop: Dict[str, Any]) -> Any:
         return fields["values"]   # a bare list, as it was written
     fields.update(kept)
     return _ordered(fields, order, SPEC_ORDER)
+
+
+def _with_spec(rows: List[Any], loop_key: Any) -> Dict[str, Any]:
+    """A loop's with: rows as the mapping; a row with no key yet is left out."""
+    out: Dict[str, Any] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("%s: a setting that moves with it is {key, from, to} or {key, values}" % loop_key)
+        key = " ".join(str(row.get("key") or "").split())
+        if not key:
+            continue
+        if key in out or key == loop_key:
+            raise ValueError("%s moves twice in the loop of %s" % (key, loop_key))
+        if row.get("form") in ("list", "values"):
+            values = list(row.get("values") or [])
+            out[key] = values if row.get("form") == "list" else {"values": values}
+        else:
+            out[key] = _ordered({"from": row.get("from"), "to": row.get("to")}, row.get("order") or [], ("from", "to"))
+    return out
 
 
 def _ramp(legs: List[Any], one: bool) -> Any:

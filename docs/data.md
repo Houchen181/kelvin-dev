@@ -22,7 +22,21 @@ after: { smu.V: 0, magnet.B: 0 }
 Sweep values can be `{from, to, step}`, `{from, to, points}`, `{from, to, points, log: true}` or `{values: [...]}`. A sweep axis can also set:
 - its own `settle`: one number, one per value (`settle: [5, 5, 600]`, mirrored on the way back), or only for the steps that need longer (`settle: {50: 600}`), so a staircase's last step can hold longer than the others;
 - a `stabilize` condition: wait until a reading changes by less than `within` over `for` seconds, up to `timeout` (then it measures anyway and says so). With `near: 0.05` the reading must also be that close to its set point (the one its instrument reads back, else the axis's value), so a steady reading short of it, or a dead sensor, doesn't pass. With `every: 10` a point is recorded every 10 s while it waits, marked `stabilizing: 1` (the settled point has 0; the automatic analysis takes only those). The run keeps when each one settled (`stabilized`);
-- `until:` or `while:` (see [Ending early](#ending-early)).
+- `until:` or `while:` (see [Ending early](#ending-early));
+- `with:` the settings that move with it, as Special Measure's loops set several channels: `stage.y: { from: 70, to: 72, points: 101, with: { stage.x: { from: 93, to: 81 } } }` takes `stage.x` from 93 to 81 in step with `stage.y` (or `values:`, one per value), and back with it. Drives the gate ramps move together, in turn a ramp step at a time, so two gates of a device travel the line between their points rather than one and then the other;
+- its own `measure:`, read once each time it takes a value (after it settles, before the loops inside it) and kept on every point inside: a gate's leakage once per gate value, a temperature once per line;
+- `first_settle:` the hold after its first value, each time the loop starts again, in place of its settle: the jump back from a line's end often needs longer.
+
+A sweep key without a dot is a variable of the plan's own, and `sets:` works settings out from the variables and the settings swept, at each point, as Special Measure's function channels do:
+
+```yaml
+sweep: { E: { from: -0.3, to: 0.3, points: 7 }, n: { from: 0, to: 2, points: 101 } }
+sets:  { dac.Vbg: "1.18*n - 8.4*E + 2.4", dac.Vtg: "0.95*n + 7.6*E + 2.6" }
+```
+
+An expression uses only the variables and the settings swept (numbers, arithmetic and functions such as `sqrt` and `where`), never a reading, so every value it gives is worked out before the run: the limits are checked on each, and the run's one card shows the real gates' ranges. They move together, as `with:` does, and each point records them.
+
+A lab's own names for its settings (`names:` in `lab.yaml`, which **From Special Measure…** writes from the rack's channels: `Vbg: dac.CH0`) can stand for `instrument.parameter` in a plan, in the queue and in `set_value`; Kelvin keeps and runs the plan with the instruments' own names.
 
 What the run needs first goes in its `setup`, so the run's one card covers it: an excitation's amplitude, frequency and output, a laser's emission and power. One of the card's actions runs once there, in order (`isrc.wave_start: run`), or in `after` (`isrc.wave_stop: run`); `on_abort` takes only actions that don't drive the sample. The card shows every drive the run changes. It gives the rate each moves at, as the instrument reports it or as the plan sets it, and how long the run takes. It also shows what the run leaves on at the end ([safety.md](safety.md#the-rules)).
 

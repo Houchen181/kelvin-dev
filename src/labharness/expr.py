@@ -12,7 +12,10 @@ bound."""
 from __future__ import annotations
 
 import ast
-from typing import Any, Callable, Dict
+import contextlib
+import math
+import operator
+from typing import Any, Callable, Dict, List
 
 MAX_LENGTH = 500      # characters in an expression
 MAX_NODES = 300       # its parts
@@ -105,6 +108,116 @@ HELP = ("functions: abs sqrt log log10 exp sin cos tan arcsin arccos arctan arct
         "rad2deg sign floor ceil round clip(a, lo, hi) where(cond, a, b) deriv(y, x) diff cumsum smooth(y, n) "
         "interp(x0, x, y) at_min(y, x) at_max(y, x) (x where y is smallest or largest) mean std min max sum median "
         "count; constants: " + " ".join(CONSTANTS))
+
+
+class _Point:
+    """numpy's functions as evaluate uses them, on one point's plain numbers: a plan's sets: is worked out at each
+    point without numpy (Kelvin's core runs without it). A function of a whole column (mean, smooth, deriv...) has
+    no meaning at one point and says so."""
+    float64 = float
+    add, subtract, multiply, power = operator.add, operator.sub, operator.mul, operator.pow
+    mod, floor_divide = operator.mod, operator.floordiv
+    less, less_equal, greater, greater_equal = operator.lt, operator.le, operator.gt, operator.ge
+    equal, not_equal, negative = operator.eq, operator.ne, operator.neg
+    abs, floor, ceil, round, hypot = abs, math.floor, math.ceil, round, math.hypot
+    sqrt, log, log10, exp, sin, cos, tan = math.sqrt, math.log, math.log10, math.exp, math.sin, math.cos, math.tan
+    arcsin, arccos, arctan, arctan2 = math.asin, math.acos, math.atan, math.atan2
+    sinh, cosh, tanh, deg2rad, rad2deg = math.sinh, math.cosh, math.tanh, math.radians, math.degrees
+
+    @staticmethod
+    def true_divide(a: float, b: float) -> float:
+        if b == 0:
+            raise ExprError("a division by zero")
+        return a / b
+
+    @staticmethod
+    def logical_not(a: Any) -> bool:
+        return not a
+
+    @staticmethod
+    def logical_and(a: Any, b: Any) -> bool:
+        return bool(a) and bool(b)
+
+    @staticmethod
+    def logical_or(a: Any, b: Any) -> bool:
+        return bool(a) or bool(b)
+
+    @staticmethod
+    def where(c: Any, a: Any, b: Any) -> Any:
+        return a if c else b
+
+    @staticmethod
+    def sign(x: float) -> float:
+        return float((x > 0) - (x < 0))
+
+    @staticmethod
+    def clip(a: float, lo: float, hi: float) -> float:
+        return min(max(a, lo), hi)
+
+    @staticmethod
+    def errstate(**_: Any) -> Any:
+        return contextlib.nullcontext()
+
+    def __getattr__(self, name: str) -> Any:
+        def whole(*_: Any) -> Any:
+            raise ExprError("this function works on a whole column, not on one point's values")
+        return whole
+
+
+def names_in(text: str) -> List[str]:
+    """The names an expression uses (instrument.parameter, a plan's variables, col("...")), in the order it first
+    uses them, without its functions and constants. ExprError: not an expression evaluate takes."""
+    text = str(text or "").strip()
+    if not text:
+        raise ExprError("the expression is empty")
+    if len(text) > MAX_LENGTH:
+        raise ExprError("the expression is longer than %d characters" % MAX_LENGTH)
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError as e:
+        raise ExprError("not a valid expression: %s" % e.msg)
+    if sum(1 for _ in ast.walk(tree)) > MAX_NODES:
+        raise ExprError("the expression has too many parts")
+    out: List[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == "col" and node.args and \
+                    isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                out.append(node.args[0].value)
+                return
+            for a in node.args:
+                walk(a)
+            return
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            name = _dotted(node)
+            if name not in CONSTANTS:
+                out.append(name)
+            return
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+    walk(tree)
+    return list(dict.fromkeys(out))
+
+
+def scalar(text: str, values: Dict[str, Any]) -> float:
+    """text worked out at one point: values gives each name its number. A finite number, else ExprError."""
+    def column(key: str) -> Any:
+        if key not in values:
+            raise KeyError("no value for %s here" % key)
+        v = values[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ExprError("%s is %r here, not a number" % (key, v))
+        return float(v)
+    try:
+        out = evaluate(text, column, _Point())
+    except ExprError:
+        raise
+    except (ArithmeticError, ValueError, TypeError) as e:   # sqrt(-1), log(0), 1e308 ** 2
+        raise ExprError(str(e) or type(e).__name__)
+    if isinstance(out, bool) or not isinstance(out, (int, float)) or not math.isfinite(out):
+        raise ExprError("it gives %r, not a finite number" % (out,))
+    return float(out)
 
 
 def _dotted(node: Any) -> str:

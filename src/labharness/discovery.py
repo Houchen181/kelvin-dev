@@ -594,7 +594,10 @@ def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
     rated = {} if used else rated_limits(card, str(item.get("idn") or item.get("note") or ""))
     lim = ["%s: [%g, %g]" % (p.name, p.limits[0], p.limits[1]) for p in card.drives
            if p.numeric and p.limits and p.name not in used and p.name not in rated]
-    if used:
+    if used and item.get("from") == "specialmeasure":
+        lines.append("    limits: { %s }   # from your Special Measure rack (its channels' limits): check them, and "
+                     "tighten the rest" % ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in used.items()] + lim))
+    elif used:
         lines.append("    limits: { %s }   # from your %s (the values they use): check them, and tighten the rest" % (
             ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in used.items()] + lim),
             "LabVIEW VIs" if item.get("from") == "labview" else "scripts"))
@@ -603,6 +606,10 @@ def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
                      "can take" % ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in rated.items()] + lim))
     elif lim:
         lines.append("    limits: { %s }   # vendor limits: tighten to what your sample can take" % ", ".join(lim))
+    rates = {p: v for p, v in (item.get("rates") or {}).items() if p in card.params}
+    if rates:   # a Special Measure rack's ramp rates, per second in the parameter's unit
+        lines.append("    rates: { %s }   # from your Special Measure rack (its ramp rates)" % ", ".join(
+            "%s: %g" % (p, v) for p, v in rates.items()))
     if card.kind in ("laser", "laser-driver"):
         lines.append("    auto: never        # a person approves every laser change")
     if item.get("connection"):
@@ -684,6 +691,33 @@ def add_to_config(text: str, items: Sequence[Dict[str, Any]], registry: CardRegi
     while end > start + 1 and not lines[end - 1].strip():
         end -= 1
     return "\n".join(lines[:end] + blocks + lines[end:]) + "\n"
+
+
+def add_names(text: str, names: Dict[str, str]) -> str:
+    """A lab config text with the lab's own names for settings (names: name: instrument.parameter) added, keeping
+    what is there: a name it has already keeps its meaning."""
+    from .yamlio import load_yaml
+    if not names:
+        return text
+    data = load_yaml(text) if text.strip() else None
+    have = data.get("names") if isinstance(data, dict) and isinstance(data.get("names"), dict) else None
+    fresh = {k: v for k, v in names.items() if not have or k not in have}
+    if not fresh:
+        return text
+    rows = ["  %s: %s" % (k, v) for k, v in sorted(fresh.items(), key=lambda kv: kv[0].lower())]
+    lines = text.rstrip("\n").split("\n")
+    if have is None:
+        return "\n".join(lines + ["", "names:   # your Special Measure channels' names: plans, the chat and set_value "
+                                      "may use them for instrument.parameter"] + rows) + "\n"
+    start = next(i for i, l in enumerate(lines) if re.match(r"^names\s*:", l))
+    if re.match(r"^names\s*:\s*[{\[]", lines[start]):   # written on one line: as a block, with the new ones
+        rows = ["  %s: %s" % (k, v) for k, v in sorted(dict(have, **fresh).items(), key=lambda kv: str(kv[0]).lower())]
+        return "\n".join(lines[:start] + ["names:"] + rows + lines[start + 1:]) + "\n"
+    end = next((i for i in range(start + 1, len(lines)) if lines[i] and not lines[i][0].isspace()
+                and not lines[i].startswith("#")), len(lines))
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    return "\n".join(lines[:end] + rows + lines[end:]) + "\n"
 
 
 def _instrument_lines(lines: List[str], name: str) -> Tuple[int, int]:

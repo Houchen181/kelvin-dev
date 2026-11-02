@@ -1398,6 +1398,13 @@ body.resizing .plot-svg { pointer-events: none; }
 .ed-set { flex-wrap: nowrap; gap: 6px; }
 .ed-set .ed-key { flex: 1 1 0; }
 .ed-eq { color: var(--muted); }
+.ed-expr { flex: 1.4 1 0; min-width: 110px; font-family: ui-monospace, Consolas, monospace; }
+.ed-with { gap: 6px; }
+.ed-with .ed-key { flex: 1 1 120px; }
+.ed-with .icon-btn { padding: 3px; }
+.ed-with .icon-btn svg { width: 14px; height: 14px; }
+.ed-loop-reads { margin-top: 2px; }
+.ed-loop-reads .ed-add { flex: 1 1 160px; }
 .ed-plan { position: relative; }
 .ed-plan pre { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--code); font: 12.5px/1.5 ui-monospace, Consolas, monospace;
   overflow: auto; max-height: 40vh; }
