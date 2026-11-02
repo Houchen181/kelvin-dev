@@ -1660,7 +1660,8 @@ class ScriptRun:
         except Exception as e:   # a command that failed on the way: the script gets the error, the run goes on
             answer = {"id": rid, "ok": False, "error": "%s: %s" % (type(e).__name__, e), "stop": False}
         self._send(conn, answer)
-        self.last_activity = time.monotonic()
+        if msg.get("op") not in ("sleep", "live"):   # waiting, or reading an input, is no clean-up after a stop:
+            self.last_activity = time.monotonic()      # a script that only does that is ended once GRACE_S passes
         return True
 
     def _command_line(self, run_dir: Path, source_file: Optional[Path]) -> List[str]:
@@ -1986,7 +1987,7 @@ def rehearsal_problem(prep: Prepared) -> Optional[str]:
 
 
 def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: Any = None,
-             twin: Any = None) -> Rehearsal:
+             twin: Any = None, real: Any = None, wire: Optional[List[Any]] = None) -> Rehearsal:
     """An experiment run on a simulated copy of the lab (lab.make_twin), as it would run on the lab: every command
     through the twin's gate, which says yes to whatever a person would be asked (and lists it), its waits skipped on the
     simulated clock, nothing outside the simulated lab, and nothing written beside the script. Kelvin presses Stop on
@@ -1995,7 +1996,9 @@ def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: An
     the simulated copy, made by the caller while it holds the lab (making one reads every instrument); else made here.
     Nothing it runs reaches past the simulated lab: its process refuses programs, native libraries, COM, the network
     and writing outside its own folder (kelvin_shim._fence). (No job object stops it starting a process, as run_python's
-    has: a venv's python.exe on Windows starts the real Python as a second process.)"""
+    has: a venv's python.exe on Windows starts the real Python as a second process.) real: the lab's own gate, whose
+    Stop (a person's, or the agent's stop_run) stops the rehearsal too. wire: a list that gets each (instrument,
+    command) the simulated instruments are sent, in order (vicheck compares it with a plan's)."""
     if not prep.found.experiment:
         raise ScriptError("%s doesn't use kelvin.lab, so Kelvin can't rehearse it: it may reach what the simulated lab "
                           "can't stand in for" % prep.name)
@@ -2005,6 +2008,12 @@ def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: An
     from .eventlog import EventLog
     from .gate import SimulationApprover
     twin = twin if twin is not None else lab.make_twin()
+    if wire is not None:
+        for name, inst in twin.instruments.items():
+            def recorded(command: str, _write: Any = inst.backend.write, _name: str = name) -> Any:
+                wire.append((_name, command))
+                return _write(command)
+            inst.backend.write = recorded
     gate = SafetyGate(twin, SimulationApprover(), EventLog(None, twin.clock), envelope=envelope, operator="dry-run")
     _, grants, problems = approval(gate, prep)
     if problems:
@@ -2015,10 +2024,21 @@ def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: An
     timer = threading.Timer(seconds, gate.request_abort, args=("the rehearsal's time ran out",))
     timer.daemon = True
     timer.start()
+    watching = threading.Event()
+    if real is not None:   # a person's Stop on the lab stops its rehearsal too
+        stops = real.stop_generation
+
+        def watch() -> None:
+            while not watching.wait(0.1):
+                if real.stop_generation != stops:
+                    gate.request_abort("a person pressed Stop")
+                    return
+        threading.Thread(target=watch, name="kelvin-rehearsal-stop", daemon=True).start()
     try:
         report = job.execute()
     finally:
         timer.cancel()
+        watching.set()
     lab_seconds = twin.clock.now() - t0
     commands: List[Dict[str, Any]] = []
     try:
