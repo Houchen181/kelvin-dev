@@ -2957,8 +2957,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             except KeyError:
                 return error(400, "%s: choose a card" % name)
             item = {"name": name, "card": card, "address": address, "note": str(it.get("note") or "")[:60]}
-            if it.get("from") == "labview":   # its limits from the values its VIs use, so said in the lab config
-                item["from"] = "labview"
+            if it.get("from") in ("labview", "specialmeasure"):   # where its limits come from, said in the lab config
+                item["from"] = it["from"]
+            rates = it.get("rates")   # a Special Measure rack's ramp rates
+            if isinstance(rates, dict):
+                item["rates"] = {str(p): float(v) for p, v in rates.items() if str(p) in spec_card.params
+                                 and isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0}
             limits = it.get("limits")   # from the lab's scripts: the values they use (the person reviews them)
             if isinstance(limits, dict):
                 item["limits"] = {str(p): [float(v[0]), float(v[1])] for p, v in limits.items()
@@ -2973,7 +2977,13 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         there = config_lists(base)   # in the config already (added twice, or found by a scan and in the scripts): kept once
         already = [{"item": k, "name": there[instrument_key(i)], "address": i["address"]}
                    for k, i in enumerate(items) if instrument_key(i) in there]
-        return JSONResponse({"yaml": add_to_config(base, items, runtime.script_cards()), "already": already})
+        text = add_to_config(base, items, runtime.script_cards())
+        names = body.get("names")   # a Special Measure rack's channel names: name -> instrument.parameter
+        if isinstance(names, dict):
+            from ..discovery import add_names
+            text = add_names(text, {str(k): str(v) for k, v in names.items()
+                                    if str(k).isidentifier() and re.fullmatch(r"\w+\.\w+", str(v))})
+        return JSONResponse({"yaml": text, "already": already})
 
     async def scripts_view(request: Request) -> Response:
         """The lab's own scripts, read (never run) to set the lab up the way it already works: {folder}. Each
@@ -3539,10 +3549,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     async def queue(request: Request) -> Response:
         """GET: the scan queue (the portal's Sequence). POST {op, ...}: a person's change to it, answered with the
         queue and a message (400 {error} when refused). start asks for the queue's approval as usual and returns once
-        it is answered. The Sequence's own: rename {name}; skip {item} (a waiting item won't run, the running one
-        ends and the queue goes on); duplicate {item}; params {item, params: {name: value | null}} for a script, or
-        {item, wait: seconds} / {item, set: {instr.param: value | null}} for a step; ladder {items: [ids], key,
-        values: [...]} (one copy of the items per value, appended)."""
+        it is answered. {op: fields, item} changes nothing: the item as written, as its mapping ({item, kind,
+        fields}), for the step row to show a step in its fields. The Sequence's own: rename {name}; skip {item} (a
+        waiting item won't run, the running one ends and the queue goes on); duplicate {item}; params {item, params:
+        {name: value | null}} for a script, or {item, wait: seconds} / {item, set: {instr.param: value | null}} for a
+        step; ladder {items: [ids], key, values: [...]} (one copy of the items per value, appended)."""
         if request.method == "GET":
             return JSONResponse(await asyncio.to_thread(runtime.queue_view))
         try:
@@ -3553,6 +3564,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(400, "send {op, ...}")
         op, by = str(body.get("op") or ""), "human"
         item = body.get("item")
+        if op == "fields":   # changes nothing, so no one hears of it
+            try:
+                return JSONResponse(runtime.queue_fields(item))
+            except KeyError as e:
+                return error(404, e.args[0] if e.args else "no such queue item")
         before = await asyncio.to_thread(runtime.queue_view)   # what it was, for the change in words (notices.py)
 
         def persons(fn: Any, *args: Any) -> str:
@@ -3662,16 +3678,18 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """The person's library of scans and scripts (scanlibrary.py), for the Runs panel. GET: {scripts, scans}, the
         latest used first. POST, a person's change on this computer (no phone, no agent tool): {op: import, path}
         → {entry, check, library}; {op: rename, id, name} and {op: remove, id} → {library}; {op: run, id, params?,
-        args?, queue?} → {queue, message}: at the front of the queue and started, pausing after it (it returns once
-        the queue's approval is answered), or with queue: true at its end. The scan editor (scanedit.py): {op: parts,
-        id?} → {id, name, edited_from, parts, lab, check}, a scan as its parts (a new one without id); {op: check,
-        parts, editor?} → its check (points, time, problems, its plan's text), or {superseded: true} when the same
-        editor asked for a newer one meanwhile; {op: save, parts, from?} → {entry, new, library}, an entry of its own;
-        {op: run, parts, from?, queue?} → {queue, message, entry, library}: saved, then run as above. The Sequence
-        pane's functions: {op: meta, id, name?, color?, note?} → {entry, library} (a colour is #rrggbb, "" for none);
-        {op: files} → {folder, files: [{path, rel, name, kind}], more}, the scripts in the lab's scripts folder
-        (folder null when none is set); {op: inspect, path} → {name, path, settable, notes, problem}, a script read
-        (never run)."""
+        args?, queue?, position?} → {queue, message}: at the front of the queue and started, pausing after it (it
+        returns once the queue's approval is answered), with queue: true at its end, or with position at that place
+        (1 = first), not started. The scan editor (scanedit.py): {op: parts, id?, item?} → {id, name, edited_from,
+        parts, lab, check}, a scan as its parts (a new one without id; item: a scan waiting in the queue, then also
+        {item, library}); {op: check, parts, editor?} → its check (points, time, problems, its plan's text), or
+        {superseded: true} when the same editor asked for a newer one meanwhile; {op: text, parts} → {text}: its
+        plan's text, nothing kept (Save puts it back into the queue item with /api/queue op edit); {op: save, parts,
+        from?} → {entry, new, library}, an entry of its own; {op: run, parts, from?, queue?} → {queue, message,
+        entry, library}: saved, then run as above. The Sequence pane's functions: {op: meta, id, name?, color?,
+        note?} → {entry, library} (a colour is #rrggbb, "" for none); {op: files} → {folder, files: [{path, rel, name,
+        kind}], more}, the scripts in the lab's scripts folder (folder null when none is set); {op: inspect, path} →
+        {name, path, settable, notes, problem}, a script read (never run)."""
         if role_of(request) != "owner":   # remote.py lists none of it either
             return error(403, ON_THIS_COMPUTER)
         if request.method == "GET":
@@ -3698,14 +3716,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 out = await asyncio.to_thread(as_person, runtime.scan_run, body["parts"], base,
                                               bool(body.get("queue")), by)
             elif op == "run":
+                at = body.get("position")   # the Runs panel's ⇒: after the queue item the person selected
+                if at is not None and (isinstance(at, bool) or not isinstance(at, int) or at < 1):
+                    return error(400, "position is a place in the queue: 1 for the first")
                 return JSONResponse(await asyncio.to_thread(as_person, runtime.library_run, entry_id,
                                                             body.get("params"), body.get("args"),
-                                                            bool(body.get("queue")), by))
+                                                            bool(body.get("queue")), by, at))
             elif op == "parts":
-                return JSONResponse(await checked("", runtime.scan_parts, entry_id or None))
+                return JSONResponse(await checked("", runtime.scan_parts, entry_id or None, body.get("item")))
             elif op == "check":
                 check = await checked(str(body.get("editor") or "")[:80], runtime.scan_check, body.get("parts"))
                 return JSONResponse(check if check is not None else {"superseded": True})
+            elif op == "text":
+                return JSONResponse({"text": runtime.scan_text(body.get("parts"))})
             elif op == "save":
                 out = await asyncio.to_thread(runtime.scan_save, body.get("parts"), base, by)
             elif op == "meta":   # a function's name, colour and note, each only when given
@@ -3716,8 +3739,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             elif op == "inspect":   # read only, never run or imported
                 return JSONResponse(await asyncio.to_thread(runtime.library_inspect, body.get("path")))
             else:
-                return error(400, "unknown library operation %r (import, rename, remove, run, parts, check, save, "
-                                  "meta, files or inspect)" % op)
+                return error(400, "unknown library operation %r (import, rename, remove, run, parts, check, text, "
+                                  "save, meta, files or inspect)" % op)
         except KeyError as e:
             return error(404, e.args[0] if e.args else "nothing like that in the library")
         except ValueError as e:
@@ -3917,6 +3940,84 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         out["library"] = await asyncio.to_thread(runtime.library_view)
         return JSONResponse(out)
 
+    def sm_why(e: Exception) -> str:
+        return str(e).splitlines()[0][:200] if str(e) else type(e).__name__
+
+    async def specialmeasure_view(request: Request) -> Response:
+        """The lab's Special Measure, read (no MATLAB is run, MATLAB isn't needed) to switch the lab to Kelvin as its
+        rack has it: {folder, setup?: the setup script to start from}. Each instrument of the rack with its likely card,
+        its channels' names, limits and ramp rates, who answers at its address now (asked as a scan asks); the scans
+        found, translated. One folder at a time, on the thread kept for reading the lab's programs (409 meanwhile)."""
+        problem = busy_problem()
+        if problem:
+            return error(409, problem)
+        body = await request.json()
+        folder = str(body.get("folder") or "").strip()
+        if not folder:
+            return error(400, "Choose the folder with your Special Measure (its setup scripts, sm and its scans).")
+        setup = str(body.get("setup") or "").strip() or None
+        try:
+            return JSONResponse(await asyncio.wrap_future(runtime.labview_reads.submit(
+                runtime.specialmeasure_found, folder, setup)))
+        except Underway as e:
+            return error(409, str(e))
+        except (OSError, ValueError) as e:
+            return error(400, str(e))
+        except Exception as e:   # nothing was changed: say what went wrong rather than a bare 500
+            return error(500, "Kelvin could not read that Special Measure folder (%s)" % sm_why(e))
+
+    async def specialmeasure_scans(request: Request) -> Response:
+        """POST {folder, setup, scans: [{path, index}], instruments: [{rack, name, card}]}: Special Measure scans a
+        person chose in Set up, translated with the instruments named as in the review and kept in their library
+        (Runs → Scans) as Special Measure's. On this computer only, as the library is. {kept, not, library}."""
+        if role_of(request) != "owner":
+            return error(403, ON_THIS_COMPUTER)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not str(body.get("folder") or "").strip():
+            return error(400, "send {folder, setup, scans, instruments}")
+        scans = [s for s in body.get("scans") or [] if isinstance(s, dict) and isinstance(s.get("path"), str)]
+        if not scans:
+            return error(400, "Choose the scans to keep.")
+        chosen = [c for c in body.get("instruments") or [] if isinstance(c, dict)]
+        try:
+            out = await asyncio.wrap_future(runtime.labview_reads.submit(
+                as_person, runtime.specialmeasure_scans, str(body["folder"]).strip(),
+                str(body.get("setup") or "").strip() or None, scans, chosen, person(request)))
+        except Underway as e:
+            return error(409, str(e))
+        except (OSError, ValueError) as e:
+            return error(400, str(e))
+        except Exception as e:
+            return error(500, "Kelvin could not keep those scans (%s)" % sm_why(e))
+        out["library"] = await asyncio.to_thread(runtime.library_view)
+        return JSONResponse(out)
+
+    async def specialmeasure_runs(request: Request) -> Response:
+        """POST {folder, runs: [folders, as the survey lists them]}: Special Measure's run files (NNN_name.mat) in
+        those folders imported as runs, each its own, with its number, name, comments and when it was taken; one
+        imported already is left. {imported, left, failed: [{file, why}], more}: at most MAX_SM_IMPORT at a time."""
+        if role_of(request) != "owner":
+            return error(403, ON_THIS_COMPUTER)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not str(body.get("folder") or "").strip():
+            return error(400, "send {folder, runs}")
+        runs = [str(r) for r in body.get("runs") or [] if isinstance(r, str)]
+        if not runs:
+            return error(400, "Choose the folders of runs to import.")
+        try:
+            return JSONResponse(await asyncio.to_thread(as_person, runtime.import_sm_runs,
+                                                        str(body["folder"]).strip(), runs, person(request)))
+        except (OSError, ValueError) as e:
+            return error(400, str(e))
+        except Exception as e:
+            return error(500, "Kelvin could not import those runs (%s)" % sm_why(e))
+
     async def run_again(request: Request) -> Response:
         """A run again, from the Runs panel; on this computer only. GET: {kind, name, text? (a plan's), script? ({path,
         exists, changed, sha256, params, args, python}), conditions ([{key, then, now, unit, differs, settable,
@@ -4044,6 +4145,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/instruments/scripts-folder", scripts_folder, methods=["POST"]),
         Route("/api/instruments/labview", labview_view, methods=["POST"]),
         Route("/api/instruments/labview/scans", labview_scans, methods=["POST"]),
+        Route("/api/instruments/specialmeasure", specialmeasure_view, methods=["POST"]),
+        Route("/api/instruments/specialmeasure/scans", specialmeasure_scans, methods=["POST"]),
+        Route("/api/instruments/specialmeasure/runs", specialmeasure_runs, methods=["POST"]),
         Route("/api/labview/translate", experiment_translate, methods=["POST"]),
         Route("/api/experiments", experiments_list),
         Route("/api/experiments/keep", experiment_keep, methods=["POST"]),

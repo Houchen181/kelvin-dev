@@ -127,10 +127,10 @@ def digest(run_dir: Path) -> Optional[Digest]:
     ranges: Dict[str, Tuple[float, float]] = {}
     try:
         from ..plans import load_plan
-        for a in load_plan(plan).instrument_axes:
-            vals = [v for v in a.values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        for key, values in load_plan(plan).swept_settings():   # with: and sets: settings explored too
+            vals = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
             if vals:
-                ranges[a.key] = (min(vals), max(vals))
+                ranges[key] = (min(vals), max(vals))
     except Exception:
         pass
     results = []

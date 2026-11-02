@@ -145,6 +145,9 @@ You are connected to a physics lab through Kelvin.
 - A lab that runs its instruments from LabVIEW: survey_labview on its LabVIEW folder reads NI MAX and its projects
   and VIs the same way (never running a VI) and translates each VI it could read into a scan, saying what didn't
   translate; a scan is a plan, run with run_plan once the person agrees. Never guess what a VI not read does.
+- A lab that runs Special Measure (MATLAB): survey_specialmeasure on its folder reads the rack its setup scripts
+  build (instruments, addresses, named channels with limits and ramp rates, function channels), its drivers, scans
+  and runs, never running MATLAB, and translates each scan into a plan.
 - An instrument the scan doesn't find or doesn't identify: find out what it is yourself. find_on_network for one on
   the network whose address nobody knows (it sweeps this computer's networks, or the range named, for the ports
   instruments and their gateways use, and asks each who it is), inspect_address for one at a known address (what its
@@ -455,6 +458,19 @@ def build_server(rt: LabRuntime) -> MCPServer:
         nothing is sent to an instrument."""
         try:
             return outside(rt, "the lab's LabVIEW files", rt.survey_labview(path))
+        except Underway as e:   # Set up reads one now: Kelvin's own words, nothing from the files
+            return "not read now: %s" % e
+
+    @server.tool(annotations=READ, structured_output=False)
+    def survey_specialmeasure(path: str) -> str:
+        """Read a lab's Special Measure (MATLAB; the folder of its setup scripts, sm drivers, scans and runs the
+        person named), to switch the lab to Kelvin as its rack has it: each setup script's instruments (model,
+        address, the Kelvin card that fits), its named channels (Vbg, X_A: the card parameter each is, with its
+        limits, ramp rate and multiplier), function channels' formulas, the commands sent at start-up, the scans
+        saved and run, and the run files by folder. Only reads: no MATLAB is run (it needn't be installed), and
+        nothing is sent to an instrument."""
+        try:
+            return outside(rt, "the lab's Special Measure files", rt.survey_specialmeasure(path))
         except Underway as e:   # Set up reads one now: Kelvin's own words, nothing from the files
             return "not read now: %s" % e
 
@@ -1115,9 +1131,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
         (CSV, TSV, text, Excel .xlsx; dates become seconds, text columns are left out; a long x, y, value table of a
         2-D scan becomes a 2-D run), makers' files (BioLogic .mpt and .mpr, Gamry .dta, Arbin's CSV and Excel
         exports, LabVIEW's .lvm and .tdms (TDMS needs npTDMS: when it isn't installed, the message says how to
-        install it), LightField's .spe), NumPy's .npy and .npz, and TIFF images (a camera
-        frame, or a stack: a point per frame). paths: the files' full paths, ';' between several, or a folder of data
-        files (up to 20); files with the same x values go side by side into
+        install it), LightField's .spe), MATLAB's .mat (a Special Measure run, NNN_name.mat, on its scan: x its inner
+        loop's set channel, its outer loop a 2-D scan's slow axis; another file's numeric variables), NumPy's .npy and
+        .npz, and TIFF images (a camera frame, or a stack: a point per frame). paths: the files' full paths, ';'
+        between several, or a folder of data files (up to 20); files with the same x values go side by side into
         one run, to compare, normalise or subtract them with compute. name: the run's name. Only numbers are read.
         Data files a person attaches in the chat are imported as they attach them."""
         return rt.import_data(paths, name)

@@ -41,7 +41,7 @@ from .. import rundata
 from ..literature import Literature
 from ..monitor import Monitor, Watch
 from ..notify import Notifier
-from ..plans import Plan, PlanError, load_plan
+from ..plans import Plan, PlanError, load_plan, variables_of, with_names
 from ..scanlibrary import Library
 from ..scanqueue import (KINDS, Item, ScanQueue, ScriptItem, load_named, load_script_item, load_step, parse_item,
                          save_named, saved_queues)
@@ -84,6 +84,14 @@ LABVIEW_NEXT = ("Next, with the person (nothing above was sent to any instrument
                 "plan: show it with what didn't translate, and run it (run_plan) only once the person agrees; the "
                 "person keeps scans in their library in Lab → Set up… → From your LabVIEW…. A VI not read yet "
                 "can't be translated: never guess what it does. Never run a VI.")
+SPECIALMEASURE_NEXT = (
+    "Next, with the person (nothing above was sent to any instrument, and no MATLAB was run): set the lab up in Lab → "
+    "Set up… → From Special Measure…, where the person picks the setup script, checks each instrument's card and the "
+    "limits and ramp rates its channels give, and adds them with the channels' names (the lab config's names:, which "
+    "plans, get_value and set_value then take); or add each instrument with add_instrument at its address and the "
+    "likely card. One with no card fitting: draft_card, from its driver (the smc file above): the commands each "
+    "channel sends. Propose limits and set them only once the person agrees. Its scans become Kelvin scans there "
+    "(Keep), and its runs import as runs (Import). Never run MATLAB, a setup script or a driver.")
 
 
 def _light(card: Any) -> bool:
@@ -1233,15 +1241,57 @@ class LabRuntime:
         except KeyError:
             return None
 
-    def _plan(self, text: str) -> Plan:
-        """Plans arrive as YAML/JSON text only, never as a file path."""
+    def _plan(self, text: str, named: bool = False) -> Plan:
+        """Plans arrive as YAML/JSON text only, never as a file path. named: a plan coming in (the agent's tools), the
+        lab's own names (names:) put back first; a plan Kelvin keeps (the queue's, the library's, a run's) has them
+        put back already and is never put back again: a name the lab gives later never changes it."""
         try:
             data = load_yaml(text)
         except yaml.YAMLError as e:
             raise PlanError(["not valid YAML: %s" % str(e).splitlines()[0]])
         if not isinstance(data, dict):
             raise PlanError(["a plan must be a YAML mapping"])
-        return load_plan(data)
+        return load_plan(data, names=self.lab.config.names if named else None)
+
+    @staticmethod
+    def _variables(text: str) -> set:
+        """A kept plan's variables (its bare sweep keys), for with_names keep; none for text that isn't a plan."""
+        try:
+            return variables_of(load_yaml(text))
+        except yaml.YAMLError:
+            return set()
+
+    def _editor_plan(self, parts: Any) -> Dict[str, Any]:
+        """The scan editor's parts as the plan Kelvin keeps: the lab's own names put back, but never on the variables
+        the scan came with. ValueError (PlanError among them): they make no plan, and why."""
+        from .. import scanedit
+        return with_names(scanedit.to_plan(parts), self.lab.config.names, keep=scanedit.kept_variables(parts))
+
+    def _named(self, text: str, keep: Any = ()) -> str:
+        """A queue item's text with the lab's own names (names:) put back as instrument.parameter, as the queue keeps
+        it: a plan's keys, conditions and expressions (plans.with_names), a step's settings and reading. keep: the
+        variables of the item it replaces, which stay variables. PlanError: a name beside the setting it names."""
+        names = self.lab.config.names
+        if not names:
+            return text
+        try:
+            data = load_yaml(text)
+        except yaml.YAMLError:
+            return text
+        if not isinstance(data, dict):
+            return text
+        if "plan" in data:
+            new = with_names(data, names, keep)
+        elif "step" in data:
+            new = dict(data)
+            if isinstance(new.get("set"), dict):
+                new["set"] = {names.get(k, k): v for k, v in new["set"].items()}
+            stab = new.get("stabilize")
+            if isinstance(stab, dict) and stab.get("read") in names:
+                new["stabilize"] = dict(stab, read=names[stab["read"]])
+        else:
+            return text
+        return text if new == data else plan_text(new)
 
     # ------------------------------------------------------------------ agent operations
 
@@ -1275,6 +1325,11 @@ class LabRuntime:
                              "change on %s asks the person, auto mode included" % (", ".join(unsure),
                                                                                   "it" if len(unsure) == 1 else "them"))
             lines += self._status_lines()
+            if self.lab.config.names:   # the lab's own names (its Special Measure channels): plans may use them
+                shown = ["%s = %s" % kv for kv in sorted(self.lab.config.names.items())]
+                lines.append("the lab's own names for settings and readings (plans, get_value and set_value take "
+                             "them for instrument.parameter): %s%s" % (", ".join(shown[:60]),
+                                                                       " …" if len(shown) > 60 else ""))
             lines += self._programs_here()
             lines.append("data folder: %s (runs/<run id>/run.h5, catalog.sqlite, reports/, events.jsonl)"
                          % self.data_dir)
@@ -1346,10 +1401,21 @@ class LabRuntime:
         """Its card and limits: nothing is sent to it, so it never waits for the lab."""
         return self.gate.describe(instrument)
 
+    def _named_pair(self, instrument: str, parameter: str) -> Tuple[str, str]:
+        """(instrument, parameter) of a setting named by the lab's own name (names:), given as either: get_value Vbg,
+        or Vbg alone; as given otherwise."""
+        names = self.lab.config.names
+        for alias in (instrument, parameter):
+            if alias in names and str(instrument) not in self.lab.instruments:
+                instr, _, param = names[alias].partition(".")
+                return instr, param
+        return instrument, parameter
+
     def get(self, instrument: str, parameter: str) -> str:
         """get_value: read now, beside whatever else Kelvin does; while the work changing the lab uses the instrument
         (a run), its latest value instead, as a reading then could upset what the work does there."""
         self.last_active = time.monotonic()
+        instrument, parameter = self._named_pair(instrument, parameter)
         inst = self.lab.instruments.get(instrument)
         if self._spec("%s.%s" % (instrument, parameter)) is None or inst is None or not inst.enabled:
             return self.gate.get(instrument, parameter).message   # refused, saying why; nothing is sent
@@ -1365,6 +1431,7 @@ class LabRuntime:
 
     def set(self, instrument: str, parameter: str, value: Any) -> str:
         chat = self.attribution.get("chat")   # the change goes on this chat's undo list (None: a client's)
+        instrument, parameter = self._named_pair(instrument, parameter)
 
         def run() -> str:
             with self.gate.undoable(chat):
@@ -1778,7 +1845,7 @@ class LabRuntime:
     def validate(self, plan_text: str) -> str:
         def run() -> str:
             try:
-                plan = self._plan(plan_text)
+                plan = self._plan(plan_text, named=True)
             except PlanError as e:
                 return "invalid plan: %s" % e
             errors = self.engine.validate(plan)
@@ -1801,7 +1868,7 @@ class LabRuntime:
     def simulate(self, plan_text: str) -> str:
         def run() -> str:
             try:
-                plan = self._plan(plan_text)
+                plan = self._plan(plan_text, named=True)
             except PlanError as e:
                 return "invalid plan: %s" % e
             report = self.engine.simulate(plan)
@@ -1837,7 +1904,7 @@ class LabRuntime:
     def _run_once(self, plan_text: str, dry_run: bool = False) -> Tuple[str, Optional[RunReport]]:
         """One plan, run (the caller holds the lock): run_plan's answer, and the run's report (None: not run)."""
         try:
-            plan = self._plan(plan_text)
+            plan = self._plan(plan_text, named=True)
         except PlanError as e:
             return "invalid plan: %s" % e, None
         meta = self._attribute(plan)
@@ -1945,11 +2012,11 @@ class LabRuntime:
         known = dict(recipe.values)
         for s in recipe.stages:
             try:
-                plan = self._plan(recipes.render(s.plan, dict(known, **{k: 1.0 for k in s.keep})))
+                plan = self._plan(recipes.render(s.plan, dict(known, **{k: 1.0 for k in s.keep})), named=True)
             except (PlanError, recipes.RecipeError) as e:
                 return None, "stage %s: %s" % (s.name, e)
-            keys = [st.key for st in plan.setup] + [a.key for a in plan.axes if a.kind == "instrument"] + \
-                ["%s.%s" % m for m in plan.measure]
+            keys = [st.key for st in plan.setup] + [k for k, _ in plan.swept_settings()] + \
+                ["%s.%s" % m for m in plan.measure] + ["%s.%s" % m for a in plan.axes for m in a.measure]
             for key in keys:
                 if self._spec(key) is None:
                     return None, "stage %s: this lab has no %s" % (s.name, key)
@@ -2286,9 +2353,9 @@ class LabRuntime:
 
     def import_data(self, paths: Any, name: str = "") -> str:
         """Files Kelvin didn't measure, as a run (imports.py): another program's tables (CSV, TSV, text, Excel),
-        makers' files (BioLogic .mpt/.mpr, Gamry .dta, Arbin's exports, LabVIEW .lvm and .tdms, LightField .spe), NumPy
-        arrays and TIFF images (camera frames); several with the same x values side by side in one run, to compare
-        or subtract.
+        makers' files (BioLogic .mpt/.mpr, Gamry .dta, Arbin's exports, LabVIEW .lvm and .tdms, LightField .spe), MATLAB
+        .mat files (Special Measure's runs too), NumPy arrays and TIFF images (camera frames); several with the same x
+        values side by side in one run, to compare or subtract.
         A folder stands for its data files. What a person put in the data folder's runs is theirs to import
         (issue #6: a collaborator pasted data there); Kelvin's own folders and records, runs the chat may not see
         and files of sign-ins are not (_unreadable). The run goes with this chat's runs, gets the automatic fits,
@@ -2358,9 +2425,11 @@ class LabRuntime:
         with self.attributed(attribution):
             return self._imported(table, [shown], "", by)
 
-    def _imported(self, table: Any, files: List[str], name: str, by: str) -> Dict[str, Any]:
+    def _imported(self, table: Any, files: List[str], name: str, by: str, when: Optional[float] = None,
+                  meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """An imported table kept as a run: its x (and a 2-D scan's slow axis), its columns, and camera frames as a
-        run keeps a camera's. {text: what Kelvin says of it, run: its id, points, frames}."""
+        run keeps a camera's. {text: what Kelvin says of it, run: its id, points, frames}. when: the time the data
+        was taken (old runs imported), for the run's id; meta: what else its record says (where it came from)."""
         from types import SimpleNamespace
         from ..analysis import analyze_run
         # a run's own i (its points' numbers) and t (its clock): an x named I (a current) or T (a temperature) would
@@ -2371,7 +2440,8 @@ class LabRuntime:
             table.outer = ("x_" + table.outer[0],) + tuple(table.outer[1:])
         plan_name = re.sub(r"[^\w.-]+", "_", (name or "").strip() or "imported_" + table.name)[:48]
         rec = self.engine.store.create(plan_name, {"plan": plan_name, "imported": files}, "import",
-                                       self.attribution.get("folder"))
+                                       self.attribution.get("folder"), when=when)
+        rec.meta.update(meta or {})
         whose = self._attribute(SimpleNamespace(device=None))
         whose.pop("_apart", None)
         rec.meta.update(whose)
@@ -3081,6 +3151,7 @@ class LabRuntime:
     def queue_add(self, text: str, position: Optional[int] = None, note: str = "", by: str = "agent",
                   then_pause: bool = False) -> str:
         try:
+            text = self._named(text)   # the lab's own names as instrument.parameter, as the queue keeps an item
             problems = self._queue_problems(text)
         except PlanError as e:
             return "not added: %s" % e
@@ -3146,6 +3217,7 @@ class LabRuntime:
             if found.restores:
                 return "not changed: %s restores the settings another item ran with, so it isn't edited: remove it " \
                        "and its item, then use Run again" % found.name
+            text = self._named(text, keep=self._variables(found.text))   # its variables stay its own
             problems = self._queue_problems(text)
             if problems:
                 return "not changed: " + "; ".join(problems[:5])
@@ -3163,6 +3235,18 @@ class LabRuntime:
             return "not changed: %s" % (e.args[0] if e.args else e)
         self.gate.log.write("queue_edit", by=by, item=item.id, name=item.name)
         return "changed %s\n%s" % (item.name, self._queue_text())
+
+    def queue_fields(self, ref: Any) -> Dict[str, Any]:
+        """An item as written, read as its mapping, for a person on this computer: the Runs panel's step row shows a
+        step's set, wait or settle in its fields, and writes them back as text, which queue_edit checks. {item, kind,
+        fields}; KeyError: no such item."""
+        item = self.queue.find(ref)
+        try:
+            data = load_yaml(item.text)
+        except yaml.YAMLError:
+            data = None
+        fields = json.loads(json.dumps(data, default=str)) if isinstance(data, dict) else {}
+        return {"item": item.id, "kind": item.kind, "fields": fields}
 
     def queue_change(self, op: str, ref: Any = None, position: Optional[int] = None, by: str = "agent",
                      name: Any = None) -> str:
@@ -3294,14 +3378,18 @@ class LabRuntime:
     def queue_ladder(self, refs: Any, key: Any, values: Any, by: str = "agent") -> str:
         """A ladder (labMaster's sweep): one copy of these items per value, with that value set, appended in the
         queue's order, value after value. key: a script's setting (params), a step's wait or one of its set values
-        (instr.param), or one of a scan's setup values; an item it isn't for goes along unchanged (a wait between
-        the scans), but a scan whose setup lacks it is refused when it is a key no other item takes. At most
-        MAX_COPIES items; each copy is checked as queue_add checks one, and none is added unless all pass."""
+        (instr.param, or the lab's own name for it), or one of a scan's setup values (the same); an item it isn't
+        for goes along unchanged (a wait between the scans), but a scan whose setup lacks it is refused when it is a
+        key no other item takes. At most MAX_COPIES items; each copy is checked as queue_add checks one, and none is
+        added unless all pass."""
         from .. import scriptrun
         from ..scanqueue import MAX_COPIES, item_with
         key = str(key or "").strip()
         if not key:
             return "not added: name the setting to step (key)"
+        # a step's and a scan's settings are kept as instrument.parameter, so the lab's own name for one (names:, a
+        # Special Measure channel's) stands for it there, as queue_add takes it; a script's setting keeps its name
+        full = self.lab.config.names.get(key, key)
         if not isinstance(values, (list, tuple)) or not values:
             return "not added: give the values (a list)"
         if any(v is None or isinstance(v, (dict, list)) for v in values):
@@ -3331,8 +3419,8 @@ class LabRuntime:
                 if item.kind == "step":
                     if key == "wait":
                         return "wait", None
-                    return ("sets", None) if re.match(r"^[A-Za-z_][\w-]*\.[A-Za-z_]\w*$", key) else None
-                if item.kind == "plan" and isinstance(data, dict) and key in (data.get("setup") or {}):
+                    return ("sets", None) if re.match(r"^[A-Za-z_][\w-]*\.[A-Za-z_]\w*$", full) else None
+                if item.kind == "plan" and isinstance(data, dict) and full in (data.get("setup") or {}):
                     return "setup", None
             except Exception:
                 return None
@@ -3355,7 +3443,7 @@ class LabRuntime:
                         text = item_with(item.text, wait=float(value))
                     else:
                         given = scriptrun._coerce(setting, value) if setting is not None else value
-                        text = item_with(item.text, **{arg: {key: given}})
+                        text = item_with(item.text, **{arg: {key if arg == "params" else full: given}})
                     found = self._queue_problems(text)
                 except scriptrun.ScriptError as e:
                     found = [str(e)]
@@ -3475,7 +3563,7 @@ class LabRuntime:
         for item in items:
             if item.kind == "plan":
                 plan = self._plan(item.text)
-                keys = {s.key for s in plan.setup + plan.after} | {a.key for a in plan.instrument_axes} \
+                keys = {s.key for s in plan.setup + plan.after} | {k for k, _ in plan.swept_settings()} \
                     | ({plan.ramp.key} if plan.ramp else set())
             elif item.kind == "step":
                 keys = set(load_step(item.text).keys)
@@ -4129,16 +4217,16 @@ class LabRuntime:
         return out
 
     def library_run(self, entry_id: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
-                    at_end: bool = False, by: str = "human") -> Dict[str, Any]:
+                    at_end: bool = False, by: str = "human", at: Optional[int] = None) -> Dict[str, Any]:
         """An entry of the library, run again (queue_run_now), as whose work its latest run was (its marks: a
         confidential project's scan stays that project's): a scan as it ran; a script as its file is now, with the
         values given, else those its last run changed, its arguments, and the Python its last run had while Kelvin
-        still runs the lab's scripts with it."""
+        still runs the lab's scripts with it. at: queued at that place instead (queue_run_now)."""
         entry = self.library.get(entry_id)
         whose = dict(entry.get("marks") or {})
         if entry["kind"] == "plan":
             with self.attributed(whose):
-                return self.queue_run_now([str(entry.get("text") or "")], at_end, by, library=entry_id)
+                return self.queue_run_now([str(entry.get("text") or "")], at_end, by, library=entry_id, at=at)
         item: Dict[str, Any] = {"script": str(entry.get("path") or "")}
         params = entry.get("params") if params is None else params
         args = entry.get("args") if args is None else args
@@ -4154,7 +4242,7 @@ class LabRuntime:
             item["python"] = python
         with self.attributed(whose):   # its item knows its entry: the Sequence shows the entry's name and colour
             return self.queue_run_now([yaml.safe_dump(item, sort_keys=False, allow_unicode=True)], at_end, by, notes,
-                                      library=entry_id)
+                                      library=entry_id, at=at)
 
     def _python_here(self, script: str, python: Any, notes: List[str]) -> Optional[str]:
         """The Python a run had (as its record names it), if Kelvin still runs the lab's scripts with it here; else
@@ -4171,14 +4259,23 @@ class LabRuntime:
 
     # ------------------------------------------------------------------ the scan editor (people, the Runs panel)
 
-    def scan_parts(self, entry_id: Optional[str] = None) -> Dict[str, Any]:
-        """A scan of the library in the scan editor (scanedit.py), or a new scan (no entry_id): {id, name, edited_from
-        (the scan it was edited from, until it is renamed), parts, lab: what a scan can step or set and record ({set,
-        read}: key, unit), check: scan_check}. KeyError: no such entry; ValueError: it is a script, or its text isn't
-        a plan."""
+    def scan_parts(self, entry_id: Optional[str] = None, item: Any = None) -> Dict[str, Any]:
+        """A scan of the library in the scan editor (scanedit.py), a scan waiting in the queue (item: its id or #n,
+        which the editor's Save puts back with queue_edit), or a new scan (neither): {id, name, edited_from (the scan
+        it was edited from, until it is renamed), parts, lab: what a scan can step or set and record ({set, read}:
+        key, unit), check: scan_check}; a queued one's also {item: its id, library: the entry its runs are noted
+        under}. KeyError: no such entry or item; ValueError: it is a script or a step, or its text isn't a plan."""
         from .. import scanedit
-        name, came = "", None
-        if entry_id:
+        name, came, queued = "", None, None
+        if item not in (None, ""):
+            queued = self.queue.find(item)
+            name = queued.name
+            if queued.kind != "plan":
+                raise ValueError("%s is a %s, not a scan" % (name, KINDS.get(queued.kind, queued.kind)))
+            data = self._kept_plan({"text": queued.text})
+            if data is None:
+                raise ValueError("%s isn't a plan the editor can read" % name)
+        elif entry_id:
             entry = self.library.get(entry_id)
             name = str(entry.get("name") or "")
             if entry["kind"] != "plan":
@@ -4190,8 +4287,17 @@ class LabRuntime:
         else:
             data = {"plan": "scan"}
         parts = scanedit.to_parts(data)
-        return {"id": entry_id or None, "name": name, "edited_from": came, "parts": parts, "lab": self._scan_choices(),
-                "check": self.scan_check(parts)}
+        out = {"id": entry_id or None, "name": name, "edited_from": came, "parts": parts, "lab": self._scan_choices(),
+               "check": self.scan_check(parts)}
+        if queued is not None:
+            out.update(id=None, item=queued.id, library=queued.library)
+        return out
+
+    def scan_text(self, parts: Any) -> str:
+        """The plan the scan editor's parts make, as text (as Kelvin keeps it: _editor_plan), nothing kept or checked:
+        what Save puts back into the queue item the editor shows (queue_edit checks it). ValueError: they can't make
+        a plan, and why."""
+        return plan_text(self._editor_plan(parts))
 
     @staticmethod
     def _kept_plan(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -4207,14 +4313,18 @@ class LabRuntime:
         record (read), each with its unit: from the lab's cards, nothing is read."""
         settable: List[Dict[str, Any]] = []
         readable: List[Dict[str, Any]] = []
+        named: Dict[str, str] = {}   # the lab's own name for a key (names:), shown beside it
+        for alias, key in sorted(self.lab.config.names.items()):
+            named.setdefault(key, alias)
         for name in sorted(self.lab.instruments):
             card = self.lab.instruments[name].card
             for p in card.params.values():
                 key = "%s.%s" % (name, p.name)
+                alias = {"name": named[key]} if key in named else {}
                 if p.set_cmd is not None and p.type not in ("trace", "image"):
-                    settable.append({"key": key, "unit": p.unit, "drive": p.is_drive})
+                    settable.append(dict({"key": key, "unit": p.unit, "drive": p.is_drive}, **alias))
                 if p.get_cmd is not None:
-                    readable.append({"key": key, "unit": p.unit})
+                    readable.append(dict({"key": key, "unit": p.unit}, **alias))
             settable += [{"key": "%s.%s" % (name, a), "unit": "", "action": True} for a in card.actions]
         return {"set": settable, "read": readable}
 
@@ -4228,12 +4338,12 @@ class LabRuntime:
         points, by its key), time (as its card would say it: timing.py), problems (load_plan's, then the gate's:
         limits, read-only settings, instruments off, interlocks)}. No instrument is asked anything: what the checks and
         the time need of the lab is the latest Kelvin has seen (_SeenGate)."""
-        from .. import scanedit, techniques
+        from .. import techniques
         from ..forecast import Forecast
         out: Dict[str, Any] = {"text": "", "loads": False, "points": None, "estimate": False, "counts": {}, "time": "",
                                "problems": []}
         try:
-            out["text"] = plan_text(scanedit.to_plan(parts))
+            out["text"] = plan_text(self._editor_plan(parts))
             plan = self._plan(out["text"])
         except PlanError as e:
             out["problems"] = list(e.errors)
@@ -4251,7 +4361,8 @@ class LabRuntime:
             out["time"] = forecast.duration().lstrip(", ")
         except Exception:   # its time stays unsaid; the problems say what is wrong
             pass
-        known = [a for a in plan.axes if a.kind in ("instrument", "technique") or a.kind == "ramp" and a.estimate]
+        known = [a for a in plan.axes if a.kind in ("instrument", "technique", "variable") or
+                 a.kind == "ramp" and a.estimate]
         out.update(loads=True, problems=problems, estimate=plan.ramp is not None,
                    points=plan.points if plan.ramp is None or plan.ramp.estimate else None,   # a ramp untimed: unknown
                    counts={a.key: a.count for a in known})
@@ -4262,13 +4373,13 @@ class LabRuntime:
         (base_id) stays. Named as its plan is; while it keeps the name it came with, as that scan is, marked edited from
         it. Whose work it is: as that scan's runs were; one taken out of the library meanwhile leaves it a scan of its
         own. {entry, new: false when the library had this very scan}. ValueError: it isn't a plan, and why."""
-        from .. import scanedit
         from ..scanlibrary import summary
         try:
             base = self.library.get(base_id) if base_id else None
         except KeyError:
             base = None
-        data = scanedit.to_plan(parts)
+        # kept with the instruments' own names: a lab's own name (names:) changed later never changes a kept scan
+        data = self._editor_plan(parts)
         text = plan_text(data)
         try:
             self._plan(text)
@@ -4289,8 +4400,7 @@ class LabRuntime:
         """A scan from the editor, run as a scan of the library runs (library_run: the queue, its gate and its
         approval; the editor drives nothing itself): checked as the queue checks it, kept in the library (scan_save),
         then run, or with at_end queued. {queue, message, entry}; ValueError: not added, and why."""
-        from .. import scanedit
-        text = plan_text(scanedit.to_plan(parts))
+        text = plan_text(self._editor_plan(parts))
         try:
             problems = self._queue_problems(text)
         except PlanError as e:
@@ -4302,16 +4412,18 @@ class LabRuntime:
 
     def queue_run_now(self, texts: List[str], at_end: bool = False, by: str = "human",
                       notes: Iterable[str] = (), restores: bool = False,
-                      library: Optional[str] = None) -> Dict[str, Any]:
+                      library: Optional[str] = None, at: Optional[int] = None) -> Dict[str, Any]:
         """Items a person runs now, from the Runs panel, filed as whose work this thread does (a run again's: the
         run's own): checked together first, then at the front of the line, the last marked then_pause, and the queue
         started (its approval, as ever: this returns once it is answered); that start runs them alone, and the queue
         pauses after them if more items wait. While the queue runs they go next in line, and it goes on as it was;
         while it is pausing, or running a start with a pause point (another Run's, which runs only what it was
         started for), they wait next in line after what it still runs, marked as well, for its next start. at_end: at
-        the end of the queue, not started. restores: the first is a step setting back what the second ran with (if it
-        doesn't finish, the second is skipped). library: the entry the last one's runs are noted under. {queue,
-        message}; ValueError: nothing was added, and why (a start that didn't happen takes them out again)."""
+        the end of the queue, not started; at: at that place instead (1 = first; the Runs panel's ⇒, after the item a
+        person selected), the others after it, not started either. restores: the first is a step setting back what
+        the second ran with (if it doesn't finish, the second is skipped). library: the entry the last one's runs are
+        noted under. {queue, message}; ValueError: nothing was added, and why (a start that didn't happen takes them
+        out again)."""
         for text in texts:
             try:
                 problems = self._queue_problems(text)
@@ -4324,8 +4436,11 @@ class LabRuntime:
             running = q.state in ("running", "pausing")
             pausing = q.state == "pausing"
             only = self._queue_only if q.state == "running" else None   # a start with a pause point: not run by it
-            first = None if at_end else next((n for n, i in enumerate(q.items, 1) if i.status == "waiting"), None)
-            if first is not None and only is not None:   # after the items that start still runs: in the order they run
+            if at is not None:   # where the person put them: there, and nothing starts
+                at_end, first = True, max(1, min(int(at), len(q.items) + 1))
+            else:
+                first = None if at_end else next((n for n, i in enumerate(q.items, 1) if i.status == "waiting"), None)
+            if first is not None and only is not None and at is None:   # after the items that start still runs
                 first = max((n + 1 for n, i in enumerate(q.items, 1) if i.status == "waiting" and i.id in only),
                             default=first)
             last = len(texts) - 1
@@ -4337,8 +4452,11 @@ class LabRuntime:
                 added[0].restores, added[1].restored_by = added[1].id, added[0].id
                 q.save()
             after = "the item running now" if only is None else self._started_for(only)
+            place = q.items.index(added[0]) + 1 if added else 0
         names = " and ".join(i.name for i in added)
-        if at_end:
+        if at is not None:
+            said = "added %s as #%d" % (names, place)
+        elif at_end:
             said = "added %s at the end of the queue" % names
         elif running:
             them = "them" if len(added) > 1 else "it"
@@ -4391,7 +4509,8 @@ class LabRuntime:
             p = self._plan(plan_text(plan))
         except Exception:   # a plan this lab can't read now: nothing is its own, as for a script
             return set()
-        return {s.key for s in p.setup} | {a.key for a in p.axes if a.kind in ("instrument", "ramp")}
+        return {s.key for s in p.setup} | {a.key for a in p.axes if a.kind in ("instrument", "ramp")} \
+            | {k for k, _ in p.swept_settings()}
 
     def _conditions(self, then: Dict[str, Any], now: Dict[str, Dict[str, Any]], own: Iterable[str] = (),
                     unread: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
@@ -4563,7 +4682,8 @@ class LabRuntime:
         if not restoring:
             return plan_text(plan)
         p = self._plan(plan_text(plan))
-        own = {s.key for s in p.setup} | {a.key for a in p.axes if a.kind in ("instrument", "ramp")}
+        own = {s.key for s in p.setup} | {a.key for a in p.axes if a.kind in ("instrument", "ramp")} \
+            | {k for k, _ in p.swept_settings()}
         left = sorted(k for k in restoring if k in own)
         if left:
             notes.append("The plan sets %s itself" % ", ".join(left))
@@ -4786,6 +4906,7 @@ class LabRuntime:
         return str(rec.rows[k][images[0]]), images[0], len(rec.rows)
 
     def _look_camera(self, key: str) -> Tuple[Optional[bytes], str]:
+        key = self.lab.config.names.get(key, key)
         spec = self._spec(key)
         if spec is None:
             return None, "no reading %r (instrument.parameter)" % key
@@ -5858,6 +5979,234 @@ class LabRuntime:
             kept.append({"vi": s["name"], "path": s["path"], "id": entry["id"], "name": entry["name"],
                          "gaps": t["gaps"]})
         return {"kept": kept, "not": missed}
+
+    # ------------------------------------------------------------------ the lab's Special Measure (specialmeasure.py)
+
+    def survey_specialmeasure(self, path: str) -> str:
+        """The lab's Special Measure, read for how the lab works now: the rack its setup scripts build (each
+        instrument's address, the card that fits, its channels' names, limits and ramp rates, a Function's formulas),
+        the scans found and the runs. Nothing is run, MATLAB isn't needed, and no instrument is asked. One folder at a
+        time, on the thread kept for reading the lab's programs."""
+        return self.labview_reads.run(self._survey_specialmeasure, path)
+
+    def _survey_specialmeasure(self, path: str) -> str:
+        from .. import specialmeasure
+        try:
+            found = specialmeasure.survey(path, self.script_cards(), own=self._kelvins())
+        except (OSError, ValueError) as e:
+            return "not read: %s" % e
+        return found.text() + "\n\n" + SPECIALMEASURE_NEXT
+
+    def specialmeasure_found(self, folder: str, setup: Optional[str] = None) -> Dict[str, Any]:
+        """The lab's Special Measure read for the Set up panel (a person chose the folder): the chosen setup
+        script's rack (the newest by default) in the script survey's review (asked who they are as a scan asks, named
+        as the rack names them), each channel's parameter on the card each one has now, the limits and rates its
+        channels give, the names it gives the lab, and each scan found translated with those names. Raises OSError
+        for a folder that isn't there. The portal reads it on labview_reads."""
+        from .. import specialmeasure
+        registry = self.script_cards()
+        found = specialmeasure.survey(folder, registry)   # a person chose it, as Set up reads a LabVIEW folder
+        view = found.view(setup)
+        view["kind"] = "specialmeasure"
+        chosen = found.chosen(setup)
+        rack = specialmeasure._hardware(chosen)
+        self._in_lab(view["instruments"], [ri.inst for ri in rack])
+        self._ask_found(view["instruments"], [ri.inst for ri in rack], registry,
+                        "asking the rack's instruments who they are")
+        self._name_found(view["instruments"])
+        for item, ri in zip(view["instruments"], rack):
+            self._sm_channels(item, ri, registry)
+        keys, functions = self._sm_keys(view["instruments"], chosen)
+        for s, x in zip(found.scans, view["scans"]):
+            t = self._sm_translated(s["scan"], keys, s["name"], functions)
+            x.update({k: t[k] for k in ("title", "text", "summary", "gaps")}, index=s.get("index", 0))
+        from ..labconfig import NOT_NAMES
+        taken = set(self.lab.config.instruments) | {i["name"] for i in view["instruments"]} | NOT_NAMES
+        loaded = self._sm_keys([i for i in view["instruments"] if i.get("used") or i.get("in_lab")], None)[0]
+        view["names"] = {ch: k for ch, (k, *_) in loaded.items() if ch.isidentifier() and ch not in taken
+                         and ch not in self.lab.config.names}   # the channels of the instruments the script loads
+        return view
+
+    def _sm_channels(self, item: Dict[str, Any], ri: Any, registry: Any) -> None:
+        """A rack instrument's channels on the card it has in the review (the lab's, the one its identity reply
+        named, or the rack's guess): each channel's parameter, and the limits and ramp rates they give on what sets it
+        (its set point, where the card has one apart). A rate only for a drive Kelvin ramps itself, at most the card's
+        max_rate, as the lab config takes them."""
+        from .. import specialmeasure
+        card_id = (item.get("card") or {}).get("id")
+        card = registry.get(card_id) if card_id and card_id in registry else None
+        if item.get("in_lab") in self.lab.instruments:
+            card = self.lab.instruments[item["in_lab"]].card
+        limits: Dict[str, List[float]] = {}
+        rates: Dict[str, float] = {}
+        taken: Dict[str, str] = {}
+        for view_ch, ch in zip(item["channels"], ri.channels):
+            param, why = specialmeasure.param_of(card, ch.channel, ri.numbered.get(ch.channel, []), ch.send)
+            if param and param in taken:
+                param, why = None, "%s is %s's already: a second channel is an entry of its own" % (param,
+                                                                                                    taken[param])
+            elif param:
+                taken[param] = ch.name
+            view_ch.update(param=param, why=why, set_param=specialmeasure.set_param_of(card, param))
+            ch.param, ch.set_param = param, view_ch["set_param"]
+            specialmeasure.card_units(ch, card)   # on this card: sm's multiplier, or the card's own unit
+            view_ch.update(native=ch.native, how=ch.how)
+            drive = view_ch["set_param"] or param
+            spec = card.params.get(drive) if card is not None and drive else None
+            if spec is None or not spec.numeric or not spec.is_drive:
+                continue
+            ends = sorted(ch.to_instrument(v) for v in (ch.low, ch.high))   # as the instrument gets them
+            if all(math.isfinite(v) for v in ends):
+                limits[drive] = ends
+            if math.isfinite(ch.rate) and ch.rate > 0 and spec.ramp == "gate":
+                rate = ch.rate * abs(ch.multiplier())
+                rates[drive] = min(rate, spec.max_rate) if spec.max_rate else rate
+        if item.get("card") is not None:
+            item["card"]["limits"] = limits
+            item["card"]["rates"] = rates
+
+    @staticmethod
+    def _sm_translated(scan: Any, keys: Dict[str, Tuple[Any, ...]], name: str, functions: Dict[str, Any]) -> \
+            Dict[str, Any]:
+        """specialmeasure.translate, one scan at a time: one Kelvin can't read is a scan with a gap, not a review
+        that fails."""
+        from .. import specialmeasure
+        try:
+            return specialmeasure.translate(scan, keys, name, functions)
+        except Exception as e:
+            return {"plan": None, "text": "", "title": str(name or "scan"), "summary": "", "gaps": [
+                "Kelvin couldn't read this scan (%s)" % (str(e).splitlines()[0] if str(e) else type(e).__name__)]}
+
+    @staticmethod
+    def _sm_keys(items: List[Dict[str, Any]], setup: Any) -> Tuple[Dict[str, Tuple[Any, ...]], Dict[str, Any]]:
+        """Each rack channel as a Kelvin key, by the names and channels the review gives its instruments; and the
+        rack's function channels (specialmeasure.channel_map's forms)."""
+        from .. import specialmeasure
+        keys: Dict[str, Tuple[Any, ...]] = {}
+        for item in items:
+            name = item.get("in_lab") or item.get("name")
+            for ch in item.get("channels") or []:
+                if name and ch.get("param"):
+                    native = bool(ch.get("native"))   # its card takes the channel's own unit: no conversion
+                    keys[ch["name"]] = ("%s.%s" % (name, ch["param"]), 1.0 if native else
+                                        float(ch.get("factor") or 1.0) * float(ch.get("scale") or 1.0),
+                                        "%s.%s" % (name, ch["set_param"]) if ch.get("set_param") else None,
+                                        0.0 if native else float(ch.get("offset") or 0.0))
+        functions = specialmeasure.channel_map(setup, {})[1] if setup is not None else {}
+        return keys, functions
+
+    def specialmeasure_scans(self, folder: str, setup: Optional[str], scans: List[Dict[str, Any]],
+                             chosen: List[Dict[str, Any]], by: str = "human") -> Dict[str, Any]:
+        """Special Measure scans a person chose in Set up, translated (specialmeasure.translate) with the lab's
+        instruments by the lab's names and the others as the person named them in the review (chosen: [{rack, name,
+        card}]), and kept in their library (scanlibrary.keep_scan, source specialmeasure). {kept: [{scan, path, id,
+        name, gaps}], not: [{scan, path, gaps}]}."""
+        from .. import specialmeasure
+        from ..importers import specialmeasure as smfiles
+        registry = self.script_cards()
+        found = specialmeasure.survey(folder, registry, scans=False)
+        view = found.view(setup)
+        s = found.chosen(setup)
+        rack = specialmeasure._hardware(s)
+        self._in_lab(view["instruments"], [ri.inst for ri in rack])
+        named = {str(c.get("rack") or ""): c for c in chosen}
+        for item, ri in zip(view["instruments"], rack):
+            pick = named.get(ri.name)
+            if not item.get("in_lab") and pick:
+                item["name"] = str(pick.get("name") or "").strip()
+                item["card"] = {"id": str(pick.get("card") or "")}
+            elif not item.get("in_lab"):
+                item["name"] = ""   # not chosen in the review: its channels name nothing
+            self._sm_channels(item, ri, registry)
+        keys, functions = self._sm_keys(view["instruments"], s)
+        root = Path(folder).expanduser()
+        kept: List[Dict[str, Any]] = []
+        missed: List[Dict[str, Any]] = []
+        for pick in scans:
+            rel, k = str(pick.get("path") or ""), int(pick.get("index") or 0)
+            path = (root / rel) if root.is_dir() else root
+            if root.is_dir() and root.resolve() not in path.resolve().parents:
+                missed.append({"scan": rel, "path": rel, "gaps": ["not a file in %s" % folder]})
+                continue
+            try:
+                got = smfiles.scans_in(path) if not specialmeasure.RUN_FILE.match(path.name) else [smfiles.scan_of(path)]
+                scan = got[k]
+            except Exception as e:
+                missed.append({"scan": path.name, "path": rel, "gaps": [str(e).splitlines()[0] if str(e) else
+                                                                        type(e).__name__]})
+                continue
+            m = specialmeasure.RUN_FILE.match(path.name)
+            t = self._sm_translated(scan, keys, (m.group(2) if m else "") or str(scan.get("name") or "")
+                                    or path.stem, functions)
+            if t["plan"] is None:
+                missed.append({"scan": t["title"], "path": rel, "gaps": t["gaps"]})
+                continue
+            entry = self.library.keep_scan(t["text"], t["title"], t["summary"], path.name, rel,
+                                           source="specialmeasure")
+            self.gate.log.write("library", by=by, change="kept from Special Measure", name=entry["name"], path=rel)
+            kept.append({"scan": t["title"], "path": rel, "id": entry["id"], "name": entry["name"], "gaps": t["gaps"]})
+        return {"kept": kept, "not": missed}
+
+    MAX_SM_IMPORT = 500   # Special Measure runs imported at a time
+
+    def import_sm_runs(self, folder: str, runs: List[str], by: str = "human") -> Dict[str, Any]:
+        """Special Measure's run files (NNN_name.mat) in these folders of the lab's Special Measure folder (as the
+        survey lists them), each imported as a run of its own (importers/specialmeasure.py): its scan's name and run
+        number, its comments, the time the file was written as the run's. One imported before (sm-imports.json, by
+        its path, size and time) is left. At most MAX_SM_IMPORT at a time: {imported, left, failed, more}."""
+        from .. import specialmeasure
+        from ..importers import specialmeasure as smfiles
+        root = Path(folder).expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError("%s is not a folder" % folder)
+        index_path = self.data_dir / "sm-imports.json"
+        try:
+            done = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
+        except (OSError, ValueError):
+            done = {}
+        files: List[Path] = []
+        for rel in runs:
+            here = (root / rel).resolve() if rel not in ("", ".") else root
+            if here != root and root not in here.parents:
+                raise ValueError("%s is not in %s" % (rel, folder))
+            try:
+                files += sorted(p for p in here.iterdir() if p.is_file() and specialmeasure.RUN_FILE.match(p.name))
+            except OSError as e:
+                raise ValueError("Kelvin could not look in %s: %s" % (here, e.strerror or e))
+        out: Dict[str, Any] = {"imported": [], "left": 0, "failed": [], "more": 0}
+        todo = []
+        for p in files:
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            stamp = "%d:%d" % (st.st_size, int(st.st_mtime))
+            if done.get(str(p)) and done[str(p)].get("stamp") == stamp:
+                out["left"] += 1
+                continue
+            todo.append((p, st.st_mtime, stamp))
+        out["more"] = max(0, len(todo) - self.MAX_SM_IMPORT)
+        for p, mtime, stamp in todo[:self.MAX_SM_IMPORT]:
+            try:
+                table = smfiles.read_run(p)
+                m = specialmeasure.RUN_FILE.match(p.name)
+                got = self._imported(table, [str(p)], (m.group(2) if m else "") or table.name, by, when=mtime,
+                                     meta={"source": "specialmeasure", "sm_run": int(m.group(1)) if m else None})
+            except Exception as e:
+                out["failed"].append({"file": p.name, "why": str(e).splitlines()[0][:200] if str(e) else
+                                      type(e).__name__})
+                continue
+            done[str(p)] = {"stamp": stamp, "run": got.get("run")}
+            out["imported"].append({"file": p.name, "run": got.get("run")})
+        try:
+            tmp = index_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(done, indent=1), encoding="utf-8")
+            tmp.replace(index_path)
+        except OSError:
+            pass   # the next import may take one of them again: never a run lost
+        self.gate.log.write("sm_import", by=by, folder=str(root), imported=len(out["imported"]),
+                            failed=len(out["failed"]), left=out["left"])
+        return out
 
     # ------------------------------------------------------------------ the lab's experiments, from its VIs
 
@@ -8407,6 +8756,7 @@ class LabRuntime:
                   note: str = "", source: str = "person", lab_wide: bool = False) -> Dict[str, Any]:
         """A notify-only watch (actions on alarm are for the watches written in the lab config). Made while a sample
         is mounted, it is that sample's and ends when the sample is taken out, unless lab_wide (a cryostat's helium)."""
+        key = self.lab.config.names.get(key, key)   # the lab's own name for it (names:): watched as its card has it
         spec = self._spec(key)
         if spec is None:
             raise KeyError("%r is not a parameter in this lab" % key)

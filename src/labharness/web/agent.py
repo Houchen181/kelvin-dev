@@ -83,6 +83,7 @@ OUTSIDE_TOOLS = {"read_web_page": "a web page", "web_search": "web search result
                  "results", "read_paper": "a paper", "read_file": "a file in the chat's folder",
                  "survey_scripts": "the lab's scripts", "check_script": "the lab's scripts",
                  "survey_labview": "the lab's LabVIEW files", "run_script": "a lab script's output",
+                 "survey_specialmeasure": "the lab's Special Measure files",
                  "team_chat": "the team chat"}
 COMPARE_STEPS = 8
 MAX_LANES = 3
@@ -162,8 +163,8 @@ TEXT_FILES = {".py", ".pyw", ".ipynb", ".m", ".jl", ".r", ".c", ".h", ".cpp", ".
               ".ts", ".sh", ".ps1", ".bat", ".cmd", ".vb", ".bas", ".ino", ".pro", ".ipf", ".tex", ".bib", ".md",
               ".rst", ".log", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".xml", ".html", ".htm"}
 # data files a person attaches, each made a run as it is attached (imports.py)
-DATA_KINDS = ("CSV, TSV, text and Excel tables, NumPy arrays, TIFF images, BioLogic, Gamry, Arbin and LabVIEW (.lvm, "
-              ".tdms) files")
+DATA_KINDS = ("CSV, TSV, text and Excel tables, NumPy arrays, MATLAB .mat files (Special Measure's runs too), TIFF "
+              "images, BioLogic, Gamry, Arbin and LabVIEW (.lvm, .tdms) files")
 WAIT_S = 120   # the longest wait inside a turn: a wait holds the lab, so longer waits use wake_me
 STOP_POLL_S = 0.2   # how often a tool call that is still running looks at the stop button
 STOPPED_CALL = ("stopped: the person pressed stop while this was still running. Kelvin ends it as soon as the lab "
@@ -297,7 +298,7 @@ def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
 DEFERRED = {
     "setting up instruments": ["scan_instruments", "find_on_network", "connected_devices", "inspect_address",
                                "inspect_serial", "add_instrument", "reconnect_instrument", "ask_to_switch_on",
-                               "survey_scripts", "survey_labview"],
+                               "survey_scripts", "survey_labview", "survey_specialmeasure"],
     "running the lab's own scripts": ["run_script", "check_script", "set_live"],
     "translating LabVIEW into experiments": ["describe_vi", "translate_vi", "save_experiment", "keep_experiment",
                                              "experiments"],
@@ -320,7 +321,8 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
            "lab_config", "card_guide", "find_card", "experiment_guide", "look_at", "watches", "queue_show",
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
-           "use_skill", "read_skill_file", "survey_scripts", "survey_labview", "run_provenance", "activity",
+           "use_skill", "read_skill_file", "survey_scripts", "survey_labview", "survey_specialmeasure",
+           "run_provenance", "activity",
            "shared_memory"}
 # agents over MCP keep a note in the lab's memory with remember_shared; the portal's chats with remember (scope lab),
 # which knows whose chat it is and asks the person after the chat read text from outside the lab

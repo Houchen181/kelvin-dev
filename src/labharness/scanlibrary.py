@@ -3,11 +3,13 @@ it is, so the exact same measurement is a click away; and the scripts a person i
 are outside the lab's scripts folder (a person chose each one; scriptrun.locate).
 
     library.json, in the data folder (each person's own, beside queue.json):
-    {"entries": [{"id", "kind": "plan" | "script", "name", "source": "kelvin" | "you" | "labview", "added", "used",
-                  "count", "runs": [run ids, newest first, at most 10], ...}]}
+    {"entries": [{"id", "kind": "plan" | "script", "name", "source": "kelvin" | "you" | "labview" | "specialmeasure",
+                  "added", "used", "count", "runs": [run ids, newest first, at most 10], ...}]}
 
 A scan a person kept from LabVIEW (Set up → From your LabVIEW…: a VI translated by viscan.py) is a plan entry with
-source "labview", the VI's name (vi) and path; it is theirs, as a script they imported is.
+source "labview", the VI's name (vi) and path; one kept from Special Measure (From Special Measure…: a scan translated
+by specialmeasure.py) has source "specialmeasure" and the file it came from; each is theirs, as a script they
+imported is.
 
 A plan is kept by the sha256 of its text as it ran (the run's /plan), with a line that says what it does; a script by
 its path (resolved), with the values (params) and arguments its last run had, the Python it ran in, and the sha256 of
@@ -90,7 +92,7 @@ def summary(plan: Dict[str, Any], unit_of: Callable[[str], str] = lambda key: ""
         p = load_plan(plan)
     except Exception:
         return ""
-    swept = [a for a in p.axes if a.kind in ("instrument", "ramp", "technique")]
+    swept = [a for a in p.axes if a.kind in ("instrument", "ramp", "technique", "variable")]
     parts: List[str] = []
     for a in p.axes:
         if a.kind == "repeat":
@@ -99,13 +101,18 @@ def summary(plan: Dict[str, Any], unit_of: Callable[[str], str] = lambda key: ""
             parts.append("every %s s" % _num(a.every))
         elif a.kind == "ramp":
             parts.append("%s ramp → %s" % (a.key, " → ".join(_span([v], unit_of(a.key)) for v in a.values)))
-        else:
-            parts.append("%s %s%s" % (a.key, _span(a.values, unit_of(a.key)),
-                                      " (%d)" % len(a.values) if len(swept) > 1 else ""))
+        else:   # what moves with it, after it: "stage.y 70 → 72 µm with stage.x 93 → 81 µm"
+            parts.append("%s %s%s%s" % (a.key, _span(a.values, unit_of(a.key)),
+                                        "".join(" with %s %s" % (w.key, _span(w.values, unit_of(w.key)))
+                                                for w in a.with_),
+                                        " (%d)" % len(a.values) if len(swept) > 1 else ""))
     text = " × ".join(parts)
+    if p.sets:   # what the variables set: "n 0 → 2 × E -0.3 → 0.3, setting dac.Vbg, dac.Vtg"
+        text += ", setting %s" % ", ".join(c.key for c in p.sets)
     if p.ramp is None:
         text += "%s%d point%s" % (", " if text else "", p.points, "" if p.points == 1 else "s")
-    keys = ["%s.%s" % m for m in p.measure] + [t.key for t in p.techniques]
+    keys = ["%s.%s" % m for m in p.measure] + [t.key for t in p.techniques] + \
+        ["%s.%s" % m for a in p.axes for m in a.measure]
     if keys:
         text += " · " + ", ".join(keys[:4]) + (" +%d" % (len(keys) - 4) if len(keys) > 4 else "")
     return text
@@ -300,11 +307,12 @@ class Library:
     @staticmethod
     def _keep(found: Dict[str, Dict[str, Any]]) -> None:
         """At most MAX_ENTRIES: the entries Kelvin noted itself go first, least recently used first; a script a person
-        imported, a scan they kept from LabVIEW, or an entry they named, stays."""
+        imported, a scan they kept from LabVIEW or Special Measure, or an entry they named, stays."""
         extra = len(found) - MAX_ENTRIES
         if extra <= 0:
             return
-        spare = sorted((e for e in found.values() if e.get("source") not in ("you", "labview") and not e.get("named")
+        spare = sorted((e for e in found.values() if e.get("source") not in ("you", "labview", "specialmeasure")
+                        and not e.get("named")
                         and not e.get("color") and not e.get("note")),   # one a person coloured or noted stays too
                        key=lambda e: e.get("used") or e.get("added") or 0)
         for e in spare[:extra]:
@@ -312,10 +320,11 @@ class Library:
 
     # ------------------------------------------------------------------ a person's changes
 
-    def keep_scan(self, text: str, name: Any, about: str, vi: str, path: str) -> Dict[str, Any]:
-        """A scan a person keeps before it ever ran: a LabVIEW VI translated into a plan (viscan.py), kept by its
-        plan's text as every scan is (its runs are noted under it), with source "labview" and the VI it came from.
-        One already in the library keeps its runs and its name, and becomes theirs."""
+    def keep_scan(self, text: str, name: Any, about: str, vi: str, path: str, source: str = "labview") -> Dict[str, Any]:
+        """A scan a person keeps before it ever ran: a LabVIEW VI translated into a plan (viscan.py), or a Special
+        Measure scan (specialmeasure.py; source "specialmeasure"), kept by its plan's text as every scan is (its runs
+        are noted under it), with its source and the file it came from (vi: its name; path). One already in the
+        library keeps its runs and its name, and becomes theirs."""
         entry_id = plan_id(text)
         with _LOCK:
             found = self._read()
@@ -323,7 +332,7 @@ class Library:
                 "id": entry_id, "kind": "plan", "name": plain_name(name), "added": time.time(), "used": None,
                 "count": 0, "runs": [], "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "text": text,
                 "summary": about}
-            entry.update(source="labview", vi=str(vi), path=str(path))
+            entry.update(source=source, vi=str(vi), path=str(path))
             found[entry_id] = entry
             self._keep(found)
             self._write(found)

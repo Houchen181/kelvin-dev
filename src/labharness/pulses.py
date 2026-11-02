@@ -911,17 +911,74 @@ def illustrate(request: Any, inst: Any, changes: Dict[str, Any]) -> None:
 
 # ------------------------------------------------------------------ plans: every value checked before the run
 
+def _moving(plan: Any, name: str) -> List[Tuple[str, List[int], List[Any]]]:
+    """The times of generator `name` a plan's sweep moves: (parameter, the loops it follows, its values). A loop's own
+    and what moves with it (with:) follow that loop, a value at each of its points; what sets: works out follows the
+    loops it uses, a value at each combination of theirs, outer first (plans._worked_out)."""
+    axes = list(getattr(plan, "axes", []) or [])
+    index: Dict[str, int] = {}
+    out: List[Tuple[str, List[int], List[Any]]] = []
+    for j, a in enumerate(axes):
+        if getattr(a, "kind", "") not in ("instrument", "variable"):
+            continue
+        index[a.key] = j
+        if a.kind == "instrument" and a.instr == name and a.param in TIME_PARAMS:
+            out.append((a.param, [j], list(a.values)))
+        for w in getattr(a, "with_", []) or []:
+            index[w.key] = j
+            if w.instr == name and w.param in TIME_PARAMS:
+                out.append((w.param, [j], list(w.values)))
+    for c in getattr(plan, "sets", []) or []:
+        if c.instr == name and c.param in TIME_PARAMS and c.values:
+            out.append((c.param, sorted({index[n] for n in c.names if n in index}), list(c.values)))
+    return out
+
+
+def _points(plan: Any, name: str, most: int = 4000) -> Iterable[Dict[str, Any]]:
+    """The times the sweep gives generator `name` together, as the run takes them: every combination of the loops
+    they follow (past `most`, each loop at its ends, and each loop's values with the others at their first)."""
+    moving = _moving(plan, name)
+    axes = list(getattr(plan, "axes", []) or [])
+    loops = sorted({j for _, js, _ in moving for j in js})
+    sizes = {j: len(axes[j].values) for j in loops}
+
+    def at(ks: Dict[int, int]) -> Dict[str, Any]:
+        values = {}
+        for param, js, vals in moving:
+            pos = 0
+            for j in js:   # the place of these loops' values among the combinations, outer first
+                pos = pos * sizes[j] + ks[j]
+            if pos < len(vals):
+                values[param] = vals[pos]
+        return values
+
+    total = 1
+    for j in loops:
+        total *= max(1, sizes[j])
+    if any(not sizes[j] for j in loops):
+        return
+    if total <= most:
+        for combo in itertools.product(*(range(sizes[j]) for j in loops)):
+            yield at(dict(zip(loops, combo)))
+        return
+    for combo in itertools.product(*([0, sizes[j] - 1] for j in loops)):
+        yield at(dict(zip(loops, combo)))
+    for j in loops:
+        for k in range(sizes[j]):
+            yield at(dict({o: 0 for o in loops}, **{j: k}))
+
+
 def _played(lab: Any, plan: Any) -> List[Tuple[Any, Dict[str, Any], Dict[str, List[Any]]]]:
     """The generators a plan plays: (instrument, its settings as the setup leaves them, its swept times and their
-    values). A generator plays if the setup switches it on, or it is on already and the plan doesn't switch it off."""
+    values, as _moving finds them). A generator plays if the setup switches it on, or it is on already and the plan
+    doesn't switch it off."""
     out = []
     for name in getattr(plan, "requires", []) or []:
         inst = getattr(lab, "instruments", {}).get(name)
         if inst is None or not is_generator(inst):
             continue
         setup = {s.param: s.value for s in getattr(plan, "setup", []) if s.instr == name}
-        swept = {a.param: list(a.values) for a in getattr(plan, "axes", [])
-                 if getattr(a, "kind", "") == "instrument" and a.instr == name and a.param in TIME_PARAMS}
+        swept = {param: values for param, _, values in _moving(plan, name)}
         running = setup.get("running")
         if running is None:
             try:
@@ -938,24 +995,6 @@ def _played(lab: Any, plan: Any) -> List[Tuple[Any, Dict[str, Any], Dict[str, Li
         settings = settings_of(inst, {k: v for k, v in setup.items() if k in TIME_PARAMS})
         out.append((inst, settings, swept))
     return out
-
-
-def _combinations(swept: Dict[str, List[Any]], most: int = 4000) -> Iterable[Dict[str, Any]]:
-    """Every combination of the swept values; past `most`, each value with the others at their ends."""
-    keys = list(swept)
-    total = 1
-    for k in keys:
-        total *= max(1, len(swept[k]))
-    if total <= most:
-        for combo in itertools.product(*(swept[k] for k in keys)):
-            yield dict(zip(keys, combo))
-        return
-    ends = {k: [v[0], v[-1]] for k, v in swept.items()}
-    for combo in itertools.product(*(ends[k] for k in keys)):
-        yield dict(zip(keys, combo))
-    for k in keys:
-        for v in swept[k]:
-            yield dict({o: swept[o][0] for o in keys}, **{k: v})
 
 
 def _seq_at(inst: Any, settings: Dict[str, Any], values: Dict[str, Any]) -> Sequence:
@@ -976,7 +1015,7 @@ def plan_problems(lab: Any, plan: Any) -> List[str]:
     for inst, settings, swept in _played(lab, plan):
         lim = limits_of(inst)
         seen = set()
-        for values in _combinations(swept) if swept else [{}]:
+        for values in _points(plan, inst.name) if swept else [{}]:
             try:
                 problems = check(_seq_at(inst, settings, values), lim)
             except (KeyError, ValueError) as e:
@@ -1008,7 +1047,7 @@ def illustrate_plan(request: Any, lab: Any, plan: Any) -> None:
             request.figures.append(figure(seq, "at " + _shown(first) if first else ""))
             if swept:
                 periods, duties = [], []
-                for values in _combinations(swept, most=400):
+                for values in _points(plan, inst.name, most=400):
                     try:
                         s = _seq_at(inst, settings, values)
                     except (KeyError, ValueError):

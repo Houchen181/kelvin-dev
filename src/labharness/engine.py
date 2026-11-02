@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from . import frames, pulses, techniques
+from . import expr, frames, pulses, techniques
 from ._version import __version__
 from .analysis import analyze_run
 from .chain import derived_readings
@@ -103,7 +103,8 @@ class RunEngine:
     def held(self, plan: Plan, snapshot: Dict[str, Any]) -> Dict[str, str]:
         """The conditions a run was taken in, with units: every drive away from its safe value that the plan
         doesn't sweep, and the temperature and field readings (for the run's card and catalog)."""
-        swept = {a.key for a in plan.axes} | {self.followed(a) for a in plan.axes if a.kind == "ramp"}
+        swept = {a.key for a in plan.axes} | {self.followed(a) for a in plan.axes if a.kind == "ramp"} \
+            | {k for k, _ in plan.swept_settings()}
         out: Dict[str, str] = {}
         for name, values in (snapshot or {}).items():
             inst = self.lab.instruments.get(name)
@@ -167,7 +168,9 @@ class RunEngine:
 
     def columns(self, plan: Plan) -> Dict[str, List[Dict[str, str]]]:
         """Axis and measured columns with units, as analysis and plots need them. A ramp's column is the reading it
-        follows (R against the temperature reached, not against the set point)."""
+        follows (R against the temperature reached, not against the set point). A reading a loop takes once per
+        value (its measure:) says which loop (loop:); the settings that move with a loop or that sets: works out are
+        columns of their own (with: their loop, or "sets"), neither an axis nor a reading."""
         def unit(key: str) -> str:
             try:
                 return self.lab.resolve(key)[1].unit
@@ -176,24 +179,30 @@ class RunEngine:
         axes = []
         for a in plan.axes:
             key = (self.followed(a) or a.key) if a.kind == "ramp" else a.key
-            axes.append({"key": key, "unit": "s" if a.kind == "time" else ("" if a.kind == "repeat" else
+            axes.append({"key": key, "unit": "s" if a.kind == "time" else ("" if a.kind in ("repeat", "variable") else
                                                                            techniques.axis_unit(self.lab, a)
                                                                            if a.kind == "technique" else unit(key)),
                          "kind": a.kind})
         ramped = {c["key"] for c in axes if c["kind"] == "ramp"}
-        measures = []
-        for instr, param in plan.measure:
+
+        def measured(instr: str, param: str) -> Dict[str, str]:
             key = "%s.%s" % (instr, param)
-            if key in ramped:
-                continue   # it is the ramp's own column, read at every point
             spec = self.lab.resolve(key)[1]
             m = {"key": key, "unit": spec.unit, "kind": "trace" if spec.type == "trace" else
                  "image" if spec.type == "image" else "scalar"}
             if spec.axis or spec.axis_step or spec.x_values:
                 m["x_unit"] = unit("%s.%s" % (instr, (spec.axis or spec.axis_step or (spec.x_values,))[0]))
-            measures.append(m)
+            return m
+        measures = []
+        for instr, param in plan.measure:
+            if "%s.%s" % (instr, param) in ramped:
+                continue   # it is the ramp's own column, read at every point
+            measures.append(measured(instr, param))
         measures += techniques.columns(self.lab, plan)   # a technique's buffers: traces, against its x
-        return {"axes": axes, "measures": measures}
+        measures += [dict(measured(i, p), loop=a.key) for a in plan.axes for i, p in a.measure]
+        moved = [{"key": w.key, "unit": unit(w.key), "with": a.key} for a in plan.axes for w in a.with_] + \
+            [{"key": c.key, "unit": unit(c.key), "with": "sets"} for c in plan.sets]
+        return dict({"axes": axes, "measures": measures}, **({"set": moved} if moved else {}))
 
     # ------------------------------------------------------------------ checks
 
@@ -272,20 +281,30 @@ class RunEngine:
                 inst, spec = settable(step.instr, step.param, group)
                 if spec:
                     step.value = check_value(inst, spec, step.value, group)
-        for axis in plan.instrument_axes:
-            inst, spec = settable(axis.instr, axis.param, "sweep")
+        def check_all(item: Any, where: str) -> Any:
+            """Every value a sweep gives one setting (a loop's own, a with:, a sets:): one message is enough."""
+            inst, spec = settable(item.instr, item.param, where)
             if spec:
                 before = len(errors)
-                numbers = floats(spec, axis.values) if axis.values else None
+                numbers = floats(spec, item.values) if item.values else None
                 if numbers is not None:   # a limit and a fixed range are ranges of values: when the least and the
                     for v in (min(numbers), max(numbers)):   # greatest are within them, every value is
-                        check_value(inst, spec, v, "sweep")
+                        check_value(inst, spec, v, where)
                 if numbers is not None and len(errors) == before:
-                    axis.values = numbers   # a million-point sweep was checked value by value
+                    item.values = numbers   # a million-point sweep was checked value by value
                 else:
                     del errors[before:]
-                    axis.values = [check_value(inst, spec, v, "sweep") for v in axis.values]
-                del errors[before + 1:]  # one message per axis is enough
+                    item.values = [check_value(inst, spec, v, where) for v in item.values]
+                del errors[before + 1:]
+            return spec
+
+        for axis in plan.axes:
+            for w in axis.with_:
+                check_all(w, "sweep.%s.with" % axis.key)
+        for c in plan.sets:
+            check_all(c, "sets")
+        for axis in plan.instrument_axes:
+            spec = check_all(axis, "sweep")
             st = axis.stabilize
             if spec and st and st.near is not None and self._set_point_of(st) is None and not self._same_unit(
                     axis.key, st.key):
@@ -305,6 +324,18 @@ class RunEngine:
                     errors.append("%s.%s cannot be read" % (instr, param))
             except KeyError as e:
                 errors.append(e.args[0])
+        for axis in plan.axes:   # a reading a loop takes once per value is kept on every point inside: a number
+            for instr, param in axis.measure:
+                try:
+                    _, spec = lab.resolve("%s.%s" % (instr, param))
+                except KeyError as e:
+                    errors.append("sweep.%s.measure: %s" % (axis.key, e.args[0]))
+                    continue
+                if spec.get_cmd is None:
+                    errors.append("sweep.%s.measure: %s.%s cannot be read" % (axis.key, instr, param))
+                elif spec.type in ("trace", "image") or spec.acquires:
+                    errors.append("sweep.%s.measure: %s.%s is a trace, a frame or an acquisition, recorded at each "
+                                  "point (measure:), not once per value of a loop" % (axis.key, instr, param))
         # a switch's or a mode's word in a condition, as its reading gives it: "tc.heater_range == off"
         for where, conds in [("preconditions", plan.preconditions)] + [
                 (r.text, [t for group in r.any_of for t in group]) for r in plan.rules()]:
@@ -434,7 +465,8 @@ class RunEngine:
     def planned(self, plan: Plan) -> set:
         """The settings a plan sets before and while it measures (its setup and sweep): a switch it turns on takes the
         set points it applies to the plan's levels, not to where they were (gate._planned)."""
-        return {s.key for s in plan.setup} | {a.key for a in plan.axes if a.kind in ("instrument", "ramp")}
+        return {s.key for s in plan.setup} | {a.key for a in plan.axes if a.kind in ("instrument", "ramp")} \
+            | {k for k, _ in plan.swept_settings()}
 
     def interlock_problems(self, plan: Optional[Plan], state: Optional[Dict[str, Any]] = None, who: str = "the plan",
                            sets: Optional[List[Tuple[str, str, Any]]] = None) -> List[str]:
@@ -535,8 +567,9 @@ class RunEngine:
             return problems
         go([(s.key, s.value, "%s's setup" % who) for s in self.ordered(plan.setup)
             if action_of(self.lab, s.instr, s.param) is None])
-        go([(a.key, v, "%s's sweep" % who) for a in plan.axes if a.kind in ("instrument", "ramp")
-            for v in (a.values if looked_at(a.key) else a.values[-1:])], together=True)
+        go([(key, v, "%s's sweep" % who) for key, values in plan.swept_settings() + [
+            (a.key, a.values) for a in plan.axes if a.kind == "ramp"]
+            for v in (values if looked_at(key) else values[-1:])], together=True)
         go([(s.key, s.value, "%s's after steps" % who) for s in plan.after
             if action_of(self.lab, s.instr, s.param) is None])
         return problems
@@ -582,7 +615,7 @@ class RunEngine:
 
         def settings(steps: List[Step]) -> List[Tuple[str, Any]]:   # not the card's actions a step may name
             return [(s.key, s.value) for s in steps if action_of(self.lab, s.instr, s.param) is None]
-        for key, value in settings(plan.setup) + [(a.key, v) for a in plan.instrument_axes for v in a.values] \
+        for key, value in settings(plan.setup) + [(k, v) for k, values in plan.swept_settings() for v in values] \
                 + self._ramp_values(plan) + techniques.drive_values(self.lab, plan) + settings(plan.after):
             _, spec = self.lab.resolve(key)
             if spec.is_drive:
@@ -621,7 +654,7 @@ class RunEngine:
 
     def simulate(self, plan: Any) -> RunReport:
         """Run the plan on a simulated copy of the lab. The real lab is untouched."""
-        plan = plan if isinstance(plan, Plan) else load_plan(plan)
+        plan = plan if isinstance(plan, Plan) else load_plan(plan, names=self.lab.config.names)
         twin = self.lab.make_twin()
         approver = SimulationApprover()
         gate = SafetyGate(twin, approver, EventLog(None, twin.clock), envelope=self.gate.envelope, operator="dry-run")
@@ -643,7 +676,7 @@ class RunEngine:
         # a stop while it is checked or approved ends it too
         since = since or (self.gate.stop_generation, self.lab.stops.count)
         try:
-            plan = plan if isinstance(plan, Plan) else load_plan(plan)
+            plan = plan if isinstance(plan, Plan) else load_plan(plan, names=self.lab.config.names)
         except PlanError as e:
             return self._refuse("?", "plan invalid: %s" % e)
         errors = self.validate(plan)
@@ -872,10 +905,9 @@ class RunEngine:
             return by_points
 
         # what the sweep changes again: its axes, and the levels a swept switch parks and puts back
-        swept = {a.key for a in plan.axes if a.kind in ("instrument", "ramp")}
-        for a in plan.axes:
-            if a.kind in ("instrument", "ramp"):
-                swept.update("%s.%s" % (a.instr, d) for d in lab.resolve(a.key)[1].enables)
+        swept = {a.key for a in plan.axes if a.kind in ("instrument", "ramp")} | {k for k, _ in plan.swept_settings()}
+        for key in list(swept):
+            swept.update("%s.%s" % (key.split(".", 1)[0], d) for d in lab.resolve(key)[1].enables)
         ramp = plan.ramp
         followed = self.followed(ramp) if ramp is not None else None   # the reading a ramp follows: its column
         logs_waits = any(a.stabilize is not None and a.stabilize.every for a in plan.axes)
@@ -1001,15 +1033,96 @@ class RunEngine:
                 ended.append("%s, at point %d" % (why, n))
             return not why
 
-        def set_axis(axis: Axis, k: int, v: Any, at: Dict[str, Any]) -> None:
-            if axis.kind == "instrument":
-                apply(axis.instr, axis.param, v)
+        # what sets: works out again when a loop takes a value: the settings whose expressions use it
+        index = {a.key: j for j, a in enumerate(plan.axes)}
+        index.update({w.key: j for j, a in enumerate(plan.axes) for w in a.with_})
+        worked: Dict[int, List[Any]] = {}
+        for c in plan.sets:
+            for j in sorted({index[name] for name in c.names}):
+                worked.setdefault(j, []).append(c)
+        spans = {key: (min(values), max(values)) for key, values in plan.swept_settings()
+                 if values and all(_num(v) for v in values)}
+
+        def together(moves: List[Tuple[str, str, Any]]) -> None:
+            """The settings a loop sets at one point (its own, with:, sets:), moved together: drives the gate ramps
+            go a ramp step at a time, each in turn, so two gates of a device travel the line between their points
+            rather than one and then the other (which could put a field on the device it never sees in the scan).
+            Only between values the run was approved for: from where a drive is before the run, it goes on its own
+            (the steps on the way are not values of the run). A drive reads back within half a ramp step (or its
+            card's tolerance) of its span: the readback's noise (7.28 read for 7.279999999999999) is no move from it,
+            and its steps start from where it is, taken into the span. Each step goes through the gate."""
+            paired, alone = [], []
+            for instr, param, value in moves:
+                try:
+                    inst, spec = lab.resolve("%s.%s" % (instr, param))
+                    target = spec.coerce(value)
+                    now = gate._current(inst, spec) if spec.is_drive and spec.numeric and spec.ramp == "gate" else None
+                except (KeyError, ValueError):
+                    now = None
+                span = spans.get("%s.%s" % (instr, param))
+                try:
+                    step = (spec.ramp_step or inst.rate(spec.name) * 0.2) if now is not None else None
+                except Exception:   # no rate to step at: the gate sets it as it would alone
+                    step = None
+                slack = max(spec.tol or 0.0, step / 2, 1e-9 * max(1.0, abs(span[0]), abs(span[1]))) \
+                    if step and step > 0 and span else None
+                if slack is not None and _num(now) and _num(target) and span[0] - slack <= now <= span[1] + slack:
+                    start = min(max(float(now), span[0]), span[1])
+                    paired.append((instr, param, start, target,
+                                   max(1, int(math.ceil(abs(target - start) / step - 1e-9)))))
+                else:
+                    alone.append((instr, param, value))
+            for instr, param, value in alone:
+                apply(instr, param, value)
+            steps = max([p[4] for p in paired] or [1])
+            if len(paired) < 2 or steps == 1:
+                for instr, param, _, target, _ in paired:
+                    apply(instr, param, target)
+                return
+            for s in range(1, steps + 1):
+                for instr, param, start, target, _ in paired:
+                    apply(instr, param, target if s == steps else start + (target - start) * s / steps)
+
+        def ramped_by_gate(step: Step) -> bool:
+            """A step together() can move with others: a numeric drive the gate ramps, not one of the card's actions."""
+            if action_of(lab, step.instr, step.param) is not None:
+                return False
+            try:
+                spec = lab.resolve(step.key)[1]
+            except KeyError:
+                return False
+            return spec.is_drive and spec.numeric and spec.ramp == "gate"
+
+        def set_axis(axis: Axis, j: int, k: int, v: Any, at: Dict[str, Any]) -> Dict[str, Any]:
+            """Loop j at its k-th value: its setting, what moves with it and what sets: works out from it, together;
+            then its stabilize, its settle (first_settle for its first value) and the readings it takes once per
+            value. Returns what each point inside it records of this: with:, sets: and those readings."""
+            extra: Dict[str, Any] = {}
+            if axis.kind in ("instrument", "variable"):
+                moves = [(axis.instr, axis.param, v)] if axis.kind == "instrument" else []
+                for w in axis.with_:
+                    moves.append((w.instr, w.param, w.values[k]))
+                    extra[w.key] = w.values[k]
+                if worked.get(j):   # its other values: as the loops outside are, and where the loops inside start
+                    known = {**at, axis.key: v, **extra}
+                    for inner in plan.axes[j + 1:]:
+                        known.setdefault(inner.key, inner.values[0] if inner.values else None)
+                        for w in inner.with_:
+                            known.setdefault(w.key, w.values[0] if w.values else None)
+                    for c in worked[j]:
+                        try:
+                            value = expr.scalar(c.text, known)
+                        except expr.ExprError as e:
+                            raise _Abort("sets.%s: %s" % (c.key, e))
+                        moves.append((c.instr, c.param, value))
+                        extra[c.key] = value
+                together(moves)
                 st = axis.stabilize
                 if st:
-                    log = (lambda: take(dict(at, **{axis.key: v}), waiting=True)) if st.every else None
+                    log = (lambda: take({**at, axis.key: v, **extra}, waiting=True)) if st.every else None
                     info = self._stabilize(st, gen, warnings, v if self._same_unit(axis.key, st.key) else None, log)
                     settled.append(dict(info, axis=axis.key, value=v, t=round(clock.now() - t0, 3)))
-                hold = axis.settle_at(k)
+                hold = axis.settle_first(k)
                 if not lab.stops.sleep(clock, hold if hold is not None else plan.settle, stops):
                     raise _Abort(gate.stop_words())   # a stop ends a settle at once
             elif axis.kind == "time" and v:
@@ -1018,9 +1131,13 @@ class RunEngine:
             elif axis.kind == "technique":   # one of a technique's parameters: its next runs use this value
                 name, _, param = axis.param.partition(".")
                 tvalues["%s.%s" % (axis.instr, name)][param] = v
-                hold = axis.settle_at(k)
+                hold = axis.settle_first(k)
                 if not lab.stops.sleep(clock, hold if hold is not None else plan.settle, stops):
                     raise _Abort(gate.stop_words())
+            for instr, param in axis.measure:   # once per value, after it settled, kept on every point inside
+                key = "%s.%s" % (instr, param)
+                extra[key] = read(key, lambda: lab.read(instr, param))
+            return extra
 
         def loop(j: int, at: Dict[str, Any]) -> bool:
             """Loop j and the ones inside it, at the outer loops' values; False once the plan's until: or while:
@@ -1030,10 +1147,12 @@ class RunEngine:
             axis = plan.axes[j]
             if axis.kind == "ramp":
                 return ramped(axis, at)
+            extra: Dict[str, Any] = {}
             for k, v in enumerate(axis.values):
-                if not (k and v == axis.values[k - 1]):   # the same value again right after: nothing to set
-                    set_axis(axis, k, v, at)
-                if not loop(j + 1, dict(at, **{axis.key: v})):
+                same = k and v == axis.values[k - 1] and all(w.values[k] == w.values[k - 1] for w in axis.with_)
+                if not same:   # the same value again right after: nothing to set
+                    extra = set_axis(axis, j, k, v, at)
+                if not loop(j + 1, {**at, axis.key: v, **extra}):
                     return False
                 why = ends(axis.until, axis.while_, state["last"]) if (axis.until or axis.while_) else None
                 if why:   # this loop's other values are skipped; the loops outside it go on
@@ -1140,15 +1259,31 @@ class RunEngine:
                     known = {}
                 rec.note(held=self.held(plan, measuring),
                          setup={"%s.%s" % (s.instr, s.param): s.value for s in plan.setup}, **known)
-                loop(0, {})
+                fixed: Dict[str, Any] = {}   # what sets: works out from no loop: set once, kept on every point
+                for c in plan.sets:
+                    if not c.names:
+                        try:
+                            fixed[c.key] = expr.scalar(c.text, {})
+                        except expr.ExprError as e:
+                            raise _Abort("sets.%s: %s" % (c.key, e))
+                        apply(c.instr, c.param, fixed[c.key])
+                loop(0, fixed)
                 late = self.readback_problems(plan.setup, swept)
                 if late:   # something reset a level during the sweep: the assessment must not say all was well
                     warnings.append("at the end of the sweep %s: points may not have been measured at the approved "
                                     "level" % "; ".join(late))
                 if plan.after:
                     self._emit(event="phase", run_id=rec.run_id, phase="after", eta_s=time_left(n))
-                for step in plan.after:
-                    apply(step.instr, step.param, step.value)
+                side: List[Tuple[str, str, Any]] = []   # gate-ramped drives written side by side: together
+                for step in plan.after + [None]:
+                    if step is not None and ramped_by_gate(step):
+                        side.append((step.instr, step.param, step.value))
+                        continue
+                    if side:
+                        together(side)
+                        side = []
+                    if step is not None:
+                        apply(step.instr, step.param, step.value)
         except _Abort as e:
             status, reason = "aborted", str(e)
         except Stopped:   # a stop that came while an instrument was still taking a reading
@@ -1225,6 +1360,10 @@ class RunEngine:
             for axis in plan.axes:
                 if getattr(axis, "instr", None) == name and axis.kind in ("instrument", "ramp"):
                     values[axis.param] = "swept"
+            for key, _ in plan.swept_settings():   # what moves with a loop, and what sets: works out
+                instr, _, param = key.partition(".")
+                if instr == name:
+                    values[param] = "swept"
             out[name] = settings_of(inst, values)
         return out
 

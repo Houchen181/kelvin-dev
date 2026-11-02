@@ -150,3 +150,17 @@ def test_kelvin_shows_a_sequence_before_playing_it(tmp_path):
     assert "problems:" in rt.pulse_sequence("rabi", {"tau": 50e-6, "t_wait": 0}, "")
     assert "unknown protocol" in rt.pulse_sequence("spin_lock", {}, "")
     assert "show_sequence" in INSTRUCTIONS and "Rabi" in INSTRUCTIONS
+
+
+def test_pulse_times_that_move_with_a_loop_or_that_sets_works_out_are_checked_before_the_run():
+    from labharness import load_plan
+    lab = build_virtual_lab(seed=1)
+    base = {"plan": "rabi", "setup": {"pg.protocol": "rabi", "pg.running": True}}
+    for sweep, sets in (({"pg.tau": {"values": [1e-7, 9e-3]}}, None),
+                        ({"pg.t_wait": {"values": [1e-6, 2e-6], "with": {"pg.tau": [1e-7, 9e-3]}}}, None),
+                        ({"x": {"values": [1, 2]}}, {"pg.tau": "x * 4.5e-3"})):
+        plan = load_plan(dict(base, sweep=sweep, **({"sets": sets} if sets else {})))
+        problems = pulses.plan_problems(lab, plan)
+        assert any("microwave is on" in p for p in problems), (sweep, problems)
+    fine = load_plan(dict(base, sweep={"pg.t_wait": {"values": [1e-6, 2e-6], "with": {"pg.tau": [1e-7, 2e-7]}}}))
+    assert pulses.plan_problems(lab, fine) == []

@@ -25,6 +25,9 @@ from .yamlio import load_yaml
 TRUST = ("ask", "envelope")
 AUTO_FRACTION = 0.25  # default: auto mode covers the first quarter of the way from safe to each limit
 ON_TRIP = ("safe", "hold")
+# words a lab's own name for a setting can't be: a run's columns, and what conditions and expressions say
+NOT_NAMES = {"i", "t", "time", "repeat", "stabilizing", "gap_s", "on", "off", "true", "false", "and", "or", "not",
+             "if", "else", "pi", "col"}
 
 
 class ConfigError(ValueError):
@@ -114,6 +117,7 @@ class LabConfig:
     auto_fraction: float = AUTO_FRACTION
     watches: List[Dict[str, Any]] = field(default_factory=list)  # watches written in the lab config (see monitor.py)
     observe_only: bool = False   # older auto-setup labs: every instrument counts as added by Kelvin (see added_by)
+    names: Dict[str, str] = field(default_factory=dict)   # the lab's own names for settings and readings (names:)
 
     def unreviewed(self) -> List[str]:
         """Real instruments whose limits no person has reviewed: Kelvin added them (or set up the whole lab)."""
@@ -356,10 +360,32 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
         err("observe_only", "must be true or false")
         observe = True
 
+    # names: the lab's own names for settings and readings (a Special Measure rack's channels: Vbg, X_A), which
+    # plans and the chat may use for instrument.parameter; one whose instrument isn't in the lab now waits for it
+    names: Dict[str, str] = {}
+    raw_names = data.get("names") or {}
+    if not isinstance(raw_names, dict):
+        err("names", "a mapping of a name to instrument.parameter")
+        raw_names = {}
+    for alias, key in raw_names.items():
+        alias, key = str(alias), str(key or "")
+        path = "names.%s" % alias
+        instr, dot, param = key.partition(".")
+        if not alias.isidentifier() or alias in NOT_NAMES:
+            err(path, "a name is letters, digits and _ (not starting with a digit), and not one of Kelvin's words")
+        elif alias in raw_instruments:
+            err(path, "%s is an instrument's name" % alias)
+        elif not dot or not instr or not param:
+            err(path, "%r should be instrument.parameter" % key)
+        elif instr in cards and param not in cards[instr].params:
+            err(path, "%s has no parameter %s" % (instr, param))
+        else:
+            names[alias] = key
+
     if errors:
         raise ConfigError(src, errors)
     return LabConfig(str(data.get("lab", "Lab")), instruments, interlocks, safe_actions, src, float(fraction), watches,
-                     observe)
+                     observe, names)
 
 
 def same_setup(a: LabConfig, b: LabConfig) -> bool:

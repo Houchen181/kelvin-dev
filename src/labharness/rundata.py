@@ -395,6 +395,8 @@ def column_info(columns: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
     for m in columns.get("measures") or []:
         info[m["key"]] = {"role": "measured", "unit": m.get("unit") or "", "kind": m.get("kind") or "scalar",
                           "x_unit": m.get("x_unit") or ""}
+    for s in columns.get("set") or []:   # moved with a loop (with:) or worked out (sets:): set, not measured
+        info[s["key"]] = {"role": "set", "unit": s.get("unit") or "", "kind": "scalar"}
     for k, v in info.items():
         v["quantity"] = quantity_of(k, v["unit"])
     return info

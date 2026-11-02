@@ -198,6 +198,7 @@ class Lab:
         inst.close()
 
     def resolve(self, key: str) -> Tuple[Instrument, ParamSpec]:
+        key = self.config.names.get(key, key)   # the lab's own name for it (names:): Vbg for dac.CH0
         instr, dot, param = key.partition(".")
         if not dot:
             raise KeyError("expected instrument.parameter, got %r" % key)

@@ -442,12 +442,93 @@ def test_a_script_isnt_edited_here_and_phones_get_none_of_it(tmp_path, monkeypat
         rt.scan_parts(entry["id"])
     for role in ("watch", "control"):
         assert not allowed(role, "POST", "/api/library")
+        assert not allowed(role, "POST", "/api/queue")   # nor the queue's fields and edits
     client, guard = portal(rt, tmp_path)
     from starlette.testclient import TestClient
     with TestClient(guard):
         guard.remote.port = 8771
         phone = TestClient(guard, base_url="http://192.168.1.50:8771")
         _, token = guard.remote.issue("Ana's phone", "control", "ios-ana")
-        for op in ("parts", "check", "save", "run"):
+        for op in ("parts", "check", "text", "save", "run"):
             r = phone.post("/api/library", headers={"X-Kelvin-Token": token}, json={"op": op, "parts": {}})
             assert r.status_code == 403, op
+
+
+# ------------------------------------------------------------------ the Runs panel's Schedule: ⇒, and Edit on a queued scan
+
+def test_the_schedules_arrow_puts_scans_after_the_selected_item_never_started(ran, tmp_path):
+    """⇒ (the Runs panel's Schedule): each selected scan or script after the selected queue item, in the order selected
+    (op run with queue and position: that place, 1 = first), filed and noted as from its Queue, nothing started and
+    nothing asked; a place past the end is the end; a step or a pasted item goes to a place too (op add)."""
+    from test_scan_library import portal
+    rt, entry = ran
+    client, _ = portal(rt, tmp_path)
+    asked = len(rt.gate.approver.requests)
+    for text in ("step: first\nwait: 1", "step: second\nwait: 1"):
+        assert client.post("/api/queue", json={"op": "add", "text": text}).status_code == 200
+    out = client.post("/api/library", json={"op": "run", "id": entry["id"], "queue": True, "position": 2}).json()
+    items = out["queue"]["items"]
+    assert [i["name"] for i in items] == ["first", "gate_sweep", "second"] and out["message"] == "added gate_sweep as #2"
+    assert out["queue"]["state"] == "idle" and not items[1]["then_pause"] and items[1]["library"] == entry["id"]
+    then = client.post("/api/library", json={"op": "run", "id": entry["id"], "queue": True, "position": 3}).json()
+    assert [i["name"] for i in then["queue"]["items"]] == ["first", "gate_sweep", "gate_sweep", "second"]
+    script = tmp_path / "probe.py"
+    script.write_text("print('hi')\n", encoding="utf-8")
+    probe = rt.library.add_script(script)   # a script a person imported goes there too, as its Queue sends it
+    got = client.post("/api/library", json={"op": "run", "id": probe["id"], "queue": True, "position": 1})
+    assert got.status_code == 200, got.text
+    assert [i["kind"] for i in got.json()["queue"]["items"]][:2] == ["script", "step"]
+    last = client.post("/api/library", json={"op": "run", "id": entry["id"], "queue": True, "position": 99}).json()
+    assert last["queue"]["items"][-1]["name"] == "gate_sweep" and last["message"] == "added gate_sweep as #6"
+    for bad in (0, -1, "2", True, 1.5):
+        r = client.post("/api/library", json={"op": "run", "id": entry["id"], "queue": True, "position": bad})
+        assert r.status_code == 400 and "position" in r.json()["error"], bad
+    step = client.post("/api/queue", json={"op": "add", "text": "step: third\nwait: 1", "position": 3}).json()
+    assert [i["name"] for i in step["items"]][:4] == ["probe.py", "first", "third", "gate_sweep"]
+    assert len(rt.gate.approver.requests) == asked and rt.queue.state == "idle"
+
+
+def test_a_scan_waiting_in_the_queue_is_edited_and_saved_back_into_its_item(ran, tmp_path):
+    """Edit on a queued scan: the editor opens that item's plan (op parts with item: its id or #n), Save makes its plan's
+    text from the parts (op text, nothing kept) and puts it back into the item (/api/queue op edit), which checks it as
+    any change; a running item isn't changed, a step or a script isn't opened in the editor, and a step's fields come
+    as written (/api/queue op fields), for the step row."""
+    from test_scan_library import portal
+    rt, entry = ran
+    client, _ = portal(rt, tmp_path)
+    item = client.post("/api/library", json={"op": "run", "id": entry["id"], "queue": True}).json()["queue"]["items"][-1]
+    opened = client.post("/api/library", json={"op": "parts", "item": item["id"]}).json()
+    assert opened["item"] == item["id"] and opened["library"] == entry["id"] and opened["id"] is None
+    assert opened["name"] == "gate_sweep" and opened["check"]["points"] == 5 and opened["check"]["problems"] == []
+    assert {"key": "smu.V", "unit": "V", "drive": True} in opened["lab"]["set"]
+    assert client.post("/api/library", json={"op": "parts", "item": "#1"}).json()["item"] == item["id"]   # by its place
+    parts = opened["parts"]
+    parts["loops"][0].update(to=1)
+    text = client.post("/api/library", json={"op": "text", "parts": parts}).json()["text"]
+    assert yaml.safe_load(text)["sweep"] == {"smu.V": {"from": 0, "to": 1, "step": 0.5}}
+    kept = rt.library_view()
+    edited = client.post("/api/queue", json={"op": "edit", "item": item["id"], "text": text})
+    assert edited.status_code == 200, edited.text
+    (now,) = [i for i in edited.json()["items"] if i["id"] == item["id"]]
+    assert now["text"] == text.strip() + "\n" and now["status"] == "waiting" and now["library"] == entry["id"]
+    assert rt.library_view() == kept                                  # Save into the queue keeps nothing in the library
+    over = client.post("/api/library", json={"op": "text", "parts": dict(parts, loops=[dict(parts["loops"][0], to=99)])})
+    refused = client.post("/api/queue", json={"op": "edit", "item": item["id"], "text": over.json()["text"]})
+    assert refused.status_code == 400 and "outside" in refused.json()["error"]
+    assert rt.queue.find(item["id"]).text == now["text"]              # as it was
+    for bad in ({"loops": [{}]}, "nope"):
+        assert client.post("/api/library", json={"op": "text", "parts": bad}).status_code == 400
+    rt.queue.mark(rt.queue.find(item["id"]), "running")
+    busy = client.post("/api/queue", json={"op": "edit", "item": item["id"], "text": text})
+    assert busy.status_code == 400 and "is running" in busy.json()["error"]
+    rt.queue.mark(rt.queue.find(item["id"]), "done")
+    step = client.post("/api/queue", json={"op": "add", "text": "step: settle\nstabilize: { read: tc.T_sample, "
+                                                               "within: 0.05 }"}).json()["items"][-1]
+    r = client.post("/api/library", json={"op": "parts", "item": step["id"]})
+    assert r.status_code == 400 and r.json()["error"] == "settle is a step, not a scan"
+    assert client.post("/api/library", json={"op": "parts", "item": "nope"}).status_code == 404
+    fields = client.post("/api/queue", json={"op": "fields", "item": step["id"]}).json()
+    assert fields == {"item": step["id"], "kind": "step",
+                      "fields": {"step": "settle", "stabilize": {"read": "tc.T_sample", "within": 0.05}}}
+    assert client.post("/api/queue", json={"op": "fields", "item": "nope"}).status_code == 404
+    assert len(rt.queue.items) == 2                                   # fields and parts changed nothing

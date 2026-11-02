@@ -1052,8 +1052,9 @@ body.resizing .plot-svg { pointer-events: none; }
 .lib-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
 .lib-label { min-width: 140px; color: var(--text-2); }
 .q-badge { margin-left: 6px; background: var(--accent-soft); color: var(--text); }
-#open-queue.live .q-badge { background: var(--accent); color: var(--accent-ink); }
-/* the runs pane's header: Runs · Scans · Queue; the open runs' tabs in a row below it */
+#open-schedule.live .q-badge { background: var(--accent); color: var(--accent-ink); }
+/* the runs pane's header: Schedule · History (the Schedule's tab out of sight: the kit, at the end); the open runs' tabs
+   in a row below it */
 .runs-seg button { display: inline-flex; align-items: center; padding: 5px 12px; font-size: 13px; }
 .runs-seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .runs-seg .badge { height: 16px; min-width: 16px; font-size: 12px; }
@@ -1089,13 +1090,35 @@ body.resizing .plot-svg { pointer-events: none; }
 .ra-conds td .tag { margin-left: 6px; }
 .ra-actions { display: flex; gap: 8px; align-items: center; }
 .tag.warn { color: var(--warn); border-color: var(--warn-line); }
+/* the Schedule, as Special Measure's window: the scans and the queue side by side when the pane has room (full screen
+   too), else the scans above the queue; ⇒ between them, ⇓ when one is above the other. Each list scrolls on its own */
+.schedule-view { container-type: inline-size; height: 100%; }
+.sched { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1.2fr) auto minmax(0, 1fr);
+  height: 100%; min-height: 540px; padding: 10px 12px 12px; }
+.sched-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
+.sched-col > * { flex-shrink: 0; }
+.sched-col > p { margin: 0; }
+.sched-col > p:empty { display: none; }
+.sched-list { flex: 1 1 auto; min-height: 60px; overflow-y: auto; display: grid; gap: 10px; align-content: start; padding: 1px 2px 2px; }
+.sched-mid { display: flex; align-items: center; justify-content: center; padding: 6px 0; }
+.sched-arrow { flex: none; width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line-strong); background: var(--raised);
+  color: var(--accent); font-size: 21px; line-height: 1; cursor: pointer; display: grid; place-items: center; padding: 0 0 2px; }
+.sched-arrow:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.sched-arrow:disabled { color: var(--muted); opacity: .55; cursor: default; }
+.sched-arrow.small { width: 30px; height: 30px; font-size: 17px; }
+.sched-arrow .to-side { display: none; }
+@container (min-width: 700px) {
+  .sched { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  .sched-mid { padding: 0 8px; }
+  .sched-arrow .to-side { display: inline; }
+  .sched-arrow .to-below { display: none; }
+}
 /* Scans: Kelvin's scans and the person's scripts */
-.scans-view { padding: 12px 12px 24px; display: grid; gap: 10px; align-content: start; }
 .scans-view h3 { font-size: 13px; font-weight: 650; color: var(--text-2); margin: 4px 0 6px; }
-.scans-view > p { margin: 0; }
-.scans-view > p:empty { display: none; }
-.scans-top { display: flex; gap: 8px; align-items: center; }
+.scans-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .scans-top .btn { flex: none; white-space: nowrap; }
+.scans-top .pane-filter { flex: 1 1 70px; width: auto; }
+#scans-edit { margin-left: auto; }
 .scans-path { display: flex; gap: 8px; }
 .scans-path input { flex: 1; min-width: 0; border: 1px solid var(--line-strong); border-radius: 8px; padding: 5px 9px; font-size: 13px;
   background: var(--raised); font-family: ui-monospace, Consolas, monospace; }
@@ -1125,10 +1148,18 @@ body.resizing .plot-svg { pointer-events: none; }
   padding: 3px 6px; background: var(--raised); font-size: 13px; font-variant-numeric: tabular-nums; }
 .lib-args { grid-column: 1 / -1; font: 12.5px ui-monospace, Consolas, monospace; color: var(--muted); }
 .lib-problem { grid-column: 1 / -1; }
-.queue-view { padding: 14px 16px 24px; display: grid; gap: 12px; }
-.q-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.q-head .q-state { font-weight: 600; }
-.q-head .q-reason { color: var(--muted); font-size: 13px; flex: 1 1 200px; }
+/* the queue: its state, Start and Pause (Special Measure's RUN and PAUSE), Edit ↑ ↓ ✕ for the selected item, the list */
+.q-top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.q-top h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--muted); }
+.q-top .q-state { flex: none; font-weight: 600; font-size: 13.5px; white-space: nowrap; }
+.q-top .q-reason { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }   /* the rest in its title */
+.q-top .icon-btn { flex: none; align-self: center; padding: 4px; margin-left: auto; }
+.q-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.q-big { min-width: 84px; padding: 7px 16px; font-size: 14px; }
+.q-move button { font-size: 14px; }
+.q-move button:disabled { opacity: .4; cursor: default; background: none; }
+.queue-view > .q-list { flex: 1 1 auto; min-height: 60px; overflow-y: auto; align-content: start; padding: 2px; }
 .q-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .q-item { display: grid; grid-template-columns: 22px auto minmax(0, 1fr) auto; align-items: center; gap: 4px 8px; padding: 8px 10px;
   border: 1px solid var(--card-line); border-radius: 10px; background: var(--card); box-shadow: var(--card-shadow); font-size: 13.5px; }
@@ -1147,9 +1178,27 @@ body.resizing .plot-svg { pointer-events: none; }
 .q-sub .q-status { margin-right: 8px; }
 .q-item.failed .q-status, .q-item.stopped .q-status { color: var(--warn); }
 .q-item.done .q-status { color: var(--ok); }
-.q-add textarea { width: 100%; min-height: 110px; }
-.q-add .add-row input.q-pos { width: 70px; flex: none; }
-.q-foot { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.q-item.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--raised)); }
+.q-item.dragging { opacity: .45; }
+.q-item.drop-before { box-shadow: 0 -3px 0 0 var(--accent); }
+.q-list.drop-end > li:last-child { box-shadow: 0 3px 0 0 var(--accent); }
+.q-list.drop-end > li.q-none { box-shadow: none; outline: 2px dashed var(--accent); outline-offset: 2px; }
+.q-none { padding: 10px 4px; }
+/* the step row (Special Measure's command box, typed), and Paste a plan */
+.step-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.step-f { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; flex: 1 1 180px; min-width: min(100%, 180px); }
+.step-key { flex: 1 1 80px; min-width: 80px; }
+#step-settle { order: 1; flex-basis: 100%; }   /* its four fields on a line of their own, under the choice and ⇒ */
+.step-go { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.step-go .icon-btn { padding: 4px; }
+.step-go .icon-btn svg { width: 15px; height: 15px; }
+.step-foot { display: flex; align-items: baseline; gap: 10px; margin-top: -4px; }
+.step-foot .link { padding: 0 2px; }
+.step-foot .hint { overflow-wrap: anywhere; }
+.q-paste { display: grid; gap: 6px; }
+.q-paste textarea { width: 100%; min-height: 110px; max-height: 40vh; resize: vertical; border: 1px solid var(--line-strong);
+  border-radius: 8px; padding: 7px 9px; background: var(--raised); }
+.q-paste-foot { display: flex; align-items: center; gap: 8px; }
 .pane-menu-wrap { position: relative; }
 .pane-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 10; width: 320px; max-height: 60vh; overflow-y: auto;
   background: var(--raised); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: var(--shadow); padding: 4px; }
@@ -1419,14 +1468,7 @@ body.resizing .plot-svg { pointer-events: none; }
 .runpane .pane-head > .runs-seg { margin-left: -6px; }   /* "Runs" lines up with the other panes' titles */
 .an-unit { color: var(--muted); font-size: 12.5px; }
 
-/* ---------- Scans: the selected rows, and the bar that acts on them ---------- */
-.scans-pick { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 6px; padding: 5px 6px 5px 10px;
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 10px;
-  background: color-mix(in srgb, var(--accent) 9%, var(--raised)); box-shadow: var(--shadow); }
-.pick-what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
-.scans-pick .btn { flex: none; white-space: nowrap; }
-.scans-pick .icon-btn { padding: 4px; }
-.scans-pick .icon-btn svg { width: 15px; height: 15px; }
+/* ---------- Scans: the selected rows, numbered in the order ⇒ adds them ---------- */
 .q-item.lib.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--raised)); }
 .lib-order { flex: none; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; display: inline-grid; place-items: center;
   background: var(--accent); color: var(--accent-ink); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -1481,6 +1523,13 @@ body.resizing .plot-svg { pointer-events: none; }
 .ed-set { flex-wrap: nowrap; gap: 6px; }
 .ed-set .ed-key { flex: 1 1 0; }
 .ed-eq { color: var(--muted); }
+.ed-expr { flex: 1.4 1 0; min-width: 110px; font-family: ui-monospace, Consolas, monospace; }
+.ed-with { gap: 6px; }
+.ed-with .ed-key { flex: 1 1 120px; }
+.ed-with .icon-btn { padding: 3px; }
+.ed-with .icon-btn svg { width: 14px; height: 14px; }
+.ed-loop-reads { margin-top: 2px; }
+.ed-loop-reads .ed-add { flex: 1 1 160px; }
 .ed-plan { position: relative; }
 .ed-plan pre { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--code); font: 12.5px/1.5 ui-monospace, Consolas, monospace;
   overflow: auto; max-height: 40vh; }
@@ -1513,10 +1562,11 @@ body.resizing .plot-svg { pointer-events: none; }
 .topbar-right .pill .badge, .topbar-right .pill .live-dot { position: absolute; top: -5px; right: -5px; }
 /* Home takes the conversation's place */
 .app.home-on #scroller, .app.home-on .composer-wrap, .app.home-on #chat-title, .app.home-on #wake-bar { display: none !important; }
-/* the Runs pane is the runs: the scans are the sequence's functions now, and the queue is the sequence */
-#open-scans, #open-queue { display: none; }
+/* the Runs pane is the runs, its History: the scans are the sequence's functions now, and the queue is the sequence, so
+   the Schedule (the scans beside the queue) stays out of sight: its tab hidden, and what showed it opens the sequence */
+#open-schedule { display: none; }
 #runs-seg { border: 0; overflow: visible; }
-#runs-seg #open-runs { background: none; color: var(--text); font-size: 15px; font-weight: 600; padding: 4px 6px; pointer-events: none; }
+#runs-seg #open-history { background: none; color: var(--text); font-size: 15px; font-weight: 600; padding: 4px 6px; pointer-events: none; }
 .seq-badge { background: var(--accent-soft); color: var(--accent); }
 #toggle-seq.live .seq-badge { background: var(--accent); color: var(--accent-ink); }
 

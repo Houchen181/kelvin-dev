@@ -298,6 +298,24 @@ def test_a_ladder_adds_one_copy_of_the_items_per_value(tmp_path, scripts):
     assert rt.queue_ladder([scan.id, step.id], "smu.V", [0.3]).startswith("added 2 items")   # the scan goes along
 
 
+def test_a_ladder_takes_the_labs_own_names_as_the_queue_does(tmp_path):
+    """A lab's own name for a setting (names:, a Special Measure channel's) stands for its instrument.parameter in a
+    step's set values and a scan's setup, as queue_add takes one: the copies keep the instruments' own names."""
+    rt = virtual(tmp_path, [])
+    rt.lab.config.names.update(Vsd="smu.V", amp="lockin.amplitude")
+    rt.queue_add("step: settle\nwait: 60")
+    rt.queue_add(SWEEP)
+    step, scan = rt.queue.items
+    n = len(rt.queue.items)
+    assert rt.queue_ladder([step.id], "Vsd", [0.1, 0.2]) == "added 2 items: Vsd = 0.1, 0.2"
+    assert [yaml.safe_load(i.text)["set"] for i in rt.queue.items[n:]] == [{"smu.V": 0.1}, {"smu.V": 0.2}]
+    n = len(rt.queue.items)
+    assert rt.queue_ladder([scan.id], "amp", [0.01, 0.02]).startswith("added 2 items")
+    setups = [yaml.safe_load(i.text)["setup"] for i in rt.queue.items[n:]]
+    assert [s["lockin.amplitude"] for s in setups] == [0.01, 0.02] and not any("amp" in s for s in setups)
+    assert "outside the limits" in rt.queue_ladder([step.id], "Vsd", [1000])   # checked as the setting it names
+
+
 # ------------------------------------------------------------------ what the blocks show, and what it costs
 
 def test_the_view_reads_a_scripts_file_only_when_it_changes(tmp_path, scripts, monkeypatch):

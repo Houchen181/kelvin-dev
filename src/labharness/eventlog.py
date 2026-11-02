@@ -273,10 +273,11 @@ class RunStore:
         self.folders = folders
         self.noted = noted
 
-    def _run_id(self, root: Optional[Path], plan_name: str) -> str:
+    def _run_id(self, root: Optional[Path], plan_name: str, when: Optional[float] = None) -> str:
         """date-time-plan, the plan's part short enough that the run's folder and every file Kelvin keeps in it fit
-        in a Windows path (a deep data folder leaves less room: the plan's part shrinks to a hash, then goes)."""
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        in a Windows path (a deep data folder leaves less room: the plan's part shrinks to a hash, then goes). when:
+        the time it was taken (old data imported), else now."""
+        stamp = (datetime.fromtimestamp(when) if when is not None else datetime.now()).strftime("%Y%m%d-%H%M%S")
         most = NAME_MAX
         if root is not None and os.name == "nt":
             room = PATH_MAX - len(str(root)) - len(stamp) - 4 - INSIDE_MAX   # "\", "-", and "-2" for a taken name
@@ -290,10 +291,11 @@ class RunStore:
         return run_id
 
     def create(self, plan_name: str, plan: Dict[str, Any], operator: str, folder: Any = None,
-               meta: Optional[Dict[str, Any]] = None) -> RunRecord:
+               meta: Optional[Dict[str, Any]] = None, when: Optional[float] = None) -> RunRecord:
         """Every run's record is made here: plans (and a queue's scans and a recipe's stages) and scripts alike.
-        meta: what the run's record says from its start (where it ran, whose work it is), as noted sees it."""
-        rec = self._create(plan_name, plan, operator, folder)
+        meta: what the run's record says from its start (where it ran, whose work it is), as noted sees it. when: the
+        time old data imported was taken, for its id (and so its place among the runs)."""
+        rec = self._create(plan_name, plan, operator, folder, when)
         rec.meta.update(meta or {})
         if self.noted is not None:
             try:
@@ -302,15 +304,16 @@ class RunStore:
                 pass
         return rec
 
-    def _create(self, plan_name: str, plan: Dict[str, Any], operator: str, folder: Any = None) -> RunRecord:
+    def _create(self, plan_name: str, plan: Dict[str, Any], operator: str, folder: Any = None,
+                when: Optional[float] = None) -> RunRecord:
         root = Path(folder) if folder and self.root else self.root
-        run_id = self._run_id(root, plan_name)
+        run_id = self._run_id(root, plan_name, when)
         if root is None or root == self.root:
             return self._record(run_id, root / run_id if root else None, plan, operator)
         try:
             rec = RunRecord(run_id, root / run_id, plan, operator)
         except OSError as e:   # the chat's folder is away (a drive, a server): the run still keeps its data
-            run_id = self._run_id(self.root, plan_name)   # the data folder may be deeper than the chat's
+            run_id = self._run_id(self.root, plan_name, when)   # the data folder may be deeper than the chat's
             rec = self._record(run_id, self.root / run_id, plan, operator)
             rec.moved = "the chat's folder %s could not be written (%s), so this run is in %s" % (
                 root, e.strerror or e, rec.path)
