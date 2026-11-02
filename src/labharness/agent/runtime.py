@@ -5475,7 +5475,7 @@ class LabRuntime:
             x.update({k: t[k] for k in ("title", "text", "summary", "gaps")}, index=s.get("index", 0))
         taken = set(self.lab.config.instruments) | {i["name"] for i in view["instruments"]}
         loaded = self._sm_keys([i for i in view["instruments"] if i.get("used") or i.get("in_lab")], None)[0]
-        view["names"] = {ch: k for ch, (k, _f) in loaded.items() if ch.isidentifier() and ch not in taken
+        view["names"] = {ch: k for ch, (k, *_) in loaded.items() if ch.isidentifier() and ch not in taken
                          and ch not in self.lab.config.names}   # the channels of the instruments the script loads
         return view
 
@@ -5497,8 +5497,8 @@ class LabRuntime:
                                                                                                     taken[param])
             elif param:
                 taken[param] = ch.name
-            view_ch.update(param=param, why=why)
-            spec = card.params.get(param) if card is not None and param else None
+            view_ch.update(param=param, why=why, set_param=specialmeasure.set_param_of(card, param))
+            spec = card.params.get(view_ch["set_param"] or param) if card is not None and param else None
             if spec is None or not spec.numeric or not spec.is_drive:
                 continue
             ends = sorted(v * ch.factor for v in (ch.low, ch.high))
@@ -5511,16 +5511,17 @@ class LabRuntime:
             item["card"]["rates"] = rates
 
     @staticmethod
-    def _sm_keys(items: List[Dict[str, Any]], setup: Any) -> Tuple[Dict[str, Tuple[str, float]], Dict[str, Any]]:
+    def _sm_keys(items: List[Dict[str, Any]], setup: Any) -> Tuple[Dict[str, Tuple[Any, ...]], Dict[str, Any]]:
         """Each rack channel as a Kelvin key, by the names and channels the review gives its instruments; and the
         rack's function channels (specialmeasure.channel_map's forms)."""
         from .. import specialmeasure
-        keys: Dict[str, Tuple[str, float]] = {}
+        keys: Dict[str, Tuple[Any, ...]] = {}
         for item in items:
             name = item.get("in_lab") or item.get("name")
             for ch in item.get("channels") or []:
                 if name and ch.get("param"):
-                    keys[ch["name"]] = ("%s.%s" % (name, ch["param"]), float(ch.get("factor") or 1.0))
+                    keys[ch["name"]] = ("%s.%s" % (name, ch["param"]), float(ch.get("factor") or 1.0),
+                                        "%s.%s" % (name, ch["set_param"]) if ch.get("set_param") else None)
         functions = specialmeasure.channel_map(setup, {})[1] if setup is not None else {}
         return keys, functions
 
@@ -5565,8 +5566,8 @@ class LabRuntime:
                                                                         type(e).__name__]})
                 continue
             m = specialmeasure.RUN_FILE.match(path.name)
-            t = specialmeasure.translate(scan, keys, str(scan.get("name") or "") or (m.group(2) if m else path.stem),
-                                         functions)
+            t = specialmeasure.translate(scan, keys, (m.group(2) if m else "") or str(scan.get("name") or "")
+                                         or path.stem, functions)
             if t["plan"] is None:
                 missed.append({"scan": t["title"], "path": rel, "gaps": t["gaps"]})
                 continue
@@ -5619,7 +5620,7 @@ class LabRuntime:
             try:
                 table = smfiles.read_run(p)
                 m = specialmeasure.RUN_FILE.match(p.name)
-                got = self._imported(table, [str(p)], table.name or (m.group(2) if m else p.stem), by, when=mtime,
+                got = self._imported(table, [str(p)], (m.group(2) if m else "") or table.name, by, when=mtime,
                                      meta={"source": "specialmeasure", "sm_run": int(m.group(1)) if m else None})
             except Exception as e:
                 out["failed"].append({"file": p.name, "why": str(e).splitlines()[0][:200] if str(e) else

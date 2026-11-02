@@ -112,3 +112,58 @@ def test_kelvin_reads_a_special_measure_folder_in_a_chat_and_never_runs_it(bench
             return (await client.list_tools()).tools
     tool = next(t for t in anyio.run(main) if t.name == "survey_specialmeasure")
     assert tool.annotations.read_only_hint   # it reads the lab's files, never changes anything
+
+
+def test_saved_scans_and_runs_come_in_and_old_runs_import_with_the_day_they_were_taken(bench):
+    pytest.importorskip("numpy")
+    import os
+    import matfiles
+    from labharness import load_plan, rundata
+    (runtime, settings, store), bus, home = bench
+    folder = home / "SpecialMeasure"
+    (folder / "setups").mkdir(parents=True)
+    (folder / "setups" / "smsetup_rig.m").write_text(RACK, encoding="utf-8")
+    (folder / "data").mkdir()
+    gate = matfiles.loop(npoints=5, setchan=["Vbg"], getchan=["X_A", "Ibg"], ranges=[(-1, 1)], waittime=0.1,
+                         startwait=2)
+    saved = matfiles.sm_run([gate], [], name="gate sweep", with_data=False, escapefn="@(x)smset('Vbg',0)")["scan"]
+    matfiles.write(folder / "gate.mat", {"smscan": saved})
+    other = matfiles.sm_run([matfiles.loop(npoints=3, setchan=["Vref_A"], getchan=["X_A"], ranges=[(0.01, 0.1)])],
+                            [], name="drive", with_data=False)["scan"]
+    matfiles.write(folder / "list.mat", {"scans": matfiles.Cell([saved, other])})   # Special Measure's Save Scans
+    import numpy as np
+    run = matfiles.write(folder / "data" / "007_gate.mat",
+                         matfiles.sm_run([gate], [np.arange(5.0).reshape(5, 1), np.zeros((5, 1))], name="gate sweep"))
+    os.utime(run, (1600000000, 1600000000))   # 2020-09-13
+    client, headers = client_for((runtime, settings, store), {"scripted": Scripted([])})
+    with client:
+        view = client.post("/api/instruments/specialmeasure", json={"folder": str(folder)}, headers=headers).json()
+        scans = {(s["name"], s["source"]) for s in view["scans"]}
+        assert scans == {("gate sweep", "saved"), ("drive", "saved"), ("gate", "run")}   # one per layout
+        gate_scan = next(s for s in view["scans"] if s["name"] == "gate sweep")
+        plan = load_plan(gate_scan["text"])
+        assert plan.axes[0].key == "source.V" and plan.axes[0].first_settle == 2.1
+        assert [k for k, _ in plan.measure] == ["lockin_a", "source"] and not gate_scan["gaps"]
+        assert view["runs"] == {"data": 1}
+        chosen = [{"rack": i["rack_name"], "name": i["name"], "card": i["card"]["id"]} for i in view["instruments"]
+                  if i["card"]]
+        body = {"folder": str(folder), "setup": view["setup"], "instruments": chosen,
+                "scans": [{"path": s["path"], "index": s["index"]} for s in view["scans"]] +
+                         [{"path": "../outside.mat", "index": 0}]}
+        kept = client.post("/api/instruments/specialmeasure/scans", json=body, headers=headers).json()
+        assert sorted(k["name"] for k in kept["kept"]) == ["drive", "gate", "gate sweep"]
+        assert kept["not"] == [{"scan": "../outside.mat", "path": "../outside.mat",
+                                "gaps": ["not a file in %s" % folder]}]
+        entry = next(e for e in kept["library"]["scans"] if e["name"] == "gate sweep")
+        assert entry["source"] == "specialmeasure" and "Special Measure" in load_plan(entry["text"]).description
+        r = client.post("/api/instruments/specialmeasure/runs", json={"folder": str(folder), "runs": ["data"]},
+                        headers=headers).json()
+        assert [x["file"] for x in r["imported"]] == ["007_gate.mat"] and not r["failed"], r
+        assert r["imported"][0]["run"].startswith("20200913-")   # named for the day it was taken
+        again = client.post("/api/instruments/specialmeasure/runs", json={"folder": str(folder), "runs": ["data"]},
+                            headers=headers).json()
+        assert again["imported"] == [] and again["left"] == 1   # imported once
+        assert client.post("/api/instruments/specialmeasure/runs", json={"folder": str(folder), "runs": [".."]},
+                           headers=headers).status_code == 400
+        rec = rundata.load(runtime.runs.find(r["imported"][0]["run"]))
+        assert rec.meta["source"] == "specialmeasure" and rec.meta["sm_run"] == 7 and len(rec.rows) == 5

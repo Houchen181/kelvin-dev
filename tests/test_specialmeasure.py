@@ -179,7 +179,7 @@ def test_a_scan_becomes_a_plan_its_loops_outer_first_and_its_channels_together()
     t = translate(SCAN, KEYS)
     assert not t["gaps"], t["gaps"]
     plan = t["plan"]
-    assert plan["description"] == "From Special Measure: T=4K; Vbias=100uV"
+    assert plan["description"] == "From Special Measure"   # its comments stay in the file
     assert plan["setup"] == {"lockin.amplitude": 0.1}   # set: 1 sets it; set: 0 is recorded (a run's snapshot)
     assert list(plan["sweep"]) == ["lockin.frequency", "dac.CH0"]
     outer, inner = plan["sweep"]["lockin.frequency"], plan["sweep"]["dac.CH0"]
@@ -237,3 +237,13 @@ def test_formulas_and_escape_functions_are_read_as_text():
     assert zeroes_of("sf%0@(x)smset(['Vtg';'Vbg'],[0,0])") == {"Vtg": 0.0, "Vbg": 0.0}
     assert zeroes_of("@(x)smset('Vbg',0)") == {"Vbg": 0.0}
     assert zeroes_of("@(x) disp('done')") is None
+
+
+def test_a_channel_set_through_its_set_point_is_swept_as_the_set_point_and_read_as_itself():
+    keys = dict(KEYS, T=("optc.T", 1.0, "optc.T_set"))
+    scan = {"name": "cooldown", "loops": [{"npoints": 3, "setchan": ["T"], "setchanranges": [[10, 2]],
+                                           "getchan": ["T", "X_A"]}],
+            "consts": [{"setchan": "T", "val": 10, "set": 1}]}
+    plan = translate(scan, keys)["plan"]
+    assert list(plan["sweep"]) == ["optc.T_set"] and plan["measure"] == ["optc.T", "lockin.X"]
+    assert plan["setup"] == {"optc.T_set": 10}

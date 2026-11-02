@@ -222,11 +222,30 @@ def scan_of(path: Any) -> Dict[str, Any]:
     scan = next((variables[k] for k in ("scan", "smscan") if is_scan(variables.get(k))), None)
     if scan is None:
         raise DataError("%s holds no Special Measure scan (a scan or smscan with loops)" % p.name)
+    return _plain_scan(scan)
+
+
+def _plain_scan(scan: Any) -> Dict[str, Any]:
     out = matfile.plain(scan)
     for k in ("loops", "consts", "disp"):
         if k in scan:
             out[k] = [matfile.plain(v) for v in items(scan[k])]
     return out
+
+
+def scans_in(path: Any) -> List[Dict[str, Any]]:
+    """The scans a file saved from Special Measure holds, each as scan_of gives one: its scan editor's (smscan, or a
+    run's scan), and its main window's list of scans (Save Scans: scans, a cell of them). [] for a file with none
+    (a figure's data, a calibration), told by the variables' names first, without reading their values."""
+    p = Path(str(path)).expanduser()
+    names = {w["name"] for w in matfile.whos(p)}
+    wanted = [k for k in ("smscan", "scan", "scans") if k in names]
+    if not wanted:
+        return []
+    variables = matfile.load(p, wanted)
+    found = [variables[k] for k in ("smscan", "scan") if is_scan(variables.get(k))]
+    found += [v for v in items(variables.get("scans")) if is_scan(v)]
+    return [_plain_scan(s) for s in found]
 
 
 def read_run(path: Any) -> Table:

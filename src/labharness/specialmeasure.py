@@ -38,12 +38,19 @@ RECENT_RUNS = 200           # the newest runs whose scans are read for the scans
 SKIP_DIRS = {".git", ".svn", ".hg", "__pycache__", "node_modules", ".venv", "venv"}
 RUN_FILE = re.compile(r"^(\d{3,4})_(.+)\.mat$", re.I)   # smrun's own names: run number, then the scan's name
 DUMMIES = {"test", "time"}  # sm's own instruments without hardware: a counter and the clock
+MAX_SCANS = 80              # scans the review lists: the newest, one per layout
+# Special Measure's model names a card's model doesn't say (no model number, or a maker's word in front): its card
+KNOWN_CARDS = {"andorixon": "andor/ccd", "andor": "andor/ccd", "optc": "qd/multivu", "ppms": "qd/multivu",
+               "dynacool": "qd/multivu", "rigoldg1022z": "rigol/dg1000z", "sp150": "princeton/spectrapro",
+               "sp300": "princeton/spectrapro", "sp2150": "princeton/spectrapro", "sp2300": "princeton/spectrapro",
+               "sp2500": "princeton/spectrapro", "sp2750": "princeton/spectrapro", "thorkdc101": "thorlabs/kdc101"}
 # the words a channel's name and a card parameter's name or label share, for a channel no command says
 SYNONYMS = {"theta": ("phase", "theta"), "phas": ("phase",), "freq": ("frequency", "freq"),
             "vref": ("amplitude", "sine_out", "level", "slvl"), "slvl": ("amplitude", "level"),
             "tau": ("tc", "time_constant", "timeconstant"), "oflt": ("tc", "time_constant"),
             "sens": ("sensitivity",), "v": ("v", "voltage", "volt", "level"), "i": ("i", "current", "curr"),
             "b": ("b", "field"), "t": ("t", "temperature", "temp", "t_sample"), "lambda": ("wavelength", "lambda"),
+            "temp": ("t", "temperature", "t_sample", "temp"), "field": ("b", "field"),
             "x": ("x",), "y": ("y",), "r": ("r", "magnitude", "mag"), "val": ("value", "reading", "v", "i")}
 
 
@@ -58,6 +65,7 @@ class Channel:
     factor: float = 1.0        # the instrument gets value * factor (sm's conversion factor)
     where: str = ""
     param: Optional[str] = None   # its card parameter, once a card fits
+    set_param: Optional[str] = None   # what sets it, where the card sets it through a set point (T_set for T)
     why: str = ""                 # how that was found
 
 
@@ -514,6 +522,16 @@ def _words(text: str) -> List[str]:
     return [w for w in re.split(r"[^a-z0-9]+", text.lower()) if w]
 
 
+def set_param_of(card: Any, param: Optional[str]) -> Optional[str]:
+    """The parameter that sets one sm reads and sets by one channel, where the card has them apart: the set point
+    whose read-back it is (a cryostat's T_set for T); None when the parameter is set itself."""
+    spec = card.params.get(param) if card is not None and param else None
+    if spec is None or spec.set_cmd is not None:
+        return None
+    drive = next((p for p in card.params.values() if p.readback == param and p.set_cmd is not None), None)
+    return drive.name if drive is not None else None
+
+
 def param_of(card: Any, channel: str, commands: List[str]) -> Tuple[Optional[str], str]:
     """The card parameter one of the instrument's channels is: by the command its driver sends for it, else by its
     name (THETA is a lock-in's phase, FREQ its frequency). (None, why) when neither says."""
@@ -624,7 +642,8 @@ def survey(path: Any, registry: Any = None, own: Iterable[Any] = (), read_mat: b
                 ri.inst.commands = started + ri.sends   # its driver's commands help name its card
                 key = (tuple(sorted(set(ri.inst.hints))), tuple(c.text for c in ri.inst.commands))
                 if key not in matched:
-                    matched[key] = scripts.match(ri.inst, registry, named_in="the rack (its sminst file)")
+                    matched[key] = scripts.match(ri.inst, registry, named_in="the rack (its sminst file)") or \
+                        _known(ri.model, registry)
                 ri.inst.card = dict(matched[key]) if matched[key] else None
                 ri.inst.commands = started
                 if ri.inst.card:
@@ -637,6 +656,16 @@ def survey(path: Any, registry: Any = None, own: Iterable[Any] = (), read_mat: b
     if read_mat and scans:
         _scans(out, files, base)
     return out
+
+
+def _known(model: str, registry: Any) -> Optional[Dict[str, Any]]:
+    """The card of a Special Measure model whose name a card doesn't say (KNOWN_CARDS), for a person to check."""
+    card_id = KNOWN_CARDS.get(re.sub(r"_\d+$", "", re.sub(r"[^a-z0-9_]", "", model.lower())))
+    if not card_id or card_id not in registry:
+        return None
+    card = registry.get(card_id)
+    return {"id": card.id, "model": card.model, "kind": card.kind, "sure": False,
+            "why": "Special Measure's %s is a %s" % (model, card.model.split(" (")[0]), "mapped": [], "limits": {}}
 
 
 def _driver(ri: RackInstrument, drivers: Dict[str, str], library: Dict[str, Path], texts: Dict[Path, str]) -> None:
@@ -692,6 +721,7 @@ def _params(ri: RackInstrument, registry: Any, texts: Dict[Path, str]) -> None:
     taken: Dict[str, str] = {}
     for ch in ri.channels:
         ch.param, ch.why = param_of(card, ch.channel, ri.numbered.get(ch.channel, []))
+        ch.set_param = set_param_of(card, ch.param)
         if ch.param and ch.param in taken:   # V2 beside V1: the instrument's second channel, another entry
             ch.why = "%s is %s's already: a second channel is an entry of its own" % (ch.param, taken[ch.param])
             ch.param = None
@@ -710,7 +740,8 @@ def _scans(out: Found, files: Dict[str, List[Path]], base: Path) -> None:
         out.unread.append("the .mat files (Kelvin's reader for them is missing)")
         return
     seen: Dict[str, Dict[str, Any]] = {}
-    for p in files["mat"][:MAX_SCAN_FILES]:
+    saved: Dict[str, Dict[str, Any]] = {}   # one per name and layout: the newest file
+    for p in sorted(files["mat"], key=lambda p: _mtime(p), reverse=True)[:MAX_SCAN_FILES]:
         try:
             scans = smfiles.scans_in(p)
         except Exception as e:
@@ -718,8 +749,12 @@ def _scans(out: Found, files: Dict[str, List[Path]], base: Path) -> None:
             continue
         for k, scan in enumerate(scans):
             name = str(scan.get("name") or "").strip() or (p.stem if len(scans) == 1 else "%s %d" % (p.stem, k + 1))
-            out.scans.append({"name": name, "path": str(p.relative_to(base)) if base in p.parents or p == base
-                              else str(p), "source": "saved", "scan": scan, "runs": 0, "index": k})
+            sig = layout(scan)   # the same scan saved again (as sm's GUI does before each run): the newest only
+            if sig in saved or len(out.scans) >= MAX_SCANS:
+                continue
+            saved[sig] = {"name": name, "path": str(p.relative_to(base)) if base in p.parents or p == base
+                          else str(p), "source": "saved", "scan": scan, "runs": 0, "index": k}
+            out.scans.append(saved[sig])
     newest = sorted(files["runs"], key=lambda p: _mtime(p), reverse=True)[:RECENT_RUNS]
     for p in newest:
         try:
@@ -733,8 +768,8 @@ def _scans(out: Found, files: Dict[str, List[Path]], base: Path) -> None:
         if sig in seen:
             seen[sig]["runs"] += 1
             continue
-        m = RUN_FILE.match(p.name)
-        name = str(scan.get("name") or "").strip() or (m.group(2) if m else p.stem)
+        m = RUN_FILE.match(p.name)   # a run's file names it surer than its scan's title, often another run's
+        name = (m.group(2) if m else "") or str(scan.get("name") or "").strip() or p.stem
         entry = {"name": name, "path": str(p.relative_to(base)) if base in p.parents else str(p), "source": "run",
                  "scan": scan, "runs": 1, "index": 0}
         seen[sig] = entry
@@ -909,7 +944,7 @@ def plan_name(text: str) -> str:
     return name or "scan"
 
 
-def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[str, float]], name: str = "",
+def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[Any, ...]], name: str = "",
               functions: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """A Special Measure scan as a Kelvin plan, by fixed rules: {plan (a mapping, None when it can't be translated),
     text (its YAML), title, summary, gaps (what didn't translate, in words)}.
@@ -926,14 +961,18 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[str, float]], name
     from .yamlio import dump_yaml
     functions = functions or {}
     gaps: List[str] = []
-    title = str(scan.get("name") or name or "scan").strip() or "scan"
+    title = str(name or scan.get("name") or "scan").strip() or "scan"   # a run's file names it surest
     loops = _loops(scan)
     if not loops:
         return {"plan": None, "text": "", "title": title, "summary": "", "gaps": ["it has no loops"]}
 
-    def key(ch: str) -> Tuple[Optional[str], float]:
+    def key(ch: str, setting: bool = False) -> Tuple[Optional[str], float]:
+        """A channel's Kelvin key; setting: as a loop, a constant or the end sets it (its set point, where the card
+        has one apart: channels' third item)."""
         hit = channels.get(ch)
-        return (hit[0], hit[1]) if hit else (None, 1.0)
+        if not hit:
+            return None, 1.0
+        return (hit[2] if setting and len(hit) > 2 and hit[2] else hit[0]), hit[1]
 
     missing: List[str] = []
     sweep: Dict[str, Any] = {}
@@ -998,12 +1037,12 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[str, float]], name
         if fn is not None:   # a function channel: a variable of the plan, and what its Function sets
             loop_key = first
         else:
-            loop_key, factor = key(first)
+            loop_key, factor = key(first, True)
             if loop_key is None:
                 missing.append(first)
                 continue
         a, b = spans[0]
-        factor0 = 1.0 if fn is not None else key(first)[1]
+        factor0 = 1.0 if fn is not None else key(first, True)[1]
         if not npoints and rng and len(rng) == n and n > 2 and not ranges:
             own["values"] = [_round(v * factor0) for v in rng]   # rng as a vector: its values
         else:
@@ -1014,7 +1053,7 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[str, float]], name
                 gaps.append("%s, a function channel, moves with %s: Kelvin moves settings with a loop, not "
                             "variables" % (ch, first))
                 return {"plan": None, "text": "", "title": title, "summary": "", "gaps": gaps}
-            kk, f = key(ch)
+            kk, f = key(ch, True)
             if kk is None:
                 missing.append(ch)
                 continue
@@ -1037,7 +1076,7 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[str, float]], name
             own["measure"] = reads
         if fn is not None:
             for dep, formula in fn["sets"].items():
-                kk, f = key(dep)
+                kk, f = key(dep, True)
                 if kk is None:
                     missing.append(dep)
                     continue
@@ -1063,15 +1102,13 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[str, float]], name
                     return {"plan": None, "text": "", "title": title, "summary": "", "gaps": gaps}
                 sets = {k: re.sub(r"(?<![\w.])%s(?![\w.(])" % re.escape(other), "(%s)" % _num(const), t)
                         for k, t in sets.items()}
-    plan: Dict[str, Any] = {"plan": plan_name(title)}
-    comments = scan.get("comments")
-    lines = [c.strip() for c in ([comments] if isinstance(comments, str) else _flat(comments or []))
-             if isinstance(c, str) and c.strip()]
-    plan["description"] = ("From Special Measure: %s" % "; ".join(lines))[:300] if lines else "From Special Measure"
+    # its comments stay in the file: a file's words never reach the model but as names (imports.py's rule), and a
+    # kept scan's text is what the model reads of it
+    plan: Dict[str, Any] = {"plan": plan_name(title), "description": "From Special Measure"}
     setup: Dict[str, Any] = {}
     for c in _consts(scan):
         if c["set"] and c["setchan"] not in functions:
-            kk, f = key(c["setchan"])
+            kk, f = key(c["setchan"], True)
             if kk is None:
                 gaps.append("the constant %s isn't a channel of the rack read" % c["setchan"])
             else:
@@ -1091,7 +1128,7 @@ def translate(scan: Dict[str, Any], channels: Dict[str, Tuple[str, float]], name
     if escape:
         after: Dict[str, Any] = {}
         for ch, v in escape.items():
-            kk, f = key(ch)
+            kk, f = key(ch, True)
             if kk is None:
                 gaps.append("the escape function sets %s, which isn't a channel of the rack read" % ch)
             else:
@@ -1156,10 +1193,10 @@ def _escape(scan: Dict[str, Any]) -> Dict[str, float]:
     return out
 
 
-def channel_map(setup: Setup, named: Dict[str, str]) -> Tuple[Dict[str, Tuple[str, float]], Dict[str, Dict[str, Any]]]:
+def channel_map(setup: Setup, named: Dict[str, str]) -> Tuple[Dict[str, Tuple[Any, ...]], Dict[str, Dict[str, Any]]]:
     """Each channel of a rack as a Kelvin key (named: each of its instruments' Kelvin name, by its rack name), with its
     multiplier; and its function channels: name → {variables, sets: {channel: formula}}."""
-    keys: Dict[str, Tuple[str, float]] = {}
+    keys: Dict[str, Tuple[Any, ...]] = {}
     functions: Dict[str, Dict[str, Any]] = {}
     for ri in setup.instruments:
         if ri.function:
@@ -1172,7 +1209,8 @@ def channel_map(setup: Setup, named: Dict[str, str]) -> Tuple[Dict[str, Tuple[st
             continue
         for ch in ri.channels:
             if ch.param:
-                keys[ch.name] = ("%s.%s" % (name, ch.param), ch.factor)
+                keys[ch.name] = ("%s.%s" % (name, ch.param), ch.factor,
+                                 "%s.%s" % (name, ch.set_param) if ch.set_param else None)
     return keys, functions
 
 
@@ -1183,4 +1221,4 @@ def names_of(setup: Setup, named: Dict[str, str], taken: Iterable[str] = ()) -> 
     blocked = set(taken) | set(named.values()) | RESERVED | {"on", "off", "true", "false", "and", "or", "not", "if",
                                                              "else", "pi", "e", "count"}
     keys, _ = channel_map(setup, named)
-    return {ch: k for ch, (k, _f) in keys.items() if ch not in blocked and re.fullmatch(r"[A-Za-z_]\w*", ch)}
+    return {ch: k for ch, (k, *_) in keys.items() if ch not in blocked and re.fullmatch(r"[A-Za-z_]\w*", ch)}
