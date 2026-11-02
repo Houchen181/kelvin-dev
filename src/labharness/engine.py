@@ -1328,6 +1328,10 @@ class RunEngine:
             for axis in plan.axes:
                 if getattr(axis, "instr", None) == name and axis.kind in ("instrument", "ramp"):
                     values[axis.param] = "swept"
+            for key, _ in plan.swept_settings():   # what moves with a loop, and what sets: works out
+                instr, _, param = key.partition(".")
+                if instr == name:
+                    values[param] = "swept"
             out[name] = settings_of(inst, values)
         return out
 

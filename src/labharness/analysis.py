@@ -1593,6 +1593,9 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
     chain.derived_readings). Returns {series: [...], quality: [...], issues: [...], assessment, next}."""
     meta = meta or {}
     derive = derive or {}
+    # a reading a loop takes once per value (loop:, a gate's leakage once per line) is the same on every point of its
+    # line: no curve along the inner sweep to fit, so it is kept, not fitted
+    measures = [m for m in measures if not m.get("loop")]
     series: List[Dict[str, Any]] = []
     issues: List[str] = []
     quality: List[str] = []
