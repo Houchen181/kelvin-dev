@@ -23,7 +23,6 @@ from labharness.labconfig import load_lab_config
 from labharness.plans import PlanError
 from labharness.scanqueue import load_script_item
 from labharness.sim.twin import World, sim_backend_factory
-from labharness.web.agent import DEFERRED
 from labharness.yamlio import load_yaml
 
 SAMPLE = '''
@@ -591,6 +590,8 @@ def test_check_script_names_an_experiments_actions(lab, folder, tmp_path):
 
 
 def test_set_live_is_with_the_scripts_tools():
+    pytest.importorskip("mcp")
+    from labharness.web.agent import DEFERRED
     assert "set_live" in DEFERRED["running the lab's own scripts"]
 
 
@@ -623,7 +624,9 @@ def test_a_rehearsal_loads_no_native_library(lab, folder):
         print("loaded")
     """)
     r = scriptrun.rehearse(lab, prepared(lab, folder, "native.py"))
-    assert not r.ok and any("a rehearsal reaches only the simulated lab" in p for p in r.problems), r.problems
+    # refused as ctypes loads it, or as the experiment does (ctypes' own import loads kernel32 on Windows: refused
+    # there, it fails as AttributeError); either way the process says what it refused
+    assert not r.ok and "its process refused: ctypes.dlopen" in r.problems, r.problems
 
 
 def test_a_rehearsal_writes_only_in_its_own_folder(lab, folder, tmp_path):
