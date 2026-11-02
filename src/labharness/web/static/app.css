@@ -662,6 +662,9 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .exp-name { display: flex; gap: 6px; align-items: center; font-size: 13px; }
 .exp-name input { width: 14em; }
 .exp-list .exp-action { max-width: 9em; }
+.rv-inputs { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 6px 0; }
+.rv-input { display: flex; gap: 4px; align-items: center; font-size: 13px; }
+.rv-input .bad { color: var(--bad, #c0392b); }
 .lv-names .why-lines { padding: 0 10px 8px 38px; }
 .add-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 220px) auto; gap: 8px; }
 .add-row input, .add-row select { border: 1px solid var(--line-strong); border-radius: 10px; padding: 7px 10px; background: var(--raised); color: var(--text); min-width: 0; }

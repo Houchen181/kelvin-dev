@@ -3597,6 +3597,24 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 return error(403, str(e))
         return None
 
+    async def runs_live(request: Request) -> Response:
+        """POST {name, value}: change a live input of the experiment running now, as the chat's set_live does, never
+        waiting for the lab; a value that moves a drive still passes the gate when the experiment applies it.
+        {said}, or 400 with Kelvin's words (no run, no such input, a value it doesn't take)."""
+        refused = experiments_refused(request)
+        if refused is not None:
+            return refused
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not str(body.get("name") or "").strip():
+            return error(400, "send {name, value}: the live input and its new value")
+        said = await asyncio.to_thread(runtime.set_live, str(body["name"]), body.get("value"), "", person(request))
+        if said.startswith(("not changed", "no experiment", "run ")):
+            return error(400, said)
+        return JSONResponse({"said": said})
+
     async def experiments_list(request: Request) -> Response:
         """GET: the lab's experiments (each with its latest version, standing, actions and live inputs) and the
         drafts nobody kept yet."""
@@ -3897,6 +3915,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/live", live),
         Route("/api/runs", runs),
         Route("/api/runs/stop", stop_run, methods=["POST"]),
+        Route("/api/runs/live", runs_live, methods=["POST"]),
         Route("/api/queue", queue, methods=["GET", "POST"]),
         Route("/api/library", library, methods=["GET", "POST"]),
         Route("/api/runs/{run_id}/again", run_again, methods=["GET", "POST"]),

@@ -153,3 +153,44 @@ def test_the_portal_has_translate_review_keep_and_the_lab_experiments():
                  "function openVersions(", "function runExperiment(", '"/api/labview/translate"',
                  '"/api/experiments/keep"', '"/approve"', '"Translate"', "Approve version", "new_version"):
         assert text in js, text
+
+
+# ------------------------------------------------------------------ live inputs in the run view (Task 3)
+
+LOOPS = '''
+import time
+from kelvin import lab, action, live, record   # VI: n1
+@action("scan", main=True)
+def scan():
+    step = 0
+    while not live("Break", False):           # VI: n2
+        lab.set("smu.V", 0.1)                  # VI: n3
+        record(step=step)
+        step += 1
+        time.sleep(0.2)
+'''
+
+
+def test_a_running_experiments_live_inputs_are_in_the_live_view_and_set_from_the_portal(portal):
+    from test_lab_experiments import person
+    from test_experiments import wait_until
+    rt, client, _ = portal
+    assert client.post("/api/runs/live", json={"name": "Break", "value": True}).status_code == 400   # nothing runs
+    keep_as(rt, LOOPS, "loops")
+    person(rt)
+    ran = {}
+    t = threading.Thread(target=lambda: ran.update(said=rt.run_script("loops")))
+    t.start()
+    wait_until(lambda: (rt.live_view() or {}).get("inputs"), 30)
+    assert rt.live_view()["inputs"] == {"Break": False}
+    r = client.post("/api/runs/live", json={"name": "Break", "value": "maybe"})
+    assert r.status_code == 400 and "true or false" in r.json()["error"]
+    r = client.post("/api/runs/live", json={"name": "Break", "value": "true"})
+    assert r.status_code == 200 and "Break is now True" in r.json()["said"], r.text
+    t.join(60)
+    assert "done" in ran["said"], ran
+
+
+def test_the_run_view_shows_live_inputs_to_set():
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "function liveInputs(" in js and '"/api/runs/live"' in js and "tab.inputs = v.inputs" in js

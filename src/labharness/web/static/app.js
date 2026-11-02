@@ -1107,6 +1107,7 @@
         tab.done = v.done; tab.total = v.total;
         if (v.eta_s !== tab.etaRaw || v.phase !== tab.phase) { tab.etaRaw = v.eta_s; tab.etaAt = Date.now(); }  // count down between updates
         tab.phase = v.phase;
+        tab.inputs = v.inputs || null;
         if (v.status !== "running") { setTabStatus(tab, "finishing"); await loadFinal(tab); continue; }
         renderRunView(tab);
         await sleep(500);
@@ -1133,6 +1134,7 @@
       catch (e) { toast(e.message); }
     });
     v.count = h("span", { class: "rv-count" });
+    v.inputs = h("div", { class: "rv-inputs", hidden: true });   // a running experiment's live inputs
     v.bar = h("i");
     v.barBox = h("div", { class: "bar" }, v.bar);
     v.analysis = h("div", { class: "rv-analysis" });
@@ -1153,7 +1155,7 @@
     back.addEventListener("click", showRunList);
     tab.body.replaceChildren(back,
       h("div", { class: "rv-head" }, v.state, h("code", { class: "rv-plan-name" }, tab.plan), h("div", { class: "spacer" }), v.stop),
-      h("div", { class: "rv-progress" }, v.count), v.barBox, v.analysis, v.files, v.plan, v.again, v.charts, v.foot, v.table);
+      h("div", { class: "rv-progress" }, v.count), v.inputs, v.barBox, v.analysis, v.files, v.plan, v.again, v.charts, v.foot, v.table);
     tab.view = v;
   }
 
@@ -1270,7 +1272,36 @@
     return { axes: tab.axes.map((a) => ({ key: a.key, unit: a.unit })), scalars: tab.measures.filter((m) => m.kind === "scalar"),
              rows: tab.rows, traces: tab.trace ? [tab.trace] : [], analysis: null };
   }
+  function liveInputs(tab) {   // a running experiment's live inputs: changed here as the chat's set_live changes them
+    const v = tab.view, inputs = tab.status === "running" ? tab.inputs : null;
+    if (!v || !v.inputs) return;
+    v.inputs.hidden = !inputs || !Object.keys(inputs).length;
+    if (v.inputs.hidden) { delete v.inputs.dataset.names; return; }
+    const names = Object.keys(inputs).join("\n");
+    if (v.inputs.dataset.names === names) {   // the same inputs: their values, unless someone is editing one
+      for (const [name, value] of Object.entries(inputs)) {
+        const f = [...v.inputs.querySelectorAll("input")].find((x) => x.dataset.name === name);
+        if (f && document.activeElement !== f && !f.dataset.dirty) f.value = String(value);
+      }
+      return;
+    }
+    v.inputs.dataset.names = names;
+    v.inputs.replaceChildren(h("span", { class: "muted small" }, "Live inputs:"), ...Object.entries(inputs).map(([name, value]) => {
+      const field = h("input", { class: "mono", "data-name": name, value: String(value), "aria-label": name, size: "8" });
+      field.addEventListener("input", () => { field.dataset.dirty = "1"; });
+      const said = h("span", { class: "muted small" });
+      const set = h("button", { class: "btn small", type: "button", title: "The running experiment reads it next time it asks; a drive it moves still passes the safety gate" }, "Set");
+      set.addEventListener("click", async () => {
+        try {
+          const r = await api("/api/runs/live", { body: { name, value: field.value } });
+          said.textContent = r.said; said.classList.remove("bad"); delete field.dataset.dirty;
+        } catch (e) { said.textContent = e.message; said.classList.add("bad"); }
+      });
+      return h("label", { class: "rv-input" }, name + " ", field, set, said);
+    }));
+  }
   function renderRunView(tab) {
+    liveInputs(tab);
     if (!tab.view) buildRunView(tab);
     const v = tab.view;
     setState(v.state, tab.status);

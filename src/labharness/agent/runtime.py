@@ -956,7 +956,11 @@ class LabRuntime:
             view = {k: v for k, v in self.live.items() if k != "rows"}
             view["rows"] = list(self.live["rows"][since:])
             view["since"] = since
-            return view
+        job = self._live_run   # a running experiment's live inputs, as they are now: the portal changes them
+        if job is not None and getattr(job, "rec_id", None) == view.get("run_id") and getattr(job, "live", None):
+            with job._live_lock:
+                view["inputs"] = dict(job.live)
+        return view
 
     # ------------------------------------------------------------------ plumbing
 
