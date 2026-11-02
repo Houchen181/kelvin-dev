@@ -40,6 +40,7 @@
     again: '<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.5V9H9"/>',
     skip: '<path d="M6 6.5l8.5 5.5L6 17.5z"/><path d="M18 6v12"/>',
     hold: '<path d="M9.5 7v10M14.5 7v10"/>',
+    run: '<path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/>',
   };
 
   // ------------------------------------------------------------------ small helpers
@@ -645,6 +646,7 @@
       box.append(x);
     };
     b("dup", K.icon("copy"), "Duplicate", () => op({ op: "duplicate", item: id }));
+    if (it.run_id) b("run", ico("run"), "Open run", () => K.openRun(it.run_id, it.name));   // what it measured
     if (FINISHED.has(it.status)) b("again", ico("again"), "Again", () => op({ op: "again", item: id }));
     if (it.status === "waiting" || it.status === "running") b("skip", ico("skip"), "Skip", () => op({ op: "skip", item: id }));
     if (it.status !== "running") {
@@ -812,9 +814,9 @@
           set: { [k]: input.value.trim() ? typed(v, input.value) : null } })));
         box.append(field(k, input));
       }
-    } else if (look.entry) {
+    } else if (it.kind === "plan") {   // this block itself, in the scan editor (Save writes it back into the block)
       const b = h("button", { class: "btn small", type: "button" }, K.icon("pencil"), h("span", {}, "Edit scan"));
-      b.addEventListener("click", (e) => { e.stopPropagation(); guard(() => K.openEditor(look.entry.id)); });
+      b.addEventListener("click", (e) => { e.stopPropagation(); guard(() => K.openEditor(null, it.id)); });
       box.append(b);
     } else box.append(h("pre", { class: "seq-yaml" }, String(it.text || "").trim()));
     const sw = h("input", { type: "checkbox", role: "switch", "aria-label": "Pause after" });
