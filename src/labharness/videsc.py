@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from . import vifile, vigraph
 from .vifile import Obj
@@ -48,6 +48,41 @@ TUNNELS = {"lpTun": "tunnel", "innerLpTun": "tunnel", "matedLpTun": "tunnel", "s
            "rSR": "shift_register", "matedRSR": "shift_register"}
 OWN_TERMINALS = ("lCnt", "lTst", "lMax", "caseSel")   # a loop's count, condition and number, a case's selector
 POLYMORPHIC = "it is a polymorphic VI: where it is called, one of its instances runs (%s), each a VI read on its own"
+
+
+# Compound Arithmetic's operation (its first terminal's dcoFiller), as lvkit read them; any other code is said as
+# its number, never guessed
+COMPOUND = {1: "or", 2: "and", 256: "add"}
+INVERTED = 0x10000   # a data object's objFlags bit: a Compound Arithmetic input inverted; on a loop's condition (lTst),
+#                      set: it stops if true, clear: it continues if true (lvkit, docs/_internal/xml-schema)
+
+
+def _same(o: Optional[Obj]) -> Optional[Obj]:
+    return o
+
+
+def stops_on_true(loop: Obj, resolve: Callable[[Optional[Obj]], Optional[Obj]] = _same) -> Optional[bool]:
+    """Does this loop stop when its condition is true (LabVIEW's default, Stop if True), or continue while it is
+    (Continue if True)? None for a loop without a condition (a For loop that runs its count)."""
+    test = resolve(loop.get("loopTestDCO"))
+    if test is None:
+        return None
+    return bool((test.number("objFlags", signed=False) or 0) & INVERTED)
+
+
+def compound(node: Obj, resolve: Callable[[Optional[Obj]], Optional[Obj]] = _same) -> Tuple[str, List[int]]:
+    """A Compound Arithmetic node's operation, and the uids of the inputs it inverts first."""
+    op, inverted = "", []
+    for i, term in enumerate(node.items("termList")):
+        dco = resolve(term.get("dco"))
+        if dco is None:
+            continue
+        if i == 0:
+            code = dco.number("dcoFiller", signed=False)
+            op = COMPOUND.get(code, "code %s" % code) if code is not None else ""
+        if (dco.number("objFlags", signed=False) or 0) & INVERTED and term.uid is not None:
+            inverted.append(term.uid)
+    return op, inverted
 
 
 def _tid(t: int) -> str:
@@ -190,6 +225,7 @@ class _Describer:
             out["index"] = _tid(index) if index is not None else None
             stop = self.g.inner_term(self.g.resolve(n.get("loopTestDCO")))
             out["stop"] = _tid(stop) if stop is not None else None
+            out["stops_on"] = stops_on_true(n, self.g.resolve)
             out["tunnels"] = self.tunnels(n)
             if len(ends) > 1:   # the count's value inside the loop (N)
                 out["tunnels"].append({"outer": _tid(ends[-1]), "inner": [_tid(e) for e in ends[:-1]],
@@ -272,6 +308,9 @@ class _Describer:
             else:
                 name = FUNCTIONS[k]
             out.update(kind="function", name=name)
+            if k == "cpdArith":
+                op, inverted = compound(n, self.g.resolve)
+                out.update(op=op, inverted=[_tid(t) for t in inverted])
             if k in ("mux", "demux", "nMux"):   # each field by its name (the type of its terminal keeps it)
                 for t, term in zip(self.g.terms(n), out["terms"]):
                     term["name"] = self.type_label(t).strip()
@@ -658,6 +697,9 @@ class _Text:
             what = 'formula "%s"' % " ".join(n["text"].split())[:200]
         elif k in ("function", "feedback"):
             what = n["name"]
+            if n.get("op"):   # Compound Arithmetic: its operation, and the inputs it inverts first
+                what += " (%s%s)" % (n["op"], "; inverts " + ", ".join(p + t for t in n["inverted"])
+                                     if n.get("inverted") else "")
         else:
             what = "other (%s)" % n.get("what", k)
         outs = [t for t in n["terms"] if t["dir"] == "out" and not t["error"]]
@@ -676,6 +718,8 @@ class _Text:
         k = n["kind"]
         if k == "loop":
             head = "%s loop%s" % (n["loop"], ' "%s"' % n["name"] if n["name"] else "")
+            if n.get("stop") and n.get("stops_on") is not None:   # which way its condition works matters
+                head += " (%s %s is true)" % ("stops when" if n["stops_on"] else "continues while", self.src(n["stop"]))
         elif k == "case":
             head = "case on %s" % (self.src(n["selector"]) if n.get("selector") else "?")
         elif k == "sequence":

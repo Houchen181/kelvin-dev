@@ -1,0 +1,55 @@
+card: 1
+id: thorlabs/kdc101
+model: Thorlabs KDC101 K-Cube brushed DC servo motor controller (Kinesis)
+vendor: Thorlabs
+kind: motion-stage
+status: draft
+manual: "Thorlabs Kinesis .NET API (Thorlabs.MotionControl.KCube.DCServoCLI, KCubeDCServo) and its C# examples"
+notes:
+  - "Through Thorlabs Kinesis, Thorlabs' current software, which the lab installs (it brings the .NET assemblies). Address lib://<serial number>?path=<the Kinesis folder, C:/Program Files/Thorlabs/Kinesis>: the controller's serial number (27xxxxxx), as on its label."
+  - "A LabVIEW VI that drives the stage through APT's MG17Motor ActiveX control is translated to this card: APT's control needs a window to host it, which Kelvin doesn't give, and Kinesis drives the same controllers (TDC001 and KDC101)."
+  - "Positions are in the real-world units Kinesis is set up with for the stage: degrees for a PRM1Z8 rotation mount (this card's limits), mm for a Z8 actuator. For a linear stage, make the lab's version of this card with mm and its travel (0 to 25 mm for a Z825B)."
+  - "Draft, from Thorlabs' Kinesis examples: every move asks a person until someone checks the card on the stage."
+identify:
+  idn: "^Thorlabs"
+  example: "Thorlabs,KDC101,27000001"
+connection: { timeout_ms: 70000 }
+library:
+  assembly: [Thorlabs.MotionControl.DeviceManagerCLI.dll, Thorlabs.MotionControl.GenericMotorCLI.dll, Thorlabs.MotionControl.KCube.DCServoCLI.dll]
+  type: Thorlabs.MotionControl.KCube.DCServoCLI.KCubeDCServo
+  setup: [Thorlabs.MotionControl.DeviceManagerCLI.DeviceManagerCLI.BuildDeviceList]
+  create: CreateKCubeDCServo
+  create_args: ["{address}"]
+  properties: [Position]
+  open: ["Connect {address}", "WaitForSettingsInitialized 10000", "StartPolling 250", "EnableDevice"]
+  close: [StopPolling, Disconnect]
+
+parameters:
+  position:
+    label: Target position
+    kind: measure
+    unit: deg
+    set: "SET MoveTo {value} 60000"
+    readback: position_actual
+    limits: [0, 360]
+    tol: 0.01
+    timeout: 70
+    description: An absolute move (MoveTo), in the stage's real-world units; Kinesis waits until the stage is there, up to 60 s. Home the stage first (do_action home).
+  position_actual:
+    label: Position
+    kind: measure
+    unit: deg
+    get: "GET Position"
+    description: Where the controller says the stage is
+
+actions:
+  home:
+    send: "SET Home 60000"
+    label: Home (moves the stage to its reference)
+    drives: true
+  stop:
+    send: "SET StopImmediate"
+    label: Stop the motion
+
+display:
+  headline: position_actual

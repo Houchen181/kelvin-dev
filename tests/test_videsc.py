@@ -587,3 +587,57 @@ def check_arrays_written_in_loops_are_plotted(paths):
                 seen += 1
                 assert c["plotted"], (path.name, c["name"])
     assert seen
+
+
+# ------------------------------------------------------------------ what a translation must not get wrong (Plan 3)
+
+CLASS = {v: k for k, v in vifile.CLASSES.items()}
+
+
+def _obj(name, value=None, kids=(), uid=None):
+    """A heap object as the reader builds it: a field by its tag name, or an element of a list."""
+    tag = vifile.SYS_ELEMENT if name == "element" else vifile.TAG[name]
+    return vifile.Obj(tag=tag, value=value, kids=list(kids), uid=uid)
+
+
+def lTst_obj(flags):
+    o = _obj("loopTestDCO", kids=[_obj("objFlags", flags.to_bytes(3, "big"))])
+    o.cls = CLASS["lTst"]
+    return o
+
+
+def loop_with(test):
+    loop = vifile.Obj(tag=vifile.SYS_ELEMENT, cls=CLASS["whileLoop"], kids=[test])
+    return loop
+
+
+def cpd_obj(filler, flags):
+    terms = []
+    for i, f in enumerate(flags):
+        dco = _obj("dco", kids=[_obj("objFlags", f.to_bytes(3, "big"))] +
+                   ([_obj("dcoFiller", filler.to_bytes(2, "big"))] if i == 0 else []))
+        dco.cls = CLASS["fPDCO"]
+        term = _obj("element", kids=[dco], uid=100 + i)
+        term.cls = CLASS["term"]
+        terms.append(term)
+    return vifile.Obj(tag=vifile.SYS_ELEMENT, cls=CLASS["cpdArith"], kids=[_obj("termList", kids=terms)])
+
+
+def test_a_while_loop_says_whether_it_stops_or_continues_on_true():
+    d = videsc.describe(KEYSIGHT / "SMU_IV single.vi")
+    loops = [n for n in nodes(d["diagram"]) if n["kind"] == "loop" and n["loop"] == "while"]
+    assert loops and all(n["stops_on"] is True for n in loops)          # LabVIEW's default, as these are drawn
+    assert "stops when" in videsc.render_text(d)
+
+
+def test_the_polarity_bit_is_read_both_ways():
+    assert videsc.stops_on_true(loop_with(lTst_obj(0x010001))) is True
+    assert videsc.stops_on_true(loop_with(lTst_obj(0x01))) is False
+    assert videsc.stops_on_true(vifile.Obj(tag=vifile.SYS_ELEMENT, cls=CLASS["forLoop"])) is None
+
+
+def test_compound_arithmetic_says_its_operation_and_inverted_inputs():
+    op, inverted = videsc.compound(cpd_obj(2, [0x10000, 0]))            # and, its first input inverted
+    assert op == "and" and inverted == [100]
+    assert videsc.compound(cpd_obj(256, [0, 0, 0x10000]))[0] == "add"
+    assert videsc.compound(cpd_obj(7, [0, 0]))[0] == "code 7"           # never guessed

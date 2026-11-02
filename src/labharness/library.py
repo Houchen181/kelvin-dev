@@ -107,6 +107,11 @@ def card_calls(card: Card) -> Tuple[Set[str], Set[str]]:
             m = _CALL.match(tmpl.text) if tmpl is not None else None
             if m:
                 names.add(m.group(2))
+    for action in card.actions.values():   # a card's action calls a function too (SET Home 60000)
+        for text in action.send:
+            m = _CALL.match(text)
+            if m and m.group(1).upper() == "SET":
+                sets.add(m.group(2))
     m = _CALL.match(card.idn_query or "")
     if m and m.group(1).upper() == "GET":
         gets.add(m.group(2))

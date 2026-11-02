@@ -290,6 +290,8 @@ DEFERRED = {
                                "inspect_serial", "add_instrument", "reconnect_instrument", "ask_to_switch_on",
                                "survey_scripts", "survey_labview"],
     "running the lab's own scripts": ["run_script", "check_script", "set_live"],
+    "translating LabVIEW into experiments": ["describe_vi", "translate_vi", "save_experiment", "keep_experiment",
+                                             "experiments"],
     "writing and trying cards": ["card_guide", "draft_card", "check_card", "try_card", "save_card", "read_examples",
                                  "find_maker_files", "library_api", "save_manual"],
     "makers' software": ["install_for_instrument", "installed_software", "environments", "remove_environment"],

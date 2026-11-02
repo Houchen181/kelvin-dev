@@ -64,6 +64,10 @@ datas.append((str(ROOT / "src" / "labharness" / "data" / "bridge" / "kelvin_brid
 datas.append((str(ROOT / "src" / "labharness" / "data" / "sandbox" / "kelvin_sandbox.py"), "labharness/data/sandbox"))
 # and so does the reader of a lab's LabVIEW files, in a process of its own (labharness/viworker.py)
 datas.append((str(ROOT / "src" / "labharness" / "data" / "labview" / "kelvin_labview.py"), "labharness/data/labview"))
+# what each LabVIEW call becomes in a Kelvin experiment (labharness/vimap.py), and the translator's rules for the
+# model (labharness/vitranslate.py)
+datas += [(str(ROOT / "src" / "labharness" / "data" / "labview" / name), "labharness/data/labview")
+          for name in ("map.yaml", "translate.md")]
 # the stand-in for the lab's instruments while Kelvin runs one of the lab's scripts, and the kelvin module an experiment
 # imports (labharness/scriptrun.py)
 datas += [(str(ROOT / "src" / "labharness" / "data" / "scriptshim" / name), "labharness/data/scriptshim")
