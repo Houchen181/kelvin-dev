@@ -275,6 +275,7 @@
         </form>
         <div id="scans-check" class="callout small calm scans-check" role="status" hidden></div>
         <p id="scans-msg" class="hint" role="status"></p>
+        <section id="scans-experiments" aria-labelledby="scans-experiments-h" hidden><h3 id="scans-experiments-h">Lab experiments</h3><ul class="q-list exp-list" aria-labelledby="scans-experiments-h"></ul></section>
         <section id="scans-scripts" aria-labelledby="scans-scripts-h" hidden><h3 id="scans-scripts-h">Your scripts</h3><ul class="q-list" role="grid" aria-multiselectable="true" aria-labelledby="scans-scripts-h"></ul></section>
         <section id="scans-plans" aria-labelledby="scans-plans-h" hidden><h3 id="scans-plans-h">Scans</h3><ul class="q-list" role="grid" aria-multiselectable="true" aria-labelledby="scans-plans-h"></ul></section>
         <p id="scans-empty" class="pane-empty" hidden>Each scan Kelvin runs, and each script you import, is kept here to run again.</p>
@@ -945,6 +946,26 @@
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Close</button>
       <button id="lab-save" class="btn primary" type="button">Save and connect</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="exp-dialog" class="dialog wide" aria-labelledby="exp-title">
+  <form method="dialog">
+    <header class="dialog-head">
+      <h2 id="exp-title">Translate</h2>
+      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div id="exp-body" class="exp-body"></div>
+    <footer class="dialog-foot">
+      <span id="exp-msg" class="muted small" role="status"></span>
+      <div class="spacer"></div>
+      <label id="exp-name-row" class="exp-name" hidden>Name <input id="exp-name" class="mono" spellcheck="false" autocomplete="off" aria-label="Name to keep it under"></label>
+      <button class="btn" value="cancel" type="submit">Close</button>
+      <button id="exp-keep" class="btn primary" type="button" hidden>Keep</button>
+      <button id="exp-approve" class="btn primary" type="button" hidden>Approve version</button>
     </footer>
   </form>
 </dialog>

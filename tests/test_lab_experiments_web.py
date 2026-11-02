@@ -139,3 +139,17 @@ def test_a_second_translate_while_one_runs_is_refused_at_once(portal):
     t.join(120)
     assert r.status_code == 409, r.text
     assert first["r"].status_code == 200
+
+
+# ------------------------------------------------------------------ the portal's page (Task 2)
+
+def test_the_portal_has_translate_review_keep_and_the_lab_experiments():
+    page = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    for text in ('id="exp-dialog"', 'id="scans-experiments"', ">Lab experiments<", 'id="exp-keep"', ">Keep<",
+                 'id="exp-approve"', 'id="exp-name"'):
+        assert text in page, text
+    for text in ("function openTranslate(", "function showDraft(", "function keepDraft(", "function renderExperiments(",
+                 "function openVersions(", "function runExperiment(", '"/api/labview/translate"',
+                 '"/api/experiments/keep"', '"/approve"', '"Translate"', "Approve version", "new_version"):
+        assert text in js, text
