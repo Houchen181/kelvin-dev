@@ -223,6 +223,23 @@ class Store:
             raise KeyError("there is no draft %s (kept already, or never made)" % draft_id)
         return folder
 
+    def drafts(self) -> List[Dict[str, Any]]:
+        """The drafts nobody kept yet, newest first: {id, name, vi, by, at, ok_to_keep}."""
+        folder = self.root / ".drafts"
+        out = []
+        for p in sorted(folder.iterdir(), reverse=True) if folder.is_dir() else []:
+            if not _DRAFT.match(p.name) or not (p / "experiment.py").is_file():
+                continue
+            try:
+                about = json.loads((p / "draft.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                about = {}
+            t = self.draft_translation(p.name)
+            out.append({"id": p.name, "name": t.get("name") or "", "vi": (t.get("vi") or {}).get("name") or "",
+                        "by": about.get("by") or "", "at": about.get("at") or "",
+                        "ok_to_keep": bool((t.get("report") or {}).get("ok_to_keep"))})
+        return out
+
     def draft_path(self, draft_id: str) -> Path:
         return self._draft_folder(draft_id) / "experiment.py"
 

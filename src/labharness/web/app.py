@@ -3583,6 +3583,144 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         out["library"] = await asyncio.to_thread(runtime.library_view)
         return JSONResponse(out)
 
+    # ---------------------------------------------------------------- the lab's experiments, from its VIs (Plan 4)
+
+    def experiments_refused(request: Request, what: str = "") -> Optional[Response]:
+        """The lab's experiments are seen and changed only on this computer (as the library); a trainee doesn't keep
+        or approve one."""
+        if role_of(request) != "owner":
+            return error(403, ON_THIS_COMPUTER)
+        if what:
+            try:
+                runtime.not_for_trainees(what)
+            except PermissionError as e:
+                return error(403, str(e))
+        return None
+
+    async def experiments_list(request: Request) -> Response:
+        """GET: the lab's experiments (each with its latest version, standing, actions and live inputs) and the
+        drafts nobody kept yet."""
+        refused = experiments_refused(request)
+        if refused is not None:
+            return refused
+        return JSONResponse(await asyncio.to_thread(runtime.experiments_data))
+
+    async def experiment_view(request: Request) -> Response:
+        """GET ?version=N: one of the lab's experiments, its versions, and one version's code, diff and checks."""
+        refused = experiments_refused(request)
+        if refused is not None:
+            return refused
+        raw = request.query_params.get("version")
+        try:
+            version = int(raw) if raw else None
+        except ValueError:
+            return error(400, "version is a version's number")
+        try:
+            return JSONResponse(await asyncio.to_thread(runtime.experiment_data, request.path_params["name"],
+                                                        version))
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else str(e))
+
+    async def experiment_draft(request: Request) -> Response:
+        """GET: a draft as the review shows it."""
+        refused = experiments_refused(request)
+        if refused is not None:
+            return refused
+        try:
+            return JSONResponse(await asyncio.to_thread(runtime.draft_data, request.path_params["draft"]))
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else str(e))
+        except ValueError as e:
+            return error(400, str(e))
+
+    async def experiment_translate(request: Request) -> Response:
+        """POST {path, name}: a VI translated by the person's model, checked and rehearsed on the simulated lab, as a
+        draft to review (it takes minutes). One at a time, on the thread LabVIEW reads go on (409 meanwhile)."""
+        refused = experiments_refused(request, "translate a VI into one of the lab's experiments")
+        if refused is not None:
+            return refused
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not str(body.get("path") or "").strip():
+            return error(400, "send {path}: the VI to translate")
+        try:
+            out = await asyncio.wrap_future(runtime.labview_reads.submit(
+                as_person, runtime.translate_vi_data, str(body["path"]).strip(), str(body.get("name") or "")))
+        except Underway as e:
+            return error(409, str(e))
+        except (OSError, ValueError) as e:
+            return error(400, str(e))
+        return JSONResponse(out)
+
+    async def experiment_keep(request: Request) -> Response:
+        """POST {draft, name, new_version}: the person keeps a draft they read in the portal: version 1, approved by
+        them (under a name kept already, only with new_version: its next version). Refused while anything blocks."""
+        refused = experiments_refused(request, "keep one of the lab's experiments")
+        if refused is not None:
+            return refused
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not body.get("draft"):
+            return error(400, "send {draft, name}")
+        try:
+            out = await asyncio.to_thread(as_person, runtime.keep_experiment_as, str(body["draft"]),
+                                          str(body.get("name") or ""), person(request), bool(body.get("new_version")))
+        except FileExistsError as e:
+            return error(409, str(e))
+        except ValueError as e:
+            return error(400, str(e))
+        return JSONResponse(out)
+
+    async def experiment_approve(request: Request) -> Response:
+        """POST {version}: the person approves a version of one of the lab's experiments, having read what changed."""
+        refused = experiments_refused(request, "approve a version of one of the lab's experiments")
+        if refused is not None:
+            return refused
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        try:
+            version = int((body or {}).get("version"))
+        except (TypeError, ValueError):
+            return error(400, "send {version}: the version's number")
+        try:
+            return JSONResponse(await asyncio.to_thread(as_person, runtime.approve_experiment,
+                                                        request.path_params["name"], version, person(request)))
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else str(e))
+        except ValueError as e:
+            return error(400, str(e))
+
+    async def experiment_run(request: Request) -> Response:
+        """POST {action, params, queue}: run one of the lab's experiments' actions, first in the queue (or last, with
+        queue), as a script item; its approval comes as the queue's, as for the library's scripts. {queue, message}."""
+        refused = experiments_refused(request)
+        if refused is not None:
+            return refused
+        name = request.path_params["name"]
+        if not runtime.experiments.has(name):
+            return error(404, "the lab has no experiment %r" % name)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        item = {"script": name}
+        if body.get("action"):
+            item["action"] = str(body["action"])
+        if isinstance(body.get("params"), dict) and body["params"]:
+            item["params"] = body["params"]
+        try:
+            return JSONResponse(await asyncio.to_thread(as_person, runtime.queue_run_now, [json.dumps(item)],
+                                                        bool(body.get("queue")), person(request)))
+        except ValueError as e:
+            return error(400, str(e))
+
     async def labview_scans(request: Request) -> Response:
         """POST {folder, vis: [the VIs' paths], instruments: [{address, name, card}]}: measurement VIs a person chose in
         Set up, translated into scans and kept in their library (Runs → Scans) as LabVIEW's, with the instruments
@@ -3737,6 +3875,13 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/instruments/scripts-folder", scripts_folder, methods=["POST"]),
         Route("/api/instruments/labview", labview_view, methods=["POST"]),
         Route("/api/instruments/labview/scans", labview_scans, methods=["POST"]),
+        Route("/api/labview/translate", experiment_translate, methods=["POST"]),
+        Route("/api/experiments", experiments_list),
+        Route("/api/experiments/keep", experiment_keep, methods=["POST"]),
+        Route("/api/experiments/drafts/{draft}", experiment_draft),
+        Route("/api/experiments/{name}", experiment_view),
+        Route("/api/experiments/{name}/approve", experiment_approve, methods=["POST"]),
+        Route("/api/experiments/{name}/run", experiment_run, methods=["POST"]),
         Route("/api/instruments/{name}/limits", instrument_limits, methods=["GET", "POST"]),
         Route("/api/instruments/setup", setup_view, methods=["GET", "POST"]),
         Route("/api/terminal", terminal, methods=["POST"]),
