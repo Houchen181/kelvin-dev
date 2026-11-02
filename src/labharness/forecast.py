@@ -139,8 +139,9 @@ def rate_words(gate: Any, inst: Any, spec: Any, value: Any = None, source: str =
 
 def mode_settings(inst: Any) -> List[Any]:
     """The settings that decide what an instrument's output applies (its source function, a waveform, a modulation
-    source): the readable choices on its card that aren't drives, the likeliest first, at most four."""
-    choices = [p for p in inst.card.params.values() if p.type == "enum" and not p.is_drive and p.get_cmd is not None]
+    source): the readable choices on its card, settings or drives (a source function a card switches is a drive), the
+    likeliest first, at most four."""
+    choices = [p for p in inst.card.params.values() if p.type == "enum" and p.get_cmd is not None]
     choices.sort(key=lambda p: not any(w in (p.name + " " + p.label).lower() for w in _MODE_WORDS))
     return choices[:4]
 

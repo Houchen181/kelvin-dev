@@ -11,7 +11,7 @@ identify:
   example: "KEITHLEY INSTRUMENTS INC.,MODEL 2400,1234567,C30   Mar 17 2006 09:29:29/A02  /K/J"
 connection: { timeout_ms: 5000 }
 error_query: ":SYSTem:ERRor[:NEXT]?"
-safe_sequence: [V, output, compliance_I]
+safe_sequence: [V, I_source, output, compliance_I, compliance_V, source_function]
 
 parameters:
   V:
@@ -29,6 +29,20 @@ parameters:
     description: Source voltage (voltage-source mode). The 2401 is limited to ±21 V; set lab limits.
     source_range: { param: V_range, auto: V_autorange, steps: [0.2, 2, 20, 200] }
     current_limit: compliance_I
+  I_source:
+    label: Source current
+    applies_when: output
+    kind: drive
+    unit: A
+    set: ":SOURce:CURRent[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: ":SOURce:CURRent[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [-1.05, 1.05]
+    safe: 0
+    ramp: gate
+    max_rate: 0.01
+    ramp_step: 0.0005
+    description: Source current (current-source mode, source_function current). The output applies it only in that mode; compliance_V limits the voltage it may reach. Set lab limits for the device.
+    source_range: { param: I_range, auto: I_autorange, steps: [1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1, 1] }
   V_range:
     label: Source range
     kind: measure
@@ -46,6 +60,23 @@ parameters:
     get: ":SOURce:VOLTage:RANGe:AUTO?"
     default: on
     description: Lets the source pick its own range. A range change under bias can glitch the output, so a mounted device's protection keeps it off.
+  I_range:
+    label: Current source range
+    kind: measure
+    unit: A
+    set: ":SOURce:CURRent:RANGe {value}"
+    get: ":SOURce:CURRent:RANGe?"
+    limits: [1.0e-6, 1.05]
+    default: 1.0e-4
+    description: The current source's output range. Kelvin changes it only while I_source is at 0.
+  I_autorange:
+    label: Current source autorange
+    kind: measure
+    type: bool
+    set: ":SOURce:CURRent:RANGe:AUTO {value}"
+    get: ":SOURce:CURRent:RANGe:AUTO?"
+    default: on
+    description: Lets the current source pick its own range; a mounted device's protection keeps it off.
   compliance_I:
     label: Current compliance
     applies_when: output
@@ -64,15 +95,28 @@ parameters:
     set: ":OUTPut[:STATe] {value}"
     get: ":OUTPut[:STATe]?"
     safe: off
-    enables: [V, compliance_I]
+    enables: [V, compliance_I, I_source, compliance_V]
     description: Connects the source to the device
+  compliance_V:
+    label: Voltage compliance
+    applies_when: output
+    kind: drive
+    unit: V
+    set: ":SENSe:VOLTage[:DC]:PROTection[:LEVel] {value}"
+    get: ":SENSe:VOLTage[:DC]:PROTection[:LEVel]?"
+    limits: [0.2, 210]
+    safe: 0.2
+    default: 21
+    description: The highest voltage the current source may reach (current-source mode).
   source_function:
     label: Source function
-    kind: measure
+    kind: drive
     type: enum
+    set: ":SOURce:FUNCtion[:MODE] {value}"
     get: ":SOURce:FUNCtion[:MODE]?"
     values: { voltage: VOLTage, current: CURRent, memory: MEMory }
-    description: What the output applies, read only. This card's levels are the voltage source's; a 2400 switched to current from its front panel sources its current level instead, so a card that switches the output on says which it is.
+    safe: voltage
+    description: What the output applies, voltage (V) or current (I_source). Switching it changes what reaches the device, so it is a drive, approved like one; a card that switches the output on says which it is, also when someone switched it at the front panel.
   I:
     label: Current
     kind: measure

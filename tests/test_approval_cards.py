@@ -559,8 +559,9 @@ def test_on_labsim_an_output_on_card_says_the_2400_now_sources_current(labsim_be
         lab.instruments["gate"].write_raw(":SOUR:FUNC CURR")    # at the front panel, past Kelvin
         assert gate.set("gate", "output", True).action == "declined"
         text = card(approver, 1)
-        assert "gate.output off → on; it applies gate.V at 0 V (its safe value, set first) and gate.compliance_I at " \
-               "1 nA (its safe value, set first); gate: source function current" in text, text
+        assert "gate.output off → on; it applies gate.V at 0 V (its safe value, set first), gate.compliance_I at " \
+               "1 nA (its safe value, set first), gate.I_source at 0 A (its safe value, set first) and " \
+               "gate.compliance_V at 200 mV (its safe value, set first); gate: source function current" in text, text
         assert lab.read("gate", "output") is False
     finally:
         lab.close()
