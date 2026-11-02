@@ -621,6 +621,14 @@ class LabRuntime:
         self.found_info: Dict[str, Dict[str, Any]] = {}     # what it learnt of each, by VISA resource: identity, card
         # the app's model writing a card from the maker's manual (autocard.make_card); None outside the Kelvin app
         self.card_writer: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
+        # the lab's experiments, translated from its VIs, every version kept (expstore.py), and what LabVIEW calls
+        # become in them (vimap.py): in Kelvin's own folder, everyone's; the app and kelvin-mcp set them beside home
+        from .. import expstore
+        self.experiments = expstore.Store(Path(data_dir) / "experiments")
+        self.labview_map = Path(data_dir) / "labview-map.yaml"
+        # the Kelvin app's model for translating a VI ("translate") and for its second opinion ("review"), as the
+        # asking chat's project's rules allow: an Ask, or ValueError with why not; None outside the Kelvin app
+        self.vi_model: Optional[Callable[[str, Dict[str, Any]], Callable[[str, str], Tuple[str, str]]]] = None
         self.manuals_found: Dict[str, Dict[str, Any]] = {}  # by VISA resource: the manual found while writing a card
         self.fetch_url: Optional[Callable[[str], bytes]] = None   # read_web_page and save_manual (profiles.http_get)
         # the app's part when Kelvin changes the lab itself ("added" an instrument, "switched" one on): keep it in
@@ -5284,6 +5292,349 @@ class LabRuntime:
                          "gaps": t["gaps"]})
         return {"kept": kept, "not": missed}
 
+    # ------------------------------------------------------------------ the lab's experiments, from its VIs
+
+    def _person(self) -> str:
+        return self.user or "a person"
+
+    def _kept_version(self, path: Any) -> Any:
+        """The version of one of the lab's experiments a script name or path is: a kept experiment's name (its
+        latest version), or the path of a version's file (that version: a run of it, run again); None: neither."""
+        text = str(path or "")
+        if not text:
+            return None
+        if not any(c in text for c in "./\\") and self.experiments.has(text):
+            return self.experiments.get(text)
+        return self.experiments.find(text)
+
+    def _kept_lines(self, kept: Any) -> List[str]:
+        if kept.approved:
+            return ["version %d of the lab's experiment %s, approved by %s (%s)" % (
+                kept.number, kept.name, kept.approved_by, kept.approved_at)]
+        lines = ["version %d of the lab's experiment %s is new%s: your yes to this run approves it" % (
+            kept.number, kept.name, ", edited from version %d" % kept.edited_from if kept.edited_from else "")]
+        if kept.note:
+            lines.append("its note: %s" % kept.note)
+        if kept.edited_from:
+            diff = self.experiments.diff(kept.name, kept.edited_from, kept.number).splitlines()[2:]
+            shown = [d for d in diff if d[:1] in "+-@"][:40]
+            lines += ["what changed:"] + ["  " + d for d in shown]
+            if len(shown) < len([d for d in diff if d[:1] in "+-@"]):
+                lines.append("  … (experiments shows the whole change)")
+        return lines
+
+    def _vi_twin(self) -> Callable[[], Any]:
+        """A simulated copy of the lab for each rehearsal of a translation, made as a plan's dry run makes one: its
+        instruments read with the lab held."""
+        def twin_of() -> Any:
+            made: Dict[str, Any] = {}
+
+            def copy() -> str:
+                made["twin"] = self.lab.make_twin()
+                return ""
+            said = self._do("copying the lab to rehearse a translation", copy)
+            if "twin" not in made:
+                raise RuntimeError("the lab couldn't be copied to rehearse it: %s" % said)
+            return made["twin"]
+        return twin_of
+
+    def _vi_prepare(self) -> Callable[[Path, str], Any]:
+        from .. import scriptrun
+        return lambda path, action: scriptrun.prepare(self.lab, str(path), [str(Path(path).parent)],
+                                                      python=self.scripts_python() or "", action=action)
+
+    def _describe(self, path: Path) -> Dict[str, Any]:
+        """A VI's full description, read whole in Kelvin's LabVIEW reader process; ValueError when its diagram
+        couldn't be read."""
+        from .. import labview
+        desc = labview.describe_vi(Path(path), folder=Path(path).parent)
+        if desc.get("read") != "full":
+            raise ValueError("Kelvin couldn't read %s's diagram (%s)" % (
+                Path(path).name, "; ".join(desc.get("unread") or []) or desc.get("read")))
+        return desc
+
+    def _vi_scan(self, path: Path) -> str:
+        """The plan Kelvin's scan reading of the VI gives (viscan, as Set up's From your LabVIEW...), when it gives
+        one: what a translation's commands are compared with; "" when it gives none."""
+        from .. import labview
+        from ..viscan import on_target, translate
+        try:
+            registry = self.script_cards()
+            found = labview.survey(str(Path(path).parent), registry)
+            target_path = Path(path).resolve()
+            s = next((v for v in found.vis if Path(str(v["path"])).resolve() == target_path), None)
+            if s is None:
+                return ""
+            target = found.target_of(s)
+            t = on_target(s, target) if target else translate(s, self._scan_instruments([], registry), found.aliases)
+            return t["text"] if t.get("plan") is not None else ""
+        except Exception:   # no scan to compare with: the other checks stand
+            return ""
+
+    @staticmethod
+    def _name_for(desc: Dict[str, Any]) -> str:
+        stem = Path(str(desc.get("name") or "experiment")).stem.lower()
+        name = re.sub(r"[^a-z0-9_-]+", "-", stem).strip("-_")[:64]
+        return name or "experiment"
+
+    def _cards(self) -> List[Any]:
+        return list({inst.card.id: inst.card for inst in self.lab.instruments.values()}.values())
+
+    def _draft_words(self, draft: str, source: str, report: Any, notes: Dict[str, Any], name: str) -> str:
+        lines = ["draft %s: %s" % (draft, "nothing blocks keeping it" if report.ok_to_keep else
+                                   "it can't be kept as it is")]
+        lines.append(report.text())
+        left = [x for x in notes.get("not_translated") or [] if isinstance(x, dict)]
+        if left:
+            lines.append("Not translated, as the translation says: " + "; ".join(
+                "%s %s (%s)" % (x.get("id", "?"), x.get("what", ""), x.get("why", "")) for x in left[:20]))
+        if report.ok_to_keep:
+            lines.append('Next: keep_experiment(draft="%s", name="%s") asks a person to keep it in the lab\'s '
+                         'experiments.' % (draft, name))
+        else:
+            lines.append("A corrected experiment goes through save_experiment, which checks it again.")
+        lines.append("The experiment:\n```python\n%s```" % source)
+        return "\n".join(lines)
+
+    def describe_vi(self, path: str) -> str:
+        """A VI's full description as text (videsc.render_text), read in Kelvin's LabVIEW reader process: what a
+        translation into an experiment is written from. Nothing is run."""
+        from .. import labview, videsc
+        try:
+            desc = labview.describe_vi(Path(path), folder=Path(path).parent)
+        except (ValueError, OSError) as e:
+            return "not described: %s" % e
+        text = videsc.render_text(desc)
+        if desc.get("read") != "full":
+            text = "only partly read (%s): %s\n\n%s" % (desc.get("read"), "; ".join(desc.get("unread") or []), text)
+        return text
+
+    def translate_vi(self, path: str, name: str = "") -> str:
+        """A VI translated into a Kelvin experiment by the Kelvin app's model (vitranslate), checked and rehearsed on
+        simulated copies of the lab until nothing blocks it (vicheck), and kept as a draft a person keeps with
+        keep_experiment. The VI goes only to a model the asking chat's project's rules allow."""
+        import shutil
+        import tempfile
+        from .. import vicheck, vimap, vitranslate
+        if self.vi_model is None:
+            return ("This Kelvin has no model of its own to translate with: read the VI with describe_vi, write the "
+                    "experiment yourself as Kelvin's rules for a translation say (every line tagged # VI: <node>, "
+                    "instruments only through kelvin.lab), and save_experiment checks it the same way and saves it as "
+                    "a draft that a person keeps with keep_experiment.")
+        attribution = dict(self.attribution or {})
+        try:
+            ask = self.vi_model("translate", attribution)
+        except ValueError as e:
+            return "not translated: %s" % e
+        try:
+            review_ask = self.vi_model("review", attribution)
+        except ValueError:
+            review_ask = None   # the second opinion's model isn't allowed here: the translation goes without it
+        vi = Path(path)
+        try:
+            desc = self._describe(vi)
+        except (ValueError, OSError) as e:
+            return "not translated: %s" % e
+        folder = Path(tempfile.mkdtemp(prefix="kelvin-translate-"))
+        try:
+            t = vitranslate.translate(desc, self.lab, ask, vimap.load(self.labview_map), folder, self._vi_twin(),
+                                      plan_text=self._vi_scan(vi), review_ask=review_ask, real=self.gate,
+                                      prepare=self._vi_prepare())
+        except ValueError as e:
+            return "not translated: %s" % e
+        except Exception as e:   # the model's service failed
+            return "not translated: %s: %s" % (type(e).__name__, e)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        name = name or self._name_for(desc)
+        translation = {"vi": t.vi, "model": t.model, "rounds": t.rounds, "notes": t.notes, "mappings": t.mappings,
+                       "report": t.report.to_json(), "lines": vicheck.tags(t.source), "name": name}
+        draft = self.experiments.draft(t.source, translation, by="Kelvin's AI (%s)" % t.model)
+        self.gate.log.write("experiment", by=self.gate._who(), change="translated", vi=str(vi), draft=draft,
+                            model=t.model)
+        return "translated %s with %s in %d round%s.\n%s" % (
+            vi.name, t.model, t.rounds, "" if t.rounds == 1 else "s", self._draft_words(draft, t.source, t.report,
+                                                                                     t.notes, name))
+
+    def save_experiment(self, name: str, source: str, note: str = "", notes: Optional[Dict[str, Any]] = None,
+                        vi: str = "") -> str:
+        """An experiment written or changed by the AI (or a person), checked as a translation is: a new version of a
+        kept experiment, edited from its latest (not approved until a person approves its first run), or, for a new
+        name, a draft a person keeps (vi: the VI it translates, to check it against)."""
+        import shutil
+        import tempfile
+        from dataclasses import asdict
+        from .. import expstore, vicheck, vimap
+        if not isinstance(name, str) or not expstore.NAME.match(name):
+            return ("not saved: %r isn't a name Kelvin can keep an experiment under: lowercase letters, digits, - and "
+                    "_, up to 64" % (name,))
+        kept = self.experiments.has(name)
+        old: Dict[str, Any] = {}
+        latest = None
+        if kept:
+            latest = self.experiments.get(name)
+            old = latest.translation()
+            vi_path = vi or str((old.get("vi") or {}).get("path") or "")
+            notes = notes if notes is not None else dict(old.get("notes") or {})
+        elif not vi:
+            return "not saved: a new experiment is checked against the VI it translates: give vi, the VI's path"
+        else:
+            vi_path, notes = vi, dict(notes or {})
+        desc: Dict[str, Any] = {}
+        if vi_path:
+            try:
+                desc = self._describe(Path(vi_path))
+            except (ValueError, OSError) as e:
+                if not kept:
+                    return "not saved: %s" % e
+                desc = {}   # the VI moved since: checked against what was kept with it
+        if desc:
+            mappings = vimap.map_description(desc, vimap.load(self.labview_map), self._cards())
+        else:
+            mappings = {k: vimap.Mapping(**m) for k, m in (old.get("mappings") or {}).items() if isinstance(m, dict)}
+        folder = Path(tempfile.mkdtemp(prefix="kelvin-experiment-"))
+        try:
+            path = folder / "experiment.py"
+            path.write_bytes(source.encode("utf-8"))
+            report = vicheck.check(source, desc, self.lab, mappings, notes, path, self._vi_twin(), real=self.gate,
+                                   prepare=self._vi_prepare())
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        if report.blocking:
+            return "not saved: %s" % report.text()
+        vi_info = {k: desc.get(k) for k in ("path", "name", "sha256", "labview")} if desc else (old.get("vi") or {})
+        translation = {"vi": vi_info, "notes": notes, "mappings": {k: asdict(m) for k, m in mappings.items()},
+                       "report": report.to_json(), "lines": vicheck.tags(source), "edited": True}
+        who = self.gate._who()
+        if latest is None:
+            draft = self.experiments.draft(source, dict(translation, name=name), by=who)
+            return self._draft_words(draft, source, report, notes, name)
+        try:
+            v = self.experiments.add(name, source, translation, by=who, note=note, edited_from=latest.number)
+        except ValueError as e:
+            return "not saved: %s" % e
+        self.gate.log.write("experiment", by=who, change="saved", name=name, version=v.number,
+                            edited_from=latest.number)
+        return ("saved %s version %d, edited from version %d: not approved yet; its first run asks a person, with what "
+                "changed.\n%s" % (name, v.number, latest.number, report.text()))
+
+    def _keep_lines(self, source: str, translation: Dict[str, Any], name: str) -> List[str]:
+        from .. import experiment
+        vi = translation.get("vi") or {}
+        lines = ["from %s%s, translated by %s" % (vi.get("name") or "a VI", " (%s)" % vi["path"] if vi.get("path")
+                                                  else "", translation.get("model") or "the AI")]
+        try:
+            exp = experiment.read(source)
+            uses = experiment.uses(exp)
+            lines.append("its actions: %s" % (", ".join("%s%s" % (a, " (main)" if a == exp.main else "")
+                                                        for a in exp.actions) or "none (it runs whole)"))
+            used = sorted({k.split(".")[0] for k in list(uses.sets) + list(uses.gets) + list(uses.acts)})
+            if used:
+                lines.append("it uses %s through kelvin.lab; it sets %s" % (
+                    ", ".join(used), ", ".join(sorted(uses.sets)) or "nothing"))
+            if exp.live:
+                lines.append("its live inputs: %s" % ", ".join(exp.live))
+        except Exception:
+            pass
+        findings = (translation.get("report") or {}).get("findings") or []
+        warnings = [f.get("text", "") for f in findings if not f.get("blocks")]
+        lines += ["warning: %s" % w for w in warnings[:12]]
+        if len(warnings) > 12:
+            lines.append("… and %d warnings more (experiments shows them)" % (len(warnings) - 12))
+        left = [x for x in (translation.get("notes") or {}).get("not_translated") or [] if isinstance(x, dict)]
+        if left:
+            lines.append("not translated: %s" % "; ".join("%s (%s)" % (x.get("what") or x.get("id"), x.get("why", ""))
+                                                         for x in left[:10]))
+        proposed = [m for m in (translation.get("notes") or {}).get("mappings") or [] if isinstance(m, dict)]
+        if proposed:
+            lines.append("your yes also adds to the lab's LabVIEW map: %s" % "; ".join(
+                "%s -> %s" % (m.get("call"), m.get("card") or m.get("python") or m.get("becomes")) for m in proposed))
+        lines.append("each run of it goes through the safety gate, approved as a run of a script is")
+        return lines
+
+    def keep_experiment(self, draft: str, name: str) -> str:
+        """A person keeps a translation (a draft from translate_vi or save_experiment) in the lab's experiments: a card
+        shows it, and their yes makes it version 1 (the next version, under a name kept already), approved by them.
+        Refused while anything blocks it."""
+        from .. import expstore, vimap
+        if not isinstance(name, str) or not expstore.NAME.match(name):
+            return "not kept: %r isn't a name Kelvin can keep an experiment under: lowercase letters, digits, - and _" \
+                % (name,)
+        try:
+            source = self.experiments.draft_path(draft).read_bytes().decode("utf-8")
+            translation = self.experiments.draft_translation(draft)
+        except (KeyError, ValueError, OSError) as e:
+            return "not kept: %s" % e
+        report = translation.get("report") or {}
+        if not report.get("ok_to_keep"):
+            blocks = [f.get("text", "") for f in report.get("findings") or [] if f.get("blocks")]
+            return "not kept: what blocks it: %s" % ("; ".join(blocks) or "it wasn't checked")
+        title = "Keep %s in the lab's experiments?" % name
+        if self.experiments.has(name):
+            title = "Keep this as version %d of the lab's experiment %s?" % (self.experiments.get(name).number + 1,
+                                                                              name)
+        request = ApprovalRequest(title, self._keep_lines(source, translation, name))
+        if not self.gate.ask(request):
+            return "not kept: %s" % (request.note or "the person said no")
+        by = self._person()
+        try:
+            v = self.experiments.keep(draft, name, by)
+        except (KeyError, ValueError, OSError) as e:
+            return "not kept: %s" % e
+        proposed = [m for m in (translation.get("notes") or {}).get("mappings") or [] if isinstance(m, dict)]
+        said = vimap.accept(self.labview_map, proposed, by) if proposed else []
+        self.gate.log.write("experiment", by=by, change="kept", name=name, version=v.number)
+        return "kept %s as version %d of the lab's experiments, approved by %s%s. Run it with run_script(script=\"%s\")." % (
+            name, v.number, by, "; " + "; ".join(said) if said else "", name)
+
+    def experiments_view(self, name: str = "") -> str:
+        """The lab's experiments (each by its name, latest version and the VI it came from), or one of them: its
+        versions, actions, live inputs, its checks and what wasn't translated."""
+        from .. import experiment
+        if not name:
+            names = self.experiments.names()
+            if not names:
+                return "The lab has no experiments yet: translate_vi turns a VI into one, and a person keeps it."
+            lines = []
+            for n in names:
+                v = self.experiments.get(n)
+                vi = (v.translation().get("vi") or {}).get("name") or "?"
+                lines.append("%s: version %d (%s), from %s" % (n, v.number, self._standing(v), vi))
+            return "\n".join(lines)
+        versions = self.experiments.versions(name)
+        if not versions:
+            return "the lab has no experiment %r (it has: %s)" % (name, ", ".join(self.experiments.names()) or "none")
+        v = versions[-1]
+        t = v.translation()
+        vi = t.get("vi") or {}
+        lines = ["%s, from %s%s" % (name, vi.get("name") or "?", " (%s)" % vi["path"] if vi.get("path") else "")]
+        for x in versions:
+            lines.append("version %d: made by %s, %s%s%s; %s" % (
+                x.number, x.made_by, x.made_at, ", edited from version %d" % x.edited_from if x.edited_from else "",
+                " (%s)" % x.note if x.note else "", self._standing(x)))
+        try:
+            exp = experiment.read(v.path.read_bytes().decode("utf-8"))
+            lines.append("actions: %s" % (", ".join("%s%s" % (a, " (main)" if a == exp.main else "")
+                                                    for a in exp.actions) or "none (it runs whole)"))
+            if exp.live:
+                lines.append("live inputs: %s" % ", ".join("%s (%r)" % kv for kv in exp.live.items()))
+        except (OSError, ValueError):
+            pass
+        findings = (t.get("report") or {}).get("findings") or []
+        lines += ["warning: %s" % f.get("text", "") for f in findings if not f.get("blocks")][:30]
+        left = [x for x in (t.get("notes") or {}).get("not_translated") or [] if isinstance(x, dict)]
+        if left:
+            lines.append("not translated: %s" % "; ".join("%s %s (%s)" % (x.get("id", "?"), x.get("what", ""),
+                                                                           x.get("why", "")) for x in left))
+        lines.append('Run it with run_script(script="%s"), an action with action=.' % name)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _standing(v: Any) -> str:
+        if not v.intact:
+            return "its file changed on disk since it was written"
+        return "approved by %s" % v.approved_by if v.approved else "not approved yet"
+
     # ------------------------------------------------------------------ the lab's own scripts, run (scriptrun.py)
 
     def _prepare_script(self, path: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
@@ -5295,6 +5646,10 @@ class LabRuntime:
         experiment's action to run (scriptrun.prepare). scriptrun.ScriptError (KeyError for a version that isn't
         there): why it can't run."""
         from .. import scriptrun
+        kept = self._kept_version(path)
+        if kept is not None:   # one of the lab's experiments: its version, in its own folder, nothing beside it
+            return scriptrun.prepare(self.lab, str(kept.path), [str(kept.folder)], params=params, args=args,
+                                     drives=drives, python=self.scripts_python() or "", named=python, action=action)
         folder = self.scripts_folder()
         folders, chosen = [folder] if folder else [], self.library.chosen()
         source = sha = None
@@ -5516,6 +5871,14 @@ class LabRuntime:
             return "script not run: preflight failed: " + "; ".join(str(r) for r in bad), None
         # said right under what runs: the person approves the file, and what it imports beside it, as they are now
         request.items[1:1] = self._changed_since(prep)
+        kept = self._kept_version(prep.path)
+        if kept is not None:   # one of the lab's experiments: which version, and what changed in a new one
+            if not kept.intact:
+                return ("script not run: %s's version %d changed after it was written, so it isn't what was approved: "
+                        "save it as a new version (save_experiment)" % (kept.name, kept.number)), None
+            request.title = "Run %s, version %d%s?" % (kept.name, kept.number,
+                                                        " (%s)" % prep.action if prep.action else "")
+            request.items[1:1] = self._kept_lines(kept)
         if gate.auto:
             request.items.append("Auto mode does not cover this run: a person approves each run of a script, "
                                  "experiments too" if prep.found.experiment else
@@ -5523,9 +5886,14 @@ class LabRuntime:
         if not gate.ask(request):
             gate.log.write("run_declined", by=gate.operator, plan=prep.name)
             return "declined: script %s not run%s" % (prep.name, " (%s)" % request.note if request.note else ""), None
+        if kept is not None and not kept.approved:   # the person's yes to its run approves the version
+            kept = self.experiments.approve(kept.name, kept.number, self._person())
+            gate.log.write("experiment", by=self._person(), change="approved", name=kept.name, version=kept.number)
         meta = self._attribute(None)
         apart = meta.pop("_apart", "")
         meta.update(extra or {})
+        if kept is not None:
+            meta["experiment"] = {"name": kept.name, "version": kept.number}
 
         def busy(text: str) -> None:
             self.busy = text

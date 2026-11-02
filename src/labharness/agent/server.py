@@ -458,6 +458,49 @@ def build_server(rt: LabRuntime) -> MCPServer:
             return "not read now: %s" % e
 
     @server.tool(annotations=READ, structured_output=False)
+    def describe_vi(path: str) -> str:
+        """One LabVIEW VI described whole, as text: its front panel's controls and indicators (ids c...), every node,
+        wire and frame of its block diagram (ids n..., terminals t...), whether each while loop stops or continues on
+        true, what it calls, and the lab's own sub-VIs it calls (ids s1.n...): what a translation into a Kelvin
+        experiment is written from. Read in Kelvin's LabVIEW reader; nothing runs."""
+        return outside(rt, "a LabVIEW VI", rt.describe_vi(path))
+
+    @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
+    def translate_vi(path: str, name: str = "") -> str:
+        """Translate a LabVIEW VI into a Kelvin experiment with the Kelvin app's model: Kelvin describes it, the model
+        writes the experiment, Kelvin's fixed checks and a rehearsal of each action on a simulated copy of the lab
+        send what fails back, and the result is a draft (its id, the checks, what wasn't translated, the code).
+        keep_experiment then asks a person to keep it. Nothing reaches the instruments; the VI goes only to a model
+        this chat's project allows."""
+        return outside(rt, "a LabVIEW VI's translation", rt.translate_vi(path, name))
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def save_experiment(name: str, source: str, note: str = "", notes: Optional[Dict[str, Any]] = None,
+                        vi: str = "") -> str:
+        """Save an experiment you wrote or changed, checked as a translation is (refused while anything blocks): a
+        new version of one of the lab's experiments (name), edited from its latest, which a person approves at its
+        first run, with what changed; or, for a new name, a draft keep_experiment asks a person to keep (vi: the VI
+        it translates, to check it against; notes: {inputs, not_translated, columns, mappings} as a translation
+        gives them)."""
+        return rt.save_experiment(name, source, note, notes, vi)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
+    def keep_experiment(draft: str, name: str) -> str:
+        """Ask a person to keep a draft (from translate_vi or save_experiment) in the lab's experiments, as name
+        (lowercase letters, digits, - and _): their yes makes it a version they approved, which run_script runs by its
+        name. Refused while anything blocks it."""
+        return rt.keep_experiment(draft, name)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def experiments(name: str = "") -> str:
+        """The lab's experiments, translated from its VIs: each with its latest version and the VI it came from; with
+        name, one of them: its versions (who made and approved each), actions, live inputs, its checks' warnings and
+        what wasn't translated."""
+        return outside(rt, "the lab's experiments", rt.experiments_view(name))
+
+    @server.tool(annotations=READ, structured_output=False)
     def check_script(script: str, params: Optional[Dict[str, Any]] = None, action: str = "") -> str:
         """What run_script would do with one of the lab's own scripts, without running it: the Python that runs it,
         the settings it takes (its module constants such as VMAX = 5, and main()'s defaults: params changes them
@@ -1130,6 +1173,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     runtime.owner = OwnerPin(home)   # the lab owner's PIN, when one is set in the app
     runtime.roles = LabRoles(home)   # the lab's roles: nobody signs in here, so with roles a yes takes the PIN
     runtime.lab_memory_dir = home    # the lab's memory, the same notes the app's chats have (labmemory.py)
+    from .. import expstore
+    runtime.experiments = expstore.Store(home / "experiments")   # the lab's experiments, the app's too
+    runtime.labview_map = home / "labview-map.yaml"
     runtime.scripts_folder = lambda: args.scripts
     runtime.scripts_python = lambda: args.scripts_python
     from .. import envs

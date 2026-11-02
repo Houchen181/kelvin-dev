@@ -33,7 +33,7 @@ from starlette.routing import Route
 from .._version import __version__
 from ..accounts import Accounts, LabRoles, OwnerPin, RoleRefused, cipher_for, has_legacy
 from ..configversions import ConfigVersions, widens as config_widens
-from .. import central, edition
+from .. import central, edition, expstore
 from ..agent.approval import WebApprover
 from ..agent.runtime import SETUP_STEPS, LabRuntime, Underway, Viewer, not_shown, writable_folder
 from ..agent.server import build_server
@@ -343,6 +343,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     home = lab_file.parent
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
+    runtime.experiments = expstore.Store(home / "experiments")   # the lab's experiments, from its VIs: everyone's
+    runtime.labview_map = home / "labview-map.yaml"       # what the lab's LabVIEW calls become (vimap.py)
     runtime.lab_memory_dir = home                         # the lab's memory, everyone's (labmemory.py)
     team = TeamChat(home)                                 # the lab's team chat, everyone's (teamchat.py)
     runtime.scripts_folder = lambda: settings.lab_scripts or None   # run_script runs only the scripts in it
@@ -439,6 +441,47 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     setup = AutoSetup(runtime, settings, home, can_switch=lambda: busy_problem() is None, make_card=write_card)
     runtime.card_writer = write_card                      # draft_card: a card for an instrument someone named
+
+    def vi_model(purpose: str, attribution: Dict[str, Any]) -> Callable[[str, str], Tuple[str, str]]:
+        """The model a VI's translation ("translate") or its second opinion ("review") is asked of: the asking chat's
+        own (the reviewer the person chose, for a second opinion), else the default model; ValueError when the
+        chat's project's rules don't allow it (or confidential work would go through the Kelvin hub), so the VI
+        never leaves for a model they exclude."""
+        loop = loop_ref.get("loop")
+        if loop is None:
+            raise ValueError("Kelvin is still starting")
+        chat = None
+        if (attribution or {}).get("chat"):
+            try:
+                chat = agent.store.load(str(attribution["chat"]))
+            except Exception:
+                chat = None
+
+        async def pick() -> str:
+            reviewer = agent.settings.get("reviewer") if agent.settings else ""
+            if purpose == "review" and reviewer:
+                return agent.model_key(reviewer)
+            if chat is not None and chat.get("model"):
+                return str(chat["model"])
+            return await card_model()
+        key = asyncio.run_coroutine_threadsafe(pick(), loop).result(timeout=60)
+        if chat is not None:
+            why = agent.not_here(chat, key)
+        elif not rulebook.allows((attribution or {}).get("rules"), key):
+            why = "%s is not allowed here: the rules say %s." % (agent.label(key), rulebook.describe(
+                (attribution or {}).get("rules")))
+        else:
+            why = ""
+        if why:
+            raise ValueError(why)
+
+        def ask(system: str, prompt: str) -> Tuple[str, str]:
+            async def go() -> Any:
+                provider, model_id = agent.provider_for(key)
+                return await asyncio.wait_for(review.ask(provider, model_id, system, prompt), 600), key
+            return asyncio.run_coroutine_threadsafe(go(), loop).result(timeout=630)
+        return ask
+    runtime.vi_model = vi_model                           # translate_vi: a VI into an experiment, by the chat's model
 
     def lab_changed(what: str) -> None:
         """Kelvin changed the lab itself: keep it in Settings; an instrument it added gets its folder, settings and

@@ -134,6 +134,21 @@ class Store:
                 return v
         raise KeyError("%s has no version %s (it has v1 to v%d)" % (name, number, versions[-1].number))
 
+    def find(self, path: Any) -> Optional[Version]:
+        """The version whose file a path is (a run of it, run again: the same version), or None."""
+        try:
+            p = Path(str(path)).resolve()
+            root = self.root.resolve()
+        except (OSError, ValueError, RuntimeError):
+            return None
+        m = _VERSION.match(p.parent.name)
+        if p.name != "experiment.py" or m is None or p.parent.parent.parent != root:
+            return None
+        try:
+            return self.get(p.parent.parent.name, int(m.group(1)))
+        except KeyError:
+            return None
+
     def diff(self, name: str, a: int, b: int) -> str:
         """What changed from version a to version b, as a unified diff."""
         old = self.get(name, a).path.read_text(encoding="utf-8").splitlines(keepends=True)
