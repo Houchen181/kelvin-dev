@@ -375,13 +375,16 @@ class OneAtATime:
 
     def __init__(self, name: str, busy: str):
         self.name, self.busy = name, busy
+        self.doing = ""   # what the work under way is, said to whoever asks for more meanwhile (else busy)
         self._lock = threading.Lock()
         self._pool: Optional[ThreadPoolExecutor] = None
 
-    def submit(self, fn: Callable[..., Any], *args: Any) -> "Future[Any]":
-        """fn(*args) on its thread, with this thread's context (whose work it is). Underway while another goes on."""
+    def submit(self, fn: Callable[..., Any], *args: Any, doing: str = "") -> "Future[Any]":
+        """fn(*args) on its thread, with this thread's context (whose work it is). Underway while another goes on,
+        in its own words (doing) when it gave some."""
         if not self._lock.acquire(blocking=False):
-            raise Underway(self.busy)
+            raise Underway(self.doing or self.busy)
+        self.doing = doing
         try:
             if self._pool is None:
                 self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=self.name)
@@ -392,9 +395,9 @@ class OneAtATime:
         future.add_done_callback(lambda _: self._lock.release())
         return future
 
-    def run(self, fn: Callable[..., Any], *args: Any) -> Any:
+    def run(self, fn: Callable[..., Any], *args: Any, doing: str = "") -> Any:
         """The same, waited for on this thread (an agent's tool call)."""
-        return self.submit(fn, *args).result()
+        return self.submit(fn, *args, doing=doing).result()
 
 
 class ClientCall:
@@ -5819,8 +5822,32 @@ class LabRuntime:
             return ""
 
     @staticmethod
+    def _vi_file(path: Any) -> Path:
+        """The VI a person or the AI gave by its path (as Windows' Copy as path gives it, quoted, too): ValueError, in
+        words, when it is no VI file there."""
+        raw = str(path or "").strip().strip('"').strip()
+        if not raw:
+            raise ValueError("give the VI's path")
+        vi = Path(raw).expanduser()
+        if not vi.is_absolute():
+            raise ValueError("give the VI's full path, such as C:\\Lab\\VIs\\IV scan.vi")
+        if not vi.is_file():
+            raise ValueError("%s %s" % (vi, "is a folder: choose a VI in it" if vi.is_dir() else "does not exist"))
+        if vi.suffix.lower() != ".vi":
+            raise ValueError("%s isn't a LabVIEW VI (.vi): Kelvin translates VIs into experiments" % vi.name)
+        return vi
+
+    @staticmethod
+    def translating(path: Any) -> str:
+        """What the LabVIEW thread is busy with while a VI is translated, said to whoever asks for more meanwhile."""
+        name = Path(str(path or "").strip().strip('"').strip()).name or "a VI"
+        return "Kelvin is translating %s already (it takes a few minutes): try again once that is done." % name
+
+    @staticmethod
     def _name_for(desc: Dict[str, Any]) -> str:
-        stem = Path(str(desc.get("name") or "experiment")).stem.lower()
+        """The name a translation is offered to be kept under: the VI's, its words apart (GateSweepScan2400.vi:
+        gate-sweep-scan2400)."""
+        stem = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", Path(str(desc.get("name") or "experiment")).stem).lower()
         name = re.sub(r"[^a-z0-9_-]+", "-", stem).strip("-_")[:64]
         return name or "experiment"
 
@@ -5867,9 +5894,14 @@ class LabRuntime:
         keep_experiment. The VI goes only to a model the asking chat's project's rules allow."""
         if self.vi_model is None:
             return self.NO_VI_MODEL
-        try:
-            return self.translate_vi_data(path, name)["text"]
-        except ValueError as e:
+        whose = dict(self.attribution or {})   # this thread's: the asking chat's project rules choose the model
+
+        def translate() -> Dict[str, Any]:
+            with self.attributed(whose):
+                return self.translate_vi_data(path, name)
+        try:   # on the LabVIEW thread, as the portal's: one translation (or folder read) at a time
+            return self.labview_reads.run(translate, doing=self.translating(path))["text"]
+        except (ValueError, Underway) as e:
             return "not translated: %s" % e
 
     def translate_vi_data(self, path: str, name: str = "") -> Dict[str, Any]:
@@ -5881,13 +5913,13 @@ class LabRuntime:
         from .. import vicheck, vimap, vitranslate
         if self.vi_model is None:
             raise ValueError(self.NO_VI_MODEL)
+        vi = self._vi_file(path)   # before any model is chosen: a mistyped path is said first
         attribution = dict(self.attribution or {})
         ask = self.vi_model("translate", attribution)   # ValueError: the rules don't allow it, said before any VI text
         try:
             review_ask = self.vi_model("review", attribution)
         except ValueError:
             review_ask = None   # the second opinion's model isn't allowed here: the translation goes without it
-        vi = Path(path)
         try:
             desc = self._describe(vi)
         except OSError as e:

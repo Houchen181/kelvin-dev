@@ -138,6 +138,7 @@ def test_a_second_translate_while_one_runs_is_refused_at_once(portal):
     r = client.post("/api/labview/translate", json={"path": str(VI)})
     t.join(120)
     assert r.status_code == 409, r.text
+    assert "translating SMU_IV single.vi already" in r.json()["error"], r.text   # what Kelvin is busy with
     assert first["r"].status_code == 200
 
 
@@ -258,3 +259,46 @@ def test_who_keeps_and_approves_is_the_person_signed_in(portal):
     rt.experiments.add("iv-scan", GOOD + "\n", {}, by="agent", edited_from=1)
     client.post("/api/experiments/iv-scan/approve", json={"version": 2})
     assert rt.experiments.get("iv-scan", 2).approved_by == "ana (portal)"
+
+
+# ------------------------------------------------------------------ Import a script or VI…: a VI is translated
+
+def test_importing_a_vi_as_a_script_says_it_is_translated_instead(portal):
+    _, client, _ = portal
+    r = client.post("/api/library", json={"op": "import", "path": str(VI)})
+    assert r.status_code == 400 and "LabVIEW VI" in r.json()["error"] and "translat" in r.json()["error"], r.text
+
+
+def test_with_no_model_a_translation_says_where_to_add_one(lab, folder, tmp_path):
+    pytest.importorskip("starlette")
+    pytest.importorskip("mcp")
+    from starlette.testclient import TestClient
+    from test_web import Scripted
+
+    from labharness.web.app import create_app
+    from labharness.web.settings import Settings
+    from labharness.web.store import ChatStore
+
+    class NoKey(Scripted):
+        def available(self):
+            return False
+    rt = script_runtime(lab, folder, tmp_path, timeout=30)
+    settings = Settings(tmp_path / "settings.json")
+    app = create_app(rt, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"],
+                     providers={"scripted": NoKey([])})
+    rt.experiments = expstore.Store(tmp_path / "experiments")
+    client = TestClient(app)
+    client.headers["X-Kelvin-Token"] = settings.access_key
+    with client:
+        r = client.post("/api/labview/translate", json={"path": str(VI)})
+    said = r.json()["error"]
+    assert r.status_code == 400 and "no model to translate" in said and "Settings" in said and "card" not in said, said
+
+
+def test_import_a_script_or_vi_starts_a_vis_translation():
+    page = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert ">Import a script or VI…</button>" in page and ".vi)" in page
+    for text in ("function isVI(", "function importVI(", "if (isVI(path)) return importVI(path);",
+                 "openTranslate({ name:", "the translation goes on"):
+        assert text in js, text
