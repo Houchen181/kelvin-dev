@@ -172,24 +172,28 @@ MISSING = "Request is missing x-opencode-session and cannot be routed efficientl
 
 
 class OpenCodeGo:
-    """OpenCode Go as it answers, with no network: a request without x-opencode-session is refused (400
-    MissingSessionID), and so is a model it doesn't offer (400, saying so in the shape given); it lists its models
-    (lists: False, its list out of reach) and answers the rest. The session each request carried is kept."""
+    """OpenCode Go as it answers, with no network: a key not its own is refused (401), and so is a request without
+    x-opencode-session (400 MissingSessionID) and a model it doesn't offer (400 or the status given, saying so in the
+    shape given, a web page as text); it lists its models (lists: False, its list out of reach) and answers the rest.
+    The session each request carried is kept."""
 
-    def __init__(self, refusal=None):
+    def __init__(self, refusal=None, status=400):
         self.refusal = refusal or {"type": "ModelError", "message": "Model is unavailable"}
+        self.status = status
         self.lists = True
         self.sessions = []
 
     def answer(self, path, headers, body):
         self.sessions.append(headers.get("x-opencode-session"))
+        if headers.get("authorization") != "Bearer go-secret-key":
+            return 401, {"type": "AuthError", "message": "Invalid API key."}
         if not headers.get("x-opencode-session"):
             return 400, {"type": "MissingSessionID", "message": MISSING}
         if path.endswith("/models"):
             return (200, {"object": "list", "data": [{"id": m, "created": 1} for m in GO_MODELS]}) if self.lists \
                 else (404, {"type": "NotFound", "message": "Not found"})
         if body.get("model") not in GO_MODELS:
-            return 400, self.refusal
+            return self.status, self.refusal
         return 200, None
 
     def client(self):
@@ -199,6 +203,8 @@ class OpenCodeGo:
 
         def handle(request):
             status, said = self.answer(request.url.path, request.headers, json.loads(request.content or b"{}"))
+            if isinstance(said, str):
+                return httpx2.Response(status, html=said)
             if said is not None:
                 return httpx2.Response(status, json=said)
             chunk = {"id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "glm-5.3", "choices": [
@@ -291,44 +297,57 @@ def parts(tmp_path):   # as test_web's
     return runtime, Settings(tmp_path / "settings.json"), ChatStore(tmp_path / "chats")
 
 
-@pytest.mark.parametrize("refusal", [{"type": "ModelError", "message": "Model is unavailable"},
-                                     {"error": {"type": "ModelError", "message": "Model is unavailable"}},
-                                     {"error": "Model is unavailable"}])
-def test_a_services_refusal_reaches_the_chat_in_its_own_words(parts, refusal):
+UNAVAILABLE = "OpenCode Go: Model is unavailable"
+
+
+@pytest.mark.parametrize("refusal, status, said", [
+    ({"type": "ModelError", "message": "Model is unavailable"}, 400, UNAVAILABLE),
+    ({"error": {"type": "ModelError", "message": "Model is unavailable"}}, 400, UNAVAILABLE),
+    ({"error": "Model is unavailable"}, 400, UNAVAILABLE),
+    ({"detail": "Model is unavailable"}, 400, UNAVAILABLE),                     # FastAPI's, which gateways are built on
+    ({"detail": [{"loc": ["body", "model"], "msg": "Model is unavailable", "type": "value_error"}]}, 422, UNAVAILABLE),
+    ({"type": "ModelError", "message": ""}, 400, "OpenCode Go refused the request (error 400)."),   # no words: its code
+    ("<html><body><h1>400 Bad Request</h1></body></html>", 400, "OpenCode Go refused the request (error 400).")])
+def test_a_services_refusal_reaches_the_chat_in_its_own_words(parts, refusal, status, said):
     """A model OpenCode Go doesn't offer: the chat says what OpenCode said, after the service's name, on one line,
-    whatever the shape it said it in; no stack, no "Error code: 400", never the key. A second opinion asked of it says
-    the same."""
+    whatever the shape it said it in, or its error's number when it said nothing; no stack, no "Error code: 400",
+    never the key. A second opinion asked of it says the same."""
     from labharness.web.app import make_providers
     from test_web import DONE, Scripted, client_for, stream_turn
     parts[1].add_service({"preset": "opencode-go", "api_key": "go-secret-key"})
-    go, service = make_providers(parts[1])["opencode-go"], OpenCodeGo(refusal)
+    go, service = make_providers(parts[1])["opencode-go"], OpenCodeGo(refusal, status)
     go.client = service.client()
     client, headers = client_for(parts, {"opencode-go": go, "scripted": Scripted([DONE])})
     with client:
         chat = client.post("/api/chats", json={"model": "opencode-go:glm-5.3"}, headers=headers).json()
         events = stream_turn(client, headers, chat["id"], "Plot the gate sweep.", "opencode-go:deepseek-flash")
-        assert [e["message"] for e in events if e["type"] == "error"] == ["OpenCode Go: Model is unavailable"]
+        assert [e["message"] for e in events if e["type"] == "error"] == [said]
         assert events[-1] == {"type": "turn_end", "reason": "error"}
-        said = json.dumps(events)
-        assert "go-secret-key" not in said and "Traceback" not in said and "Error code" not in said
+        shown = json.dumps(events)
+        assert "go-secret-key" not in shown and "Traceback" not in shown and "Error code" not in shown
         events = stream_turn(client, headers, chat["id"], "With one it offers, then.", "opencode-go:glm-5.3")
         assert "".join(e["delta"] for e in events if e["type"] == "text") == "Six points."   # its session: answered
         stream_turn(client, headers, chat["id"], "And the gate?", "scripted:m1")   # an answer for a second opinion
         r = client.post("/api/chats/%s/review" % chat["id"], json={"model": "opencode-go:deepseek-flash"},
                         headers=headers)
         assert r.status_code == 502
-        assert r.json()["error"] == "The reviewer could not answer: OpenCode Go: Model is unavailable"
+        assert r.json()["error"] == "The reviewer could not answer: " + said
 
 
 def test_the_models_named_for_a_service_are_checked_against_its_list(parts, monkeypatch):
     """Named models a service's own list lacks: Settings says so with the nearest it has, when the service is added
     and on Test, and keeps the names as typed (a service may serve a name it doesn't list). When its list can't be
-    read, the service is added as before and nothing is said."""
+    read, the service is added as before and nothing is said; when the service turns the key down asking for it, Add
+    and Test say so, never "Works"."""
     from starlette.testclient import TestClient
     from labharness.web.app import create_app
     assert not_offered(["deepseek-flash", "glm-5.3", "GLM-5.3", "gpt-9"], GO_MODELS) == [
         {"name": "deepseek-flash", "nearest": "deepseek-v4.1-flash"}, {"name": "GLM-5.3", "nearest": "glm-5.3"},
         {"name": "gpt-9", "nearest": ""}]
+    # names a service serves as it lists them: Ollama's llama3.3 (llama3.3:latest), OpenRouter's with a variant
+    assert not_offered(["llama3.3", "qwen3:32b", "openai/gpt-5:online", "openai/gpt-5:nitro"],
+                       ["llama3.3:latest", "qwen3:latest", "openai/gpt-5"]) == [
+        {"name": "qwen3:32b", "nearest": "qwen3:latest"}]                     # a size it hasn't pulled is not
     assert say_not_offered("OpenCode Go", not_offered(["kimi-k9", "deepseek-flash", "gpt-9"], GO_MODELS)) == (
         "OpenCode Go doesn't offer kimi-k9 (nearest: kimi-k3), deepseek-flash (nearest: deepseek-v4.1-flash) or gpt-9.")
     service = OpenCodeGo()
@@ -353,3 +372,45 @@ def test_the_models_named_for_a_service_are_checked_against_its_list(parts, monk
         assert r.status_code == 200 and "names" not in r.json()                   # added as before
         assert client.post("/api/services/opencode-go/test", json={}, headers=headers).json() == \
             {"ok": True, "message": "2 models that Kelvin can use"}
+        client.delete("/api/services/opencode-go", headers=headers)
+        wrong = ("OpenCode Go rejected the API key: it is wrong, or it was revoked. Copy it again into Settings → "
+                 "Models.")
+        r = client.post("/api/services", json=dict(named, api_key="wrong-key"), headers=headers)   # 401 for its list
+        assert r.status_code == 200 and r.json()["names"] == wrong and "wrong-key" not in r.text
+        assert client.post("/api/services/opencode-go/test", json={}, headers=headers).json() == \
+            {"ok": False, "message": wrong}                                       # not "Works" for a key turned down
+
+
+COMMANDS = ("SOURce:VOLTage:LEVel <n> sets the level; SOURce:VOLTage:LEVel? reads it. OUTPut:STATe ON|OFF switches "
+            "the output. MEASure:CURRent? reads the current.\n")
+MANUAL = "Acme Gizmo 7 programming manual\n" + COMMANDS * 10   # a command reference a card can be written from
+
+
+def test_a_refusal_inside_a_tool_reaches_the_chat_in_plain_words(parts, tmp_path):
+    """draft_card and translate_vi ask the model outside any turn, and their results quote why it failed: in plain
+    words on one line, as the chat says it, never the key a service echoes back or the SDK's "Error code: 401"."""
+    import openai
+    httpx2 = pytest.importorskip("httpx2")
+    from labharness import vicheck
+    from test_web import client_for
+    echoed = {"error": {"message": "Incorrect API key provided: sk-proj-AbCd****************wxYZ. You can find your "
+                                   "API key at https://platform.openai.com/account/api-keys.",
+                        "type": "invalid_request_error", "code": "invalid_api_key"}}
+    gpt = OpenAIProvider("openai", "GPT", "sk-proj-AbCdEfGh0123456789wxYZ", models=["gpt-5"])
+    gpt.client = openai.AsyncOpenAI(api_key="sk-proj-AbCdEfGh0123456789wxYZ", max_retries=0,
+                                    http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(
+                                        lambda request: httpx2.Response(401, json=echoed))))
+    manual = tmp_path / "gizmo-7.txt"
+    manual.write_text(MANUAL, encoding="utf-8")
+    said = ("GPT rejected the API key: it is wrong, or it was revoked. Copy it again from platform.openai.com into "
+            "Settings → Models.")
+    runtime = parts[0]
+    client, _ = client_for(parts, {"openai": gpt})
+    with client:
+        assert runtime.draft_card("", "Acme", "Gizmo 7", str(manual)) == \
+            "no card yet: Kelvin could not write the Acme Gizmo 7 card: " + said      # the card's model: the default
+        ask = runtime.vi_model("translate", {})
+        with pytest.raises(ValueError) as failed:   # translate_vi says it as it is ("not translated: ...")
+            ask("Translate it.", "The VI.")
+        assert str(failed.value) == said
+        assert [f.text for f in vicheck.review(ask, "The VI.", "x = 1")] == ["the second opinion failed: " + said]

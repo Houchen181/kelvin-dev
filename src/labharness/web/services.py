@@ -109,12 +109,14 @@ def presets_view() -> List[Dict[str, Any]]:
 
 def not_offered(typed: List[str], offered: List[str]) -> List[Dict[str, str]]:
     """The model names typed for a service that its own list lacks, each with the nearest name it has ("": none is
-    near), as {name, nearest}. Kept as typed all the same: the service may serve a name it doesn't list."""
+    near), as {name, nearest}. Kept as typed all the same: the service may serve a name it doesn't list. A name it
+    lists with ":latest" (Ollama serves llama3.3 as llama3.3:latest), or without the variant after its last colon
+    (OpenRouter serves openai/gpt-5:online, :nitro or :floor as openai/gpt-5), is offered."""
     have = set(offered)
     by_lower = {m.lower(): m for m in offered}
     out = []
     for name in typed:
-        if name in have:
+        if name in have or name + ":latest" in have or (":" in name and name.rpartition(":")[0] in have):
             continue
         near = difflib.get_close_matches(name.lower(), list(by_lower), n=1, cutoff=0.5)
         out.append({"name": name, "nearest": by_lower[near[0]] if near else ""})

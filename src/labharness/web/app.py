@@ -419,6 +419,16 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return {"default_model": default_model(keys, agent.model_key(settings.get("default_model") or "")),
                 "auto_model": default_model(keys)}
 
+    async def ask_plainly(key: str, system: str, prompt: str, wait: float) -> Tuple[str, str]:
+        """A model's answer outside any turn, with its key, for a tool's worker (a card's draft, a VI's translation and
+        its second opinion). Its service's refusal, or no answer in time, is a ValueError in one plain line, never a
+        key (agent.failure), which the tool's result quotes in the chat."""
+        provider, model_id = agent.provider_for(key)
+        try:
+            return await asyncio.wait_for(review.ask(provider, model_id, system, prompt), wait), key
+        except Exception as e:
+            raise ValueError(agent.failure(key, e)) from None
+
     def ask_model(system: str, prompt: str) -> Any:
         """Ask the card model from a worker thread (the providers live on the server's event loop)."""
         loop = loop_ref.get("loop")
@@ -426,9 +436,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             raise RuntimeError("Kelvin is still starting")
 
         async def go() -> Any:
-            key = await card_model()
-            provider, model_id = agent.provider_for(key)
-            return await asyncio.wait_for(review.ask(provider, model_id, system, prompt), 300), key
+            return await ask_plainly(await card_model(), system, prompt, 300)
         return asyncio.run_coroutine_threadsafe(go(), loop).result(timeout=330)
 
     def search_web(query: str) -> List[str]:
@@ -502,10 +510,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             raise ValueError(why)
 
         def ask(system: str, prompt: str) -> Tuple[str, str]:
-            async def go() -> Any:
-                provider, model_id = agent.provider_for(key)
-                return await asyncio.wait_for(review.ask(provider, model_id, system, prompt), 600), key
-            return asyncio.run_coroutine_threadsafe(go(), loop).result(timeout=630)
+            return asyncio.run_coroutine_threadsafe(ask_plainly(key, system, prompt, 600), loop).result(timeout=630)
         return ask
     runtime.vi_model = vi_model                           # translate_vi: a VI into an experiment, by the chat's model
 
@@ -2031,7 +2036,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def services_view(request: Request) -> Response:
         """GET: the services set up, and the ones Kelvin knows. POST {preset, name, base_url, api_key, models}: add;
-        "names" then says which of the models named it doesn't offer, with the nearest it does (added all the same)."""
+        "names" then says which of the models named it doesn't offer, with the nearest it does, or that it turned the
+        key down when asked for its list (added all the same)."""
         from .services import presets_view
         added = None
         if request.method == "POST":
@@ -2050,8 +2056,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse(dict(out, names=names) if names else out)
 
     async def names_not_offered(service_id: str) -> str:
-        """What Settings says of the models named for a service that its own list lacks, each with the nearest it has:
-        "" when it has them all, none was named, or its list can't be read (a gateway without one)."""
+        """What Settings says of the models named for a service that its own list lacks, each with the nearest it has,
+        or why the service wouldn't give its list (the key turned down, as a chat would hear it): "" when it has them
+        all, none was named, or it has no list to read (a gateway without one, or out of reach)."""
+        from .agent import describe_error
+        from .modelerrors import refused
         from .services import say_not_offered
         provider = agent.providers.get(service_id)
         check = getattr(provider, "not_offered", None)
@@ -2059,9 +2068,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return ""
         try:
             missing = await asyncio.wait_for(check(), 20)
-        except Exception as e:   # nothing to check the names against: they stay as typed
+        except Exception as e:
+            if refused(e):   # the service said no to the key: Test and Add say so, never "Works"
+                return describe_error(provider, e)
             log.info("the models named for %s weren't checked: %s", service_id, type(e).__name__)
-            return ""
+            return ""   # nothing to check the names against: they stay as typed
         return say_not_offered(provider.label, missing) if missing else ""
 
     async def service_view(request: Request) -> Response:

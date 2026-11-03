@@ -1,7 +1,8 @@
 """Buttons in a row, as the kit draws them (app.css): a skill's Show and Download are small buttons on one line under
 what it is, with room around them, in Settings → Memory and a project's settings alike. The other rows whose text
 buttons (button.link, outlined since "text buttons look like buttons") stood stacked, stretched, split or cramped:
-the help's topics, a project's master report, the owner's PIN and notifications, the scan editor's + Add."""
+the help's topics, a project's master report, the owner's PIN and notifications, Lab setup's Lab config, the scan
+editor's + Add."""
 import re
 
 import pytest
@@ -59,6 +60,10 @@ def test_rows_of_outlined_text_buttons_have_room_and_stay_together():
         row = re.search(r'<span class="field-actions"><button id="%s"[^>]*>[^<]*</button>\s*<button id="%s"[^>]*>'
                         r'[^<]*</button></span></div>' % (first, second), PAGE)
         assert row, first
+    # Lab setup's Lab config: History… beside its By instrument | Whole file switch at the row's end, not alone in the
+    # middle of the row while the switch shows
+    assert re.search(r'<label for="lab-yaml">Lab config</label>\s*<div class="field-actions"><button id="lab-history"'
+                     r'[^>]*>History…</button>\s*<div id="lab-view" class="seg"', PAGE)
     assert "justify-content: space-between" in _rule(".field-row")
     # the scan editor's + Loop and + Add, and the step row: no text-link padding cramping an outlined button
     assert ".ed-sec-head .link" not in CSS and ".step-foot .link" not in CSS

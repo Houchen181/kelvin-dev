@@ -3863,7 +3863,8 @@
       refreshModels(r);
       const added = r.services[r.services.length - 1];
       const group = r.models.groups.find((g) => g.provider === added.id);
-      // r.names: the models named for it that it doesn't offer, with the nearest it does (added all the same)
+      // r.names: the models named for it that it doesn't offer, with the nearest it does, or that it turned the key
+      // down when asked for its list (added all the same)
       $("svc-hint").textContent = group && group.error ? "Added, but " + group.error
         : r.names ? "Added, but " + r.names
         : "Added " + added.name + (group ? " with " + group.models.length + " models." : ".");
