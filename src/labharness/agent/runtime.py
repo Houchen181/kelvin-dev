@@ -713,7 +713,7 @@ class LabRuntime:
         self._queue_skip: Optional[Tuple[str, str]] = None   # (the running item a person skipped, who): it ends
         self._queue_now = threading.local()   # the queue's thread: the item it runs (.item), which its run's live names
         self._queue_step_now: Optional[Dict[str, Any]] = None   # a running step's phase and when it ends, for its block
-        # what the Sequence pane shows of each item, kept so a poll of /api/state reads no file (queue_view): by item
+        # what the Sequence shows of each item, kept so a poll of /api/state reads no file (queue_view): by item
         # (its text), the file a script item runs, that file's settings (by its time and size), the library's colours
         self._seq_items: Dict[str, Tuple[str, Dict[str, Any]]] = {}
         self._seq_found: Dict[Tuple[str, str, str], Tuple[Optional[Path], float]] = {}
@@ -2900,7 +2900,7 @@ class LabRuntime:
         return self.queue.text(lambda item: not self.may_see(item.whose(), cache))
 
     def queue_view(self) -> Dict[str, Any]:
-        """The queue for the portal's Sequence pane (and /api/state, polled every few seconds): ScanQueue.view, its
+        """The queue for the portal's Sequence (and /api/state, polled every few seconds): ScanQueue.view, its
         saved queues, and for each item a line saying what it does (summary); a script item's settings with their
         values in its file and the values it runs with (settable, notes, params), a step's set values, wait and the
         reading it settles (set, wait, stabilize); the colour and name a person gave its library entry (an item it
@@ -2932,7 +2932,7 @@ class LabRuntime:
             return self._seq_settings(self._seq_file(load_script_item(text), self.queue.changed), {})["settable"]
 
     def _seq_view_items(self, items: List[Dict[str, Any]], changed: float) -> List[Dict[str, Any]]:
-        """The items of queue_view with what the Sequence pane shows of each (queue_view)."""
+        """The items of queue_view with what the Sequence shows of each (queue_view)."""
         import os
         colors, names, by_file = self._seq_library()
         stamps: Dict[str, Optional[Tuple[int, int]]] = {}   # each file looked at once per view

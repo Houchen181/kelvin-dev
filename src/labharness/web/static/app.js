@@ -906,13 +906,13 @@
   }
 
   // ------------------------------------------------------------------ runs pane (beside the chat, like a terminal pane)
-  // Two views: the Schedule (the scans and the queue together, as Special Measure's window) and the History (one tab
-  // per open run, else the recent runs). The Schedule stays out of sight: the queue is the Sequence pane (seq.js), the
-  // scans its functions, and what showed the Schedule opens the Sequence (showQueue); the pane shows the History. A
-  // running run is polled from /api/live (so runs started by any agent show up); a finished run shows its assessment,
-  // key results, plots with fits, table, and Run again.
+  // Two views: the Sequence (seq.js: the queue as blocks, with the functions that go into it; the "schedule" view, as
+  // 0.3.39 named the queue's) and the History (one tab per open run, else the recent runs). What showed the queue opens
+  // the pane on the Sequence (showQueue). 0.3.39's Schedule (the scans beside the queue) stays on the page, never
+  // shown. A running run is polled from /api/live (so runs started by any agent show up); a finished run shows its
+  // assessment, key results, plots with fits, table, and Run again.
   const RUNS = { open: false, tabs: new Map(), active: null, polling: false, cache: new Map(), dismissed: new Set(),
-                 view: "history", list: null };
+                 view: "schedule", list: null, seqOpen: false };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const etaText = (s) => (s ? " · about " + (s < 90 ? Math.max(1, Math.round(s)) + " s" : Math.round(s / 60) + " min") + " left" : "");
   const durText = (s) => (s < 90 ? Math.round(s) + " s" : s < 5400 ? (s / 60).toFixed(1) + " min" : (s / 3600).toFixed(1) + " h");
@@ -951,7 +951,7 @@
     close.addEventListener("click", () => closeRunTab(runId));
     RUNS.tabs.set(runId, tab);
     $("run-tabs").append(btn);
-    $("run-tabs").hidden = false;
+    tabsRow();
     $("history-view").append(body);
     if (RUNS.tabs.size > 8) {  // keep the strip short: drop the oldest finished tab
       const old = [...RUNS.tabs.values()].find((t) => t.status !== "running" && t !== tab);
@@ -962,8 +962,14 @@
   function setTabStatus(tab, status) {
     tab.status = status;
     setState(tab.state, status);
-    $("runs-dot").hidden = ![...RUNS.tabs.values()].some((t) => t.status === "running");
+    liveDots();
   }
+  function liveDots() {   // a run running: a dot on the Runs button, and on History while the Sequence is shown
+    const live = [...RUNS.tabs.values()].some((t) => t.status === "running");
+    $("runs-dot").hidden = !live;
+    $("open-history").classList.toggle("live", live);
+  }
+  function tabsRow() { $("run-tabs").hidden = RUNS.view !== "history" || !RUNS.tabs.size; }
   function selectRun(runId) {
     const tab = RUNS.tabs.get(runId);
     if (!tab) return;
@@ -980,15 +986,15 @@
     RUNS.dismissed.add(runId);  // closing a running run's tab must not bring it back
     tab.btn.remove(); tab.body.remove();
     RUNS.tabs.delete(runId);
-    $("run-tabs").hidden = !RUNS.tabs.size;
+    tabsRow();
     if (RUNS.active === runId) {
       RUNS.active = [...RUNS.tabs.keys()].pop() || null;
       if (RUNS.view === "history") { if (RUNS.active) selectRun(RUNS.active); else showView("history"); }
     }
-    $("runs-dot").hidden = ![...RUNS.tabs.values()].some((t) => t.status === "running");
+    liveDots();
   }
-  // the pane's view: "schedule" (the scans and the queue) or "history" (the active run, or with none the recent runs)
-  const VIEWS = { schedule: ["open-schedule", "schedule-view"], history: ["open-history", "history-view"] };
+  // the pane's view: "schedule" (the Sequence) or "history" (the active run, or with none the recent runs)
+  const VIEWS = { schedule: ["open-schedule", "seq-view"], history: ["open-history", "history-view"] };
   function showView(view) {
     RUNS.view = view;
     for (const [v, [seg, panel]] of Object.entries(VIEWS)) {
@@ -998,7 +1004,8 @@
       $(seg).tabIndex = on ? 0 : -1;
       $(panel).hidden = !on;
     }
-    QUEUE.open = view === "schedule";
+    tabsRow();
+    $("open-report").hidden = view !== "history";   // a report of runs: the History's
     const active = view === "history" && RUNS.tabs.get(RUNS.active);
     for (const t of RUNS.tabs.values()) {
       const on = t === active;
@@ -1011,11 +1018,24 @@
     all.classList.toggle("on", !active);
     all.setAttribute("aria-selected", String(!active));
     if (view === "history" && !active) loadRunList();
-    if (view === "schedule") { loadScans(); loadQueue(); }
+    if (view === "schedule") loadQueue();
+    seqSight();
+  }
+  // the Sequence told whether it is in sight (the pane open on it), and what to say there (message)
+  function seqSight(message) {
+    const open = RUNS.open && RUNS.view === "schedule";
+    if (open === RUNS.seqOpen && !message) return;
+    emit("seq", { open, opened: open && !RUNS.seqOpen, message: message || "" });
+    RUNS.seqOpen = open;
   }
   function showRunList() {   // All runs: the open tabs stay open
     RUNS.active = null;
     showView("history");
+  }
+  function openRunList() {   // the pane, on All runs (Home's Runs)
+    RUNS.active = null;
+    RUNS.view = "history";
+    if (RUNS.open) showView("history"); else toggleRuns(true);
   }
   function allRunsTab() {   // made once, kept first in the run tabs
     let b = $("runs-all");
@@ -1027,10 +1047,9 @@
     }
     return b;
   }
-  // the segmented control is a tab list: the arrow keys, Home and End move along it, along the tabs in sight (the
-  // Schedule's is not: the queue is the Sequence pane)
+  // the segmented control is a tab list: the arrow keys, Home and End move along it
   function segKeys(e) {
-    const order = Object.keys(VIEWS).filter((v) => v !== "schedule"), i = order.indexOf(RUNS.view);
+    const order = Object.keys(VIEWS), i = order.indexOf(RUNS.view);
     const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: order.length - 1 }[e.key];
     if (next === undefined) return;
     e.preventDefault();
@@ -1084,6 +1103,7 @@
     $("toggle-runs").classList.toggle("on", RUNS.open);
     if (RUNS.open && !was) showView(RUNS.view);   // opened: its lists as they are now
     fitLayout();
+    seqSight();
   }
   function openRun(runId, plan) {
     runTab(runId, plan);
@@ -1091,8 +1111,8 @@
     toggleRuns(true);
   }
 
-  // a run started (seen in the chat stream or in the lab state): give it a tab, show it, follow it; while the person
-  // types in the schedule or drags in it (a step, the next scans), it only gets its tab, and the schedule stays
+  // a run started (seen in the chat stream or in the lab state): give it a tab, show it, follow it; while the pane
+  // shows the Sequence it only gets its tab (History's dot says so), and the Sequence stays
   function noticeRun(runId, plan) {
     if (RUNS.tabs.has(runId) || RUNS.dismissed.has(runId)) return;
     const tab = runTab(runId, plan);
@@ -1101,9 +1121,7 @@
     pollLive();
   }
   function scheduling() {
-    const at = document.activeElement;
-    return RUNS.open && RUNS.view === "schedule" && (QUEUE.dragging
-      || !!(at && $("schedule-view").contains(at) && at.closest("input, textarea, select")));
+    return RUNS.open && RUNS.view === "schedule";
   }
   async function pollLive() {
     if (RUNS.polling) return;
@@ -1379,7 +1397,6 @@
   // (app.css), below 820 px the sidebar too.
   const CHAT_MIN = 520, SIDEBAR_W = 264;
   const PANES = {   // id: [open?, its column, its least width, where its width is kept]
-    seqpane: [() => !$("seqpane").hidden, "workcol", 340, "lh.seqWidth"],
     runpane: [() => RUNS.open, "workcol", 340, "lh.runsWidth"],
     edpane: [() => ED.open, "workcol", 360, "lh.edWidth"],
     anpane: [() => ANA.open, "workcol", 340, "lh.anWidth"],
@@ -1542,7 +1559,6 @@
   function initPanes() {
     const kept = (key) => Number(store(key)) || 0;
     PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(720, Math.max(420, window.innerWidth * 0.42)));
-    PANE_W.seqpane = kept("lh.seqWidth") || 460;
     PANE_W.anpane = kept("lh.anWidth") || PANE_W.runpane;   // until it has its own: the one it shared with Runs
     PANE_W.edpane = kept("lh.edWidth") || 460;
     PANE_W.labpanel = kept("lh.labWidth") || 380;
@@ -1565,9 +1581,7 @@
   function initRunsPane() {
     $("toggle-runs").addEventListener("click", () => pillClick("runpane", toggleRuns));
     $("close-runs").addEventListener("click", () => toggleRuns(false));
-    $("toggle-seq").addEventListener("click", () => pillClick("seqpane", toggleSeq));
-    $("close-seq").addEventListener("click", () => toggleSeq(false));
-    $("open-schedule").addEventListener("click", () => showQueue());   // out of sight: the queue is the Sequence pane
+    $("open-schedule").addEventListener("click", () => showView("schedule"));
     $("open-history").addEventListener("click", () => showView("history"));
     $("runs-seg").addEventListener("keydown", segKeys);
     $("runs-filter").addEventListener("input", renderRunList);
@@ -4619,20 +4633,17 @@
     $("queue-text").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); pasteOpen(false); $("queue-paste-open").focus(); } });
     for (const ev of ["dragend", "drop"]) document.addEventListener(ev, () => { if (QUEUE.dragging) dragDone(); });
   }
-  // the queue is the Sequence pane (seq.js): what showed the Schedule's queue opens it, with a line to say (message);
-  // the Schedule stays built, out of sight
+  // the queue is the Sequence (seq.js), the Runs pane's first view: what showed the queue opens the pane on it, with
+  // a line to say there (message)
   function showQueue(message) {
-    toggleSeq(true, message);
+    RUNS.view = "schedule";
+    if (RUNS.open) showView("schedule"); else toggleRuns(true);
+    seqSight(message);
   }
-  function toggleSeq(open, message) {
-    const pane = $("seqpane"), was = !pane.hidden;
-    const now = open === undefined ? !was : !!open;
-    pane.hidden = !now;
-    $("toggle-seq").setAttribute("aria-pressed", String(now));
-    $("toggle-seq").classList.toggle("on", now);
-    fitLayout();
-    if (now && FULL.length) fullShow("seqpane");
-    emit("seq", { open: now, opened: now && !was, message: message || "" });
+  function toggleSeq(open, message) {   // the Sequence shown (true), the pane closed if it shows it (false), or either
+    const shown = RUNS.open && RUNS.view === "schedule";
+    if (open === undefined ? !shown : open) showQueue(message);
+    else if (shown) toggleRuns(false);
   }
   function loadQueue() {
     api("/api/queue").then((q) => { QUEUE.data = q; renderQueue(); }, () => {});
@@ -4643,9 +4654,11 @@
       QUEUE.data = r;
       renderQueue();
       if (!quiet) $("queue-msg").textContent = (r.message || "").split("\n")[0];
+      emit("queue", { queue: r, message: quiet ? "" : r.message || "" });   // the Sequence draws it now
       return r;
     } catch (e) {
       $("queue-msg").textContent = e.message;
+      emit("queue", { message: e.message });
       return null;
     }
   }
@@ -4925,6 +4938,7 @@
     if (STEP.editing) stepReset();
     else if (at) followInsert(r, at);
     renderQueue();
+    emit("queue", { queue: r });   // the Sequence draws it now
   }
   function stepReset() {
     STEP.editing = null;
@@ -8492,6 +8506,55 @@
     });
     setMode(store("lh.mode") === "home" ? "home" : "chat", true);
   }
+  // ------------------------------------------------------------------ motion, as labMaster moves (app.css, the end):
+  // what switches on one curve (quick out, a long settle), what appears on another; none when asked for less motion
+  // a switch (.mode-seg, .seg): a raised thumb under the one that is on, which slides to the one turned on; placed
+  // again whenever its buttons change or it changes size (a count in it, or shown at last), without sliding when it
+  // was out of sight
+  function thumb(seg) {
+    if (!seg || seg.querySelector(":scope > .seg-thumb")) return;
+    const t = h("span", { class: "seg-thumb", "aria-hidden": "true" });
+    seg.prepend(t);
+    seg.classList.add("has-thumb");
+    let shown = false;
+    const place = () => {
+      const on = seg.querySelector(":scope > button.on");
+      if (!on || !on.offsetWidth) { t.style.opacity = "0"; shown = false; return; }
+      if (!shown) t.classList.add("still");
+      t.style.width = on.offsetWidth + "px";
+      t.style.height = on.offsetHeight + "px";
+      t.style.transform = "translate(" + on.offsetLeft + "px, " + on.offsetTop + "px)";
+      t.style.opacity = "1";
+      if (!shown) { void t.offsetWidth; t.classList.remove("still"); shown = true; }
+    };
+    new MutationObserver(place).observe(seg, { subtree: true, childList: true, attributes: true, attributeFilter: ["class"] });
+    if (window.ResizeObserver) new ResizeObserver(place).observe(seg);
+    place();
+  }
+  // what a fold opens comes in on the reveal curve (.k-in), once
+  function easeIn(els) {
+    for (const el of els) {
+      el.classList.remove("k-in");
+      void el.offsetWidth;
+      el.classList.add("k-in");
+      const done = (e) => {
+        if (e.target !== el) return;
+        el.classList.remove("k-in");
+        el.removeEventListener("animationend", done);
+      };
+      el.addEventListener("animationend", done);
+    }
+  }
+  function initMotion() {
+    for (const seg of document.querySelectorAll(".mode-seg, .seg")) thumb(seg);
+    // a top-bar button's name eases in under it on hover (app.css), in place of the browser's tip: its title, whenever
+    // one is set (Incognito's says what it will do)
+    const tip = (p) => { if (p.title) { p.dataset.tip = p.title; p.removeAttribute("title"); } };
+    for (const p of document.querySelectorAll(".topbar-right .pill")) {
+      tip(p);
+      new MutationObserver(() => tip(p)).observe(p, { attributes: true, attributeFilter: ["title"] });
+    }
+  }
   // the Lab panel's parts, each foldable under its heading (remembered); Hands on the sample and Bring to safe never fold
   function initLabFolds() {
     for (const row of document.querySelectorAll("#labpanel .inst-head-row")) {
@@ -8500,18 +8563,20 @@
       const key = "lh.fold." + h3.textContent.trim();
       const btn = h("button", { class: "fold-btn", type: "button", "aria-expanded": "true" }, icon("chev"), h3.textContent.trim());
       h3.replaceChildren(btn);
-      const apply = (folded) => {
+      const apply = (folded, ease) => {
         row.classList.toggle("folded", folded);
         btn.setAttribute("aria-expanded", String(!folded));
+        const part = [];
         for (let el = row.nextElementSibling; el && !el.classList.contains("inst-head-row"); el = el.nextElementSibling) {
-          if (!el.matches(".hands-btn, #hands-locked")) el.classList.toggle("fold-hide", folded);
+          if (!el.matches(".hands-btn, #hands-locked")) { el.classList.toggle("fold-hide", folded); part.push(el); }
         }
+        if (ease && !folded) easeIn(part);
       };
       apply(store(key) === "1");
       btn.addEventListener("click", () => {
         const folded = !row.classList.contains("folded");
         store(key, folded ? "1" : "0");
-        apply(folded);
+        apply(folded, true);
       });
     }
   }
@@ -8541,7 +8606,11 @@
           for (const el of part) el.classList.toggle("fold-hide", folded);
         };
         fold(true);
-        btn.addEventListener("click", () => fold(!head.classList.contains("folded")));
+        btn.addEventListener("click", () => {
+          const folded = !head.classList.contains("folded");
+          fold(folded);
+          if (!folded) easeIn(part);
+        });
       });
     }
   }
@@ -8549,7 +8618,7 @@
   window.Kelvin = {
     $, h, api, icon, md, toast, fmt, store, S, MARK,
     setMode, ask, sendMessage, newChat, openChat, pollState,
-    toggleSeq, toggleRuns, toggleLab, toggleAnalysis, openRun, fitLayout, exitFull,
+    toggleSeq, toggleRuns, toggleLab, toggleAnalysis, openRun, openRunList, fitLayout, exitFull, thumb,
     openEditor, openVersions, openLabSetup, openSettings, settingsPage, openCards,
     pickFolder, hasPicker, hasFilePicker, popMenu, closeMenu, lineChart, getRun, runCharts,
   };
@@ -8605,6 +8674,7 @@
     initMode();
     initLabFolds();
     initSettingFolds();
+    initMotion();
     initRunsPane();
     initTeam();
     initAnalysis();

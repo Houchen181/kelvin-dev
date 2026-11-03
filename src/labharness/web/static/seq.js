@@ -1,8 +1,9 @@
 "use strict";
-// The Sequence pane: Kelvin's queue drawn as blocks (seq.css), beside the chat. It hears the page through kelvin:*
-// events (ready, state, seq) and draws in #seq-head and #seq-body; every change goes through POST /api/queue. Its
-// functions are the person's library and the lab's experiments (/api/library, /api/experiments): a click appends one,
-// a drag puts it where it is dropped. The page lends what it uses on window.Kelvin.
+// The Sequence: Kelvin's queue drawn as blocks (seq.css), the Runs pane's first view (#seq-view). It hears the page
+// through kelvin:* events (ready, state, seq, queue) and draws in #seq-body; every change goes through POST /api/queue.
+// Its functions are the person's library and the lab's experiments (/api/library, /api/experiments): a click appends
+// one, a drag puts it where it is dropped; and a step typed in the step row, or any item pasted as written (app.js
+// keeps both: index.html's #seq-step, put here with the functions). The page lends what it uses on window.Kelvin.
 (() => {
   let K = null;   // window.Kelvin, once the page is ready
   const SEQ = {
@@ -23,7 +24,6 @@
     pending: false, fnsPending: false,
     starting: false, msgTimer: 0, finished: "", el: {},
   };
-  const WAIT_TEXT = "step: wait 10 min\nwait: 600";
   const FINISHED = new Set(["done", "failed", "stopped", "skipped"]);
   const CHIP = { running: ["Running", "run"], done: ["Done", "ok"], failed: ["Failed", "bad"], stopped: ["Stopped", "warn"],
                  skipped: ["Skipped", "line"] };
@@ -343,7 +343,7 @@
 
   // ------------------------------------------------------------------ the pill's badge, and the state's ticks
   function badge(q) {
-    const b = K.$("seq-badge"), pill = K.$("toggle-seq");
+    const b = K.$("seq-badge"), pill = K.$("toggle-runs");
     if (!b || !pill || !q) return;
     const n = (q.waiting || 0) + (q.running ? 1 : 0);
     if (b.textContent !== String(n)) b.textContent = String(n);
@@ -361,7 +361,7 @@
     }
     SEQ.q = q;
     badge(q);
-    if (!SEQ.open && !K.$("seqpane").hidden) { onSeq({ open: true }); return; }   // its opening was missed
+    if (!SEQ.open && inSight()) { onSeq({ open: true }); return; }   // its opening was missed
     if (!SEQ.open) return;
     if (!SEQ.el.list || !SEQ.el.list.isConnected) { render(); return; }   // a first drawing that failed: again
     if (sigOf(q) !== SEQ.sig || SEQ.pending) render();
@@ -378,6 +378,7 @@
     const was = SEQ.open;
     SEQ.open = !!d.open;
     if (SEQ.open && !was) {
+      SEQ.drawn = false;   // drawn as it is, without motion
       render();
       loadQueue();
       loadLib();
@@ -385,6 +386,8 @@
     if (!SEQ.open) closePop();
     if (d.message) say(d.message);
   }
+  // in sight: the Runs pane open on the Sequence
+  const inSight = () => !K.$("runpane").hidden && !K.$("seq-view").hidden;
   function say(text) {
     const m = SEQ.el.msg;
     if (!m) return;
@@ -397,12 +400,17 @@
   // ------------------------------------------------------------------ building the pane once
   function init() {
     K = window.Kelvin;
-    if (!K || !K.$("seq-head") || !K.$("seq-body") || !K.$("seqpane")) return;
+    if (!K || !K.$("seq-body") || !K.$("seq-view") || !K.$("runpane")) return;
     build();
     document.addEventListener("kelvin:state", (e) => guard(onState, e.detail));
     document.addEventListener("kelvin:seq", (e) => guard(onSeq, e.detail || {}));
+    document.addEventListener("kelvin:queue", (e) => guard(() => {   // the step row's or a pasted item's answer
+      const d = e.detail || {};
+      if (d.queue) accept(d.queue);
+      if (d.message) say(d.message);
+    }));
     // opened before this file started (a click while the page was still loading): drawn now
-    if (!K.$("seqpane").hidden) guard(onSeq, { open: true });
+    if (inSight()) guard(onSeq, { open: true });
     if (window.ResizeObserver) new ResizeObserver(() => guard(fit)).observe(SEQ.el.pane);
     SEQ.el.pane.addEventListener("focusout", () => setTimeout(() => guard(() => {
       if (SEQ.pending && !fieldIn(SEQ.el.list) && !(SEQ.drag && SEQ.drag.active)) render();
@@ -418,7 +426,7 @@
       const fast = K.S.labOpen || !(K.$("lab-badge") || {}).hidden;
       if (SEQ.open && running() && !fast && document.visibilityState === "visible") K.pollState();
     }, 1500);
-    SEQ.open = !SEQ.el.pane.hidden;
+    SEQ.open = inSight();
     fit();
     if (K.S && K.S.last) onState(K.S.last);
     if (SEQ.open) { render(); loadQueue(); loadLib(); }
@@ -428,7 +436,7 @@
     const name = h("input", { class: "seq-name", type: "text", spellcheck: "false", autocomplete: "off", maxlength: "80",
                               "aria-label": "Sequence name", placeholder: "Sequence" });
     const chip = h("span", { class: "chip line seq-state" }, "Idle");
-    K.$("seq-head").replaceChildren(name, chip);
+    const head = h("div", { class: "seq-head-main" }, name, chip);
     name.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); guard(renameSeq); name.blur(); }
       else if (e.key === "Escape") { e.preventDefault(); name.value = (SEQ.q && SEQ.q.name) || ""; sizeName(); name.blur(); }
@@ -442,7 +450,7 @@
     const msg = h("span", { class: "seq-msg", role: "status" });
     const more = h("button", { class: "icon-btn seq-more", type: "button", title: "More", "aria-label": "More",
                                "aria-haspopup": "menu" }, K.icon("dots"));
-    const bar = h("div", { class: "seq-bar" }, start, pause, stop, msg, more);
+    const bar = h("div", { class: "seq-bar" }, head, start, pause, stop, more, msg);
     start.addEventListener("click", () => guard(startSeq));
     pause.addEventListener("click", () => guard(op, { op: "pause" }));
     stop.addEventListener("click", () => guard(stopSeq));
@@ -453,8 +461,15 @@
     const groups = h("div", { class: "seq-groups" });
     const newFn = h("button", { class: "btn small primary", type: "button" }, "＋ New function");   // as the portal's map names it
     const newScan = h("button", { class: "btn small ghost", type: "button" }, "New scan");
-    const fns = h("section", { class: "seq-fns", "aria-label": "Functions", hidden: true }, search, groups,
-      h("div", { class: "seq-fns-foot" }, newFn, newScan));
+    // a step typed (Set, Wait, Wait until settled) and any item as written: app.js's step row and paste form
+    const stepRow = K.$("step-row"), paste = K.$("queue-paste"), pasteOpen = K.$("queue-paste-open");
+    const step = stepRow ? h("div", { class: "seq-step-part" }, h("div", { class: "seq-gh" }, "Step"),
+      h("div", { class: "kcard k-step seq-stepcard" },
+        h("div", { class: "seq-step-head" }, stepKinds(), stepRow.querySelector(".step-go")), stepRow, K.$("step-msg"))) : null;
+    const fns = h("section", { class: "seq-fns", "aria-label": "Functions", hidden: true }, search, groups, step,
+      h("div", { class: "seq-fns-foot" }, newFn, newScan, pasteOpen), paste);
+    const holder = K.$("seq-step");
+    if (holder && stepRow) holder.remove();   // its parts are the functions' now
     search.addEventListener("input", () => { SEQ.filter = search.value; guard(renderFns); });
     search.addEventListener("keydown", (e) => {
       if (e.key !== "Escape" || !search.value) return;
@@ -477,9 +492,41 @@
     const cols = h("div", { class: "seq-cols" }, fns, main);
     const body = K.$("seq-body");
     body.replaceChildren(bar, cols);
-    Object.assign(SEQ.el, { pane: K.$("seqpane"), body, name, chip, start, pause, stop, msg, more, bar, fns, search, groups,
+    Object.assign(SEQ.el, { pane: K.$("seq-view"), body, name, chip, start, pause, stop, msg, more, bar, fns, search, groups,
                             newFn, list, add, main, cols });
   }
+  // the step row's kind (its own list, kept for app.js) as a switch: Set | Wait | Settle
+  function stepKinds() {
+    const h = K.h, sel = K.$("step-kind");
+    if (!sel) return null;
+    const box = h("div", { class: "seg seq-kinds", role: "radiogroup", "aria-label": "Step" });
+    const sync = () => {
+      for (const b of box.querySelectorAll("button")) {
+        const on = b.dataset.v === sel.value;
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-checked", String(on));
+      }
+    };
+    for (const [v, label, title] of [["set", "Set", "Set a value"], ["wait", "Wait", "Wait a time"],
+                                     ["settle", "Settle", "Wait until a reading settles"]]) {
+      const b = h("button", { type: "button", role: "radio", title }, label);
+      b.dataset.v = v;
+      b.addEventListener("click", () => guard(() => {
+        if (sel.value === v) return;
+        sel.value = v;
+        sel.dispatchEvent(new Event("change"));   // app.js shows that kind's fields
+        const first = stepRowField();
+        if (first) first.focus();
+      }));
+      box.append(b);
+    }
+    sel.addEventListener("change", sync);
+    sel.hidden = true;
+    sync();
+    if (K.thumb) K.thumb(box);
+    return box;
+  }
+  const stepRowField = () => K.$("step-row").querySelector(".step-f:not([hidden]) input");
   function sizeName() {   // a title as wide as its words (field-sizing where the browser has it)
     const n = SEQ.el.name;
     if (window.CSS && CSS.supports && CSS.supports("field-sizing", "content")) return;
@@ -509,6 +556,7 @@
     renderBar();
     SEQ.sig = sigOf(SEQ.q);
     SEQ.pending = !renderList();
+    SEQ.drawn = true;
     tick();
   }
   function redraw() {   // the blocks again (an editor opened, a confirmation's time out, the library's names)
@@ -556,6 +604,7 @@
   function renderList() {
     const list = SEQ.el.list, all = items();
     if (SEQ.drag && SEQ.drag.active) return false;
+    const stood = flipFrom(list);   // where each block stood: those that move glide from there
     const act = document.activeElement;
     const typing = fieldIn(list) ? act.closest(".seq-card") : null;
     const focusCard = act && act.closest ? act.closest(".seq-card") : null;
@@ -596,7 +645,38 @@
         if (next) next.focus({ preventScroll: true });
       }
     }
+    flipTo(stood);
     return whole;
+  }
+  // ---------- motion, as labMaster moves (app.css): a block that moves glides from where it stood, a new one rises in;
+  // none when the sequence is first drawn, nor when the person asks for less motion
+  const calm = () => !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
+  function flipFrom(list) {
+    if (!SEQ.drawn || calm()) return null;
+    const at = new Map();
+    for (const [id, c] of SEQ.cards) if (c.el.parentNode === list) at.set(id, c.el.getBoundingClientRect().top);
+    return at;
+  }
+  function flipTo(at, skip) {
+    if (!at) return;
+    for (const [id, c] of SEQ.cards) {
+      if (id === skip || !c.el.isConnected) continue;
+      if (!at.has(id)) { rise(c.el); continue; }
+      const dy = at.get(id) - c.el.getBoundingClientRect().top;
+      if (Math.abs(dy) > 1 && c.el.animate) {
+        c.el.animate([{ transform: "translateY(" + dy + "px)" }, { transform: "none" }],
+                     { duration: 340, easing: "cubic-bezier(.2, .75, .2, 1)" });
+      }
+    }
+  }
+  function rise(el) {
+    el.classList.add("seq-in");
+    const done = (e) => {
+      if (e.target !== el) return;
+      el.classList.remove("seq-in");
+      el.removeEventListener("animationend", done);
+    };
+    el.addEventListener("animationend", done);
   }
   function makeCard(id) {
     const li = K.h("li", { class: "kcard seq-card", tabindex: "0" });
@@ -638,7 +718,11 @@
     else if (it.kind === "script" && it.problem && !FINISHED.has(it.status)) {   // its file is gone or can't be read
       parts.push(h("div", { class: "seq-err", title: it.problem }, firstLine(it.problem)));
     }
-    if (SEQ.edit.has(it.id)) parts.push(editor(it, look));
+    if (SEQ.edit.has(it.id)) {
+      const ed = editor(it, look);
+      if (SEQ.opening === it.id) { ed.classList.add("seq-ed-in"); SEQ.opening = null; }
+      parts.push(ed);
+    }
     li.replaceChildren(...parts);
     if (it.status === "running") updateProgress(li.querySelector(".seq-prog"), it);
   }
@@ -676,6 +760,7 @@
   function toggleEd(id, on) {
     const now = on === undefined ? !SEQ.edit.has(id) : on;
     if (now) SEQ.edit.add(id); else SEQ.edit.delete(id);
+    SEQ.opening = now ? id : null;
     redraw();
   }
   function cardKey(e, li) {
@@ -686,8 +771,9 @@
       e.preventDefault();
       const to = e.key === "ArrowUp" ? i - 1 : i + 1;
       if (to < 0 || to >= all.length) return;
-      const list = SEQ.el.list;   // moved now; the server's answer confirms it
+      const list = SEQ.el.list, stood = flipFrom(list);   // moved now; the server's answer confirms it
       list.insertBefore(li, e.key === "ArrowUp" ? list.children[to] : list.children[to + 1] || null);
+      flipTo(stood);
       li.focus({ preventScroll: false });
       op({ op: "move", item: id, position: to + 1 });
       return;
@@ -891,7 +977,6 @@
     const lib = SEQ.lib || {}, f = SEQ.filter.trim().toLowerCase();
     const scriptSub = (p) => String(p || "").split(/[\\/]/).slice(-2).join("/");
     const groups = [
-      ["Built-in", [{ type: "wait", key: "wait", name: "Wait", sub: "10 min", kind: "k-wait" }]],
       ["Scripts", (lib.scripts || []).map((e) => ({ type: "script", key: e.id, entry: e, name: e.name, sub: scriptSub(e.path),
                                                    kind: "k-script", color: e.color, missing: e.exists === false }))],
       ["Experiments", (SEQ.exps || []).map((x) => ({ type: "exp", key: "exp:" + x.name, exp: x, name: x.name,
@@ -913,16 +998,14 @@
   }
   function fnCard(fn) {
     const h = K.h;
-    let tail = null;
-    if (fn.type !== "wait") {
-      if (SEQ.fnConfirm === fn.key) {
-        tail = h("button", { class: "seq-act ask", type: "button" }, "Remove?");
-        tail.addEventListener("click", (e) => { e.stopPropagation(); guard(removeFn, fn); });
-      } else {
-        tail = h("button", { class: "icon-btn seq-fn-more", type: "button", title: "More", "aria-label": "More: " + fn.name,
-                             "aria-haspopup": "menu" }, K.icon("dots"));
-        tail.addEventListener("click", (e) => { e.stopPropagation(); guard(fnMenu, tail, fn); });
-      }
+    let tail;
+    if (SEQ.fnConfirm === fn.key) {
+      tail = h("button", { class: "seq-act ask", type: "button" }, "Remove?");
+      tail.addEventListener("click", (e) => { e.stopPropagation(); guard(removeFn, fn); });
+    } else {
+      tail = h("button", { class: "icon-btn seq-fn-more", type: "button", title: "More", "aria-label": "More: " + fn.name,
+                           "aria-haspopup": "menu" }, K.icon("dots"));
+      tail.addEventListener("click", (e) => { e.stopPropagation(); guard(fnMenu, tail, fn); });
     }
     let nameEl;
     if (SEQ.renaming === fn.key) {
@@ -968,7 +1051,6 @@
   }
   function yq(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
   function fnText(fn) {   // the item a function makes, as op add takes it
-    if (fn.type === "wait") return WAIT_TEXT;
     if (fn.type === "exp") return "script: " + fn.exp.name;
     if (fn.type === "scan") return String(fn.entry.text || "");
     const e = fn.entry, params = e.params && typeof e.params === "object" && Object.keys(e.params).length ? e.params : null;
@@ -976,7 +1058,6 @@
   }
   async function appendFn(fn, card) {
     if (card) { card.classList.add("sent"); setTimeout(() => card.classList.remove("sent"), 400); }
-    if (fn.type === "wait") return op({ op: "add", text: WAIT_TEXT });
     if (fn.type === "exp") {
       return viaQueue(() => K.api("/api/experiments/" + encodeURIComponent(fn.exp.name) + "/run", { body: { queue: true } }));
     }
@@ -1157,8 +1238,9 @@
         if (d.src.kind === "item") {
           const from = items().findIndex((x) => x.id === d.src.id);
           if (from >= 0 && d.to !== from) {
-            const list = SEQ.el.list, others = [...list.children].filter((c) => c !== d.src.el);
+            const list = SEQ.el.list, others = [...list.children].filter((c) => c !== d.src.el), stood = flipFrom(list);
             list.insertBefore(d.src.el, others[d.to] || null);   // there now; the server's answer confirms it
+            flipTo(stood, d.src.id);
             [...list.children].forEach((c, k) => { const n = c.querySelector(".seq-num"); if (n) n.textContent = String(k + 1); });
             op({ op: "move", item: d.src.id, position: d.to + 1 });
           }

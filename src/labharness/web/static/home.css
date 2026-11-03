@@ -34,9 +34,9 @@
 .home-tile-lab { grid-column: 1 / -1; }   /* the third tile: a row of its own, room for its reading's line */
 .home-tile { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 210px; padding: 24px 26px 18px;
   background: var(--card); border: 1px solid var(--card-line); border-radius: 16px; box-shadow: var(--home-shadow);
-  cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+  cursor: pointer; transition: border-color .15s, box-shadow .15s, transform .2s cubic-bezier(.2, .75, .2, 1); }
 .home-tile:hover, .home-tile:has(.home-tile-go:focus-visible) {
-  border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--home-shadow); }
+  border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--home-shadow); transform: translateY(-2px); }
 .home-tile.live { border-color: var(--accent); }
 .home-tile-head { display: flex; align-items: center; gap: 10px; min-width: 0; margin-bottom: 14px; }
 .home-tile-go { flex: 1 1 auto; min-width: 0; margin: 0; padding: 0; border: 0; background: none; cursor: pointer; text-align: left;
@@ -129,6 +129,7 @@
 @media (prefers-reduced-motion: reduce) {
   .home-st.run { animation: none; }
   .home-bar-fill, .home-tile, .kcard.home-block { transition: none; }
+  .home-tile:hover { transform: none; }
 }
 
 /* ---------- a narrow main column (a phone, or the panels beside it): one column ---------- */

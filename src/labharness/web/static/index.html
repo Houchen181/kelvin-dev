@@ -135,11 +135,8 @@
       <button id="toggle-analysis" class="pill" type="button" title="Analysis" aria-label="Show the analysis pane" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 16l3.5-4 2.5 2.5"/><circle cx="16.5" cy="8.5" r="3"/><path d="M18.7 10.7L21 13"/></svg><span class="pill-text">Analysis</span>
       </button>
-      <button id="toggle-seq" class="pill" type="button" title="Sequence" aria-label="Show the sequence" aria-pressed="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="4.2" rx="1.4"/><rect x="4" y="10" width="16" height="4.2" rx="1.4"/><rect x="4" y="16" width="10" height="4.2" rx="1.4"/></svg><span class="pill-text">Sequence</span><span id="seq-badge" class="badge seq-badge" hidden></span>
-      </button>
       <button id="toggle-runs" class="pill" type="button" title="Runs" aria-label="Show the runs pane" aria-pressed="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/></svg><span class="pill-text">Runs</span><span id="runs-dot" class="live-dot" hidden></span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/></svg><span class="pill-text">Runs</span><span id="seq-badge" class="badge seq-badge" hidden></span><span id="runs-dot" class="live-dot" hidden></span>
       </button>
       <button id="toggle-lab" class="pill" type="button" title="Lab" aria-label="Show the lab panel" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="pill-text">Lab</span><span id="lab-badge" class="badge" hidden>0</span>
@@ -241,25 +238,11 @@
 
   <!-- the side panels: each opens on its own; side by side, or a pair to a column (fitLayout in app.js) -->
   <div id="workcol" class="dock-col" hidden>
-  <section id="seqpane" class="runpane seqpane" aria-label="Sequence" hidden>
-    <div id="seqpane-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the sequence pane" tabindex="0"></div>
-    <header class="pane-head seq-head">
-      <div id="seq-head" class="seq-head-main"></div>
-      <button class="icon-btn full-btn" type="button" data-pane="seqpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
-      </button>
-      <button id="close-seq" class="icon-btn" type="button" aria-label="Close the sequence">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-      </button>
-    </header>
-    <div id="seq-body" class="pane-body seq-body"></div>
-  </section>
-
   <section id="runpane" class="runpane" aria-label="Runs" hidden>
     <div id="runpane-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the runs pane" tabindex="0"></div>
     <header class="pane-head">
-      <div id="runs-seg" class="seg runs-seg" role="tablist" aria-label="Schedule and history">
-        <button id="open-schedule" type="button" role="tab" aria-selected="false" aria-controls="schedule-view" tabindex="-1">Schedule<span id="queue-count" class="badge q-badge" hidden></span></button><button id="open-history" class="on" type="button" role="tab" aria-selected="true" aria-controls="history-view">History</button>
+      <div id="runs-seg" class="seg runs-seg" role="tablist" aria-label="Sequence and history">
+        <button id="open-schedule" class="on" type="button" role="tab" aria-selected="true" aria-controls="seq-view">Sequence<span id="queue-count" class="badge q-badge" hidden></span></button><button id="open-history" type="button" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1">History</button>
       </div>
       <div class="spacer"></div>
       <button id="open-report" class="btn small ghost" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
@@ -272,9 +255,54 @@
     </header>
     <div id="run-tabs" class="run-tabs" role="tablist" aria-label="Open runs" hidden></div>
     <div id="run-body" class="pane-body">
-      <!-- the schedule, as Special Measure's window: the scans, ⇒ (⇓ when they stand one above the other), the queue;
-           out of sight, as its tab is (app.css): the queue is the Sequence pane, the scans its functions -->
-      <div id="schedule-view" class="schedule-view" role="tabpanel" aria-labelledby="open-schedule" hidden>
+      <!-- the Sequence (seq.js): the blocks, Start, the functions; a step typed, or any item as written -->
+      <div id="seq-view" class="seq-view" role="tabpanel" aria-labelledby="open-schedule">
+        <div id="seq-body" class="seq-body"></div>
+        <div id="seq-step" class="seq-step">
+          <!-- a step, typed (Special Measure's command box): Set, Wait, Wait until settled, written as the queue's step
+               (scanqueue.py); and any item as written. seq.js puts these with its functions -->
+          <div id="step-row" class="step-row" role="group" aria-label="A step">
+            <select id="step-kind" class="ed-mode" aria-label="Step"><option value="set">Set</option><option value="wait">Wait</option><option value="settle">Wait until settled</option></select>
+            <span id="step-set" class="step-f">
+              <input id="step-key" class="ed-in step-key" list="step-set-keys" placeholder="instrument.parameter" aria-label="Parameter" spellcheck="false" autocomplete="off">
+              <span class="ed-eq">=</span>
+              <input id="step-value" class="ed-in ed-short" placeholder="value" aria-label="Value" spellcheck="false" autocomplete="off">
+              <span id="step-unit" class="ed-unit"></span>
+            </span>
+            <span id="step-wait" class="step-f" hidden>
+              <input id="step-time" class="ed-in ed-short" inputmode="decimal" aria-label="Wait" autocomplete="off">
+              <select id="step-time-unit" class="ed-mode" aria-label="Unit"><option value="1">s</option><option value="60">min</option><option value="3600">h</option></select>
+            </span>
+            <span id="step-settle" class="step-f" hidden>
+              <input id="step-read" class="ed-in step-key" list="step-read-keys" placeholder="reading" aria-label="Reading" spellcheck="false" autocomplete="off">
+              <label class="ed-f">within<input id="step-within" class="ed-in ed-short" inputmode="decimal" autocomplete="off"><i id="step-within-unit"></i></label>
+              <label class="ed-f">for<input id="step-for" class="ed-in ed-short" inputmode="decimal" placeholder="10" autocomplete="off"><i>s</i></label>
+              <label class="ed-f">timeout<input id="step-timeout" class="ed-in ed-short" inputmode="decimal" placeholder="900" autocomplete="off"><i>s</i></label>
+            </span>
+            <span class="step-go">
+              <button id="step-add" class="btn small primary" type="button" title="Add it to the sequence" disabled>Add</button>
+              <button id="step-save" class="btn small primary" type="button" hidden>Save</button>
+              <button id="step-cancel" class="icon-btn" type="button" aria-label="Stop editing the step" title="Cancel (Esc)" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+            </span>
+            <datalist id="step-set-keys"></datalist>
+            <datalist id="step-read-keys"></datalist>
+          </div>
+          <div class="step-foot">
+            <button id="queue-paste-open" class="btn small ghost" type="button" aria-expanded="false" aria-controls="queue-paste">Paste a plan</button>
+            <span id="step-msg" class="hint" role="status"></span>
+          </div>
+          <form id="queue-paste" class="q-paste" hidden>
+            <textarea id="queue-text" class="mono" spellcheck="false" aria-label="A plan, a step or a script item, as written"></textarea>
+            <div class="q-paste-foot">
+              <button id="queue-add" class="btn small" type="submit">Add</button>
+              <button id="queue-paste-cancel" class="btn small ghost" type="button">Cancel</button>
+            </div>
+          </form>
+        </div>
+      </div>
+      <!-- the schedule as 0.3.39 drew it (the scans, ⇒, the queue): kept on the page, never shown; the Sequence is the
+           queue, its functions the scans -->
+      <div id="schedule-view" class="schedule-view" hidden>
         <div class="sched">
           <section id="scans-view" class="scans-view sched-col" aria-label="Scans">
             <div class="scans-top">
@@ -295,44 +323,6 @@
               <section id="scans-plans" aria-labelledby="scans-plans-h" hidden><h3 id="scans-plans-h">Scans</h3><ul class="q-list" role="grid" aria-multiselectable="true" aria-labelledby="scans-plans-h"></ul></section>
               <p id="scans-empty" class="pane-empty" hidden>Each scan Kelvin runs, and each script you import, is kept here to run again.</p>
             </div>
-            <!-- Special Measure's command box, typed: a step between scans, written as the queue's step (scanqueue.py) -->
-            <div id="step-row" class="step-row" role="group" aria-label="A step">
-              <select id="step-kind" class="ed-mode" aria-label="Step"><option value="set">Set</option><option value="wait">Wait</option><option value="settle">Wait until settled</option></select>
-              <span id="step-set" class="step-f">
-                <input id="step-key" class="ed-in step-key" list="step-set-keys" placeholder="instrument.parameter" aria-label="Parameter" spellcheck="false" autocomplete="off">
-                <span class="ed-eq">=</span>
-                <input id="step-value" class="ed-in ed-short" placeholder="value" aria-label="Value" spellcheck="false" autocomplete="off">
-                <span id="step-unit" class="ed-unit"></span>
-              </span>
-              <span id="step-wait" class="step-f" hidden>
-                <input id="step-time" class="ed-in ed-short" inputmode="decimal" aria-label="Wait" autocomplete="off">
-                <select id="step-time-unit" class="ed-mode" aria-label="Unit"><option value="1">s</option><option value="60">min</option><option value="3600">h</option></select>
-              </span>
-              <span id="step-settle" class="step-f" hidden>
-                <input id="step-read" class="ed-in step-key" list="step-read-keys" placeholder="reading" aria-label="Reading" spellcheck="false" autocomplete="off">
-                <label class="ed-f">within<input id="step-within" class="ed-in ed-short" inputmode="decimal" autocomplete="off"><i id="step-within-unit"></i></label>
-                <label class="ed-f">for<input id="step-for" class="ed-in ed-short" inputmode="decimal" placeholder="10" autocomplete="off"><i>s</i></label>
-                <label class="ed-f">timeout<input id="step-timeout" class="ed-in ed-short" inputmode="decimal" placeholder="900" autocomplete="off"><i>s</i></label>
-              </span>
-              <span class="step-go">
-                <button id="step-add" class="sched-arrow small" type="button" aria-label="Add the step to the queue" title="After the selected item (last when none is)" disabled><span class="to-side">⇒</span><span class="to-below">⇓</span></button>
-                <button id="step-save" class="btn small primary" type="button" hidden>Save</button>
-                <button id="step-cancel" class="icon-btn" type="button" aria-label="Stop editing the step" title="Cancel (Esc)" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
-              </span>
-              <datalist id="step-set-keys"></datalist>
-              <datalist id="step-read-keys"></datalist>
-            </div>
-            <div class="step-foot">
-              <button id="queue-paste-open" class="link soft" type="button" aria-expanded="false" aria-controls="queue-paste">Paste a plan</button>
-              <span id="step-msg" class="hint" role="status"></span>
-            </div>
-            <form id="queue-paste" class="q-paste" hidden>
-              <textarea id="queue-text" class="mono" spellcheck="false" aria-label="A plan, a step or a script item, as written"></textarea>
-              <div class="q-paste-foot">
-                <button id="queue-add" class="btn small" type="submit">Add</button>
-                <button id="queue-paste-cancel" class="link soft" type="button">Cancel</button>
-              </div>
-            </form>
           </section>
           <div class="sched-mid">
             <button id="sched-add" class="sched-arrow" type="button" aria-label="Add the selected to the queue" title="After the selected item (last when none is), in the order selected" disabled><span class="to-side">⇒</span><span class="to-below">⇓</span></button>
@@ -360,7 +350,7 @@
           </section>
         </div>
       </div>
-      <div id="history-view" role="tabpanel" aria-labelledby="open-history">
+      <div id="history-view" role="tabpanel" aria-labelledby="open-history" hidden>
         <div id="runs-list" class="runs-list">
           <input id="runs-filter" class="pane-filter" type="search" placeholder="Filter runs" aria-label="Filter runs" spellcheck="false" autocomplete="off">
           <ul id="runs-items" class="runs-items" aria-label="Recent runs"></ul>

@@ -18,7 +18,7 @@ starts (LabRuntime._noted, through RunStore's hook), and noting never stops a ru
 in place; one that can't be read as a library is kept aside (library.json.broken-<time>) and a new one starts, so a
 broken file never stops Kelvin.
 
-The portal calls the entries functions (the Sequence pane's list, as labMaster's): a person gives one a colour and a
+The portal calls the entries functions (the Sequence's list, as labMaster's): a person gives one a colour and a
 note as well as a name (meta), and picks a new one from the scripts in the lab's scripts folder (runnable_files)."""
 from __future__ import annotations
 

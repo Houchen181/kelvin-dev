@@ -3686,7 +3686,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         {superseded: true} when the same editor asked for a newer one meanwhile; {op: text, parts} → {text}: its
         plan's text, nothing kept (Save puts it back into the queue item with /api/queue op edit); {op: save, parts,
         from?} → {entry, new, library}, an entry of its own; {op: run, parts, from?, queue?} → {queue, message,
-        entry, library}: saved, then run as above. The Sequence pane's functions: {op: meta, id, name?, color?,
+        entry, library}: saved, then run as above. The Sequence's functions: {op: meta, id, name?, color?,
         note?} → {entry, library} (a colour is #rrggbb, "" for none); {op: files} → {folder, files: [{path, rel, name,
         kind}], more}, the scripts in the lab's scripts folder (folder null when none is set); {op: inspect, path} →
         {name, path, settable, notes, problem}, a script read (never run)."""

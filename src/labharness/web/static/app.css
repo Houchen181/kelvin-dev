@@ -1625,13 +1625,23 @@ button.link.danger:hover { background: var(--danger-soft); }
 .topbar { border-bottom: 1px solid var(--line); }
 .thread > :is(.msg.assistant, .turn-live, .compare) + .msg.user { margin-top: 30px; padding-top: 26px; border-top: 1px solid var(--line); }
 .composer-row { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
-/* the Runs pane is the runs, its History: the scans are the sequence's functions now, and the queue is the sequence, so
-   the Schedule (the scans beside the queue) stays out of sight: its tab hidden, and what showed it opens the sequence */
-#open-schedule { display: none; }
-#runs-seg { border: 0; overflow: visible; }
-#runs-seg #open-history { background: none; color: var(--text); font-size: 15px; font-weight: 600; padding: 4px 6px; pointer-events: none; }
+/* the Runs pane: Sequence | History, drawn as the Chat | Home switch is (a grey track, the one shown raised white); the
+   queue's count on Sequence and on the Runs button (whose live dot it stands in for); History's dot: a run running */
+#runs-seg { gap: 2px; padding: 3px; border-radius: 999px; background: var(--seg-track); border: 1px solid var(--line); overflow: visible; }
+#runs-seg button { position: relative; border: 1px solid transparent; background: none; border-radius: 999px; padding: 4px 14px;
+  font-size: 13.5px; font-weight: 550; color: var(--muted); cursor: pointer; }
+#runs-seg button:hover { color: var(--text); }
+#runs-seg button.on { background: var(--panel); color: var(--text); border-color: var(--line-strong); box-shadow: 0 1px 2px rgba(20, 32, 44, 0.10); }
+#runs-seg button.on .q-badge { background: var(--accent-soft); color: var(--accent); }
+#open-history.live::after { content: ""; position: absolute; top: 4px; right: 5px; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+#open-history.live.on::after { display: none; }
+.runpane .pane-head > .runs-seg { margin-left: 0; }
 .seq-badge { background: var(--accent-soft); color: var(--accent); }
-#toggle-seq.live .seq-badge { background: var(--accent); color: var(--accent-ink); }
+#toggle-runs.live .seq-badge { background: var(--accent); color: var(--accent-ink); }
+#toggle-runs .seq-badge:not([hidden]) + .live-dot { display: none; }
+/* the Runs pane's body: the Sequence fills it (its columns scroll on their own when wide), the History scrolls in it */
+#seq-view[hidden], #history-view[hidden] { display: none; }
 
 /* chips: a state or a kind in a word */
 .chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
@@ -1664,3 +1674,49 @@ select.kfield { padding-right: 26px; }
 
 /* the display face: greetings and page titles (Home, the first start) */
 .display { font-family: var(--display); font-weight: 600; letter-spacing: -0.01em; }
+
+/* motion, as labMaster moves: what switches on --ease-switch (quick out, a long settle: 0.42 s), what appears on
+   --ease-in (a short rise: 0.2–0.26 s); nothing moves when the person asks for less motion */
+:root { --ease-switch: cubic-bezier(.2, .75, .2, 1); --ease-in: cubic-bezier(.2, 0, 0, 1); }
+/* a switch: the raised thumb slides under the one turned on (app.js thumb), which draws no background of its own */
+.has-thumb { position: relative; isolation: isolate; }
+.seg-thumb { position: absolute; left: 0; top: 0; z-index: -1; border-radius: 999px; background: var(--panel);
+  border: 1px solid var(--line-strong); box-shadow: 0 1px 2px rgba(20, 32, 44, 0.10); pointer-events: none; opacity: 0;
+  transition: transform .42s var(--ease-switch), width .42s var(--ease-switch), height .42s var(--ease-switch), opacity .2s ease; }
+.seg-thumb.still { transition: none; }
+:is(#mode-seg, #runs-seg, .seg).has-thumb > button { transition: color .25s ease; }
+:is(#mode-seg, #runs-seg, .seg).has-thumb > button.on { background: none; border-color: transparent; box-shadow: none; }
+/* the top bar's buttons: their states fade; each one's name eases in under it on hover (none of them moves) */
+.topbar .topbar-right .pill { transition: background-color .25s ease, color .25s ease, border-color .25s ease, box-shadow .25s ease; }
+.topbar-right .pill[data-tip]::after { content: attr(data-tip); position: absolute; top: calc(100% + 10px); left: 50%; z-index: 40;
+  width: max-content; max-width: 240px; padding: 4px 10px; border-radius: 10px; background: var(--text); color: var(--page);
+  font-size: 12px; font-weight: 550; line-height: 1.4; text-align: center; white-space: normal; pointer-events: none; opacity: 0;
+  transform: translate(-50%, -4px);
+  transition: opacity .18s ease, transform .42s var(--ease-switch); }
+.topbar-right .pill[data-tip]:is(:hover, :focus-visible)::after { opacity: 1; transform: translate(-50%, 0); transition-delay: .12s; }
+.topbar-right .pill[data-tip]:last-child::after { left: auto; right: 0; transform: translate(0, -4px); }
+.topbar-right .pill[data-tip]:last-child:is(:hover, :focus-visible)::after { transform: none; }
+/* buttons, tabs and chips: their states fade */
+.btn, .icon-btn, .run-tab, .chip, button.link { transition: background-color .2s ease, color .2s ease, border-color .2s ease, box-shadow .2s ease; }
+.fold-btn svg, .fold-field .fold-btn svg { transition: transform .32s var(--ease-switch); }
+/* what comes in: a panel from its side, a view, a dialog, what a fold or a block's editor opens, a new block */
+@keyframes k-pane-in { from { opacity: 0; transform: translateX(18px); } }
+@keyframes k-view-in { from { opacity: 0; transform: translateY(6px); } }
+@keyframes k-pop-in { from { opacity: 0; transform: translateY(10px) scale(.985); } }
+@keyframes k-reveal { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes k-card-in { from { opacity: 0; transform: translateY(10px) scale(.98); } }
+@keyframes k-fade { from { opacity: 0; } }
+:is(#runpane, #edpane, #anpane, #termpane, #labpanel, #teampanel) { animation: k-pane-in .34s var(--ease-switch); }
+:is(#seq-view, #history-view, .run-view, #homeview, #scroller, .seq-fns) { animation: k-view-in .26s var(--ease-in); }
+dialog[open] { animation: k-pop-in .28s var(--ease-switch); }
+dialog[open]::backdrop { animation: k-fade .28s ease; }
+.k-in, .seq-ed.seq-ed-in { animation: k-reveal .22s var(--ease-in); }
+.seq-card.seq-in { animation: k-card-in .36s var(--ease-switch); }
+.seq-fn { transition: border-color .14s ease, box-shadow .2s ease, transform .2s var(--ease-switch); }
+.seq-fn:hover { transform: translateY(-1px); }
+@media (prefers-reduced-motion: reduce) {
+  .seg-thumb, .topbar-right .pill[data-tip]::after, .seq-fn, .fold-btn svg { transition: none; }
+  :is(#runpane, #edpane, #anpane, #termpane, #labpanel, #teampanel, #seq-view, #history-view, .run-view, #homeview, #scroller,
+      .seq-fns, .k-in, .seq-ed, .seq-card), dialog[open], dialog[open]::backdrop { animation: none; }
+  .seq-fn:hover { transform: none; }
+}

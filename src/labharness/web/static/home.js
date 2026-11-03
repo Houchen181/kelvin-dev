@@ -144,7 +144,7 @@
     p.seqNum = h("span", { class: "home-line-num" });
     p.seq.body.append(h("div", { class: "home-bar", "aria-hidden": "true" }, p.seqFill),
       h("div", { class: "home-line" }, p.seqName, p.seqNum));
-    p.runs = tile("runs", "Runs", "open all runs", () => K.toggleRuns(true));
+    p.runs = tile("runs", "Runs", "open all runs", () => K.openRunList());
     p.runList = h("ul", { class: "home-mini" });
     p.runs.body.append(p.runList);
     p.labt = tile("lab", "Lab", "open the lab", () => K.toggleLab(true));
@@ -419,7 +419,7 @@
       } else if (a.do === "ask") K.ask(a.text || "");
       else if (a.do === "run") K.openRun(a.run_id, planOf(a.run_id));
       else if (a.do === "pane") {
-        const open = { sequence: K.toggleSeq, runs: K.toggleRuns, lab: K.toggleLab, analysis: K.toggleAnalysis }[a.pane];
+        const open = { sequence: K.toggleSeq, runs: K.openRunList, lab: K.toggleLab, analysis: K.toggleAnalysis }[a.pane];
         if (open) open(true);
       }
     } catch (e) { K.toast(e.message); }
