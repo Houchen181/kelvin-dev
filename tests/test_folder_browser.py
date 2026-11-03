@@ -252,7 +252,7 @@ def test_every_folder_chosen_goes_through_pick_folder():
 def test_the_browser_wears_the_kit_in_light_and_dark():
     part = CSS[CSS.index("/* Kelvin's folder browser"):CSS.index("/* motion, as labMaster moves")]
     assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", part)   # colours through the tokens only
-    for text in (".folder-dialog { width: min(600px, calc(100vw - 32px)); }", "var(--card)", "var(--accent-soft)",
+    for text in (".folder-dialog { width: min(600px, calc(100 * var(--vw) - 32px)); }", "var(--card)", "var(--accent-soft)",
                  ".folder-item:focus-visible", ".folder-note:empty { display: none; }"):
         assert text in part, text
     motion = CSS[CSS.index("/* motion, as labMaster moves"):]

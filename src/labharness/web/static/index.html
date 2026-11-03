@@ -94,7 +94,7 @@
   <div id="chrome" class="chrome">
     <header class="topbar">
       <div class="topbar-left">
-      <button id="toggle-sidebar" class="icon-btn" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Hide conversations" data-tip="Hide conversations">
+      <button id="toggle-sidebar" class="icon-btn" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Conversations" data-tip="Conversations">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
       </button>
       <span class="logo topbar-mark" aria-hidden="true" data-mark></span>
@@ -144,7 +144,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat
       </button>
     </div>
-    <nav id="chat-list" class="chat-list" aria-label="Projects and conversations"></nav>
+    <nav id="chat-list" class="chat-list" aria-label="Projects and conversations" data-region="conversations"></nav>
     <div class="side-bottom">
       <div id="account-row" class="account-row" hidden>
         <span id="account-avatar" class="avatar" aria-hidden="true"></span>
@@ -160,7 +160,7 @@
 
   <main class="main">
     <section id="homeview" class="homeview" aria-label="Home" hidden></section>
-    <div id="scroller" class="scroller">
+    <div id="scroller" class="scroller" data-region="chat">
       <section id="empty" class="empty">
         <img class="hero-mark" src="/static/kelvin.svg" width="72" height="72" alt="Kelvin">
         <h1 id="greeting" class="display">What are we measuring today?</h1>
@@ -235,7 +235,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
       </header>
-      <div id="term-out" class="term-out" role="log" aria-live="polite"></div>
+      <div id="term-out" class="term-out" role="log" aria-live="polite" data-region="terminal"></div>
       <label class="term-in"><span id="term-prompt" class="term-prompt">kelvin&gt;</span><input id="term-input" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Terminal input"></label>
     </section>
   </main>
@@ -281,7 +281,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <div id="an-body" class="pane-body an-body">
+    <div id="an-body" class="pane-body an-body" data-region="analysis">
       <div class="an-row">
         <select id="an-run" class="an-run" aria-label="Run"></select>
         <div class="pane-menu-wrap">
@@ -641,7 +641,7 @@
       </button>
     </header>
     <div class="set-body">
-      <nav class="set-nav" aria-label="Settings sections">
+      <nav class="set-nav" aria-label="Settings sections" data-region="settings-nav">
         <button type="button" id="nav-account" data-page="account" hidden>Account</button>
         <button type="button" id="nav-models" data-page="models">Models</button>
         <button type="button" id="nav-instruments" data-page="instruments">Instruments</button>
@@ -1122,7 +1122,7 @@
       <select id="history-who" aria-label="Who"><option value="">Anyone</option></select>
       <label class="check" title="Only what widened Kelvin's reach: the owner hears of each"><input id="history-safety" type="checkbox"> Only widening</label>
     </div>
-    <ul id="history-list" class="history-list"></ul>
+    <ul id="history-list" class="history-list" data-region="dialog"></ul>
     </div>
     <footer class="dialog-foot">
       <span id="history-msg" class="muted small"></span>
@@ -1251,7 +1251,7 @@
       <div class="key-row"><input id="help-q" type="search" placeholder="What do you want to know? e.g. change an instrument's limits" aria-label="Search Kelvin's help"><button id="help-go" class="btn small primary" type="button">Search</button></div>
       <span class="hint">From Kelvin's own documentation, the same pages Kelvin reads when you ask it (kelvin_help). You can also just ask in a chat.</span>
     </div>
-    <div id="help-results" class="help-results" hidden></div>
+    <div id="help-results" class="help-results" data-region="dialog" hidden></div>
     <div class="field">
       <span class="field-label">Getting started</span>
       <div id="help-checklist" class="checklist-box"></div>

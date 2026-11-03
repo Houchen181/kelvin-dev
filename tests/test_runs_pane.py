@@ -54,8 +54,9 @@ def test_the_header_is_sequence_and_history_and_the_open_runs_have_a_row_below_i
     assert not re.search(r'<div id="seq-view"[^>]*hidden>', head) and 'view: "schedule"' in JS   # the Sequence first
     assert re.search(r'<div id="history-view"[^>]*hidden>', head)
     assert '<div id="schedule-view" class="schedule-view" hidden>' in head   # 0.3.39's Schedule: never shown
-    keys = _js("segKeys")
+    keys = _js("runsSegKeys")   # the Lab's choices have their own segKeys
     assert all(k in keys for k in ("ArrowRight", "ArrowLeft", "Home", "End"))
+    assert '$("runs-seg").addEventListener("keydown", runsSegKeys);' in JS
     assert "const order = Object.keys(VIEWS)," in keys   # both tabs
     view = _js("showView")
     assert "aria-selected" in view and "tabIndex" in view and "loadRunList()" in view and "loadQueue()" in view

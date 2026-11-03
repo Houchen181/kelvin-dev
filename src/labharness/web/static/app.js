@@ -1097,8 +1097,8 @@
     }
     return b;
   }
-  // the segmented control is a tab list: the arrow keys, Home and End move along it
-  function segKeys(e) {
+  // the segmented control is a tab list: the arrow keys, Home and End move along it (the Lab's choices have segKeys)
+  function runsSegKeys(e) {
     const order = Object.keys(VIEWS), i = order.indexOf(RUNS.view);
     const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: order.length - 1 }[e.key];
     if (next === undefined) return;
@@ -1764,7 +1764,7 @@
     $("close-runs").addEventListener("click", () => toggleRuns(false));
     $("open-schedule").addEventListener("click", () => showView("schedule"));
     $("open-history").addEventListener("click", () => showView("history"));
-    $("runs-seg").addEventListener("keydown", segKeys);
+    $("runs-seg").addEventListener("keydown", runsSegKeys);
     $("runs-filter").addEventListener("input", renderRunList);
     $("scans-filter").addEventListener("input", renderScans);
     $("scans-import").addEventListener("click", importScript);
@@ -8355,7 +8355,7 @@
   const FIT = { zoom: 1, tier: "", timer: 0, still: 0, wheel: 0, native: false };
   const V = readVariants();
   function readVariants() {
-    const v = { 1: "A", 2: "A", 3: "A", 4: "A" };
+    const v = { 1: "A", 2: "A", 3: "C", 4: "A" };   // what shows without a choice: 1A Steps, 2A, 3C the Lab's folds
     let given = null;
     try { given = new URLSearchParams(location.search).get("v"); } catch (e) { /* none given */ }
     if (given !== null) store("lh.v", given.trim());
