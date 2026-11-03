@@ -298,8 +298,10 @@
       : "Accounts on this computer only.";
     $(edit).textContent = session.central ? "change" : "Use a Kelvin hub";
     $(edit).onclick = async () => {
+      const lost = $("settings-dialog").open ? settingsWhere() : [];   // in Settings: changes waiting for Save go with the reload
       const url = await askText("The Kelvin hub people sign in to on this computer\nLeave it empty for Kelvin's own hub. " +
-        "Changing it takes the lab owner's PIN; with no PIN set, only while nobody else has an account here.",
+        "Changing it takes the lab owner's PIN; with no PIN set, only while nobody else has an account here." +
+        (lost.length ? "\nThe page then reloads, and your changes on " + andList(lost) + " are lost." : ""),
         { value: session.hub || "", placeholder: "https://…", ok: "Use this hub" });
       if (url === null) return;
       try { await api("/api/session/hub", { body: { url: url.trim() } }); location.reload(); } catch (e) { toast(e.message); }
@@ -594,7 +596,10 @@
     } catch (e) { $("settings-msg").textContent = e.message; }
   }
 
-  async function changePassword() {
+  async function changePassword() {   // Settings → Account's Change; an empty new password takes the password off: asked first
+    const user = (S.account && S.account.user) || {};
+    if (!$("pw-new").value && user.password && !user.central && !(await askYes("Remove your password?\n" +
+      "Anyone at this computer can then sign in as you, and your API keys are no longer encrypted.", { ok: "Remove", danger: true }))) return;
     $("settings-msg").textContent = "Changing…";
     try {
       S.account = await api("/api/account", { body: { old: $("pw-old").value, new: $("pw-new").value } });
@@ -4373,18 +4378,49 @@
         try { const r = await api("/api/services/" + s.id + "/test", { body: {} }); out.textContent = (r.ok ? "Works: " : "Problem: ") + r.message; }
         catch (e) { out.textContent = e.message; }
       });
-      // do its models see pictures: auto (Kelvin finds out, model by model: web/vision.py), or the person says
-      const pictures = h("select", { class: "svc-pictures", "aria-label": "Pictures for " + s.name,
-        title: "Auto: Kelvin finds out which of its models see pictures" },
-        new Option("Pictures: auto", ""), new Option("Pictures: on", "on"), new Option("Pictures: off", "off"));
-      pictures.value = s.pictures || "";
-      pictures.addEventListener("change", async () => {
-        try { const r = await api("/api/services/" + s.id, { method: "PATCH", body: { pictures: pictures.value } }); renderServices(r.services); }
-        catch (e) { $("svc-hint").textContent = e.message; pictures.value = s.pictures || ""; }
-      });
+      // do its models see pictures: Auto (Kelvin finds out, model by model: web/vision.py), or On or Off for the whole
+      // service. It acts at once, so it is a choice of three (the kit's .seg) on a line of its own in the service's row,
+      // as a skill's switch acts in its row: busy while it is sent, the newest choice sent once the one on its way is
+      // answered, and a refusal turning it back, the reason under the list
+      const pictures = h("div", { class: "seg svc-pics", role: "radiogroup", "aria-label": "Pictures for " + s.name });
+      const mark = (v) => {
+        for (const b of pictures.querySelectorAll(":scope > button")) {
+          const on = b.dataset.v === v;
+          b.classList.toggle("on", on);
+          b.setAttribute("aria-checked", String(on));
+          b.tabIndex = on ? 0 : -1;
+        }
+      };
+      let want = s.pictures || "", sending = false;
+      const choose = async (v) => {
+        want = v;
+        mark(v);
+        if (sending) return;
+        sending = true;
+        pictures.setAttribute("aria-busy", "true");
+        while (want !== (s.pictures || "")) {
+          const v1 = want;
+          try { await api("/api/services/" + s.id, { method: "PATCH", body: { pictures: v1 } }); s.pictures = v1; }
+          catch (e) { $("svc-hint").textContent = e.message; want = s.pictures || ""; }
+        }
+        sending = false;
+        pictures.removeAttribute("aria-busy");
+        mark(want);
+      };
+      for (const [v, label, tip] of [["", "Auto", "Kelvin finds out which of its models see pictures"],
+        ["on", "On", "Its models see pictures"], ["off", "Off", "Its models see no pictures"]]) {
+        const b = h("button", { type: "button", role: "radio", title: tip }, label);
+        b.dataset.v = v;
+        b.addEventListener("click", () => choose(v));
+        pictures.append(b);
+      }
+      segKeys(pictures, choose);
+      mark(want);
+      thumb(pictures);
       return h("li", { class: "memory-note" }, h("span", { class: "memory-kind" }, "service"),
-        h("div", { class: "memory-body" }, h("span", {}, s.name), out),
-        h("span", { class: "card-actions" }, pictures, test),
+        h("div", { class: "memory-body" }, h("span", {}, s.name), out,
+          h("div", { class: "field-actions svc-pics-row" }, h("span", { class: "svc-pics-label", "aria-hidden": "true" }, "Pictures"), pictures)),
+        h("span", { class: "card-actions" }, test),
         rowButton("trash", "Remove " + s.name, async () => {
           if (!(await askYes("Remove " + s.name + " and its key from Kelvin?", { ok: "Remove", danger: true }))) return;
           try { const r = await api("/api/services/" + s.id, { method: "DELETE" }); renderServices(r.services); refreshModels(r); }
@@ -4394,9 +4430,17 @@
   }
   function refreshModels(r) {   // r: the models, with the default (Settings' choice, else Claude Opus)
     applyModels(r.models.groups, r.default_model, r.auto_model, r.models.hub);
+    const waiting = $("settings-dialog").open ? settingsDiff() : [];
+    const picked = { default_model: $("default-model").value, reviewer: $("reviewer").value };
     fillDefaultModel();
     fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
     $("reviewer").options[0].textContent = "Off";
+    // the lists filled again are no change of the person's; a choice of theirs waiting for Save stays while it is offered
+    settingsFilled(Object.keys(picked));
+    for (const [k, v] of Object.entries(picked)) {
+      if (waiting.includes(k) && [...settingField(k).options].some((o) => o.value === v)) settingField(k).value = v;
+    }
+    settingsPending();
   }
   async function addService() {
     const body = { preset: $("svc-preset").value, name: $("svc-name").value.trim(), base_url: $("svc-url").value.trim(),
@@ -4799,12 +4843,9 @@
       }));
       const newest = lines.length && String(lines[0].text).match(/^(\d\d:\d\d)/);   // newest first: its time on the head
       $("activity-summary").textContent = newest ? newest[1] : "";
-      if (LAB_TABS.tabs.size) {   // v3A: a dot on Activity's tab for a line not seen there yet
-        const top = lines.length ? String(lines[0].text) : "";
-        if (LAB_TABS.seen === null || (LAB_TABS.chosen === "activity" && S.labOpen)) LAB_TABS.seen = top;
-        else if (top !== LAB_TABS.seen) labTabMark("activity", true);
-      }
+      LAB_TABS.top = lines.length ? String(lines[0].text) : "";   // v3A: Activity's newest line, for its tab's dot
     }
+    labTabSeen();   // v3A: seen if its part is on the screen now, else a dot on its tab
     wakeState(s);
     termState(s);   // the terminal first: an approval its own command needs is asked there
     // requests not already shown in a conversation (e.g. after a page reload)
@@ -4830,7 +4871,7 @@
     if (fresh) Kelvin.paneShow("labpanel");
     showMode(s.approval_mode, s.approval_rule);
     renderAlerts(s.alarms, s.incident);
-    renderWatches(s.watches || [], s.status);
+    renderWatches(s.watches || [], s.status, s.alarms);
     if (s.lab_memory && s.lab_memory !== LABMEM.stamp) { LABMEM.stamp = s.lab_memory; loadLabMemory(); }
     if (s.chats && s.chats !== S.chatsStamp) { S.chatsStamp = s.chats; refreshChats(); }   // a chat made or changed elsewhere (a phone, another window)
     teamState(s.team);
@@ -4933,12 +4974,14 @@
     }
     S.noticeSeen = newest;
   }
-  function renderWatches(watches, status) {
-    const paused = watches.filter((w) => w.paused).length, alarms = watches.filter((w) => w.alarm).length;
-    $("watch-summary").textContent = watches.length ? alarms + " alarm · "
-      + (watches.length - paused) + " watched" + (paused ? " · " + paused + " paused" : "") : "";
-    $("watch-summary").classList.toggle("bad", alarms > 0);   // seen on the head while the part is folded
-    labTabMark("watches", alarms);   // v3A: and on its tab
+  function renderWatches(watches, status, alarms) {
+    // the alarms on, of every kind (a reading out of range, an instrument gone silent, an interlock, a stalled set
+    // point; Alarm history below has each), as Home counts them: a Got it does not end one, only its clearing does
+    const on = (alarms || []).filter((a) => a && !a.cleared).length, paused = watches.filter((w) => w.paused).length;
+    $("watch-summary").textContent = [on ? on + (on === 1 ? " alarm" : " alarms") : "",
+      watches.length ? watches.length - paused + " watched" : "", paused ? paused + " paused" : ""].filter(Boolean).join(" · ");
+    $("watch-summary").classList.toggle("bad", on > 0);   // seen on the head while the part is folded
+    labTabMark("watches", on);   // v3A: and on its tab
     const sig = JSON.stringify(watches);
     if (sig !== PANEL.watchesShown) {   // redrawn only when it changed, so a focused × keeps its focus
       PANEL.watchesShown = sig;
@@ -8232,7 +8275,7 @@
       hint.textContent = src ? "Set (from " + src + ")" : "Not set";
       hint.classList.toggle("set", !!src);
     }
-    for (const input of document.querySelectorAll("#settings-form input:not([type=checkbox])")) { input.value = ""; delete input.dataset.clear; }
+    for (const input of document.querySelectorAll("#settings-form input:not([type=checkbox])")) { input.value = ""; keyKept(input); }
     $("local-url").value = (S.settings && S.settings.local_base_url) || "";
     $("local-models").value = (S.settings && S.settings.local_models) || "";
     fillDefaultModel();
@@ -8258,6 +8301,7 @@
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
     ownerPinState();
     rolesState();
+    $("roles-list").hidden = $("roles-actions").hidden = true;   // folded: roles picked but not kept by Save roles are let go
     const idle = S.settings && S.settings.idle_off !== undefined ? S.settings.idle_off : 60, idleSel = $("idle-off");
     const idleValue = idle ? String(idle) : "off";
     if (![...idleSel.options].some((o) => o.value === idleValue)) idleSel.append(h("option", { value: idleValue }, "After " + idle + " minutes"));
@@ -8288,6 +8332,7 @@
     $("settings-dialog").showModal();
     api("/api/memory").then((m) => renderGlobalNotes(m.notes)).catch(() => renderGlobalNotes([]));
     loadKnow("global", $("global-know"), $("global-know-count"), $("settings-msg"));
+    settingsStart();   // every field filled (Claude Code's too, by loadClaudeCode above): what Save would send now is the start
   }
   // skills and recipes (web/skills.py): Kelvin's own, the person's, a project's
   async function loadKnow(scope, list, count, msg) {
@@ -8463,7 +8508,17 @@
     } catch (e) { $("cc-status").textContent = e.message; }
   }
 
-  async function saveSettings() {
+  // Settings keep Save and Cancel (the morning's 4B). What acts at once is kept already: a switch (each in a card of its
+  // own at the top of its page, .set-now, or in its row, as a skill's), Page size, and every button. Everything else
+  // waits for Save, and what waits is what Save would send now (settingsBody) that differs from what it would have sent
+  // as the dialog opened (SETS.start). Save is offered only then, the other button reads Cancel (else Close), and each
+  // section holding a change has a dot in the list on the left. Cancel lets go of what waits (the fields are filled from
+  // S.settings again at the next opening), never of what acted. The head's × and Esc do as that button does, but while
+  // something waits they ask first
+  const SETS = { start: {}, saving: false, asking: false };
+  // what Save sends: every setting the pages hold for Save, as its field holds it now (each field is named after its
+  // setting: settingField); a key goes only when typed, or empty once its Remove was pressed
+  function settingsBody() {
     const body = {};
     for (const input of document.querySelectorAll("#settings-form input[type=password][name]")) {
       if (input.dataset.clear) body[input.name] = "";
@@ -8498,15 +8553,102 @@
     body.approval_wait = $("approval-wait").value;
     if (S.claudeCode) { body.claude_code = $("cc-on").checked ? "on" : "off"; body.claude_code_path = $("cc-path").value.trim(); }
     body.updates = $("updates").value;
+    return body;
+  }
+  function settingField(name) { return document.querySelector('#settings-form [name="' + name + '"]'); }
+  // the settings that wait for Save: those Save would now send otherwise than at the opening, by name
+  function settingsDiff() {
+    const now = settingsBody(), start = SETS.start;
+    return [...new Set(Object.keys(now).concat(Object.keys(start)))].filter((k) => JSON.stringify(now[k]) !== JSON.stringify(start[k]));
+  }
+  // the dialog as its fields were filled at the opening: nothing waits
+  function settingsStart() { SETS.start = settingsBody(); settingsPending(); }
+  // a load that fills fields again after the opening (the model lists, once a service is added or removed): what it
+  // fills is no change of the person's
+  function settingsFilled(names) { const now = settingsBody(); for (const k of names) SETS.start[k] = now[k]; }
+  // what waits, said where it is: Save offered (and the chosen look) only then, the other button Cancel or Close, and a
+  // dot on each section holding a change (heard as ", changed"). While a Save is on its way nothing leaves: Save, Close
+  // (or Cancel) and the head's × are greyed until the answer closes the dialog or says why not. Gives the settings waiting
+  function settingsPending() {
+    const names = settingsDiff(), pages = settingsPages(names), save = $("save-settings"), close = $("settings-close");
+    save.disabled = !names.length || SETS.saving;
+    save.classList.toggle("primary", names.length > 0);
+    save.title = names.length ? "" : "Nothing to save";
+    const word = names.length ? "Cancel" : "Close";
+    if (close.textContent !== word) close.textContent = word;
+    close.disabled = $("settings-x").disabled = SETS.saving;
+    for (const b of document.querySelectorAll(".set-nav button")) {
+      const dot = b.querySelector(".set-dot");
+      if (dot) dot.hidden = !pages.has(b.dataset.page);
+    }
+    return names;
+  }
+  // the sections (data-page) holding the settings named
+  function settingsPages(names) {
+    const pages = new Set();
+    for (const k of names) { const page = settingField(k) && settingField(k).closest(".set-page"); if (page) pages.add(page.dataset.page); }
+    return pages;
+  }
+  // the names of the sections holding a change that waits for Save, as the list on the left gives them
+  function settingsWhere() {
+    const pages = settingsPages(settingsDiff());
+    return [...document.querySelectorAll(".set-nav button")].filter((b) => pages.has(b.dataset.page)).map((b) => b.firstChild.textContent.trim());
+  }
+  // the head's × and Esc: as Close, but while something waits for Save they ask first, and No (Keep editing, or Esc)
+  // keeps the dialog open; while a Save is on its way they do nothing, as its answer decides
+  async function settingsLeave() {
+    if (SETS.asking || SETS.saving || !$("settings-dialog").open) return;
+    if (settingsPending().length) {
+      const where = settingsWhere();
+      SETS.asking = true;
+      const yes = await askYes(where.length ? "Discard your changes on " + andList(where) + "?" : "Discard your changes?",
+        { ok: "Discard", cancel: "Keep editing", danger: true });
+      SETS.asking = false;
+      if (!yes) return;
+    }
+    $("settings-dialog").close();
+  }
+  // a key's box as before its Remove: nothing to remove on Save
+  function keyKept(input) {
+    delete input.dataset.clear;
+    if ("was" in input.dataset) { input.placeholder = input.dataset.was; delete input.dataset.was; }
+  }
+  // Enter in a box of one line never closes Settings, nor loses what waits: it presses the button on the box's own row
+  // (Connect, Add, Change, Use this folder…), never a key's Remove, and with none does nothing. A box marked
+  // enterkeyhint="next" (Current password, a service's name and address) goes on to the next box of its row instead, and
+  // an empty New password presses nothing (Change from it would take the password off)
+  function settingsEnter(e) {
+    const box = e.target;
+    if (e.key !== "Enter" || e.isComposing || e.defaultPrevented || box.tagName !== "INPUT" ||
+      !/^(text|password|url|email|search|tel|number)$/.test(box.type)) return;
+    e.preventDefault();
+    const row = box.closest(".key-row, .service-form"), shown = (el) => !el.hidden && el.offsetWidth > 0;
+    if (!row || (box.id === "pw-new" && !box.value)) return;
+    if (box.enterKeyHint === "next") {
+      const boxes = [...row.querySelectorAll("input")].filter(shown), next = boxes[boxes.indexOf(box) + 1];
+      if (next) { next.focus(); return; }
+    }
+    const go = [...row.querySelectorAll("button:not([data-clear])")].filter(shown).pop();
+    if (go && !go.disabled) go.click();
+  }
+  // Save: as before (Settings saved., the dialog closes); a refusal keeps the dialog open, says why, and keeps what waits
+  async function saveSettings() {
+    const body = settingsBody();
+    SETS.saving = true;
+    settingsPending();   // greyed while it is on its way
     $("settings-msg").textContent = "Saving…";
     try {
       const r = await api("/api/settings", { body });
       S.settings = r.settings;
+      SETS.start = body;
       applyModels(r.models.groups, r.default_model, r.auto_model, r.models.hub);
       $("settings-dialog").close();
       toast("Settings saved.");
     } catch (e) {
       $("settings-msg").textContent = e.message;
+    } finally {
+      SETS.saving = false;
+      settingsPending();
     }
   }
 
@@ -8516,24 +8658,27 @@
   // more), on a touch screen and under 1000 px wide; 85 % under 680 px tall; 90 % otherwise (the person's own "90 % on
   // a laptop"). A choice in Settings → Page size (80 to 150 %) overrides it on this browser (lh.pageSize). fitTiers also
   // sets the density tier on <html> by the layout's height, the window's divided by the page size: fit-roomy (900 or
-  // more), fit-compact (720 to 899) or fit-tight. The morning's variants: ?v=1B,2A… in the query string (the hash holds
-  // the key), kept as lh.v (?v= alone forgets them), shown as html[data-v1] to [data-v4] and as V[n] to the code
-  // (fenced: /* v2B */ … /* /v2B */ and if (V[2] === "B")). Option 1 changes Auto alone: 1B keeps 100 %, 1C shrinks a
-  // 1600 × 900 layout to the window, never under 80 %, 1D is 1A with 110 % on a window of 2400 × 1200 or more (the big
-  // monitor, a Chrome tab on it too); Settings → Page size keeps its choices under each. Option 2 has a third, 2C
-  // (home.css). ?v= takes only the variants built: 1A to 1D, 2A to 2C, 3A and 3C, 4A.
+  // more), fit-compact (720 to 899) or fit-tight. The variants kept for the morning's comparison: ?v=1B,2A… in the
+  // query string (the hash holds the key), kept as lh.v (?v= alone forgets them), shown as html[data-v1] to [data-v3]
+  // and as V[n] to the code (fenced: /* v2B */ … /* /v2B */ and if (V[2] === "B")). Option 1 changes Auto alone: 1B
+  // keeps 100 %, 1C shrinks a 1600 × 900 layout to the window, never under 80 %, 1D is 1A with 110 % on a window of
+  // 2400 × 1200 or more (the big monitor, a Chrome tab on it too); Settings → Page size keeps its choices under each.
+  // Option 2 is Home on a big screen (home.css): 2D draws it as it was before 3 Nov where Home is big and fitted below
+  // that, 2A fitted at every size, 2B and 2C with the large tiles where Home is tall. Option 3 is the Lab's parts: 3A one
+  // at a time under a strip, 3C the folds. Settings was decided (4B, Save and Cancel kept), so there is no option 4: an
+  // lh.v naming 4A or 4B is passed over, as is anything not built. ?v= takes only 1A to 1D, 2A to 2D, 3A and 3C.
   const SIZES = [0.8, 0.85, 0.9, 1, 1.1, 1.25, 1.5];
   const FIT = { zoom: 1, tier: "", timer: 0, still: 0, wheel: 0, native: false };
   const V = readVariants();
   function readVariants() {
-    const v = { 1: "A", 2: "A", 3: "C", 4: "A" };   // what shows without a choice: 1A Steps, 2A, 3C the Lab's folds
+    const v = { 1: "A", 2: "D", 3: "A" };   // what shows without a choice: 1A Steps, 2D, 3A the Lab's strip
     let given = null;
     try { given = new URLSearchParams(location.search).get("v"); } catch (e) { /* none given */ }
     if (given !== null) store("lh.v", given.trim());
     for (const part of String(store("lh.v") || "").toUpperCase().split(/[\s,]+/)) {
-      if (/^(1[A-D]|2[A-C]|3[AC]|4A)$/.test(part)) v[part[0]] = part[1];   // the variants built, and no others
+      if (/^(1[A-D]|2[A-D]|3[AC])$/.test(part)) v[part[0]] = part[1];   // the variants built, and no others
     }
-    for (const n of [1, 2, 3, 4]) document.documentElement.setAttribute("data-v" + n, v[n]);
+    for (const n of [1, 2, 3]) document.documentElement.setAttribute("data-v" + n, v[n]);
     return v;
   }
   const inApp = () => !!(window.pywebview && window.pywebview.api && window.pywebview.api.set_zoom);
@@ -9488,14 +9633,19 @@
       new MutationObserver(() => tip(p)).observe(p, { attributes: true, attributeFilter: ["title"] });
     }
   }
-  // the Lab panel's parts (Instruments, Watches, Lab memory, Activity): each folds under its heading, remembered by its
-  // part's id (lh.labFold.<data-part>, not by its heading's words; Instruments starts open, the others folded), and the
-  // open ones share the panel's height, each scrolling inside ("fit D" in app.css). A fold opens by height (its rows go
-  // from 0fr to 1fr), at once when the keyboard pressed it; folded, its part is inert. Sample, Hands on the sample and
-  // Bring to safe never fold.
+  // the Lab panel's parts (Instruments, Watches, Memory, Activity), under what never gives way to them: the requests
+  // waiting, the sample, Hands on the sample and Bring to safe. 3A, the default: one part at a time, chosen on a strip
+  // of tabs (initLabTabs, below). ?v=3C keeps the folds, their code fenced v3C (here and in "fit D") to go in one pass
+  // v3C
+  // 3C: each part folds under its heading, remembered by its part's id (lh.labFold.<data-part>, not by its heading's
+  // words; Instruments starts open, the others folded), and the open ones share the panel's height, each scrolling
+  // inside. A fold opens by height (its rows go from 0fr to 1fr), at once when the keyboard pressed it; folded, its part
+  // is inert
   const LAB_FOLDS = new Map();   // data-part -> (folded) => its fold drawn so
+  // /v3C
   function initLabFolds() {
-    if (labTabs()) { initLabTabs(); return; }   // v3A: one part at a time, on a strip
+    if (labTabs()) { initLabTabs(); return; }   // 3A: one part at a time, on a strip
+    // v3C
     for (const part of document.querySelectorAll("#labpanel .lab-part")) {
       const id = part.dataset.part, h3 = part.querySelector(".lab-part-head h3"), body = part.querySelector(".lab-part-body");
       if (!h3 || !body || LAB_FOLDS.has(id)) continue;
@@ -9517,54 +9667,118 @@
         apply(folded);
       });
     }
+    // /v3C
   }
-  function labPartOpen(part) {   // a folded part opened to show what was asked for in it (its Add…)
-    if (!part || part.classList.contains("open") || !LAB_FOLDS.has(part.dataset.part)) return;
+  // a part brought into sight to show what was asked for in it (its Add…, a note's pencil): 3A chooses its tab, 3C
+  // opens its fold. Every way into a part comes here
+  function labPartOpen(part) {
+    if (!part) return;
+    if (labTabs()) { chooseLabPart(part.dataset.part); return; }
+    // v3C
+    if (part.classList.contains("open") || !LAB_FOLDS.has(part.dataset.part)) return;
     part.classList.remove("still");
     store("lh.labFold." + part.dataset.part, "0");
     LAB_FOLDS.get(part.dataset.part)(false);
+    // /v3C
   }
-  // v3A: one part at a time, chosen on a strip of tabs above them (lh.labPart), each tab with what is new in its part:
-  // the alarms on Watches, a dot on Activity for lines not yet seen; wide (full screen), every part stands in its column.
-  // Only when chosen (?v=3A): 3C, the folds, is the default
-  const LAB_TABS = { tabs: new Map(), chosen: "", seen: null };
-  const labTabs = () => V[3] === "A" && /\b3A\b/i.test(store("lh.v") || "");
+  // v3A, the default: one part at a time, chosen on a strip of tabs above them, the chosen part with all the height
+  // below and kept on this browser (lh.labPart; a part that shows nothing is never chosen again). Each tab says what is
+  // new in its part, to the eye and to a screen reader: the alarms on Watches, a dot on Activity for lines not seen
+  // there yet. A tab list as the APG's: the arrow keys, Home and End choose along it at once, and the chosen tab is its
+  // one tab stop. Each tab is named as its part's heading. Wide (the Lab 900 px or more: full screen, or dragged wide),
+  // every part stands in its column under its heading and the strip steps aside ("fit D" in app.css); there the part
+  // used last (pressed, or holding the focus) is the chosen one, so that when the Lab narrows again (Esc, ⤢, a
+  // narrower window) that part, and the focus in it, stay on the screen
+  const LAB_TABS = { tabs: new Map(), chosen: "", wide: null, top: null, seen: null };   // top: Activity's newest line
+  const labTabs = () => V[3] === "A";
+  const labTabShown = (id) => LAB_TABS.tabs.has(id) && !$("lab-sec-" + id).hidden;
   function initLabTabs() {
-    const strip = $("lab-strip"), short = { memory: "Memory" };
-    $("labpanel").classList.add("lab-tabs");
+    const strip = $("lab-strip"), panel = $("labpanel");
+    panel.classList.add("lab-tabs");
     for (const part of document.querySelectorAll("#labpanel .lab-part")) {
       const id = part.dataset.part, h3 = part.querySelector(".lab-part-head h3");
       part.id = "lab-sec-" + id;
       part.classList.add("open");
       const tab = h("button", { type: "button", role: "tab", id: "lab-tab-" + id, "aria-controls": part.id },
-        short[id] || h3.textContent.trim(), h("span", { class: "lab-tab-mark", hidden: true }));
+        h("span", { class: "lab-tab-name" }, h3.textContent.trim()),
+        h("span", { class: "lab-tab-mark", "aria-hidden": "true", hidden: true }), h("span", { class: "sr-only" }));
       tab.dataset.v = id;
       tab.addEventListener("click", () => chooseLabPart(id));
       strip.append(tab);
       LAB_TABS.tabs.set(id, tab);
     }
+    const used = (e) => {   // a press or the focus in a part (narrow, only the chosen one can have either)
+      const part = e.target.closest ? e.target.closest("#labpanel .lab-part") : null;
+      if (part && part.dataset.part !== LAB_TABS.chosen) chooseLabPart(part.dataset.part);
+    };
+    panel.addEventListener("focusin", used);
+    panel.addEventListener("pointerdown", used);
     strip.hidden = false;
-    segKeys(strip, chooseLabPart);
-    chooseLabPart(LAB_TABS.tabs.has(store("lh.labPart")) ? store("lh.labPart") : "instruments");
+    strip.addEventListener("keydown", labTabKeys);
+    if (window.ResizeObserver) new ResizeObserver(labTabRoles).observe($("labpanel"));
+    labTabRoles();
+    const kept = store("lh.labPart");
+    chooseLabPart(labTabShown(kept) ? kept : [...LAB_TABS.tabs.keys()].find(labTabShown));
   }
   function chooseLabPart(id) {
+    if (!labTabShown(id)) return;
     LAB_TABS.chosen = id;
     store("lh.labPart", id);
     for (const [k, tab] of LAB_TABS.tabs) {
       const on = k === id;
+      tab.hidden = $("lab-sec-" + k).hidden;   // a part that shows nothing has no tab
       tab.classList.toggle("on", on);
       tab.setAttribute("aria-selected", String(on));
       tab.tabIndex = on ? 0 : -1;
       $("lab-sec-" + k).classList.toggle("chosen", on);
     }
-    if (id === "activity") labTabMark("activity", "");   // its new lines seen
+    if (id === "activity") labTabSeen();   // its new lines seen
   }
-  function labTabMark(id, mark) {   // "" none, a number (Watches' alarms) or true (a dot: Activity's new lines)
+  // ← and → the part before or after (round), Home and End the first and the last: chosen at once, as the strip's thumb
+  // jumps there (nothing moves for the keyboard)
+  function labTabKeys(e) {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const tabs = [...LAB_TABS.tabs.values()].filter((t) => !t.hidden), i = tabs.indexOf(LAB_TABS.tabs.get(LAB_TABS.chosen));
+    const to = { ArrowLeft: i - 1, ArrowRight: i + 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (to === undefined || !tabs.length) return;
+    e.preventDefault();
+    const tab = tabs[(to + tabs.length) % tabs.length], t = $("lab-strip").querySelector(":scope > .seg-thumb");
+    if (t) { t.classList.add("still"); setTimeout(() => t.classList.remove("still"), 80); }
+    chooseLabPart(tab.dataset.v);
+    tab.focus();
+  }
+  // the parts are the tabs' panels while the strip shows; wide, where it has stepped aside, plain sections under their
+  // headings. Read whenever the Lab changes size (its container query decides)
+  function labTabRoles() {
+    const wide = getComputedStyle($("lab-strip")).display === "none";
+    if (wide === LAB_TABS.wide) return;
+    LAB_TABS.wide = wide;
+    for (const [id, tab] of LAB_TABS.tabs) {
+      const part = $("lab-sec-" + id);
+      if (wide) { part.removeAttribute("role"); part.removeAttribute("tabindex"); }
+      else { part.setAttribute("role", "tabpanel"); part.tabIndex = 0; }
+      part.setAttribute("aria-labelledby", wide ? "lab-h-" + id : tab.id);
+    }
+    labTabSeen();
+  }
+  function labTabMark(id, mark) {   // "" or 0 none, a number (Watches' alarms) or true (a dot: Activity's new lines)
     const tab = LAB_TABS.tabs.get(id), m = tab && tab.querySelector(".lab-tab-mark");
-    if (!m) return;
+    if (!m || m.dataset.mark === String(mark || "")) return;   // written only when it changed
+    m.dataset.mark = String(mark || "");
     m.textContent = mark === true ? "" : String(mark || "");
     m.classList.toggle("dot", mark === true);
     m.hidden = !mark;
+    // and said with the tab's name: "Watches, 2 alarms", "Activity, new lines"
+    tab.querySelector(".sr-only").textContent = !mark ? "" : mark === true ? ", new lines"
+      : ", " + mark + (Number(mark) === 1 ? " alarm" : " alarms");
+  }
+  // Activity's newest line is seen while its part is on the screen (chosen, or every part shown); else a dot on its tab
+  function labTabSeen() {
+    if (!LAB_TABS.tabs.size || LAB_TABS.top === null) return;
+    if (LAB_TABS.seen === null || (paneVisible("labpanel") && (LAB_TABS.chosen === "activity" || LAB_TABS.wide))) {
+      LAB_TABS.seen = LAB_TABS.top;
+    }
+    labTabMark("activity", LAB_TABS.top !== LAB_TABS.seen);
   }
   // /v3A
   // Settings: an item with more than two fields folds under its title, folded until the title is clicked. An item is a
@@ -9865,9 +10079,41 @@
     segKeys($("inst-seg"), instShown);
     $("close-lab").addEventListener("click", () => toggleLab(false));
     $("open-settings").addEventListener("click", openSettings);
-    for (const b of document.querySelectorAll(".set-nav button")) b.addEventListener("click", () => settingsPage(b.dataset.page));
+    for (const b of document.querySelectorAll(".set-nav button")) {   // each section's name, with its dot while it holds a change
+      b.append(h("span", { class: "set-dot", hidden: true }, h("span", { class: "sr-only" }, ", changed")));
+      b.addEventListener("click", () => settingsPage(b.dataset.page));
+    }
     pageKeys();
+    // Settings' Save and Cancel (settingsPending): what waits for Save is weighed at every change in the form; Close (or
+    // Cancel) leaves without saving, × and Esc ask first while something waits; Enter in a box closes nothing
     $("save-settings").addEventListener("click", saveSettings);
+    $("settings-close").addEventListener("click", () => $("settings-dialog").close());
+    $("settings-x").addEventListener("click", settingsLeave);
+    document.addEventListener("keydown", (e) => {   // Esc while Settings is the dialog on top, wherever the focus is in it
+      const dlg = $("settings-dialog");
+      if (e.key !== "Escape" || e.isComposing || e.defaultPrevented || !dlg.open) return;
+      const over = [...document.querySelectorAll("dialog[open]")].filter((d) => d !== dlg).pop();
+      if (over) {   // a dialog over it takes Esc; a question is answered No here, never by the browser's own close: an Esc
+        // gives the page no activation, so after a few the browser would close Settings along with the question it asked
+        if (over.classList.contains("ask-dialog")) { e.preventDefault(); over.close(); }
+        return;
+      }
+      e.preventDefault();   // the dialog's own close (settingsLeave), not the browser's
+      settingsLeave();
+    });
+    $("settings-dialog").addEventListener("cancel", (e) => {   // any other close request (a phone's Back)
+      if (!e.cancelable) return;
+      e.preventDefault();
+      settingsLeave();
+    });
+    const settingsChanged = (e) => {
+      if (e.target.dataset && e.target.dataset.clear && e.target.value) keyKept(e.target);   // a removed key typed again
+      settingsPending();
+    };
+    $("settings-form").addEventListener("input", settingsChanged);
+    $("settings-form").addEventListener("change", settingsChanged);
+    $("settings-form").addEventListener("keydown", settingsEnter);
+    $("settings-form").addEventListener("submit", (e) => e.preventDefault());   // nothing in Settings submits it
     $("save-project").addEventListener("click", saveProjectSettings);
     $("project-confidential").addEventListener("change", () => {   // one switch for the rules and the hub's mark
       const on = $("project-confidential").checked;
@@ -9887,10 +10133,12 @@
       try { await api("/api/quit", { body: {} }); } catch (e) { /* already gone */ }
       document.body.replaceChildren(h("div", { class: "nokey" }, h("h1", {}, "Kelvin has quit"), h("p", {}, "You can close this tab.")));
     });
-    for (const b of document.querySelectorAll("[data-clear]")) {
+    for (const b of document.querySelectorAll("[data-clear]")) {   // a key's Remove waits for Save, as any change
       b.addEventListener("click", () => {
         const input = document.querySelector('#settings-form input[name="' + b.dataset.clear + '"]');
+        if (!("was" in input.dataset)) input.dataset.was = input.placeholder;
         input.value = ""; input.dataset.clear = "1"; input.placeholder = "Removed on Save";
+        settingsPending();
       });
     }
     setInterval(() => { if (S.labOpen || TEAM.open || S.live.size || S.answering.size || !$("lab-badge").hidden) pollState(); }, 1500);

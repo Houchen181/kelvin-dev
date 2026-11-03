@@ -535,9 +535,11 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <!-- the panel never scrolls as a whole: what waits for an answer, the sample and its safety, then the parts, each
-         open part scrolling inside with a fair share of the height (initLabFolds; "fit D" in app.css). Wide (full
-         screen), the parts stand in two columns: the sample and Instruments, then Watches, Lab memory and Activity -->
+    <!-- the panel never scrolls as a whole: what waits for an answer, the sample and its safety, then the parts. One
+         part at a time, chosen on the strip of tabs (#lab-strip, built by initLabTabs), the chosen part scrolling
+         inside with all the height left (?v=3C: each part folds under its heading instead; "fit D" in app.css). Wide
+         (full screen), every part shows, in two columns: the sample and Instruments, then Watches, Memory and
+         Activity. Each tab is named as its part's heading -->
     <div class="lab-scroll">
       <div class="lab-pend"><div id="lab-pending" data-region="lab-part"></div></div>
       <div class="lab-top">
@@ -604,7 +606,7 @@
         </div>
       </section>
       <section class="lab-part" data-part="memory" aria-labelledby="lab-h-memory">
-        <div class="inst-head-row lab-part-head"><h3 id="lab-h-memory">Lab memory</h3><span id="labmem-summary" class="inst-summary"></span>
+        <div class="inst-head-row lab-part-head"><h3 id="lab-h-memory">Memory</h3><span id="labmem-summary" class="inst-summary"></span>
           <button id="labmem-add" class="btn small disclose" type="button" aria-expanded="false" aria-controls="labmem-form" title="Keep a note about this lab: for every chat and everyone here">Add…<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button></div>
         <div id="lab-part-memory" class="lab-part-body" data-region="lab-part">
           <form id="labmem-form" class="labmem-form" hidden>
@@ -636,7 +638,7 @@
   <form id="settings-form" method="dialog">
     <header class="dialog-head">
       <h2>Settings</h2>
-      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+      <button id="settings-x" class="icon-btn" type="button" aria-label="Close">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
@@ -656,10 +658,17 @@
       <div id="set-pages" class="set-pages" data-region="settings-page">
         <section class="set-page" data-page="account" hidden>
           <h3 class="set-title">Account</h3>
+          <!-- what acts at once, in a card of its own at the top (.set-now): the switch letting the phone through the hub -->
+          <div id="relay-field" class="field set-now" hidden>
+            <div class="field-row"><span class="field-label">Your phone, through the Kelvin hub</span><span id="relay-status" class="hint"></span></div>
+            <div class="sw-row"><span id="relay-on-label">Let my phone reach this Kelvin through the hub while I'm signed in here</span>
+              <button id="relay-on" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="relay-on-label"><span></span></button></div>
+            <span class="hint">Sign in to the iPhone app with this account. Unshared work never goes through the hub.</span>
+          </div>
           <div id="account-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Your account</span><span id="account-status" class="hint"></span></div>
             <span id="account-hint" class="hint"></span>
-            <div class="key-row pw-row"><input id="pw-old" type="password" autocomplete="current-password" placeholder="Current password"><input id="pw-new" type="password" autocomplete="new-password" placeholder="New password (empty: none)"><button id="pw-change" class="btn small" type="button">Change</button></div>
+            <div class="key-row pw-row"><input id="pw-old" type="password" autocomplete="current-password" placeholder="Current password" enterkeyhint="next"><input id="pw-new" type="password" autocomplete="new-password" placeholder="New password (empty: none)"><button id="pw-change" class="btn small" type="button">Change</button></div>
             <div class="chatgpt-row"><a id="account-hub-link" class="link soft" target="_blank" rel="noopener noreferrer" hidden>Your account on the Kelvin hub</a><span id="account-hub-text" class="hint"></span><button id="account-hub-edit" class="link soft" type="button">change</button></div>
             <details id="account-delete" class="account-delete">
               <summary>Delete this account…</summary>
@@ -667,12 +676,6 @@
               <label id="account-delete-everywhere-row" class="check wrap" hidden><input id="account-delete-everywhere" type="checkbox"> Also delete my Kelvin account, on every computer. This can't be undone.</label>
               <div class="key-row"><input id="account-delete-password" type="password" autocomplete="current-password" placeholder="Your password"><button id="account-delete-go" class="btn small danger" type="button">Delete</button></div>
             </details>
-          </div>
-          <div id="relay-field" class="field" hidden>
-            <div class="field-row"><span class="field-label">Your phone, through the Kelvin hub</span><span id="relay-status" class="hint"></span></div>
-            <div class="sw-row"><span id="relay-on-label">Let my phone reach this Kelvin through the hub while I'm signed in here</span>
-              <button id="relay-on" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="relay-on-label"><span></span></button></div>
-            <span class="hint">Sign in to the iPhone app with this account. Unshared work never goes through the hub.</span>
           </div>
           <div id="hub-field" class="field">
             <div class="field-row"><span class="field-label">Your hub account</span><span id="hub-status" class="hint"></span></div>
@@ -684,7 +687,7 @@
               <button id="hub-disconnect" class="link soft" type="button">Disconnect</button>
             </div>
             <span id="hub-sync-status" class="hint"></span>
-            <label class="check"><input id="hub-old-runs" type="checkbox"> Also share older runs</label>
+            <label class="check"><input id="hub-old-runs" name="hub_old_runs" type="checkbox"> Also share older runs</label>
             <span class="hint">Only if your data folder is yours alone: older runs don't record who made them.</span>
           </div>
         </section>
@@ -734,8 +737,8 @@
             <ul id="service-list" class="memory-notes" data-region="settings-page"></ul>
             <div class="service-form">
               <select id="svc-preset" aria-label="Service"></select>
-              <input id="svc-name" placeholder="Name" aria-label="Service name" hidden>
-              <input id="svc-url" placeholder="https://…/v1" spellcheck="false" aria-label="API address">
+              <input id="svc-name" placeholder="Name" aria-label="Service name" enterkeyhint="next" hidden>
+              <input id="svc-url" placeholder="https://…/v1" spellcheck="false" aria-label="API address" enterkeyhint="next">
               <input id="svc-key" type="password" autocomplete="off" placeholder="API key" aria-label="API key">
               <input id="svc-models" placeholder="Models (optional)" spellcheck="false" aria-label="Models">
               <button id="svc-add" class="btn small" type="button">Add</button>
@@ -745,7 +748,7 @@
           <div id="cc-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Claude Code <span class="tag">temporary</span></span><span id="cc-status" class="hint"></span></div>
             <span class="hint">Your Claude plan; it can also operate this computer's screen.</span>
-            <label class="check"><input id="cc-on" type="checkbox"> Use Claude Code</label>
+            <label class="check"><input id="cc-on" name="claude_code" type="checkbox"> Use Claude Code</label>
             <label for="cc-path">Program path</label>
             <input id="cc-path" name="claude_code_path" spellcheck="false" placeholder="Found by Kelvin when empty">
           </div>
@@ -800,10 +803,10 @@
           <div class="field">
             <div class="field-row"><span class="field-label">Connected instruments</span></div>
             <div class="checks">
-              <label class="check" title="Setting up only asks each instrument who it is"><input id="auto-setup" type="checkbox"> Set up at start</label>
-              <label class="check"><input id="manuals" type="checkbox"> Fetch manuals</label>
-              <label class="check" title="Windows may ask once: allow private networks"><input id="scan-network" type="checkbox"> Local network too</label>
-              <label class="check"><input id="auto-cards" type="checkbox"> Draft unknown cards</label>
+              <label class="check" title="Setting up only asks each instrument who it is"><input id="auto-setup" name="auto_setup" type="checkbox"> Set up at start</label>
+              <label class="check"><input id="manuals" name="manuals" type="checkbox"> Fetch manuals</label>
+              <label class="check" title="Windows may ask once: allow private networks"><input id="scan-network" name="scan_network" type="checkbox"> Local network too</label>
+              <label class="check"><input id="auto-cards" name="auto_cards" type="checkbox"> Draft unknown cards</label>
             </div>
             <span class="hint" hidden>Setting up only asks each instrument who it is. On the network, Windows may ask once: allow private networks.</span>
           </div>
@@ -812,7 +815,7 @@
               <button id="scripts-add" class="btn small" type="button">Add folder…</button></div>
             <ul id="scripts-folders" class="env-list"></ul>
             <span id="scripts-msg" class="hint" hidden></span>
-            <input id="scripts-python" spellcheck="false" autocomplete="off" aria-label="Python to run them" placeholder="Python to run them (found when empty)">
+            <input id="scripts-python" name="lab_scripts_python" spellcheck="false" autocomplete="off" aria-label="Python to run them" placeholder="Python to run them (found when empty)">
             <span class="hint" hidden>Kelvin runs one when you ask in a chat, after you approve the run.</span>
           </div>
           <div class="field">
@@ -823,7 +826,7 @@
           <div class="field">
             <div class="field-row"><span class="field-label">Instrument collection</span><button id="collection-sync" class="link" type="button">Update now</button></div>
             <div class="checks">
-              <label class="check" title="Cards and manuals from Kelvin's public repository, kept for offline use; never replaces a card you reviewed"><input id="collection" type="checkbox"> Use the collection</label>
+              <label class="check" title="Cards and manuals from Kelvin's public repository, kept for offline use; never replaces a card you reviewed"><input id="collection" name="collection" type="checkbox"> Use the collection</label>
             </div>
             <span id="collection-status" class="hint"></span>
             <span class="hint" hidden>Cards and manuals from Kelvin's public repository, kept for offline use. Never replaces a card you reviewed.</span>
@@ -841,20 +844,20 @@
           </div>
           <div class="field">
             <span class="field-label">Chats' folders</span>
-            <div class="checks"><label class="check wrap"><input id="ask-folder" type="checkbox" checked> Ask for a folder when I start a new chat</label></div>
+            <div class="checks"><label class="check wrap"><input id="ask-folder" name="ask_folder" type="checkbox" checked> Ask for a folder when I start a new chat</label></div>
           </div>
           <div class="field">
             <label class="field-label" for="auto-report">Reports</label>
-            <select id="auto-report">
+            <select id="auto-report" name="auto_report">
               <option value="both">After each run: PDF and PowerPoint</option>
               <option value="pdf">After each run: PDF</option>
               <option value="pptx">After each run: PowerPoint</option>
               <option value="off">Only when I ask</option>
             </select>
             <div class="checks" id="report-kinds">
-              <label class="check" title="In each run's folder"><input type="checkbox" value="scan"> Scan reports</label>
-              <label class="check"><input type="checkbox" value="device"> Device reports</label>
-              <label class="check"><input type="checkbox" value="project"> Master reports</label>
+              <label class="check" title="In each run's folder"><input name="report_kinds" type="checkbox" value="scan"> Scan reports</label>
+              <label class="check"><input name="report_kinds" type="checkbox" value="device"> Device reports</label>
+              <label class="check"><input name="report_kinds" type="checkbox" value="project"> Master reports</label>
             </div>
           </div>
         </section>
@@ -862,9 +865,9 @@
           <h3 class="set-title">Memory</h3>
           <div class="field">
             <div class="field-row"><span class="field-label">Memory</span>
-              <label class="check"><input id="learn" type="checkbox"> Learn from conversations</label></div>
+              <label class="check"><input id="learn" name="learn" type="checkbox"> Learn from conversations</label></div>
             <label for="global-instructions">Instructions for every conversation</label>
-            <textarea id="global-instructions" rows="4" maxlength="4000" spellcheck="true" placeholder="e.g. Give fields in tesla and temperatures in kelvin. Ask me before any overnight run."></textarea>
+            <textarea id="global-instructions" name="instructions" rows="4" maxlength="4000" spellcheck="true" placeholder="e.g. Give fields in tesla and temperatures in kelvin. Ask me before any overnight run."></textarea>
             <div class="field-row"><span class="field-label small">About you</span><span id="global-notes-count" class="hint"></span></div>
             <ul id="global-notes" class="memory-notes" data-region="settings-page"></ul>
             <span class="hint" hidden>What everyone knows about the lab itself is in the Lab panel → Lab memory.</span>
@@ -877,7 +880,7 @@
         <section class="set-page" data-page="literature" hidden>
           <h3 class="set-title">Literature</h3>
           <div class="field">
-            <label class="check"><input id="literature" type="checkbox"> Literature and web search</label>
+            <label class="check"><input id="literature" name="literature" type="checkbox"> Literature and web search</label>
             <span class="hint">Only search words leave this computer.</span>
             <label for="k-openalex">OpenAlex key</label>
             <div class="key-row"><input id="k-openalex" name="openalex_api_key" type="password" autocomplete="off" spellcheck="false" placeholder="Optional"><button type="button" class="link danger" data-clear="openalex_api_key">Remove</button></div>
@@ -893,11 +896,11 @@
             <div class="key-row"><input id="k-webhook" name="webhook" type="password" autocomplete="off" spellcheck="false" placeholder="https://ntfy.sh/your-own-secret-topic"><button type="button" class="link danger" data-clear="webhook">Remove</button></div>
             <span class="hint" data-hint="webhook"></span>
             <div class="checks" id="notify-kinds">
-              <label class="check"><input type="checkbox" value="alarm"> Alarms</label>
-              <label class="check"><input type="checkbox" value="alarm_cleared"> Alarms cleared</label>
-              <label class="check"><input type="checkbox" value="approval"> Approvals waiting</label>
-              <label class="check"><input type="checkbox" value="run"> Finished runs</label>
-              <label class="check"><input type="checkbox" value="safety"> Safety changes</label>
+              <label class="check"><input name="notify_kinds" type="checkbox" value="alarm"> Alarms</label>
+              <label class="check"><input name="notify_kinds" type="checkbox" value="alarm_cleared"> Alarms cleared</label>
+              <label class="check"><input name="notify_kinds" type="checkbox" value="approval"> Approvals waiting</label>
+              <label class="check"><input name="notify_kinds" type="checkbox" value="run"> Finished runs</label>
+              <label class="check"><input name="notify_kinds" type="checkbox" value="safety"> Safety changes</label>
               <button id="notify-test" class="link soft" type="button">Send a test</button>
             </div>
             <span class="hint">Use a private topic or channel.</span>
@@ -905,26 +908,26 @@
           <div class="field">
             <label for="smtp-host" data-fold="email" title="Your institution's or provider's mail server (SMTP)">Email</label>
             <div class="field-row">
-              <input id="smtp-host" type="text" autocomplete="off" spellcheck="false" placeholder="smtp.example.edu" aria-label="Mail server" style="flex: 4 1 0">
-              <input id="smtp-port" type="text" inputmode="numeric" maxlength="5" placeholder="587" aria-label="Port" style="flex: 1 1 0">
-              <select id="smtp-security" aria-label="Connection security" style="flex: 2 1 0">
+              <input id="smtp-host" name="smtp_host" type="text" autocomplete="off" spellcheck="false" placeholder="smtp.example.edu" aria-label="Mail server" style="flex: 4 1 0">
+              <input id="smtp-port" name="smtp_port" type="text" inputmode="numeric" maxlength="5" placeholder="587" aria-label="Port" style="flex: 1 1 0">
+              <select id="smtp-security" name="smtp_security" aria-label="Connection security" style="flex: 2 1 0">
                 <option value="starttls">STARTTLS</option>
                 <option value="ssl">SSL</option>
                 <option value="none">None</option>
               </select>
             </div>
-            <input id="smtp-user" type="text" autocomplete="off" spellcheck="false" placeholder="User name (often your address)" aria-label="Mail user name">
+            <input id="smtp-user" name="smtp_user" type="text" autocomplete="off" spellcheck="false" placeholder="User name (often your address)" aria-label="Mail user name">
             <div class="key-row"><input id="k-smtp-password" name="smtp_password" type="password" autocomplete="new-password" placeholder="Password" aria-label="Mail password"><button type="button" class="link danger" data-clear="smtp_password">Remove</button></div>
             <span class="hint" data-hint="smtp_password"></span>
-            <input id="smtp-from" type="text" autocomplete="off" spellcheck="false" placeholder="From (if not the user name)" aria-label="From address">
-            <input id="smtp-to" type="text" autocomplete="off" spellcheck="false" placeholder="To: you@example.edu, a colleague's address" aria-label="Send to">
+            <input id="smtp-from" name="smtp_from" type="text" autocomplete="off" spellcheck="false" placeholder="From (if not the user name)" aria-label="From address">
+            <input id="smtp-to" name="smtp_to" type="text" autocomplete="off" spellcheck="false" placeholder="To: you@example.edu, a colleague's address" aria-label="Send to">
             <span class="hint" hidden>The ticked notices go here too. The password is kept like an API key.</span>
           </div>
           <div class="field">
             <label for="k-heartbeat" data-fold="heartbeat" title="A healthchecks.io check, or an Uptime Kuma push monitor: if the pings stop, that service tells you">Heartbeat</label>
             <div class="key-row"><input id="k-heartbeat" name="heartbeat" type="password" autocomplete="off" spellcheck="false" placeholder="https://hc-ping.com/your-check"><button type="button" class="link danger" data-clear="heartbeat">Remove</button></div>
             <span class="hint" data-hint="heartbeat"></span>
-            <select id="heartbeat-minutes" aria-label="How often">
+            <select id="heartbeat-minutes" name="heartbeat_minutes" aria-label="How often">
               <option value="1">Every minute</option>
               <option value="5">Every 5 minutes</option>
               <option value="15">Every 15 minutes</option>
@@ -933,7 +936,7 @@
           </div>
           <div class="field">
             <label for="approval-wait">Unanswered requests</label>
-            <select id="approval-wait" aria-describedby="approval-wait-hint">
+            <select id="approval-wait" name="approval_wait" aria-describedby="approval-wait-hint">
               <option value="off">Decline after 5 minutes</option>
               <option value="15">After 5 min, ask my phone: 15 min more</option>
               <option value="60">After 5 min, ask my phone: 1 hour more</option>
@@ -951,25 +954,28 @@
               <option value="240">After 4 hours</option>
               <option value="off">Never</option>
             </select>
-            <label class="check"><input id="idle-off-all" type="checkbox"> Other outputs too (sources, excitations, RF)</label>
+            <label class="check"><input id="idle-off-all" name="idle_off_all" type="checkbox"> Other outputs too (sources, excitations, RF)</label>
             <span id="idle-off-hint" class="hint">Lasers and light sources go to safe; other outputs only send you a notice, unless ticked. Temperature, field and positions stay.</span>
           </div>
         </section>
         <section class="set-page" data-page="phone" hidden>
           <h3 class="set-title">Phone</h3>
-          <div class="field">
+          <!-- what acts at once, in a card of its own at the top (.set-now): Phone access, and what lets phones through;
+               under it the phones that reach Kelvin directly -->
+          <div class="field set-now">
             <div class="field-row sw-row"><span id="phone-on-label" class="sw-text">Phone access</span>
               <button id="phone-on" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="phone-on-label"><span></span></button></div>
             <span id="phone-status" class="hint phone-status"></span>
             <div id="firewall-row" class="field-row" hidden><span id="firewall-status" class="hint"></span>
               <button id="firewall-allow" class="btn small" type="button">Let phones through</button></div>
-            <ul id="device-list" class="memory-notes" data-region="settings-page"></ul>
-            <span class="hint" hidden>The Kelvin iPhone app, signed in with your Kelvin account, reaches Kelvin through the Kelvin hub from anywhere. With Phone access on, it also connects directly on the lab network: faster, and the only way unshared work opens. When this computer's address is public, the iPhone connects through the hub; Tailscale gives the direct connection that opens unshared work.</span>
           </div>
+          <ul id="device-list" class="memory-notes" data-region="settings-page"></ul>
+          <span class="hint" hidden>The Kelvin iPhone app, signed in with your Kelvin account, reaches Kelvin through the Kelvin hub from anywhere. With Phone access on, it also connects directly on the lab network: faster, and the only way unshared work opens. When this computer's address is public, the iPhone connects through the hub; Tailscale gives the direct connection that opens unshared work.</span>
         </section>
         <section class="set-page" data-page="display" hidden>
           <h3 class="set-title">Display</h3>
-          <div class="field">
+          <!-- what acts at once, in a card of its own at the top (.set-now): the page size, kept on this browser -->
+          <div class="field set-now">
             <span class="field-label">Page size</span>
             <div class="zoom-row" role="group" aria-label="Page size">
               <button id="zoom-out" class="btn small" type="button" aria-label="Smaller">−</button>
@@ -1007,8 +1013,9 @@
       <button id="quit-app" class="btn" type="button" hidden>Quit Kelvin</button>
       <span id="settings-msg" class="muted small"></span>
       <div class="spacer"></div>
-      <button class="btn" value="cancel" type="submit">Cancel</button>
-      <button id="save-settings" class="btn primary" type="button">Save</button>
+      <!-- Close while nothing waits for Save, Cancel once something does (settingsPending); Save only then -->
+      <button id="settings-close" class="btn" type="button">Close</button>
+      <button id="save-settings" class="btn" type="button" title="Nothing to save" disabled>Save</button>
     </footer>
   </form>
 </dialog>

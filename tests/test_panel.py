@@ -47,9 +47,10 @@ def test_unresponsive_instrument_shows_as_error(tmp_path):
 
 
 def test_the_lab_panel_never_scrolls_and_its_controls_say_their_state():
-    """The page's Lab panel (fit D): it never scrolls as a whole, each open part scrolls inside (a region); the folds
-    are kept by their part's id; Add… and Settings (n) are disclosures; the one switch; Mine | Everyone a radio group;
-    the panel only says Locked (the one Unlock… is in the notice row); Team chat's messages are its region."""
+    """The page's Lab panel (fit D): it never scrolls as a whole, each part shown scrolls inside (a region): one at a
+    time on its strip of tabs (3A, the default: test_lab_tabs), or with ?v=3C the folds, kept by their part's id; Add…
+    and Settings (n) are disclosures; the one switch; Mine | Everyone a radio group; the panel only says Locked (the one
+    Unlock… is in the notice row); Team chat's messages are its region."""
     import pytest
     pytest.importorskip("starlette")
     from labharness.web.app import STATIC

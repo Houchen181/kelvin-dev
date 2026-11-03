@@ -6,7 +6,7 @@ zoom on <html> that multiplies a raw vh. There is one switch: a button.switch wi
 (data-region) scrolls, so each one gets the thin scrollbar and the soft edge where it is cut; what else may scroll is
 listed below with its reason. The density tier on <html> (fit-roomy, fit-compact, fit-tight) is set by fitTiers alone,
 so it can never disagree with the page size. The morning's variants come from ?v= in the query string (the hash holds
-the key), kept as lh.v and shown as html[data-v1] to [data-v4], and each variant's CSS is fenced, so the ones not
+the key), kept as lh.v and shown as html[data-v1] to [data-v3], and each variant's CSS is fenced, so the ones not
 chosen can be deleted in one pass."""
 import re
 from pathlib import Path
@@ -278,18 +278,22 @@ def test_the_variants_come_from_the_query_string_and_are_fenced():
     read = _function(js, "readVariants")
     assert 'new URLSearchParams(location.search).get("v")' in read and "location.hash" not in read
     assert 'store("lh.v", given.trim())' in read and 'store("lh.v")' in read   # kept on this browser; ?v= alone forgets
-    assert 'setAttribute("data-v" + n, v[n])' in read and "/^(1[A-D]|2[A-C]|3[AC]|4A)$/" in read   # those built
-    # what shows without a choice: 1A Steps, 2A one row of three tiles, 3C the Lab's folds (3A is the strip)
-    assert re.search(r'const v = \{ 1: "A", 2: "A", 3: "C", 4: "A" \};', read)
+    assert 'setAttribute("data-v" + n, v[n])' in read and "/^(1[A-D]|2[A-D]|3[AC])$/" in read   # those built
+    # what shows without a choice: 1A Steps, 2D Home as before 3 Nov where it is big, 3A the Lab's strip (3C the folds).
+    # Settings was decided (4B), so there is no option 4: no data-v4, and an lh.v naming 4A or 4B is passed over
+    assert re.search(r'const v = \{ 1: "A", 2: "D", 3: "A" \};', read)
+    assert "for (const n of [1, 2, 3])" in read and "data-v4" not in js
     assert "const V = readVariants();" in js and "V, fitTiers" in js[js.index("window.Kelvin = {"):]
     for name in SCRIPTS:
         for n, x in re.findall(r'\bV\[(\d)\] === "(\w)"', _read(name)):
-            assert n in "1234" and x in {"1": "ABCD", "2": "ABC", "3": "AC", "4": "A"}[n], (name, n, x)
+            assert n in "123" and x in {"1": "ABCD", "2": "ABCD", "3": "AC"}[n], (name, n, x)
     for name in STYLES:
         css = _read(name)
         comments = [m.span() for m in re.finditer(r"/\*.*?\*/", css, flags=re.S)]
         opens = re.findall(r"/\* v([1-4][A-D]) \*/", css)
         assert opens == re.findall(r"/\* /v([1-4][A-D]) \*/", css), name   # each fence closed, in order
+        assert all(v[0] in "123" for v in opens), (name, opens)
+        assert not re.search(r"\[data-v4", re.sub(r"/\*.*?\*/", "", css, flags=re.S)), name
         for m in re.finditer(r'\[data-v([1-4])="?([A-D])"?\]', css):
             if any(a <= m.start() < b for a, b in comments):
                 continue
@@ -304,10 +308,10 @@ def test_the_big_monitor_variants_1d_and_2c():
     Page size still overrides it, and 110 % is one of its sizes, so - and + step on from there. 2C is 2B's large 2 + 1
     tiles where Home is tall, in a column of 1180 px (four columns of blocks) instead of 1440."""
     js = _read("app.js")
-    given = re.search(r"/(\^\(1\[A-D\]\|2\[A-C\]\|3\[AC\]\|4A\)\$)/", _function(js, "readVariants")).group(1)
-    for part, ok in (("1D", True), ("2C", True), ("3A", True), ("3C", True), ("4A", True), ("1B", True),
-                     ("2D", False), ("3B", False), ("4B", False), ("4C", False), ("4D", False), ("5A", False)):
-        assert bool(re.match(given, part)) == ok, part   # ?v= takes the variants built, and no others
+    given = re.search(r"/(\^\(1\[A-D\]\|2\[A-D\]\|3\[AC\]\)\$)/", _function(js, "readVariants")).group(1)
+    for part, ok in (("1D", True), ("2C", True), ("2D", True), ("3A", True), ("3C", True), ("1B", True),
+                     ("2E", False), ("3B", False), ("4A", False), ("4B", False), ("4C", False), ("5A", False)):
+        assert bool(re.match(given, part)) == ok, part   # ?v= takes the variants built, and no others (no option 4)
     auto = _function(js, "autoZoom")
     big = 'if (V[1] === "D" && w >= 2400 && h >= 1200) return 1.1;'
     # after a touch screen's and a narrow window's 100 %, before 1A's steps
@@ -336,6 +340,58 @@ def test_the_big_monitor_variants_1d_and_2c():
     # where Home is tall, 2B's tiles rule for rule
     assert lines(re.search(tall, c, flags=re.S).group(1)) == \
         [x.replace('data-v2="B"', 'data-v2="C"') for x in lines(re.search(tall, b, flags=re.S).group(1))]
+
+
+def test_home_on_a_big_screen_is_as_it_was_before_2d():
+    """2D, shown without a choice: where Home is big it is drawn as the big monitor had it before 3 Nov (450825c's
+    home.css): a column of 1040 px with 32 px sides, the greeting on a line of its own at 34 px over what goes on at 16,
+    the 2 + 1 large tiles (at least 210 px tall, padding 24 26 18, title 20 on a line of 28, the targets' floor, number
+    44, 18 px apart, 26 px between the parts) and three columns of blocks (280 px least, 16 apart, padding 18 18 14,
+    radius 15, value 26, text 14). Big is Home's own box as wide as that column, so the blocks always stand three to a
+    row, and 1200 tall, where three rows of them stand whole under full tiles (three runs, three readings and the line:
+    1193 px, measured at 2560 x 1440): the 1440p monitor, in the app or a Chrome tab, and not a 1080p screen (Home 1028
+    tall), a 1440 x 900 laptop at 90 % (948) or a portrait tablet (820 wide), which keep 2A's nine blocks. The number's
+    line holds its figures, so nothing spills at 110 or 125 %, and its row's margin gives back what that adds. What the
+    night cut stays cut, the blocks keep their region, and below the rule nothing of 2D applies: Home is 2A's."""
+    css = _read("home.css")
+    assert css.index("/* /v2C */") < css.index("/* v2D */") < css.index("/* /v2D */")   # fenced, after 2C
+    d = re.sub(r"/\*.*?\*/", "", css[css.index("/* v2D */"):css.index("/* /v2D */")], flags=re.S)
+    big = re.search(r"@container home \(min-width: (\d+)px\) and \(min-height: (\d+)px\) \{(.*)\n\}", d, flags=re.S)
+    assert big and not d.replace(big.group(0), "").strip()   # one rule on Home's own box, and nothing of 2D outside it
+    rules = dict(_rules(big.group(3)))
+    assert all(sel.startswith('html[data-v2="D"] ') for sel in rules), list(rules)
+
+    def of(sel):
+        return dict(re.findall(r"([\w-]+):\s*([^;]+);", rules['html[data-v2="D"] ' + sel]))
+    col = of(".home-col")
+    assert col["max-width"] == "1040px" and col["padding"] == "34px 32px 32px" and col["gap"] == "26px"
+    assert "height" not in col   # the whole height still, so the blocks take what is left
+    assert int(big.group(1)) == int(col["max-width"][:-2]) and int(big.group(2)) == 1200   # as wide as its column
+    assert of(".home-greet") == {"flex-basis": "100%", "font-size": "34px"}   # a line of its own
+    assert of(".home-state")["font-size"] == of(".home-labname")["font-size"] == "16px"
+    assert of(".home-tiles") == {"grid-template-columns": "repeat(2, minmax(0, 1fr))", "gap": "18px"}
+    assert of(".home-tile-lab") == {"grid-column": "1 / -1"}
+    tile = of(".home-tile")
+    assert tile["min-height"] == "210px" and tile["padding"] == "24px 26px 18px" and tile["max-height"] == "none"
+    assert of(".home-tile-go") == {"font-size": "20px", "line-height": "28px"}   # the title's button: 28 px
+    # the number's line holds its figures (1.14 em), and its row's margin keeps the tile as tall as it was
+    assert of(".home-kpi-n") == {"font-size": "44px", "line-height": "1.15"} and of(".home-kpi")["margin"] == "-2px 0"
+    blocks = of(".home-blocks")
+    assert blocks == {"grid-template-columns": "repeat(auto-fill, minmax(280px, 1fr))", "gap": "16px"}   # the region's own
+    width = int(col["max-width"][:-2]) - 2 * int(col["padding"].split()[1][:-2])
+    least, gap = int(re.search(r"minmax\((\d+)px", blocks["grid-template-columns"]).group(1)), int(blocks["gap"][:-2])
+    assert width == 976 and (width + gap) // (least + gap) == 3   # three columns in the 976 px
+    block = of(".kcard.home-block")
+    assert block["padding"] == "18px 18px 14px" and block["border-radius"] == "15px"
+    assert of(".hk-value") == {"font-size": "26px"} and of(".hk-text")["font-size"] == "14px"
+    sizes = [int(x) for x in re.findall(r"font-size: (\d+)px", d)]
+    assert sizes and min(sizes) >= 12   # authored text 12 px or more
+    assert not re.search(r"#[0-9a-fA-F]{3}|rgba?\(|transform|transition|animation", d)   # tokens; no lift, no motion
+    # what the night cut stays cut: no "Overview" line, no middle dot, no tile footers
+    home = _read("home.js")
+    assert "Overview" not in home and "home-tile-foot" not in home and "home-eyebrow" not in home
+    assert '"· "' not in css and "home-tile-foot" not in css
+    assert '"data-region": "home-blocks"' in home   # the blocks scroll in their region, never the page
 
 
 def test_the_sequences_dialogs_keep_their_head_and_buttons():

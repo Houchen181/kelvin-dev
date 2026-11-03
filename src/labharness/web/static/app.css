@@ -712,9 +712,10 @@ body:not(.incognito) #empty-sub { display: none; }
 .set-page { display: grid; gap: 18px; align-content: start; }
 .set-page[hidden] { display: none; }
 .set-title { margin: 2px 0 -8px; font-size: 17px; }
-/* a section of one field: its title says what the field's label would */
-.set-page:is([data-page="account"], [data-page="memory"], [data-page="literature"], [data-page="notifications"], [data-page="phone"], [data-page="updates"]) > .field:first-of-type > .field-row:first-child > .field-label { visibility: hidden; }
-.set-page:is([data-page="account"], [data-page="memory"], [data-page="literature"], [data-page="notifications"], [data-page="phone"], [data-page="updates"]) > .field:first-of-type > .field-row:first-child:has(> .field-label:only-child) { display: none; }
+/* a section of one field: its title says what the field's label would (Account is not one: its card of what acts at
+   once, "fit S", stands over Your account) */
+.set-page:is([data-page="memory"], [data-page="literature"], [data-page="notifications"], [data-page="phone"], [data-page="updates"]) > .field:first-of-type > .field-row:first-child > .field-label { visibility: hidden; }
+.set-page:is([data-page="memory"], [data-page="literature"], [data-page="notifications"], [data-page="phone"], [data-page="updates"]) > .field:first-of-type > .field-row:first-child:has(> .field-label:only-child) { display: none; }
 @media (max-width: 640px) {
   .set-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 12px; }
   .set-nav { flex-direction: row; padding: 0 0 8px; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -1862,10 +1863,11 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
 /* ===== end fit B ===== */
 
 /* ===== fit D: the Lab panel and Team chat ===== */
-/* The Lab panel never scrolls as a whole (3C, the default): what waits for an answer (a region, at most 40 % of the
-   window), the sample and its safety, then the parts. The open parts share the rest fairly, each scrolling inside: the
-   rows grow alike from each part's heading, and a part whose content is shorter keeps only what it needs (rows
-   minmax(heading, auto) under align-content: start), so a short list never sits in a tall box */
+/* The Lab panel never scrolls as a whole: what waits for an answer (a region, at most 40 % of the window), the sample
+   and its safety, then the parts: one at a time under its strip (3A, the default: the v3A block below), or 3C's folds,
+   where the open parts share the rest fairly, each scrolling inside: the rows grow alike from each part's heading, and
+   a part whose content is shorter keeps only what it needs (rows minmax(heading, auto) under align-content: start), so
+   a short list never sits in a tall box */
 #labpanel { container: lab / inline-size; --lab-row: var(--row-h, 36px); }
 #labpanel .lab-scroll { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto;
   grid-auto-rows: minmax(var(--lab-row), auto); align-content: start; overflow: clip; }   /* clip: not even a focus scrolls it */
@@ -1877,32 +1879,37 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
 #labpanel .lab-top > .callout { margin: 0; }
 #labpanel .lab-sample { display: flex; align-items: center; gap: var(--sp-2, 8px); min-height: var(--lab-row); }
 #labpanel .lab-sample h3 { flex: none; }
+#labpanel .lab-sample > .btn { flex: none; white-space: nowrap; }   /* New device… on one line: the list gives way */
 #labpanel .hands-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 #labpanel .lab-col { display: contents; }
-/* a part: its heading, then its body (the region), whose row goes from 0fr to 1fr as it opens (by height, .2 s; shut in
-   .12 s; at once from the keyboard, .still). Folded, the body is inert (initLabFolds) and hidden once it has shut */
-#labpanel .lab-part { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 0fr; min-width: 0; min-height: 0;
-  border-top: 1px solid var(--line);
-  transition: grid-template-rows .12s var(--ease-in); }
-#labpanel .lab-part.open { grid-template-rows: auto 1fr; transition-duration: .2s; }
+/* a part: its heading, then its body (the region) */
+#labpanel .lab-part { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; min-width: 0; min-height: 0;
+  border-top: 1px solid var(--line); }
 #labpanel .lab-part-head { min-height: var(--lab-row); }
-#labpanel .lab-part-body { min-height: 0; margin-inline: -4px; padding-inline: 4px; opacity: 0; visibility: hidden;
-  transition: opacity .12s ease, visibility 0s .12s; }
-#labpanel .lab-part.open > .lab-part-body { opacity: 1; visibility: visible; transition: opacity .2s ease; }
+#labpanel .lab-part-body { min-height: 0; margin-inline: -4px; padding-inline: 4px; }
 #labpanel .lab-part-body::before { content: ""; display: block; height: 3px; }   /* room for a focus ring at the top */
 #labpanel .lab-part-body::after { content: ""; display: block; height: var(--sp-3, 12px); }   /* and under the last line */
+/* v3C */
+/* 3C's folds (3A's parts are always .open): a part's body row goes from 0fr to 1fr as it opens (by height, .2 s; shut
+   in .12 s; at once from the keyboard, .still). Folded, the body is inert (initLabFolds) and hidden once it has shut. A
+   fold's heading is a target as tall as a row allows */
+#labpanel .lab-part { grid-template-rows: auto 0fr; transition: grid-template-rows .12s var(--ease-in); }
+#labpanel .lab-part.open { grid-template-rows: auto 1fr; transition-duration: .2s; }
+#labpanel .lab-part-body { opacity: 0; visibility: hidden; transition: opacity .12s ease, visibility 0s .12s; }
+#labpanel .lab-part.open > .lab-part-body { opacity: 1; visibility: visible; transition: opacity .2s ease; }
 #labpanel .lab-part.still, #labpanel .lab-part.still > .lab-part-body, #labpanel .lab-part.still .fold-btn svg { transition: none; }
-/* targets of 24 px or more at 85 %: a fold's heading, the switch and the row buttons as tall as a row allows, a choice's
-   sides 28 px */
 #labpanel .fold-btn { min-height: max(30px, calc(var(--lab-row) - 4px)); }
+#labpanel .lab-part:not(.open) .fold-btn svg { transform: none; }
+/* /v3C */
+/* targets of 24 px or more at 85 %: the switch and the row buttons as tall as a row allows, a choice's sides 30 px, as
+   the strip's tabs */
 #labpanel .inst-switch { height: max(30px, calc(var(--lab-row) - 4px)); }
 /* the switch (the one .switch, "fit A") at the row's end: its track as far in from the list's right edge as the icon is
    from its left, 10 px (the button is 3 px wider than the track on each side; on touch 5 px, below) */
 #labpanel .inst-head > .inst-switch { margin-right: 7px; }
 #labpanel .inst-row { height: var(--lab-row); }
 #labpanel .row-btn { min-width: 30px; min-height: 30px; }
-#labpanel .seg:not(.lab-strip) > button { min-height: 28px; }
-#labpanel .lab-part:not(.open) .fold-btn svg { transform: none; }
+#labpanel .seg:not(.lab-strip) > button { min-height: 30px; }
 /* Add… and Settings (n): disclosures, one label, a chevron that turns, pressed while open */
 #labpanel .disclose { display: inline-flex; align-items: center; gap: 4px; }
 #labpanel .disclose > svg { width: 12px; height: 12px; color: var(--muted); transform: rotate(90deg); transition: transform .32s var(--ease-switch); }
@@ -1916,7 +1923,7 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
 #activity-who { margin-left: auto; }
 /* Team chat: its heading, its messages (the one region, data-region="team"), the form at its foot */
 #teampanel .team-list { padding: var(--sp-1, 4px) var(--sp-3, 12px) var(--sp-3, 12px); }
-/* wide (full screen, or dragged wide): two columns, the sample and Instruments, then Watches, Lab memory and Activity,
+/* wide (full screen, or dragged wide): two columns, the sample and Instruments, then Watches, Memory and Activity,
    each column sharing its height as the one column does */
 @container lab (min-width: 900px) {
   #labpanel .lab-scroll { grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); grid-template-rows: auto auto minmax(0, 1fr);
@@ -1930,19 +1937,36 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
   #labpanel .lab-col-2 { grid-area: b; }
 }
 /* v3A */
-/* one part at a time under a strip of tabs (#labpanel.lab-tabs, initLabTabs); wide, every part stands in its column */
+/* the default: one part at a time under a strip of tabs (#labpanel.lab-tabs, initLabTabs), the chosen part with the
+   rest of the height; wide, every part stands in its column. The tabs share the strip, each name whole (an ellipsis
+   only as the last resort), its count or dot after it */
 #labpanel.lab-tabs .lab-scroll { grid-template-rows: auto auto auto; }
 #labpanel.lab-tabs .lab-strip { grid-row: 3; display: flex; margin: 0 0 var(--sp-2, 8px); }
 #labpanel.lab-tabs .lab-strip > button { flex: 1 1 auto; min-width: 0; display: inline-flex; align-items: center; justify-content: center;
-  gap: 5px; min-height: 28px; padding: 3px 8px; }
-#labpanel .lab-tab-mark { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--danger); color: var(--panel);
+  gap: 5px; min-height: 30px; padding: 3px 8px; }
+#labpanel .lab-tab-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#labpanel .lab-tab-mark { flex: none; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--danger); color: var(--panel);
   font-size: 12px; font-weight: 700; line-height: 18px; text-align: center; }
 #labpanel .lab-tab-mark.dot { min-width: 8px; width: 8px; height: 8px; padding: 0; background: var(--accent); }
+#labpanel.lab-tabs .lab-part[role="tabpanel"]:focus-visible { outline-offset: -2px; border-radius: var(--radius-s); }
 #labpanel.lab-tabs .lab-part:not(.chosen) { display: none; }
 #labpanel.lab-tabs .lab-part { border-top: 0; }
 #labpanel.lab-tabs .lab-part-head h3 { display: none; }
 #labpanel.lab-tabs [data-part="activity"] .lab-part-head:has(#activity-who[hidden]) { display: none; }   /* nothing left on it */
 #labpanel.lab-tabs .lab-part-body { grid-row: 2; }
+/* a narrow Lab (under its usual width, down to its least beside other panes): a tab's count or dot sits on its corner,
+   as the top bar's do, and the tabs' sides tighten, so that every name stays whole. Inline, the four names, both marks
+   and the sides need 366 px of Lab at the roomy tier's spacing (less in the others), a few more where a font runs wide.
+   On the corner, a mark stands wholly above its tab's name, whose box starts 10 px above the tab's middle: the count
+   (16 px tall) and the dot both end 11 px above that middle, so a mark never covers a letter; the strip stands 4 px
+   lower, so that the count, up to 9 px over the strip's top edge, keeps clear of Hands on the sample above it */
+@container lab (max-width: 371px) {
+  #labpanel.lab-tabs .lab-strip { margin-top: 4px; }
+  #labpanel.lab-tabs .lab-strip > button { position: relative; padding-inline: 5px; border-width: 0; }
+  #labpanel.lab-tabs .lab-tab-mark { position: absolute; top: calc(50% - 27px); right: -4px; min-width: 16px; height: 16px;
+    padding: 0 4px; border-radius: 8px; line-height: 16px; }
+  #labpanel.lab-tabs .lab-tab-mark.dot { top: calc(50% - 19px); right: -1px; min-width: 8px; height: 8px; padding: 0; }
+}
 @container lab (min-width: 900px) {
   #labpanel.lab-tabs .lab-scroll { grid-template-rows: auto auto minmax(0, 1fr); }
   #labpanel.lab-tabs .lab-strip { display: none; }
@@ -1950,6 +1974,12 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
   #labpanel.lab-tabs .lab-part-head h3 { display: block; }
   #labpanel.lab-tabs [data-part="activity"] .lab-part-head:has(#activity-who[hidden]) { display: flex; }
   #labpanel.lab-tabs .lab-col-2 > .lab-part + .lab-part { border-top: 1px solid var(--line); }
+}
+@media (pointer: coarse) {
+  #labpanel.lab-tabs .lab-strip > button { min-height: 40px; }   /* a touch screen: 40 px, as every target */
+}
+@media (prefers-reduced-motion: reduce) {
+  #labpanel.lab-tabs .lab-strip > button { transition: color .15s ease; }   /* only the colour changes, and quickly */
 }
 /* /v3A */
 /* tight: each note above the sample on one line, its words cut with an ellipsis (its buttons stay whole) */
@@ -1965,6 +1995,8 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
 @media (pointer: coarse) {
   #labpanel { --lab-row: max(var(--row-h, 36px), 40px); }
   #labpanel :is(.btn.small, button.link, .row-btn, .fold-btn, .inst-tools input, .mount-select) { min-height: 40px; }
+  #labpanel .row-btn { min-width: 40px; }   /* a watch's ×, a note's pencil and bin */
+  #labpanel .alarm-history summary { min-height: 40px; padding-block: 11px; }
   #labpanel .inst-switch { height: 40px; }
   #labpanel .inst-head > .inst-switch { margin-right: 5px; }   /* 44 px wide on touch: the track still 10 px in */
   :is(#labpanel, #teampanel) .lab-head .icon-btn { min-width: 40px; min-height: 40px; }
@@ -1976,12 +2008,14 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
   #labpanel .lab-part-body::after { height: 4px; }
   #labpanel .lab-part-body::before { height: 0; }
   #labpanel .lab-top { gap: 6px; padding-bottom: 4px; }
-  #labpanel .seg:not(.lab-strip) > button { min-height: 34px; }
+  #labpanel .seg:not(.lab-strip) > button { min-height: 40px; }   /* All | Active, Mine | Everyone: 40 px as the rest */
   #labpanel .inst + .inst { border-top: 0; box-shadow: inset 0 1px 0 var(--line); }   /* a line that takes no room */
 }
 @media (prefers-reduced-motion: reduce) {
-  #labpanel :is(.lab-part, .lab-part-body, .disclose > svg, .inst-row .chev),
-  #labpanel .lab-part.open > .lab-part-body { transition: none; }
+  #labpanel :is(.disclose > svg, .inst-row .chev) { transition: none; }
+  /* v3C */
+  #labpanel :is(.lab-part, .lab-part.open, .lab-part-body), #labpanel .lab-part.open > .lab-part-body { transition: none; }
+  /* /v3C */
 }
 /* ===== end fit D ===== */
 
@@ -2314,3 +2348,31 @@ body.incognito .composer { background: color-mix(in srgb, var(--text) 4%, var(--
   .seq-bar .btn.seq-hold.armed > span { display: inline; }
 }
 /* ===== end fit P ===== */
+
+/* ===== fit S: Settings, Save and Cancel ===== */
+/* Settings keep Save and Cancel (the morning's 4B). What acts at once stands in a card of its own at the top of its
+   page (.set-now: the phone through the hub on Account, Phone access, Page size), drawn as the kit's cards are; on the
+   Settings pages a switch acts at once and a tick box waits for Save */
+.set-page > .set-now { padding: 12px 14px; border: 1px solid var(--card-line); border-radius: var(--radius);
+  background: var(--card); box-shadow: var(--card-shadow); }
+/* a section holding a change that waits for Save: a dot after its name in the list on the left, as the Lab strip's dot
+   for new lines (settingsPending in app.js; a screen reader hears ", changed") */
+.set-dot { display: inline-block; width: 8px; height: 8px; margin-left: 7px; border-radius: 50%; background: var(--accent);
+  vertical-align: middle; }
+/* Close and Cancel are one button: only its word changes, not its width */
+#settings-close { min-width: 76px; }
+/* while a Save is on its way the head's × is greyed with Close (settingsPending): its answer decides */
+#settings-x:disabled { opacity: .5; cursor: default; background: none; }
+/* without the hub's card over it (a local account), Account is a section of one field again: its title says what
+   "Your account" would */
+.set-page[data-page="account"] > #relay-field[hidden] + #account-field > .field-row:first-child > .field-label { visibility: hidden; }
+/* a service's Pictures (Models → Other model services): a choice of three that acts at once, on a line of its own under
+   the service's address, as a skill's switch acts in its row */
+.svc-pics-label { font-size: 13px; color: var(--text-2); }
+.seg.svc-pics > button { min-height: 28px; padding: 3px 10px; }
+.seg.svc-pics[aria-busy="true"] { cursor: progress; }
+@media (pointer: coarse) {   /* a touch screen: every target 40 px or more */
+  #settings-x { min-width: 40px; min-height: 40px; }
+  .seg.svc-pics > button { min-height: 40px; }
+}
+/* ===== end fit S ===== */
