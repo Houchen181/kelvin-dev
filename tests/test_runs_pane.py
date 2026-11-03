@@ -119,9 +119,14 @@ def test_the_scan_editor_is_a_side_panel_of_its_own():
     assert "PANE_W.edpane" in _js("initPanes")
     toggle = _js("toggleEditor")
     assert '$("edpane").hidden = !ED.open' in toggle and "fitLayout()" in toggle
-    assert "ED.open" in _js("syncScrim") and "if (ED.open) toggleEditor(false);" in JS   # the scrim closes all, as ever
+    assert "edpane: toggleEditor," in JS and "if (ED.open) toggleEditor(false);" not in JS   # the scrim closes no panel
     opened = _js("openEditor")
-    assert 'op: "parts", id: id || null' in opened and "toggleEditor(true)" in opened and "confirm(" in opened
+    assert 'op: "parts", id: id || null' in opened and "toggleEditor(true)" in opened and "await edLeave()" in opened
+    # with changes, × and another scan ask in the page: Save, Discard or Keep editing (never confirm())
+    leave = _js("edLeave")
+    assert "Kelvin.askYes(" in leave and '{ ok: "Save", alt: "Discard"' in leave and 'cancel: "Keep editing"' in leave
+    assert "await edSave(false);" in leave and "return !edDirty();" in leave and "confirm(" not in leave
+    assert "edDirty() && !(await edLeave())" in _js("closeEditor") and '"click", closeEditor' in _js("initEditor")
     for label in (">Edit scan<", ">Plan text<", ">+ Loop<", ">Loops<", ">Record<", ">Setup<", ">At the end<",
                   ">As written<", ">Add to sequence<", ">Run<", ">Save<", ">Save as scan<", ">Revert<"):
         assert label in pane, label
@@ -404,7 +409,7 @@ def test_the_step_row_writes_the_queues_own_step_format_and_kelvin_checks_it(tmp
                  '<button id="step-add" class="btn small primary"', ">Add</button>", 'id="step-save"', 'id="step-cancel"'):
         assert text in row, text
     assert PAGE.index('<div id="seq-view"') < PAGE.index('<div id="step-row"') < PAGE.index('<div id="schedule-view"')
-    assert '<button id="queue-paste-open" class="btn small ghost"' in PAGE and ">Paste a plan</button>" in PAGE
+    assert '<button id="queue-paste-open" class="btn small"' in PAGE and ">Paste a plan</button>" in PAGE   # a button that looks like one
     assert re.search(r'<form id="queue-paste" class="q-paste" hidden>', PAGE) and 'id="queue-text"' in PAGE
     assert (r'const QUEUE_STEP = "step: cool to 2 K\nset: { tc.T_set: 2 }\nstabilize: { read: tc.T, within: 0.02, '
             r'for: 120, timeout: 7200 }\nwait: 600";') in JS

@@ -1,15 +1,22 @@
 /* the first start (welcome.js): a page over the app in AlphainZ's wizard form, drawn with the kit (app.css, at its
    end): a column on the page, one card of rows (a title, its value under it, the control at the right), the way on
-   under it. Tokens only, so light and dark follow the computer's. */
+   under it. It fits the window: the column is the window's height, and a list in the card (data-region) takes the
+   room left and scrolls there; the way on stays under the card. Tokens only, so light and dark follow the computer's. */
 .welcome { position: fixed; inset: 0; z-index: 45; overflow-y: auto; overscroll-behavior: contain;
   background: var(--page); color: var(--text); }
-.wl-col { width: min(640px, calc(100% - 32px)); margin: 0 auto; padding-top: clamp(24px, 10vh, 112px); }
+.wl-col { width: min(640px, calc(100% - 32px)); height: 100%; min-height: 420px; margin: 0 auto;
+  padding-top: clamp(12px, 4 * var(--vh), 48px); display: flex; flex-direction: column; }
+.wl-col > * { flex: none; }
 
-/* the head: the mark in its tile, the name, the version */
-.wl-head { display: flex; align-items: flex-end; gap: 16px; margin: 0 0 18px; }
-.wl-head .logo { width: 64px; height: 64px; border-radius: 16px; box-shadow: var(--card-shadow); }
-.wl-titles { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; padding-bottom: 6px; }
-.wl-h1 { margin: 0; font-size: 26px; line-height: 1.2; }
+/* the head: the mark in its tile, the name, the version; Skip, quiet, at the right */
+.wl-head { display: flex; align-items: center; gap: 14px; margin: 0 0 14px; }
+.wl-head .logo { width: 48px; height: 48px; border-radius: 12px; box-shadow: var(--card-shadow); }
+.wl-titles { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
+.wl-h1 { margin: 0; font-size: var(--fs-display, 26px); line-height: 1.2; }
+.wl-skip { align-self: flex-start; margin-left: auto; padding: 4px 2px; border: 0; background: none; cursor: pointer;
+  font: inherit; font-size: 13px; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
+.wl-skip:hover { color: var(--text); }
+.wl-skip:disabled { cursor: default; opacity: .5; }
 
 /* the steps: a dot each (the chosen one in the accent), then where this is */
 .wl-steps { display: flex; align-items: center; margin: 0 0 12px -6px; }
@@ -17,16 +24,21 @@
 .wl-dot { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer;
   display: grid; place-items: center; }
 .wl-dot::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); }
-.wl-dot:hover::before { background: var(--muted); }
+.wl-dot:hover:not(:disabled)::before { background: var(--muted); }
 .wl-dot.on::before { background: var(--accent); }
+.wl-dot:disabled { cursor: default; }   /* a step not reached yet */
+.wl-dot:disabled:not(.on)::before { opacity: .5; }
 .wl-where { margin-left: 6px; font-size: 13px; color: var(--muted); }
 
-/* the step: one card of rows */
-.wl-group { background: var(--card); border: 1px solid var(--card-line); border-radius: var(--radius);
-  box-shadow: var(--card-shadow); overflow: hidden; }
+/* the step: one card of rows; the block with a list gives way first when the window is short */
+.wl-group { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; background: var(--card);
+  border: 1px solid var(--card-line); border-radius: var(--radius); box-shadow: var(--card-shadow); overflow: hidden; }
+.wl-group > .wl-block { flex: none; }
+.wl-group > .wl-block:has(> .wl-list) { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .wl-group > .wl-block:not([hidden]) ~ .wl-block:not([hidden]),
-.wl-block > .wl-row + .wl-row { border-top: 1px solid var(--line); }
-.wl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-height: 56px; padding: 12px 16px; }
+.wl-block > .wl-row + .wl-row, .wl-list > .wl-row { border-top: 1px solid var(--line); }
+.wl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-height: 48px; padding: 8px 16px; }
+:root.fit-tight .wl-row { min-height: 44px; }
 .wl-text { flex: 1 1 160px; min-width: 0; }
 .wl-title { font-size: 15px; font-weight: 550; line-height: 1.35; }
 .wl-value { margin-top: 2px; font-size: 13px; line-height: 1.4; color: var(--text-2);
@@ -40,8 +52,11 @@
 .wl-ctl .btn, .wl-ctl .chip, .wl-ctl .spinner { flex: none; }
 .wl-ctl .btn { white-space: nowrap; }
 
-/* a list in the card: the lab's scripts folders (with Remove), the scripts to import, the instruments a scan found */
-.wl-item { flex-wrap: nowrap; gap: 12px; min-height: 44px; padding: 9px 16px; cursor: pointer; }
+/* a list in the card: the lab's scripts folders (with Remove), the scripts to import, the instruments a scan found;
+   the scripts and the instruments in a region of their own (.wl-list), two columns where it is wide enough */
+.wl-list { flex: 0 1 auto; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; }
+.wl-item { flex-wrap: nowrap; gap: 12px; min-height: 40px; padding: 6px 16px; cursor: pointer; }
+:root.fit-tight .wl-item { min-height: 36px; }
 .wl-item:hover { background: var(--hover); }
 .wl-item.off { cursor: default; }
 .wl-item.off:hover { background: none; }
@@ -49,17 +64,13 @@
 .wl-label { flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wl-sub { flex: 1 1 0; min-width: 0; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wl-item .chip, .wl-item .link, .wl-item .spinner { flex: none; }
-.wl-more { width: 100%; min-height: 44px; border: 0; background: none; cursor: pointer; text-align: left;
-  font-size: 13px; font-weight: 600; color: var(--accent); }
-.wl-more:hover { background: var(--hover); }
 
-/* the way on: Skip or Back, then Next or Done; it stays in view under a long step */
-.wl-foot { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px;
-  padding: 18px 0 max(24px, env(safe-area-inset-bottom));
-  background: linear-gradient(to bottom, transparent, var(--page) 16px); }
+/* the way on: Back (from the second step), then Next or Done; under the card, in view whatever the step's length */
+.wl-foot { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px; min-height: 56px;
+  padding: 0 0 env(safe-area-inset-bottom); background: var(--page); }
 .wl-foot .btn { min-width: 84px; }
 
-@media (max-width: 480px) {
-  .wl-col { padding-top: 24px; }
-  .wl-head { gap: 14px; margin-bottom: 16px; }
+@media (min-width: 640px) {
+  .wl-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .wl-list > .wl-row:nth-child(odd) { border-right: 1px solid var(--line); }
 }

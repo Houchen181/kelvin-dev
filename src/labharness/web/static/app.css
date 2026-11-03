@@ -49,6 +49,25 @@
   --radius: 12px;
   --radius-s: 8px;
   --display: Georgia, Cambria, "Times New Roman", "Noto Serif SC", "Songti SC", "SimSun", serif;
+  /* the fit (the contract every part codes against; fitTiers in app.js sets the factor and the tier):
+     --zoom the page size, the CSS zoom on <html>; --vh and --vw a hundredth of the window in page px (write
+     calc(N * var(--vh)), never a raw vh: the zoom multiplies viewport units); --topbar-h the top bar's height and
+     --chrome-h the bar's with the notice row under it, both measured */
+  --zoom: 1;
+  --vh: calc(1dvh / var(--zoom));
+  --vw: calc(1vw / var(--zoom));
+  --topbar-h: 52px;
+  --chrome-h: 52px;
+  /* the density tier's tokens: roomy here, compact and tight in "fit A" (app.css, the end); text keeps its sizes */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+  --pad-card: 18px 20px;
+  --pad-page: 24px;
+  --fs-display: 30px;
+  --fs-kpi: 36px;
+  --fs-title: 16px;
+  --head-h: 52px;
+  --row-h: 40px;
+  --fs-body: 15px; --fs-small: 13px; --fs-meta: 12px;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
@@ -98,6 +117,7 @@
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
+html { zoom: var(--zoom); }   /* the page size (fitTiers in app.js): the one scaling, in a browser and in the app */
 body {
   margin: 0;
   background: var(--bg);
@@ -114,11 +134,11 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 [hidden] { display: none !important; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.nokey { max-width: 520px; margin: 18vh auto; padding: 0 16px; text-align: center; }
+.nokey { max-width: 520px; margin: calc(18 * var(--vh)) auto; padding: 0 16px; text-align: center; }
 .nokey img { display: block; margin: 0 auto 12px; }
 
 /* ---------- who is using Kelvin (accounts) ---------- */
-.signin { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px; background: var(--bg); }
+.signin { min-height: calc(100 * var(--vh)); display: grid; place-items: center; padding: 24px 16px; background: var(--bg); }
 .signin[hidden] { display: none; }
 .signin-card { width: min(400px, 100%); display: grid; gap: 12px; justify-items: center; text-align: center; }
 .signin-card .logo { width: 64px; height: 64px; border-radius: 16px; }
@@ -183,7 +203,9 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .msg.wake { margin: 18px 0 -6px; font-size: 13.5px; }
 
 /* ---------- layout ---------- */
-.app { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
+/* the frame: the window, below the top bar and the notice row (.chrome, fixed above it: --chrome-h); the page never
+   scrolls, only regions do, until the window is too short to hold 560 page px (a phone on its side, 200 % zoom) */
+.app { display: flex; height: calc(100 * var(--vh)); min-height: 560px; padding-top: var(--chrome-h); overflow: hidden; }
 .sidebar {
   width: 264px; flex: none; display: flex; flex-direction: column;
   background: var(--sidebar); border-right: 1px solid var(--line);
@@ -197,11 +219,6 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 
 /* ---------- sidebar ---------- */
 .side-top { padding: 14px 12px 8px; display: grid; gap: 10px; }
-.brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px; }
-.brand .logo { width: 34px; height: 34px; border-radius: 10px; }
-.brand-text { display: grid; line-height: 1.15; }
-.brand-text span { font-weight: 700; font-size: 17px; letter-spacing: -0.01em; }
-.brand-text small { font-size: 12px; color: var(--muted); }
 .logo { width: 28px; height: 28px; border-radius: 8px; background: var(--brand-ice); display: grid; place-items: center; overflow: hidden; flex: none; }
 .logo svg { width: 100%; height: 100%; }
 .side-btn {
@@ -257,7 +274,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .drop-on { background: var(--accent-soft) !important; outline: 2px solid var(--accent) !important; outline-offset: -2px; color: var(--text); }
 
 /* small pop-up menus */
-.menu { position: fixed; z-index: 60; min-width: 210px; max-width: 280px; max-height: 70vh; overflow-y: auto; padding: 4px;
+.menu { position: fixed; z-index: 60; min-width: 210px; max-width: 280px; max-height: calc(70 * var(--vh)); overflow-y: auto; padding: 4px;
   background: var(--raised); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: var(--shadow); }
 .menu-item { display: flex; align-items: center; gap: 9px; width: 100%; border: 0; background: none; padding: 7px 9px; border-radius: 7px;
   font-size: 13.5px; color: var(--text); cursor: pointer; text-align: left; }
@@ -296,8 +313,15 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
   white-space: nowrap; }
 
 /* ---------- top bar ---------- */
-.topbar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; padding: 10px 16px; min-height: 56px; }
+/* the chrome: the top bar and the notice row under it, fixed across the whole window above the sidebar, the chat and
+   the panes, so nothing in it moves when the sidebar hides, a pane opens or one goes full screen (the frame, #app, starts
+   below it: --chrome-h). The bar's three slots: ☰, Kelvin's mark and the chat's title; Chat | Home, centred on the
+   window; the panes' buttons, never squeezed (on a window too narrow for them, Chat | Home gives way to the left) */
+.chrome { position: fixed; top: 0; left: 0; right: 0; z-index: 35; background: var(--bg); }
+.topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(max-content, 1fr); align-items: center; gap: 8px;
+  padding: 6px 16px; min-height: 52px; container: topbar / inline-size; }
 .topbar-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.topbar-mark { width: 26px; height: 26px; border-radius: 7px; }
 .topbar-right { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .chat-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .icon-btn { border: 0; background: none; padding: 7px; border-radius: 8px; cursor: pointer; color: var(--text-2); display: grid; place-items: center; }
@@ -564,22 +588,22 @@ body:not(.incognito) #empty-sub { display: none; }
 .send.stop .i-stop { display: block; }
 
 /* ---------- lab panel ---------- */
-/* a pane's header, every pane alike (.pane-head below): 56px, the title 15px 600, on --panel over a --line */
-.lab-head { display: flex; align-items: center; gap: 6px; min-height: 56px; padding: 0 10px 0 16px; border-bottom: 1px solid var(--line);
+/* a pane's header, every pane alike (.pane-head below): --head-h tall, the title 15px 600, on --panel over a --line */
+.lab-head { display: flex; align-items: center; gap: 6px; min-height: var(--head-h, 56px); padding: 0 10px 0 16px; border-bottom: 1px solid var(--line);
   background: var(--panel); flex: none; }
 .lab-head h2 { font-size: 15px; font-weight: 600; margin: 0 4px 0 0; white-space: nowrap; }
-.lab-scroll { flex: 1; overflow-y: auto; padding: 12px 16px 24px; }
-.lab-scroll h3 { font-size: 13px; font-weight: 650; color: var(--text-2); margin: 18px 0 8px; }
+.lab-scroll { flex: 1; min-height: 0; padding: var(--sp-2, 8px) var(--sp-4, 16px) 0; }   /* never scrolls: its parts do ("fit D") */
+.lab-scroll h3 { font-size: var(--fs-title, 15px); font-weight: 650; color: var(--text); margin: 0; }
 .agent-chip { font-size: 12px; font-weight: 600; line-height: 1.5; color: var(--text-2); background: var(--muted-soft); padding: 2px 9px; border-radius: 999px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
 .agent-chip:empty { display: none; }
 .agent-chip.busy { color: var(--accent); background: var(--accent-soft); }
 
 /* instruments: a dense list, one line each, so a full rack fits */
-.inst-head-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 14px 0 8px; }
+.inst-head-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: var(--row-h, 36px); margin: 0; }
 .inst-head-row h3 { margin: 0; }
-.inst-summary { font-size: 12px; color: var(--muted); white-space: nowrap; }
-.inst-tools { display: flex; gap: 6px; margin-bottom: 8px; }
+.inst-summary { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.inst-tools { display: flex; align-items: center; gap: 6px; margin-bottom: var(--sp-2, 8px); }
 .inst-tools input { flex: 1; min-width: 0; border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 5px 9px; font-size: 13px; background: var(--raised); }
 /* a choice of two or three, as the top bar's Chat | Home: a track, the chosen side raised on it */
 .seg { display: inline-flex; flex: none; }
@@ -594,18 +618,11 @@ body:not(.incognito) #empty-sub { display: none; }
 .inst-list { border: 1px solid var(--card-line); border-radius: var(--radius); background: var(--card); box-shadow: var(--card-shadow); overflow: hidden; }
 .inst + .inst { border-top: 1px solid var(--line); }
 .inst-row { display: grid; grid-template-columns: 22px auto minmax(0, 1fr) auto 18px 12px; align-items: center; gap: 8px;
-  width: 100%; height: 34px; padding: 0 10px; border: 0; background: none; cursor: pointer; text-align: left; font-size: 13px; }
+  width: 100%; height: var(--row-h, 36px); padding: 0 10px; border: 0; background: none; cursor: pointer; text-align: left; font-size: 13px; }
 .inst-row:hover { background: var(--hover); }
 .inst-head { display: flex; align-items: center; }
 .inst-head .inst-row { flex: 1; min-width: 0; }
-.inst-switch { position: relative; flex: none; width: 28px; height: 16px; margin: 0 10px 0 0; padding: 0; border: 0;
-  border-radius: 8px; background: var(--line-strong); cursor: pointer; transition: background .15s; }
-.inst-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%;
-  background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform .15s; }
-.inst-switch[aria-checked="true"] { background: var(--accent); }
-.inst-switch[aria-checked="true"]::after { transform: translateX(12px); }
-.inst-switch:disabled { opacity: .5; cursor: progress; }
-.inst-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.inst-switch { margin: 0 6px 0 0; }   /* the one switch (.switch, "fit A"), at the row's end */
 .inst.off .inst-row { opacity: .5; }
 .inst.off .inst-sub { color: var(--muted); }
 .inst-icon { width: 22px; height: 22px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; }
@@ -636,17 +653,24 @@ body:not(.incognito) #empty-sub { display: none; }
 .tag-armed { font-size: 12px; font-weight: 600; line-height: 1.4; color: var(--muted);
   border: 1px solid var(--line-strong); border-radius: 999px; padding: 0 7px; margin-right: 7px; vertical-align: 1px; }
 .group.settings .kv .k, .group.settings .kv .v { color: var(--muted); }
-.settings-toggle { padding: 0; color: var(--accent); font-size: 12px; }
-.settings-toggle:hover { color: var(--accent); text-decoration: underline; }
+.settings-toggle { justify-self: start; }   /* Settings (n): a disclosure, drawn as a small button ("fit D") */
+.inst-settings { display: grid; margin-top: 4px; }
 
 .lab-events { list-style: none; padding: 0; margin: 0; font-size: 13px; color: var(--text-2); }
 .lab-events li { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; line-height: 1.45; }
 .lab-events time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; padding-top: 1px; }
 
 /* ---------- dialog ---------- */
-.dialog { border: 1px solid var(--line-strong); border-radius: 16px; padding: 0; width: min(520px, calc(100vw - 32px)); background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
+/* a dialog is never taller than the window: its head and its actions stay, its body scrolls (.dialog-body,
+   data-region="dialog"); a dialog made without one scrolls as a whole */
+.dialog { border: 1px solid var(--line-strong); border-radius: 16px; padding: 0; width: min(520px, calc(100 * var(--vw) - 32px));
+  max-height: calc(100 * var(--vh) - 32px); background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
 .dialog::backdrop, .pin-dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
-.dialog form { padding: 18px 20px; display: grid; gap: 14px; }
+.dialog form { padding: 18px 20px; display: grid; gap: 14px; max-height: calc(100 * var(--vh) - 34px); }
+.dialog form:has(> .dialog-body) { grid-template-rows: auto minmax(0, 1fr) auto; }
+.dialog form:not(:has(> .dialog-body, > .set-body)) { overflow: auto; }
+.dialog-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-content: start; margin: -3px -20px;
+  padding: 3px 20px; }   /* to the dialog's edges: its scrollbar at the edge, room for a field's focus ring */
 .dialog-head { display: flex; align-items: center; }
 .dialog-head h2 { margin: 0; font-size: 18px; flex: 1; }
 .field { display: grid; gap: 6px; }
@@ -658,7 +682,7 @@ body:not(.incognito) #empty-sub { display: none; }
 .field input[type="checkbox"], .field input[type="radio"] { width: auto; }
 .field textarea { resize: vertical; min-height: 84px; max-height: 50vh; line-height: 1.45; }
 .field-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.dialog.wide { width: min(760px, calc(100vw - 32px)); }
+.dialog.wide { width: min(760px, calc(100 * var(--vw) - 32px)); }
 /* waiting while the instruments are set up (Kelvin starting), and the first setup's question about the lab's scripts */
 #setup-wait .dialog-head { gap: 10px; }
 #setup-wait .spinner[hidden] { display: none; }
@@ -671,8 +695,8 @@ body:not(.incognito) #empty-sub { display: none; }
 .setup-scripts h3 { margin: 0; font-size: 15px; }
 .setup-scripts p { margin: 0; }
 /* Settings: a list of sections on the left, one section at a time on the right */
-.dialog.settings { width: min(900px, calc(100vw - 32px)); }
-.dialog.settings form { height: min(720px, calc(100vh - 48px)); height: min(720px, calc(100dvh - 48px)); grid-template-rows: auto minmax(0, 1fr) auto; }
+.dialog.settings { width: min(1040px, calc(100 * var(--vw) - 32px)); }
+.dialog.settings form { height: min(900px, calc(100 * var(--vh) - 48px)); grid-template-rows: auto minmax(0, 1fr) auto; }
 .set-body { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 20px; min-height: 0; }
 .set-nav { display: flex; flex-direction: column; gap: 2px; padding-right: 12px; border-right: 1px solid var(--line); overflow: auto; }
 .set-nav button { text-align: left; border: 0; background: none; padding: 8px 10px; border-radius: 8px; cursor: pointer; color: var(--text-2); font-weight: 550; }
@@ -1008,9 +1032,9 @@ body.resizing .plot-svg { pointer-events: none; }
 .run-tab-x svg { width: 13px; height: 13px; }
 .run-tab:hover .run-tab-x, .run-tab.on .run-tab-x { opacity: 1; }
 .run-tab-x:hover { background: var(--active); color: var(--text); }
-.mount-select { width: 100%; margin: 2px 0 6px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 6px 9px;
-  background: var(--raised); color: var(--text); font-size: 14px; }
-.mount-protection { border: 1px solid var(--card-line); border-radius: 10px; background: var(--card); padding: 7px 10px; margin: 4px 0 8px; font-size: 13px; }
+.mount-select { flex: 1 1 auto; min-width: 0; margin: 0; border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 5px 8px;
+  background: var(--raised); color: var(--text); font-size: 13px; }
+.mount-protection { border: 1px solid var(--card-line); border-radius: 10px; background: var(--card); padding: 5px 6px 5px 10px; margin: 0; font-size: 13px; }
 .mount-protection.on { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); background: color-mix(in srgb, var(--ok) 7%, transparent); }
 .mp-head { display: flex; align-items: center; gap: 8px; }
 .mp-state { display: inline-flex; align-items: center; gap: 6px; flex: 1; min-width: 0; color: var(--muted); }
@@ -1020,12 +1044,12 @@ body.resizing .plot-svg { pointer-events: none; }
 .mp-lines { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 2px; color: var(--text-2); font-size: 12.5px; }
 .mp-lines:empty { display: none; }
 .mp-lines .bad { color: var(--danger); }
-.hands-btn { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 8px; }
+.hands-btn { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
 .hands-btn svg { width: 15px; height: 15px; flex: none; }
-.hands-locked { display: flex; align-items: center; gap: 8px; border: 1px solid var(--warn-line); background: var(--warn-bg);
-  border-radius: 10px; padding: 6px 8px 6px 10px; margin: 0 0 8px; font-size: 13px; font-weight: 600; }
-.hands-locked > svg { color: var(--warn); width: 16px; height: 16px; flex: none; }
-.hands-locked span { flex: 1; min-width: 0; }
+/* locked: the panel only says so, in the place of Hands on the sample; the notice row above holds the one Unlock… */
+.hands-locked { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--warn-line); background: var(--warn-bg);
+  color: var(--text); border-radius: 8px; padding: 4px 11px 4px 9px; margin: 0; font-size: 13px; font-weight: 600; line-height: 1.35; }
+.hands-locked > svg { color: var(--warn); width: 15px; height: 15px; flex: none; }
 .hands-banner { display: flex; align-items: center; gap: 10px; border: 1px solid var(--warn-line); background: var(--warn-bg);
   border-radius: var(--radius); padding: 9px 12px; max-width: 780px; margin: 8px auto 0; width: calc(100% - 32px); }
 .hands-banner > svg { color: var(--warn); width: 20px; height: 20px; flex: none; }
@@ -1223,64 +1247,62 @@ body.resizing .plot-svg { pointer-events: none; }
 
 /* ---------- fitting the side panels (fitLayout in app.js): the conversation keeps its room ---------- */
 .main { container-type: inline-size; }
-/* the sidebar: beside the page, where its button (always in the top bar) hides it and the page and the panels take its
-   room (.side-hidden); over the page, opened by the button, while the panels need its room (.compact) or below 820 px,
-   below the top bar (fitLayout measures it), so the button that opened it is there to close it */
-.app.compact .sidebar { position: fixed; left: 0; top: var(--topbar-h, 57px); bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow); }
-.app.compact.side-open .sidebar { transform: none; }
-@media (min-width: 821px) { .app.side-hidden:not(.compact) .sidebar { margin-left: -264px; visibility: hidden; } }
+/* the sidebar: beside the page, unless its button (always in the top bar) hid it (.side-hidden), and then the page and
+   the panels take its room; the panels never hide it. Where the page has no room for it beside (.side-floats, which
+   fitLayout sets in the page's own pixels) it stands over the page (narrow screens, below) */
+.app.side-hidden:not(.side-floats) .sidebar { margin-left: -264px; visibility: hidden; }
 /* in the top bar's buttons' order: Team chat, Analysis, Runs and the scan editor (#workcol), then Lab (#sidecol); side
    by side, or, short of room, one above the other in their column */
 .dock-col { display: flex; flex: none; min-width: 0; }
-.app.stacked .dock-col, .app.float-lab #sidecol { flex-direction: column; }
-.app.stacked .dock-col > *, .app.float-lab #sidecol > * { width: auto !important; flex: 1 1 0; min-height: 0; }
-.app.stacked .dock-col > :not([hidden]) ~ :not([hidden]),
-.app.float-lab #sidecol > :not([hidden]) ~ :not([hidden]) { border-top: 1px solid var(--line); }
-.app.float-lab #sidecol { position: fixed; right: 0; top: 0; bottom: 0; z-index: 30; box-shadow: var(--shadow); }
+.app.stacked .dock-col { flex-direction: column; }
+.app.stacked .dock-col > * { width: auto !important; flex: 1 1 0; min-height: 0; }
+.app.stacked .dock-col > :not([hidden]) ~ :not([hidden]) { border-top: 1px solid var(--line); }
+/* and when even two columns don't fit, Lab's goes under the others, one column for all, as wide as fitLayout makes
+   both, each open panel an equal share of the height (--float-top): nothing over anything */
+#app.lab-under:not(.full) #workcol { align-self: flex-start; height: calc(100% * var(--float-top, .5)); }
+#app.lab-under:not(.full) #sidecol { position: fixed; right: 0; bottom: 0; z-index: 30; border-top: 1px solid var(--line);
+  top: calc(var(--chrome-h, 52px) + (100% - var(--chrome-h, 52px)) * var(--float-top, .5)); }
 @container (max-width: 640px) {
   .pill .pill-text { display: none; }
   .pill { padding-left: 9px; padding-right: 9px; }
   .folder-label { display: none; }
 }
 
-/* ---------- narrow screens ---------- */
-@media (max-width: 1100px) {   /* the panels float over the conversation, one column in the buttons' order from the top,
-                                  each open one an equal share of it */
-  .dock-col { position: fixed; right: 0; top: 0; bottom: 0; z-index: 30; box-shadow: var(--shadow); flex-direction: column;
-    width: min(640px, 100vw) !important; }
-  /* with only Team chat or Lab open, as narrow as they are */
-  .app:not(:has(.dock-col > .runpane:not([hidden]))) .dock-col { width: min(380px, 100vw) !important; }
-  /* both columns: the first above the second, with a share of the height for each panel it holds open (--float-top,
-     which fitLayout sets) */
-  .app.float-two #workcol { bottom: calc((100% - var(--topbar-h, 57px)) * (1 - var(--float-top, .5))); }
-  .app.float-two #sidecol { top: calc(var(--topbar-h, 57px) + (100% - var(--topbar-h, 57px)) * var(--float-top, .5)); }
-  .dock-col > * { width: auto !important; flex: 1 1 0; min-height: 0; }
-  .dock-col > :not([hidden]) ~ :not([hidden]) { border-top: 1px solid var(--line); }
-  .dock-col, .scrim { top: var(--topbar-h, 57px); }   /* below the top bar (fitLayout measures it): its buttons open and close each panel */
-  .pane-resize { display: none; }
-}
+/* ---------- narrow screens: where the page has no room for the panels or the sidebar beside it (.floating and
+   .side-floats, which fitLayout sets in the page's own pixels, so they follow the page size), they stand over it,
+   below the top bar and the notice row: their buttons still open and close each one, and no alarm is covered ---------- */
+/* the panels over the conversation, one column in the buttons' order from the top, each open one an equal share of it */
+.app.floating .dock-col { position: fixed; right: 0; top: var(--chrome-h, 52px); bottom: 0; z-index: 30;
+  box-shadow: var(--shadow); flex-direction: column; width: min(640px, calc(100 * var(--vw, 1vw))) !important; }
+/* with only Team chat or Lab open, as narrow as they are */
+.app.floating:not(:has(.dock-col > .runpane:not([hidden]))) .dock-col { width: min(380px, calc(100 * var(--vw, 1vw))) !important; }
+/* both columns: the first above the second, with a share of the height for each panel it holds open (--float-top,
+   which fitLayout sets) */
+.app.floating.float-two #workcol { bottom: calc((100% - var(--chrome-h, 52px)) * (1 - var(--float-top, .5))); }
+.app.floating.float-two #sidecol { top: calc(var(--chrome-h, 52px) + (100% - var(--chrome-h, 52px)) * var(--float-top, .5)); }
+.app.floating .dock-col > * { width: auto !important; flex: 1 1 0; min-height: 0; }
+.app.floating .dock-col > :not([hidden]) ~ :not([hidden]) { border-top: 1px solid var(--line); }
+.app.floating .pane-resize { display: none; }
+/* the sidebar over the page at its left, the page dimmed under it (the scrim: a click there hides it); hidden by its
+   button, it waits out of sight to the left */
+.app.side-floats .sidebar { position: fixed; left: 0; top: var(--chrome-h, 52px); bottom: 0; z-index: 30; box-shadow: var(--shadow); }
+.app.side-floats.side-hidden .sidebar { transform: translateX(-100%); visibility: hidden; box-shadow: none; }
 @media (max-width: 820px) {
-  .sidebar { position: fixed; left: 0; top: var(--topbar-h, 57px); bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow); }
-  .app.side-open .sidebar { transform: none; }
   .thread, .empty { padding-left: 16px; padding-right: 16px; }
   .composer-wrap { padding: 0 12px 10px; }
   .suggestions { grid-template-columns: 1fr; }
   .empty { padding-top: 8vh; }
 }
-@media (max-width: 560px) {   /* a phone: the menu and the panels' buttons on one row, Chat | Home on its own below them */
-  .topbar { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "left right" "seg seg"; row-gap: 8px; padding: 8px 12px; }
-  .topbar > .topbar-left { grid-area: left; }
-  .topbar > .topbar-right { grid-area: right; gap: 4px; }
-  .topbar > .mode-seg { grid-area: seg; justify-self: center; }
-  .topbar .topbar-right .pill { padding: 6px 7px; }
+@media (max-width: 560px) {   /* a phone (the top bar's two rows: "fit A", at the end) */
   .empty h1 { font-size: 28px; }
 }
 
-/* ---------- full screen (a panel's own button; FULL in app.js): that panel alone below the top bar, whose buttons,
-   badges and alarms stay; the chat, the conversation list and the other panels stay as they are, out of sight ---------- */
+/* ---------- full screen (a panel's own button; FULL in app.js): that panel alone below the top bar and the notice row,
+   which stay whole (☰ too: there it ends full screen and shows the list); the chat, the conversation list and the other
+   panels stay as they are, out of sight ---------- */
 .full-btn .i-min, .full-btn[aria-pressed="true"] .i-max { display: none; }
 .full-btn[aria-pressed="true"] .i-min { display: inline; }
-#app.full .sidebar, #app.full #toggle-sidebar, #app.full .main > .scroller, #app.full .main > .composer-wrap,
+#app.full .sidebar, #app.full .main > .scroller, #app.full .main > .composer-wrap,
 #app.full:not(.full-term) .main > .termpane, #app.full .dock-col:not(.full-in), #app.full .dock-col > :not(.full-on),
 #app.full .pane-resize, #app.full .term-resize { display: none !important; }
 #app.full:not(.full-term) { flex-direction: column; }
@@ -1400,12 +1422,13 @@ body.resizing .plot-svg { pointer-events: none; }
 .tm-head { display: flex; gap: 8px; align-items: baseline; margin: 0 4px 2px; font-size: 12px; color: var(--muted); }
 .tm-head b { color: var(--text); font-weight: 600; }
 .tm.mine .tm-head { justify-content: flex-end; }
-.tm-text { padding: 6px 11px; border-radius: 14px; background: var(--surface-1); border: 1px solid var(--card-line); font-size: 14px;
+.tm-text { padding: 6px 11px; border-radius: 14px; background: var(--surface-1); border: 1px solid var(--card-line); font-size: var(--fs-body, 15px);
   line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tm.mine .tm-text { background: var(--accent-soft); border-color: transparent; }
-.team-form, .team-name-form { display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid var(--line); background: var(--panel); }
+.team-form, .team-name-form { display: flex; align-items: flex-end; gap: 8px; padding: var(--sp-2, 8px) var(--sp-3, 12px) var(--sp-3, 12px);
+  border-top: 1px solid var(--line); background: var(--panel); flex: none; }
 .team-form textarea, .team-name-form input { flex: 1; min-width: 0; border: 1px solid var(--line-strong); border-radius: 14px;
-  padding: 8px 12px; background: var(--raised); color: var(--text); font: inherit; font-size: 14px; resize: none; max-height: 160px;
+  padding: 7px 12px; background: var(--raised); color: var(--text); font: inherit; font-size: var(--fs-body, 15px); resize: none; max-height: 160px;
   overflow-y: hidden; }
 .team-form .send { width: 34px; height: 34px; flex: none; }
 
@@ -1468,8 +1491,6 @@ body.resizing .plot-svg { pointer-events: none; }
 .an-fit-foot { margin-top: 4px; color: var(--muted); font-size: 12px; }
 .an-warn { margin: 4px 0 0; padding-left: 18px; color: var(--warn); font-size: 12px; }
 .an-actions { justify-content: flex-end; }
-.run-downloads { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; }
-.run-downloads .dl { display: inline-flex; align-items: center; gap: 2px; color: var(--muted); }
 .runpane .pane-head > .runs-seg { margin-left: -6px; }   /* "Runs" lines up with the other panes' titles */
 .an-unit { color: var(--muted); font-size: 12.5px; }
 
@@ -1571,15 +1592,8 @@ body.resizing .plot-svg { pointer-events: none; }
   background: var(--panel); color: var(--text); border-color: var(--line-strong); box-shadow: 0 1px 2px rgba(20, 32, 44, 0.10); }
 .topbar-right .pill .pill-text { display: none; }
 .topbar-right .pill .badge, .topbar-right .pill .live-dot { position: absolute; top: -6px; right: -6px; }
-/* on a wide screen the top bar spans the window above the panels: a panel opening never moves the buttons; it starts
-   where the sidebar ends, while the sidebar stands beside the page */
-@media (min-width: 1101px) {
-  #app:not(.full) .topbar { position: fixed; top: 0; right: 0; left: 264px; z-index: 25; background: var(--bg);
-    border-bottom: 1px solid var(--line); }
-  #app:is(.compact, .side-hidden):not(.full) .topbar { left: 0; }
-  #app:not(.full) .main { padding-top: 57px; }
-  #app:not(.full) .dock-col { margin-top: 57px; }
-}
+/* the top bar spans the window at every width and in full screen (.chrome, the top bar section): nothing offsets the
+   page by a guess; the frame starts at the measured --chrome-h */
 /* the Runs pane: All runs is the first tab, not a link inside a run */
 .rv-back { display: none !important; }
 .run-tab.all-runs { font-weight: 600; padding-right: 12px; }
@@ -1591,11 +1605,9 @@ button.link:hover { background: var(--hover); color: var(--text); border-color: 
 button.link.danger { color: var(--danger); }
 button.link.danger:hover { background: var(--danger-soft); }
 button.link:disabled { opacity: .5; cursor: default; }   /* waiting, as a .btn does */
-/* the Lab panel: a heading per part, larger, a line between parts, each part folds under its heading */
-#labpanel .lab-scroll h3 { font-size: 15px; font-weight: 650; color: var(--text); margin: 0; }
-#labpanel .inst-head-row { align-items: center; margin: 16px 0 10px; }
-#labpanel .inst-head-row ~ .inst-head-row { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 20px; }
-#labpanel .inst-head-row .btn.small { margin-left: 4px; }
+/* the Lab panel: a heading per part, a line between parts, each part folds under its heading ("fit D" lays them out) */
+#labpanel .inst-head-row { gap: 6px; }
+#labpanel .inst-head-row .btn.small { flex: none; white-space: nowrap; }
 #labpanel .inst-head-row .inst-summary { margin-right: auto; }
 .fold-btn { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; padding: 0; cursor: pointer;
   font: inherit; color: inherit; }
@@ -1603,9 +1615,10 @@ button.link:disabled { opacity: .5; cursor: default; }   /* waiting, as a .btn d
 .folded .fold-btn svg { transform: none; }
 .fold-hide { display: none !important; }
 /* instrument rows: icon, name, the value in a right-aligned column, the state, the arrow; no model in small print */
-#labpanel .inst-row { grid-template-columns: 22px minmax(0, 1fr) 112px 18px 12px; }
+#labpanel .inst-row { grid-template-columns: 22px minmax(56px, 1fr) minmax(0, max-content) 18px 12px; gap: 6px; }   /* narrow: the value gives way first, cut with an ellipsis */
 #labpanel .inst-model { display: none; }
-#labpanel .inst-headline { text-align: right; justify-self: end; }
+#labpanel .inst-headline { text-align: right; justify-self: end; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+#labpanel .inst-id { overflow: hidden; text-overflow: ellipsis; }
 /* Settings: larger titles, every item's alike; an item with more than two fields folds under its title (initSettingFolds
    in app.js hides what follows the title, .fold-hide, and marks the title .folded) */
 .set-title { font-size: 20px; font-weight: 650; }
@@ -1756,13 +1769,11 @@ dialog[open] { animation: k-pop-in .28s var(--ease-switch); }
 dialog[open]::backdrop { animation: k-fade .28s ease; }
 .k-in, .seq-ed.seq-ed-in { animation: k-reveal .22s var(--ease-in); }
 .seq-card.seq-in { animation: k-card-in .36s var(--ease-switch); }
-.seq-fn { transition: border-color .14s ease, box-shadow .2s ease, transform .2s var(--ease-switch); }
-.seq-fn:hover { transform: translateY(-1px); }
+.seq-fn { transition: border-color .14s ease, box-shadow .2s ease; }   /* no lift on hover: its border answers */
 /* the sidebar its button hides or shows slides away or back, the top bar's left edge with it, and the panels widen or
    narrow on the same curve, so the conversation never gives up its room meanwhile (.side-slide: for that change alone,
    never as the panels make room) */
 .app.side-slide .sidebar { transition: margin-left .42s var(--ease-switch), visibility .42s; }
-.app.side-slide .topbar { transition: left .42s var(--ease-switch); }
 .app.side-slide :is(.dock-col, .dock-col > *) { transition: width .42s var(--ease-switch); }
 @media (prefers-reduced-motion: reduce) {
   .seg-thumb, .topbar-right .pill[data-tip]::after, #toggle-sidebar[data-tip]::after, .seq-fn, .fold-btn svg { transition: none; }
@@ -1771,3 +1782,433 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
       .seq-fns, .k-in, .seq-ed, .seq-card), dialog[open], dialog[open]::backdrop { animation: none; }
   .seq-fn:hover { transform: none; }
 }
+
+/* ===== fit A: the frame, density, page size, the top bar, regions, switch, questions ===== */
+@supports not (height: 1dvh) { :root { --vh: calc(1vh / var(--zoom)); } }
+/* the density tiers (fitTiers in app.js, by the layout's height: the window's divided by the page size). Roomy (900 page
+   px or more) is :root's; compact (720 to 899) and tight (under 720) give way in order: spacing, display sizes, then the
+   minor lines (.k-minor). Body text keeps its size */
+:root.fit-compact { --sp-3: 10px; --sp-4: 12px; --sp-5: 16px; --sp-6: 22px; --pad-card: 14px 16px; --pad-page: 16px;
+  --fs-display: 24px; --fs-kpi: 30px; --fs-title: 15px; --head-h: 46px; --row-h: 36px; }
+:root.fit-tight { --sp-2: 6px; --sp-3: 8px; --sp-4: 10px; --sp-5: 12px; --sp-6: 14px; --pad-card: 10px 12px; --pad-page: 12px;
+  --fs-display: 21px; --fs-kpi: 26px; --fs-title: 15px; --head-h: 42px; --row-h: 32px; }
+:root.fit-tight .k-minor { display: none !important; }
+/* a re-fit (a resize, a new tier or page size) moves nothing: no transition while it lands */
+:root.k-still *, :root.k-still *::before, :root.k-still *::after { transition: none !important; }
+
+/* the notice row under the top bar, in every layout (full screen and a pane alone too): the alarms, Hands on the
+   sample and the update bar, side by side while they fit, their words wrapping rather than cut */
+#notices { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px 8px; padding: 0 16px; }
+#notices:has(> :not([hidden])) { padding-block: 6px; border-bottom: 1px solid var(--line); }
+#notices > * { flex: 1 1 360px; min-width: 0; width: auto; max-width: none; margin: 0; }
+#notices > #alerts { flex-grow: 2; padding: 0; gap: 6px; }
+#notices :is(.alert, .hands-banner, .update-bar) { padding: 4px 6px 4px 12px; margin: 0; width: auto; max-width: none; }
+#notices :is(.alert-body, .hb-body) { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; row-gap: 0; }
+#notices .update-bar > span { flex: 1 1 200px; }
+
+/* the only things that scroll: named regions (data-region="…"). Each has a thin scrollbar and, while it is cut, a soft
+   edge on the side where more waits (data-cut: t, b or tb, which app.js cueRegions keeps) */
+[data-region] { overflow: auto; min-height: 0; overscroll-behavior: contain; }
+[data-region][data-cut="t"] { -webkit-mask-image: linear-gradient(to bottom, rgb(0 0 0 / .3), #000 24px);
+  mask-image: linear-gradient(to bottom, rgb(0 0 0 / .3), #000 24px); }
+[data-region][data-cut="b"] { -webkit-mask-image: linear-gradient(to top, rgb(0 0 0 / .3), #000 24px);
+  mask-image: linear-gradient(to top, rgb(0 0 0 / .3), #000 24px); }
+[data-region][data-cut="tb"] {
+  -webkit-mask-image: linear-gradient(to bottom, rgb(0 0 0 / .3), #000 24px, #000 calc(100% - 24px), rgb(0 0 0 / .3));
+  mask-image: linear-gradient(to bottom, rgb(0 0 0 / .3), #000 24px, #000 calc(100% - 24px), rgb(0 0 0 / .3)); }
+/* thin scrollbars without arrow buttons, everywhere: a rounded thumb in the line colour */
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track, *::-webkit-scrollbar-corner { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+*::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+@supports not selector(::-webkit-scrollbar) { * { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; } }
+
+/* the one switch, for a setting that acts at once: a button (role=switch, aria-checked) holding a thumb span, its label
+   saying what it turns on. Off an outlined track, on the accent; aria-busy while it saves; .still when the keyboard
+   moved it (app.js), so it jumps instead of sliding */
+.switch { position: relative; flex: none; display: inline-grid; place-items: center; width: 40px; height: 28px; margin: 0;
+  padding: 0; border: 0; border-radius: 999px; background: none; color: inherit; cursor: pointer; vertical-align: middle; }
+.switch::before { content: ""; grid-area: 1 / 1; width: 34px; height: 20px; border: 1.5px solid var(--muted); border-radius: 999px;
+  background: var(--card); transition: background-color .2s ease, border-color .2s ease; }
+.switch > span { grid-area: 1 / 1; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); pointer-events: none;
+  transform: translateX(-7px); transition: transform .42s var(--ease-switch), width .2s ease, height .2s ease, background-color .2s ease; }
+.switch[aria-checked="true"]::before { background: var(--accent); border-color: var(--accent); }
+.switch[aria-checked="true"] > span { width: 14px; height: 14px; background: var(--accent-ink); transform: translateX(7px); }
+.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.switch:disabled { opacity: .5; cursor: default; }
+.switch[aria-busy="true"] { cursor: progress; }
+.switch[aria-busy="true"] > span { opacity: .5; }
+.switch.still::before, .switch.still > span { transition: none; }
+
+/* the in-page question (askYes, askText in app.js): its first line the heading, the rest under it, the answers at the
+   foot; Cancel first, the one that acts last */
+.ask-dialog { width: min(460px, calc(100 * var(--vw) - 32px)); }
+.ask-dialog form { max-height: calc(100 * var(--vh) - 32px); grid-template-rows: auto minmax(0, 1fr) auto; }
+.ask-body { display: grid; gap: 10px; align-content: start; }
+.ask-body p { margin: 0; color: var(--text-2); white-space: pre-line; overflow-wrap: anywhere; }
+.ask-body input { width: 100%; }
+.ask-dialog .dialog-foot { flex-wrap: wrap; justify-content: flex-end; }
+.ask-dialog .btn.danger-line { background: var(--panel); border-color: var(--danger); color: var(--danger); }
+.ask-dialog .btn.danger-line:hover { background: var(--danger-soft); }
+/* Settings → Page size: − Auto · 90 % +, its buttons kept still whatever the size says */
+#zoom-now { min-width: 7.5em; }
+
+/* where the window is narrow (the bar's own width, without its padding): Chat | Home keeps the centre, the chat's
+   title goes first, then the mark; from 560 px down, two rows (below) give the title room again */
+@container topbar (536px < width < 600px) { .topbar .chat-title { display: none; } }
+@container topbar (width <= 330px) { .topbar .chat-title { display: none; } }
+@container topbar (width <= 300px) { .topbar .topbar-mark { display: none; } }
+@media (max-width: 560px) {   /* a phone: ☰, the mark and the panes' buttons on one row, Chat | Home on its own below */
+  .topbar { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "left right" "seg seg"; row-gap: 8px; padding: 8px 12px; }
+  .topbar > .topbar-left { grid-area: left; }
+  .topbar > .topbar-right { grid-area: right; gap: 4px; }
+  .topbar > .mode-seg { grid-area: seg; justify-self: center; }
+  .topbar .topbar-right .pill { padding: 6px 7px; }
+}
+@media (pointer: coarse) {   /* touch: every target 40 px or more */
+  .switch { width: 44px; height: 40px; }
+  #toggle-sidebar, .topbar .topbar-right .pill { min-width: 40px; min-height: 40px; justify-content: center; }
+  .topbar .mode-seg button { min-height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch::before, .switch > span { transition: background-color .15s ease, border-color .15s ease; }
+}
+/* ===== end fit A ===== */
+
+/* ===== fit B: panes and full screen ===== */
+/* the sidebar over the page slides in and out on the switch curve, for its button's change alone (.side-slide), never
+   as the layout fits again; with less motion it comes and goes at once (the motion section above) */
+.app.side-slide.side-floats .sidebar { transition: transform .42s var(--ease-switch), visibility .42s; }
+/* where both stand over the page, the one asked for last is on top: the sidebar its button showed (.side-above),
+   until a panel is asked for */
+.app.side-floats.side-above .sidebar { z-index: 31; }
+/* a panel already on the screen, asked for again (paneShow, ring in app.js): its head rings once, an accent ring that
+   holds, then fades. Colour only, so it is the same with less motion */
+@keyframes k-ring { from, 70% { box-shadow: inset 0 0 0 2px var(--accent); background-color: var(--accent-soft); } }
+.k-ring { animation: k-ring .5s linear; }
+/* ===== end fit B ===== */
+
+/* ===== fit D: the Lab panel and Team chat ===== */
+/* The Lab panel never scrolls as a whole (3C, the default): what waits for an answer (a region, at most 40 % of the
+   window), the sample and its safety, then the parts. The open parts share the rest fairly, each scrolling inside: the
+   rows grow alike from each part's heading, and a part whose content is shorter keeps only what it needs (rows
+   minmax(heading, auto) under align-content: start), so a short list never sits in a tall box */
+#labpanel { container: lab / inline-size; --lab-row: var(--row-h, 36px); }
+#labpanel .lab-scroll { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto;
+  grid-auto-rows: minmax(var(--lab-row), auto); align-content: start; overflow: clip; }   /* clip: not even a focus scrolls it */
+#labpanel .lab-pend { grid-row: 1; min-width: 0; }
+#lab-pending { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-2, 8px); max-height: calc(40 * var(--vh, 1vh)); }
+#lab-pending:not(:empty) { margin-bottom: var(--sp-2, 8px); }
+#labpanel .lab-top { grid-row: 2; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-2, 8px);
+  padding-bottom: var(--sp-2, 8px); }
+#labpanel .lab-top > .callout { margin: 0; }
+#labpanel .lab-sample { display: flex; align-items: center; gap: var(--sp-2, 8px); min-height: var(--lab-row); }
+#labpanel .lab-sample h3 { flex: none; }
+#labpanel .hands-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+#labpanel .lab-col { display: contents; }
+/* a part: its heading, then its body (the region), whose row goes from 0fr to 1fr as it opens (by height, .2 s; shut in
+   .12 s; at once from the keyboard, .still). Folded, the body is inert (initLabFolds) and hidden once it has shut */
+#labpanel .lab-part { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 0fr; min-width: 0; min-height: 0;
+  border-top: 1px solid var(--line);
+  transition: grid-template-rows .12s var(--ease-in); }
+#labpanel .lab-part.open { grid-template-rows: auto 1fr; transition-duration: .2s; }
+#labpanel .lab-part-head { min-height: var(--lab-row); }
+#labpanel .lab-part-body { min-height: 0; margin-inline: -4px; padding-inline: 4px; opacity: 0; visibility: hidden;
+  transition: opacity .12s ease, visibility 0s .12s; }
+#labpanel .lab-part.open > .lab-part-body { opacity: 1; visibility: visible; transition: opacity .2s ease; }
+#labpanel .lab-part-body::before { content: ""; display: block; height: 3px; }   /* room for a focus ring at the top */
+#labpanel .lab-part-body::after { content: ""; display: block; height: var(--sp-3, 12px); }   /* and under the last line */
+#labpanel .lab-part.still, #labpanel .lab-part.still > .lab-part-body, #labpanel .lab-part.still .fold-btn svg { transition: none; }
+/* targets of 24 px or more at 85 %: a fold's heading, the switch and the row buttons as tall as a row allows, a choice's
+   sides 28 px */
+#labpanel .fold-btn { min-height: max(30px, calc(var(--lab-row) - 4px)); }
+#labpanel .inst-switch { height: max(30px, calc(var(--lab-row) - 4px)); }
+#labpanel .inst-row { height: var(--lab-row); }
+#labpanel .row-btn { min-width: 30px; min-height: 30px; }
+#labpanel .seg:not(.lab-strip) > button { min-height: 28px; }
+#labpanel .lab-part:not(.open) .fold-btn svg { transform: none; }
+/* Add… and Settings (n): disclosures, one label, a chevron that turns, pressed while open */
+#labpanel .disclose { display: inline-flex; align-items: center; gap: 4px; }
+#labpanel .disclose > svg { width: 12px; height: 12px; color: var(--muted); transform: rotate(90deg); transition: transform .32s var(--ease-switch); }
+#labpanel .disclose[aria-expanded="true"] { background: var(--active); box-shadow: inset 0 0 0 1px var(--line-strong); }
+#labpanel .disclose[aria-expanded="true"] > svg { transform: rotate(-90deg); }
+#labpanel .settings-toggle { justify-self: start; }
+#labpanel .inst-sub.refused { color: var(--danger); white-space: normal; }
+#watch-summary.bad { color: var(--danger); font-weight: 600; }
+#labpanel .watch { min-height: var(--lab-row); padding-block: 2px; }
+#labpanel .alarm-history summary { padding: 5px 0; }
+#activity-who { margin-left: auto; }
+/* Team chat: its heading, its messages (the one region, data-region="team"), the form at its foot */
+#teampanel .team-list { padding: var(--sp-1, 4px) var(--sp-3, 12px) var(--sp-3, 12px); }
+/* wide (full screen, or dragged wide): two columns, the sample and Instruments, then Watches, Lab memory and Activity,
+   each column sharing its height as the one column does */
+@container lab (min-width: 900px) {
+  #labpanel .lab-scroll { grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-areas: "pend pend" "top b" "a b"; grid-auto-rows: auto; column-gap: var(--sp-6, 32px); }
+  #labpanel .lab-pend { grid-area: pend; }
+  #labpanel .lab-top { grid-area: top; }
+  #labpanel .lab-col { display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-rows: minmax(var(--lab-row), auto);
+    align-content: start; min-width: 0; min-height: 0; }
+  #labpanel .lab-col-2 > .lab-part:first-child { border-top: 0; }
+  #labpanel .lab-col-1 { grid-area: a; }
+  #labpanel .lab-col-2 { grid-area: b; }
+}
+/* v3A */
+/* one part at a time under a strip of tabs (#labpanel.lab-tabs, initLabTabs); wide, every part stands in its column */
+#labpanel.lab-tabs .lab-scroll { grid-template-rows: auto auto auto; }
+#labpanel.lab-tabs .lab-strip { grid-row: 3; display: flex; margin: 0 0 var(--sp-2, 8px); }
+#labpanel.lab-tabs .lab-strip > button { flex: 1 1 auto; min-width: 0; display: inline-flex; align-items: center; justify-content: center;
+  gap: 5px; min-height: 28px; padding: 3px 8px; }
+#labpanel .lab-tab-mark { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--danger); color: var(--panel);
+  font-size: 12px; font-weight: 700; line-height: 18px; text-align: center; }
+#labpanel .lab-tab-mark.dot { min-width: 8px; width: 8px; height: 8px; padding: 0; background: var(--accent); }
+#labpanel.lab-tabs .lab-part:not(.chosen) { display: none; }
+#labpanel.lab-tabs .lab-part { border-top: 0; }
+#labpanel.lab-tabs .lab-part-head h3 { display: none; }
+#labpanel.lab-tabs [data-part="activity"] .lab-part-head:has(#activity-who[hidden]) { display: none; }   /* nothing left on it */
+#labpanel.lab-tabs .lab-part-body { grid-row: 2; }
+@container lab (min-width: 900px) {
+  #labpanel.lab-tabs .lab-scroll { grid-template-rows: auto auto minmax(0, 1fr); }
+  #labpanel.lab-tabs .lab-strip { display: none; }
+  #labpanel.lab-tabs .lab-part:not(.chosen) { display: grid; }
+  #labpanel.lab-tabs .lab-part-head h3 { display: block; }
+  #labpanel.lab-tabs [data-part="activity"] .lab-part-head:has(#activity-who[hidden]) { display: flex; }
+  #labpanel.lab-tabs .lab-col-2 > .lab-part + .lab-part { border-top: 1px solid var(--line); }
+}
+/* /v3A */
+/* tight: each note above the sample on one line, its words cut with an ellipsis (its buttons stay whole) */
+:root.fit-tight #labpanel .lab-top > .callout { display: flex; align-items: center; gap: 6px; padding: 5px 8px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+:root.fit-tight #labpanel .lab-top > .callout > :is(span, b) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+:root.fit-tight #labpanel .lab-top > .callout > span { flex: 1 1 auto; }
+:root.fit-tight #labpanel .lab-top > .callout > :is(button, .why-actions) { flex: none; margin: 0; }
+:root.fit-tight #labpanel #lab-setting-up { display: block; }
+:root.fit-tight #labpanel #lab-why:has(> .why-lines:not([hidden])) { flex-wrap: wrap; white-space: normal; }
+:root.fit-tight #labpanel #lab-why > .why-lines { flex-basis: 100%; }
+/* a touch screen: every row and button of the panel 40 px tall or more */
+@media (pointer: coarse) {
+  #labpanel { --lab-row: max(var(--row-h, 36px), 40px); }
+  #labpanel :is(.btn.small, button.link, .row-btn, .fold-btn, .inst-tools input, .mount-select) { min-height: 40px; }
+  #labpanel .inst-switch { height: 40px; }
+  :is(#labpanel, #teampanel) .lab-head .icon-btn { min-width: 40px; min-height: 40px; }
+  #teampanel :is(.team-me, .btn.small, .send, textarea, input) { min-height: 40px; }
+  #teampanel .send { width: 40px; }
+  /* the room those take back: less space around the parts */
+  #labpanel .lab-scroll { padding-top: 4px; }
+  #labpanel .inst-tools { margin-bottom: 4px; }
+  #labpanel .lab-part-body::after { height: 4px; }
+  #labpanel .lab-part-body::before { height: 0; }
+  #labpanel .lab-top { gap: 6px; padding-bottom: 4px; }
+  #labpanel .seg:not(.lab-strip) > button { min-height: 34px; }
+  #labpanel .inst + .inst { border-top: 0; box-shadow: inset 0 1px 0 var(--line); }   /* a line that takes no room */
+}
+@media (prefers-reduced-motion: reduce) {
+  #labpanel :is(.lab-part, .lab-part-body, .disclose > svg, .inst-row .chev),
+  #labpanel .lab-part.open > .lab-part-body { transition: none; }
+}
+/* ===== end fit D ===== */
+
+/* ===== fit E: the Sequence, Runs and Analysis ===== */
+/* the Runs pane's body never scrolls: its two views fill it, and only their regions scroll (the Sequence's blocks and
+   functions, seq.css; the History's list; a run's view, and its side beside the plots) */
+#run-body { display: flex; flex-direction: column; overflow: hidden; }
+#history-view:not([hidden]) { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; container: runview / inline-size; }
+/* its head: Sequence | History at the left, the rest at the right; all of it on one line down to its least width (340) */
+#runpane > .pane-head { container: runshead / inline-size; }
+#runpane > .pane-head > #runs-seg { margin-right: auto; }
+
+/* the run tabs: the tab itself a button, its × beside it in the same shape (not inside it) */
+div.run-tab { padding: 0 3px 0 0; gap: 0; cursor: default; }
+.run-tab-btn { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 190px; padding: 8px 4px 9px 10px; border: 0;
+  border-radius: 8px 0 0 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.run-tab-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.run-tab-x { width: 30px; height: 30px; padding: 0; }   /* 24 px or more at 85 % (it sits against its tab) */
+
+/* the History: the recent runs, each a compact card on one line; with none, a dashed copy of the place with what to do */
+#runs-list:not([hidden]) { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--sp-2, 8px) var(--sp-3, 12px) var(--sp-3, 12px);
+  gap: 8px; }
+.runs-items { gap: 4px; }
+.runs-items .pane-menu-item.run-row { min-height: var(--row-h, 36px); padding: 4px 12px; border-radius: var(--radius-s); }
+.runs-empty { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px 12px; min-height: 72px; padding: 12px;
+  border: 1.5px dashed color-mix(in srgb, var(--muted) 60%, transparent); border-radius: var(--radius); color: var(--text-2); font-size: 14px; }
+
+/* a run's view: its head, how far it got (the run's id at the end of that line), its files on one row, then its plots
+   filling what is left (never under 160 px) with the analysis and the row of what is a press away above them, or beside
+   them from 900 px. It scrolls (data-region run) only when what was opened needs more than there is */
+.run-view:not([hidden]) { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px;
+  padding: var(--sp-2, 8px) var(--sp-3, 12px) var(--sp-3, 12px); }
+.run-view > * { flex: none; min-width: 0; }
+.run-view > .rv-main { flex: 1 1 0; min-height: 160px; display: flex; flex-direction: column; gap: 8px; }
+.rv-progress { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.rv-count { min-width: 0; }
+.rv-id { margin-left: auto; min-width: 0; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rv-side { order: -1; flex: none; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-content: start; }
+.rv-folds { display: flex; flex-wrap: wrap; gap: 6px; }
+.rv-folds:not(:has(> :not([hidden]))) { display: none; }
+/* a disclosure: a small outlined button that keeps its name, its chevron turning and its look pressed while open */
+.rv-fold { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 3px 10px 3px 6px; border: 1px solid var(--line-strong);
+  border-radius: var(--radius-s); background: var(--panel); color: var(--text); font-size: 13px; font-weight: 550; cursor: pointer; }
+.rv-fold svg { width: 14px; height: 14px; color: var(--muted); transition: transform .2s var(--ease-in); }
+.rv-fold:hover { background: var(--hover); }
+.rv-fold[aria-expanded="true"] { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, var(--line-strong)); color: var(--accent); }
+.rv-fold[aria-expanded="true"] svg { transform: rotate(90deg); color: inherit; }
+.rv-fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rv-plan pre { margin: 0; }
+.rv-again .ra-body { margin-top: 0; }
+.run-view .table-wrap { max-height: min(280px, calc(40 * var(--vh, 1vh))); }
+/* the assessment: two lines, the rest a press away (its chevron, or a click on it) */
+.run-view .assess { position: relative; padding: 8px 38px 8px 12px; }
+.assess:has(> .assess-more:not([hidden])) { cursor: pointer; }
+.assess-body { flex: 1 1 auto; min-width: 0; }
+.assess:not(.open) .assess-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.assess:not(.open) .assess-body > :not(.assess-text) { display: none; }   /* Next and the issues: when it is opened */
+.assess-body .issues { margin-top: 4px; }
+.assess-more { position: absolute; top: 4px; right: 4px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--radius-s);
+  background: none; color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+.assess-more:hover { background: var(--hover); color: var(--text); }
+.assess-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.assess-more svg { width: 16px; height: 16px; transition: transform .2s var(--ease-in); }
+.assess.open .assess-more svg { transform: rotate(90deg); }
+/* its files and downloads: one row of real buttons; what does not fit is in its ⋯ (fitRow in app.js) */
+.report-files.rv-files { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; margin: 0; overflow: hidden; }
+.rv-files > .btn { flex: none; }
+.rv-files > .btn svg { width: 14px; height: 14px; }
+.rv-files > .rv-files-more { padding-inline: 7px; }
+.rv-file-view:not([hidden]) { display: grid; gap: 4px; margin: 0; }
+.rv-file-view .rv-file-text { max-height: min(320px, calc(35 * var(--vh, 1vh))); }
+/* the plots fill what is left: their rows share the height, none under 160 px, each drawn as tall as its place */
+.rv-charts { flex: 1 1 0; min-height: 160px; display: flex; flex-direction: column; }
+.rv-charts > .plots { flex: 1 1 0; min-height: 0; grid-auto-rows: minmax(160px, 1fr); }
+.plot.fill { display: flex; flex-direction: column; min-height: 0; padding-bottom: 4px; }
+.plot.fill > .plot-svg { flex: 1 1 0; min-height: 140px; }
+.plot.fill > :not(.plot-svg) { flex: none; }
+/* the Analysis pane's plot fills the height its pane leaves it, never under 220 px (more of the pane: the pane scrolls) */
+#an-plot { flex: 1 0 220px; min-height: 220px; display: flex; flex-direction: column; }
+#an-plot > .plot.fill { flex: 1 1 0; }
+@container runview (min-width: 900px) {   /* a wide run view: the analysis beside the plots, scrolling on its own */
+  .run-view > .rv-main { display: grid; grid-template-columns: minmax(0, 1fr) clamp(280px, 34%, 420px); grid-template-rows: minmax(0, 1fr); }
+  .rv-side { order: 0; min-height: 0; overflow-y: auto; }
+  .rv-charts { min-height: 0; }
+}
+@container runshead (max-width: 400px) {   /* a narrow pane's head: its buttons a little closer in */
+  #runs-seg button { padding-inline: 9px; }
+  #open-report { padding-inline: 7px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rv-fold svg, .assess-more svg { transition: none; }
+  #runpane .spinner { animation: none; }   /* a run's mark stands still: its tab and its state say it runs */
+}
+@media (pointer: coarse) {   /* a touch screen: every target 40 px or more */
+  #runs-seg button, .run-tab-btn, .rv-fold, .rv-files > .btn, .runs-empty .btn, #runs-filter { min-height: 40px; }
+  .run-tab-x { width: 40px; height: 40px; }
+  .runs-items .pane-menu-item.run-row { min-height: 44px; }
+  .assess-more { top: 2px; right: 2px; width: 40px; height: 40px; }
+  .run-view .assess { padding-right: 46px; }
+}
+/* ===== end fit E ===== */
+
+/* ===== fit F: dialogs, Settings, the scan editor ===== */
+/* the scan editor fits its pane with no scrolling for a typical scan: each loop one line (two in a narrow pane), its
+   details under its own button; the parts after the loops with their titles at the left, an empty one only as its
+   button in one row; the footer one row */
+.ed-body { container: ed / inline-size; padding: 10px 14px 12px; gap: var(--sp-3, 10px); }
+.ed-short { width: 54px; }
+.ed-f { gap: 4px; }
+#ed-repeat { width: 40px; }
+#ed-settle, #ed-every, #ed-for { width: 48px; }
+.ed-loops { container-type: inline-size; gap: 4px; }
+.ed-loop { gap: 4px; padding: 5px 8px 6px; }
+.ed-loop-head { gap: 4px 6px; }
+.ed-loop-head .ed-key { flex: 1 1 120px; min-width: 80px; }
+.ed-vals { order: 1; flex: 1 1 100%; flex-wrap: wrap; padding-left: 22px; gap: 4px 8px; }
+.ed-loop-head .ed-count { margin-left: auto; }
+.ed-more { display: grid; grid-template-rows: 1fr; padding-left: 22px; }
+.ed-more-in { display: grid; gap: 4px; min-height: 0; }
+/* the editor's small buttons are 28 px targets: 24 px or more at every page size */
+.ed-more-btn { min-width: 28px; min-height: 28px; display: inline-grid; place-items: center; padding: 0 4px; }
+.ed-acts { gap: 6px; }
+.ed-acts .link { min-height: 28px; }
+.ed-set .icon-btn, .ed-leg .icon-btn, .ed-with .icon-btn { width: 28px; height: 28px; padding: 0; display: inline-grid; place-items: center; }
+.ed-chip .icon-btn { width: 28px; height: 28px; margin: 0; padding: 0; display: inline-grid; place-items: center; }
+.ed-more-btn svg { width: 14px; height: 14px; transition: transform .2s var(--ease-switch); }
+.ed-more-btn[aria-expanded="true"] { background: var(--active); color: var(--text); }
+.ed-more-btn[aria-expanded="true"] svg, .ed-disclose[aria-expanded="true"] svg { transform: rotate(90deg); }
+.ed-more-btn.has { position: relative; }
+.ed-more-btn.has::after { content: ""; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); }
+/* Plan text: a disclosure in the pane's head (its chevron turns, it looks pressed while open); the plan wraps */
+.ed-disclose { display: inline-flex; align-items: center; gap: 4px; }
+.ed-disclose svg { width: 13px; height: 13px; transition: transform .2s var(--ease-switch); }
+.ed-disclose[aria-expanded="true"] { background: var(--active); color: var(--text); }
+.ed-plan { display: grid; grid-template-rows: 1fr; }
+.ed-plan pre { max-height: none; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 0; }
+/* what opens in place grows to its height as it fades in, once (edEase in app.js); closing is at once */
+@keyframes ed-open { from { grid-template-rows: 0fr; opacity: 0; } }
+.ed-opening { animation: ed-open .2s var(--ease-in); }
+.ed-opening > * { overflow: hidden; }
+/* the parts after the loops: the title (and its + Add) at the left of its rows */
+.ed-side { grid-template-columns: 78px minmax(0, 1fr); column-gap: 10px; row-gap: 4px; align-items: start; }
+.ed-side > .ed-sec-head { flex-direction: column; align-items: flex-start; gap: 4px; padding-top: 3px; }
+.ed-side > .ed-sec-head > .spacer { display: none; }
+.ed-rows { gap: 4px; }
+.ed-set > .ed-unit { flex: 0 0 44px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }   /* values in a column */
+.ed-adds { display: flex; flex-wrap: wrap; gap: 6px; }
+/* the footer: the points and time (and what the last action said) at the left of the buttons, on one row */
+.ed-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 14px; }
+.ed-foot > .ed-problems { flex: 1 1 100%; }
+.ed-state { flex: 1 1 90px; min-width: 0; display: grid; gap: 0; line-height: 1.35; }
+.ed-actions { flex: none; gap: 6px; }
+/* a dialog's body scrolls as a whole: a list in it scrolls on its own only where it is a region itself */
+#exp-body { max-height: none; }
+#history-list { max-height: none; overflow: visible; }
+/* the Report dialog: the new report beside the library, which fills its column (from 760 px, below) */
+.report-new { display: grid; gap: 14px; align-content: start; min-width: 0; }
+/* Settings: Models and Instruments in two columns where the page is wide enough (below); each key one line, its label
+   over its state at the left of the box; a setting that acts at once is a switch at the right of what it turns on */
+#set-pages { container: setpage / inline-size; }
+.set-cols { display: grid; gap: 16px 28px; }
+.set-col { display: grid; gap: 16px; align-content: start; min-width: 0; }
+.set-col > .field { padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.set-col > .field > .field-row:first-child > .field-label, .set-col > .field > :is(label:not(.check), .field-label):first-child,
+.sw-row > .sw-text { font-size: 15px; font-weight: 650; color: var(--text); }
+.set-col > .svc-field { order: 2; }
+.set-col > #cc-field { order: 3; }
+.set-owner { order: 2; }
+.set-col > .field.own-keys:has(> .key-row) { grid-template-columns: 84px minmax(0, 1fr); grid-template-areas: "label row" "hint row";
+  column-gap: 12px; row-gap: 0; align-items: center; }
+.set-col > .field.own-keys:has(> .key-row) > label { grid-area: label; align-self: end; }
+.set-col > .field.own-keys:has(> .key-row) > .key-row { grid-area: row; }
+.set-col > .field.own-keys:has(> .key-row) > [data-hint] { grid-area: hint; align-self: start; font-size: 12px; }
+.sw-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* a wide pane (full screen): each loop wholly on one line; a narrow one: the parts' titles over their rows */
+@container (min-width: 700px) {
+  .ed-vals { order: 0; flex: 1 1 auto; padding-left: 0; }
+  .ed-loop-head .ed-key { flex: 0 1 260px; }
+}
+@container setpage (min-width: 520px) { .set-cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+@container ed (min-width: 760px) { .ed-rows { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); column-gap: 16px; } }
+@container (max-width: 420px) { .ed-vals { padding-left: 0; } .ed-vals .ed-short { width: 48px; } }
+@container ed (max-width: 340px) {
+  .ed-side { grid-template-columns: minmax(0, 1fr); }
+  .ed-side > .ed-sec-head { flex-direction: row; align-items: baseline; padding-top: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ed-opening { animation: none; }
+  .ed-more-btn svg, .ed-disclose svg { transition: none; }
+}
+@media (min-width: 760px) {
+  #report-dialog { width: min(920px, calc(100 * var(--vw) - 32px)); }
+  .report-cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 24px; }
+  .report-lib { contain: size; grid-template-rows: auto minmax(0, 1fr); }   /* as tall as the new report beside it */
+  .report-lib > .report-library { max-height: none; }
+}
+/* a phone: Settings' sections wrap into rows over the page, none of them out of sight */
+@media (max-width: 640px) { .set-nav { flex-wrap: wrap; overflow: visible; } }
+@media (pointer: coarse) {   /* a touch screen: every target 40 px or more */
+  #edpane :is(.ed-in, .ed-mode, .ed-more-btn, .link, .btn, .icon-btn), .dialog :is(.btn, button.link, .check, .field input,
+    .field select, .key-row input, .set-nav button), .wl-skip { min-height: 40px; }
+  #edpane :is(.icon-btn, .ed-more-btn) { min-width: 40px; }
+  .wl-dot { width: 40px; height: 40px; }
+}
+/* ===== end fit F ===== */

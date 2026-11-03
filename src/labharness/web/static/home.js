@@ -1,11 +1,11 @@
 "use strict";
 /* Home, the other side of the top bar's Chat | Home: the lab at a glance, labMaster's Home in Kelvin's colours.
-   "Overview", a greeting and one line of what goes on now; three large tiles, two to a row (the sequence, the runs, and
-   the lab on a row of its own, with a line of its first watched reading over the last ten minutes), each opening its
-   panel; under them the blocks Kelvin keeps for this person (homeboard.py: a result, a next step, a reading to watch, a
-   note, a checklist), which a person pins, ticks or takes off. It draws from the page's state poll (kelvin:state) and
-   asks the server only when something moved: the blocks when the state's home stamp changes, the runs when a run starts
-   or ends, and both when Home is shown. */
+   One line of hello (a greeting, what goes on now, the lab's name); three tiles on one row (the sequence, the runs, and
+   the lab with a line of its first watched reading over the last ten minutes), each the link to its pane; under them,
+   in the rest of the height, the blocks Kelvin keeps for this person (homeboard.py: a result, a next step, a reading to
+   watch, a note, a checklist), which a person pins, ticks or takes off. Home fits the window by construction (home.css).
+   It draws from the page's state poll (kelvin:state) and asks the server only when something moved: the blocks when the
+   state's home stamp changes, the runs when a run starts or ends, and both when Home is shown. */
 (() => {
   const SVGNS = "http://www.w3.org/2000/svg";
   // a block's kind: the edge of its card (the kit's kind colours), its small icon, and the icon's name
@@ -100,19 +100,32 @@
   // the alarms on now (a Got it does not end one: its reading is still out of range until it clears)
   const alarmsOn = (s) => ((s && s.alarms) || []).filter((a) => a && !a.cleared);
 
-  // ------------------------------------------------------------------ the page: greeting, state line, tiles, blocks
-  function tile(name, title, foot, go) {   // a card that is its panel's button: title, number, what it holds, a quiet foot
+  // ------------------------------------------------------------------ the page: the hello, the tiles, the blocks
+  // a tile's place: its pane, the view of it the tile shows (Runs: the Sequence, or History's list of all runs), and the
+  // page's own toggle for it, for a page without the panes' click model
+  const PLACES = {
+    seq: ["runpane", "schedule", () => K.toggleSeq(true)],
+    runs: ["runpane", "history", () => K.openRunList()],
+    lab: ["labpanel", null, () => K.toggleLab(true)],
+    analysis: ["anpane", null, () => K.toggleAnalysis(true)],
+  };
+  // a tile is a link to its place (brief 1.3): Kelvin.paneShow shows the pane when it is not on the screen (in full
+  // screen too), and when it is, leaves it there and rings its head; a tile never hides it
+  function goTo(name) {
+    const [pane, view, open] = PLACES[name];
+    if (K.paneShow) K.paneShow(pane, view); else open();
+  }
+  function tile(name, title) {   // a card that is its pane's link: its title, its number, what it holds
     const h = K.h;
     const t = { name };
     t.go = h("button", { class: "home-tile-go", type: "button" }, title);
-    t.go.addEventListener("click", safe(go));
+    t.go.addEventListener("click", safe(() => goTo(name)));
     t.chip = h("span", { class: "chip", hidden: true });
     t.kpi = h("span", { class: "home-kpi-n" }, "–");
     t.unit = h("span", { class: "home-kpi-unit" });
     t.body = h("div", { class: "home-tile-body" });
     t.el = h("div", { class: "home-tile home-tile-" + name },
-      h("div", { class: "home-tile-head" }, t.go, t.chip), h("div", { class: "home-kpi" }, t.kpi, t.unit), t.body,
-      h("div", { class: "home-tile-foot", "aria-hidden": "true" }, foot));
+      h("div", { class: "home-tile-head" }, t.go, t.chip), h("div", { class: "home-kpi" }, t.kpi, t.unit), t.body);
     return t;
   }
   function sparkline() {   // the Lab tile's line (drawn in drawSpark): an area, and the line over it
@@ -137,24 +150,25 @@
     p.open = h("button", { class: "btn small home-open", type: "button", hidden: true }, "Open");
     p.open.addEventListener("click", safe(openApproval));
     p.lab = h("span", { class: "home-labname" });
-    p.state = h("div", { class: "home-state", role: "status" }, p.dot, p.say, p.open, p.lab);
-    p.seq = tile("seq", "Sequence", "open the sequence", () => K.toggleSeq(true));
+    p.state = h("div", { class: "home-state", role: "status" }, p.dot, p.say, p.open);
+    p.seq = tile("seq", "Sequence");
     p.seqFill = h("span", { class: "home-bar-fill" });
     p.seqName = h("span", { class: "home-line-name" });
     p.seqNum = h("span", { class: "home-line-num" });
     p.seq.body.append(h("div", { class: "home-bar", "aria-hidden": "true" }, p.seqFill),
       h("div", { class: "home-line" }, p.seqName, p.seqNum));
-    p.runs = tile("runs", "Runs", "open all runs", () => K.openRunList());
-    p.runList = h("ul", { class: "home-mini" });
+    p.runs = tile("runs", "Runs");
+    p.runList = h("ul", { class: "home-mini home-runs" });
     p.runs.body.append(p.runList);
-    p.labt = tile("lab", "Lab", "open the lab", () => K.toggleLab(true));
+    p.labt = tile("lab", "Lab");
     p.watchList = h("ul", { class: "home-mini home-watches" });
     p.spark = sparkline();
     p.sparkRow = h("li", { class: "home-spark-row", hidden: true }, p.spark.svg);   // under the first watched reading
     p.labt.body.append(p.watchList);
-    p.blocks = h("div", { class: "home-blocks", hidden: true });
+    // the blocks: the rest of the height, the one part of Home that scrolls (brief 1.7: a region)
+    p.blocks = h("div", { class: "home-blocks", "data-region": "home-blocks", hidden: true });
     $("homeview").replaceChildren(h("div", { class: "home-col" },
-      h("header", { class: "home-hello" }, h("div", { class: "home-eyebrow" }, "Overview"), p.greet, p.state),
+      h("header", { class: "home-hello" }, p.greet, p.state, p.lab),
       h("div", { class: "home-tiles" }, p.seq.el, p.runs.el, p.labt.el),
       p.blocks));
   }
@@ -224,13 +238,14 @@
       const c = cards && typeof cards.get === "function" ? cards.get(r.id) : null;
       return !!(c && c.el && c.el.isConnected);
     });
-    if (here) K.setMode("chat"); else K.toggleLab(true);
+    if (here) K.setMode("chat"); else goTo("lab");
   }
 
   // ------------------------------------------------------------------ the tiles
   function renderSeq(s) {
     const n = sequence(s), t = H.parts.seq, st = n.q.state;
-    const [kind, words] = st === "running" ? ["run", "Running"] : st === "pausing" ? ["warn", "Pausing"]
+    // states are tinted pills; the running one the accent's soft fill (brief 1.6.3)
+    const [kind, words] = st === "running" ? ["blue", "Running"] : st === "pausing" ? ["warn", "Pausing"]
       : st === "paused" ? ["warn", "Paused"] : !n.total || n.next >= 0 ? ["line", "Idle"]
       : n.items.some((i) => i.status === "failed") ? ["bad", "Failed"] : ["ok", "Done"];
     chip(t, kind, words);
@@ -253,7 +268,7 @@
   function renderRuns(s) {
     const t = H.parts.runs, runs = H.runs;
     const live = s && s.live && s.live.status === "running" ? s.live : null;
-    chip(t, "run", live ? "Live" : "");
+    chip(t, "blue", live ? "Live" : "");
     if (!runs) return;
     const today = new Date().toDateString();
     let n = 0;
@@ -265,13 +280,13 @@
     if (sig === H.runsSig) return;
     H.runsSig = sig;
     const h = K.h;
-    H.parts.runList.replaceChildren(...(latest.length ? latest.map((r) => {
+    H.parts.runList.replaceChildren(...(latest.length ? latest.map((r, i) => {
       const st = r.status === "done" ? "ok" : r.status === "running" ? "run" : /fail|error/.test(r.status || "") ? "bad" : "warn";
       const b = h("button", { class: "home-run", type: "button", title: r.run_id + (r.status ? " · " + r.status : "") },
         h("span", { class: "home-st " + st, "aria-hidden": "true" }), h("span", { class: "home-run-name" }, r.plan || r.run_id),
         h("span", { class: "home-run-time" }, runTime(r)));
       b.addEventListener("click", safe((e) => { e.stopPropagation(); K.openRun(r.run_id, r.plan); }));
-      return h("li", {}, b);
+      return h("li", { class: i === 2 ? "k-minor" : null }, b);   // the third one: a minor line (the tight tier leaves it out)
     }) : [h("li", { class: "home-none" }, "No runs")]));
   }
   function runTime(r) {   // 14:22 today, else 30 Oct
@@ -291,9 +306,9 @@
     if (sig !== H.watchSig) {   // the rows again only when the watched readings change; their values in place
       H.watchSig = sig;
       H.watchRows = new Map();
-      const rows = watched.map((w) => {
+      const rows = watched.map((w, i) => {   // the second and third: minor lines (the tight tier keeps the first and its line)
         const value = K.h("span", { class: "home-watch-val" });
-        const row = K.h("li", { class: "home-watch", title: w.rules.join("; ") || w.key },
+        const row = K.h("li", { class: "home-watch" + (i ? " k-minor" : ""), title: w.rules.join("; ") || w.key },
           K.h("span", { class: "home-watch-key" }, w.key), value);
         H.watchRows.set(w.key, { row, value });
         return row;
@@ -361,22 +376,30 @@
     const del = h("button", { class: "hk-btn hk-del", type: "button", "data-f": "del", title: "Remove", "aria-label": "Remove" },
       K.icon("x"));
     del.addEventListener("click", safe(() => removeBlock(b, del)));
+    const t = b.updated || b.created || 0;   // how long ago: after the title, a minor line (the tight tier leaves it out)
+    const when = h("time", { class: "hk-ago k-minor", "data-t": String(t), datetime: t ? new Date(t * 1000).toISOString() : null,
+      title: t ? new Date(t * 1000).toLocaleString() : null }, ago(t));
     const el = h("article", { class: "kcard home-block " + kind.cls + (b.pinned ? " pinned" : ""), "data-id": b.id },
       h("div", { class: "hk-head" }, h("span", { class: "hk-kind", title: kind.name }, svg(kind.icon)),
-        h("h2", { class: "hk-title" }, b.title || ""), h("span", { class: "hk-tools" }, pin, del)));
+        h("div", { class: "hk-name" }, h("h2", { class: "hk-title" }, b.title || ""), " ", when),
+        h("span", { class: "hk-tools" }, pin, del)));
     const tone = ["ok", "warn", "bad"].includes(b.tone) ? " " + b.tone : "";
     if (b.kind === "result" && b.value != null && b.value !== "") {
       el.append(h("div", { class: "hk-value" + tone }, num(b.value)
         + (b.error != null && b.error !== "" ? " ± " + num(b.error) : "") + (b.unit ? " " + b.unit : "")));
     }
     if (b.kind === "watch") el.append(h("div", { class: "hk-value hk-live" + tone, "data-watch": b.watch || "", title: b.watch || null }, "—"));
-    if (b.text) el.append(h("div", { class: "hk-text", html: K.md(b.text) }));   // md escapes; links only http(s)
+    if (b.text) {   // md escapes; links only http(s). Cut to its lines (home.css): the whole is its tip then
+      const text = h("div", { class: "hk-text", html: K.md(b.text) });
+      text.addEventListener("mouseenter", () => {
+        const cut = text.scrollHeight > text.clientHeight + 1;
+        if (cut ? text.title !== text.textContent : text.title) text.title = cut ? text.textContent : "";
+      });
+      el.append(text);
+    }
     if (b.kind === "check" && Array.isArray(b.items) && b.items.length) el.append(checklist(b));
     const acts = actions(b);
     if (acts) el.append(acts);
-    const t = b.updated || b.created || 0;
-    el.append(h("div", { class: "hk-foot" }, h("time", { class: "hk-ago", "data-t": String(t),
-      datetime: t ? new Date(t * 1000).toISOString() : null, title: t ? new Date(t * 1000).toLocaleString() : null }, ago(t))));
     return el;
   }
   function checklist(b) {
@@ -388,7 +411,7 @@
       return h("li", { class: it.done ? "done" : null }, h("label", {}, box, h("span", {}, it.text)));
     }));
   }
-  function actions(b) {   // its buttons, the first one primary; a result's run, quietly, after them
+  function actions(b) {   // its buttons, the first one primary; a result's run after them (a button too: brief 1.6.2)
     const list = (Array.isArray(b.actions) ? b.actions : []).slice();
     const runOwn = b.run_id && !list.some((a) => a && a.do === "run" && a.run_id === b.run_id);
     if (!list.length && !runOwn) return null;
@@ -399,7 +422,7 @@
       return btn;
     });
     if (runOwn) {
-      const btn = h("button", { class: "btn small ghost", type: "button", "data-f": "run" }, "Open run");
+      const btn = h("button", { class: "btn small", type: "button", "data-f": "run" }, "Open run");
       btn.addEventListener("click", safe(() => K.openRun(b.run_id, planOf(b.run_id))));
       buttons.push(btn);
     }
@@ -414,13 +437,13 @@
           // from_block: the chat that put the block here hears its suggestion was taken (notices.py)
           await K.api("/api/queue", { body: { op: "add", text: a.text, from_block: b && b.id } });
           K.toast("Added");
-          K.toggleSeq(true);
+          goTo("seq");
         } finally { delete btn.dataset.busy; }
       } else if (a.do === "ask") K.ask(a.text || "");
       else if (a.do === "run") K.openRun(a.run_id, planOf(a.run_id));
-      else if (a.do === "pane") {
-        const open = { sequence: K.toggleSeq, runs: K.openRunList, lab: K.toggleLab, analysis: K.toggleAnalysis }[a.pane];
-        if (open) open(true);
+      else if (a.do === "pane") {   // a link to its place, as a tile is
+        const name = { sequence: "seq", runs: "runs", lab: "lab", analysis: "analysis" }[a.pane];
+        if (name) goTo(name);
       }
     } catch (e) { K.toast(e.message); }
   }

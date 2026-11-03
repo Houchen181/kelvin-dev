@@ -42,7 +42,7 @@ def test_a_skills_show_and_download_are_small_buttons_on_one_line():
     assert ".memory-body > .link" not in CSS   # the text links' padding (2px 0), which cramped them in their outlines
     assert 'loadKnow("global", $("global-know")' in JS and 'loadKnow(p.id, $("project-know")' in JS   # the same rows
     for list_id in ("global-know", "project-know"):
-        assert '<ul id="%s" class="memory-notes"></ul>' % list_id in PAGE
+        assert re.search(r'<ul id="%s" class="memory-notes" data-region="[a-z-]+"></ul>' % list_id, PAGE)   # a list scrolls as a region
 
 
 def test_rows_of_outlined_text_buttons_have_room_and_stay_together():

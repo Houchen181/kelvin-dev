@@ -89,12 +89,57 @@
 <div id="app" class="app" hidden>
   <div id="scrim" class="scrim" hidden></div>
 
+  <!-- the chrome: the top bar and the notice row, across the whole window above the sidebar, the chat and the panes
+       (app.css .chrome): nothing in it moves when the sidebar hides, a pane opens or one goes full screen -->
+  <div id="chrome" class="chrome">
+    <header class="topbar">
+      <div class="topbar-left">
+      <button id="toggle-sidebar" class="icon-btn" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Hide conversations" data-tip="Hide conversations">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+      <span class="logo topbar-mark" aria-hidden="true" data-mark></span>
+      <div id="chat-title" class="chat-title"></div>
+      </div>
+      <div id="mode-seg" class="mode-seg" role="tablist" aria-label="Chat or Home"><button id="mode-chat" class="on" type="button" role="tab" aria-selected="true">Chat</button><button id="mode-home" type="button" role="tab" aria-selected="false" tabindex="-1">Home</button></div>
+      <div class="topbar-right">
+      <button id="toggle-incognito" class="pill icon-only" type="button" aria-label="Incognito chat" aria-pressed="false" title="Incognito chat: no memory is used or kept, and the chat is not saved">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/></svg>
+      </button>
+      <button id="toggle-term" class="pill icon-only" type="button" aria-label="Terminal" aria-pressed="false" title="Terminal (Ctrl+`)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"/></svg>
+      </button>
+      <button id="toggle-team" class="pill icon-only team-btn" type="button" aria-label="Team chat" aria-pressed="false" title="Team chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h1v3l3.5-3"/><path d="M12 10h7a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-1v3l-3.5-3H12a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z"/></svg><span id="team-dot" class="team-dot" hidden></span>
+      </button>
+      <button id="toggle-analysis" class="pill" type="button" title="Analysis" aria-label="Analysis" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 16l3.5-4 2.5 2.5"/><circle cx="16.5" cy="8.5" r="3"/><path d="M18.7 10.7L21 13"/></svg><span class="pill-text">Analysis</span>
+      </button>
+      <button id="toggle-runs" class="pill" type="button" title="Runs" aria-label="Runs" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/></svg><span class="pill-text">Runs</span><span id="seq-badge" class="badge seq-badge" hidden></span><span id="runs-dot" class="live-dot" hidden></span>
+      </button>
+      <button id="toggle-lab" class="pill" type="button" title="Lab" aria-label="Lab" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="pill-text">Lab</span><span id="lab-badge" class="badge" hidden>0</span>
+      </button>
+      </div>
+    </header>
+    <!-- the notice row: alarms, Hands on the sample (the only Unlock…) and the update bar, in every layout -->
+    <div id="notices" class="notices">
+      <div id="update-bar" class="update-bar" role="status" hidden>
+        <span id="update-text"></span>
+        <a id="update-notes" class="link soft" target="_blank" rel="noopener noreferrer" hidden>What's new</a>
+        <button id="update-go" class="btn small primary" type="button" hidden>Restart to update</button>
+      </div>
+      <div id="alerts" class="alerts" role="alert" hidden></div>
+      <div id="hands-banner" class="hands-banner" role="status" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg>
+        <div class="hb-body"><b>Hands on the sample</b><span id="hands-text"></span></div>
+        <button id="hands-done" class="btn small primary" type="button">Unlock…</button>
+      </div>
+    </div>
+  </div>
+
   <aside id="sidebar" class="sidebar" aria-label="Conversations">
     <div class="side-top">
-      <div class="brand">
-        <span class="logo" aria-hidden="true" data-mark></span>
-        <span class="brand-text"><span>Kelvin</span></span>
-      </div>
       <button id="new-chat" class="side-btn" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat
       </button>
@@ -114,47 +159,6 @@
   </aside>
 
   <main class="main">
-    <header class="topbar">
-      <div class="topbar-left">
-      <button id="toggle-sidebar" class="icon-btn" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Hide conversations" data-tip="Hide conversations">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
-      </button>
-      <div id="chat-title" class="chat-title"></div>
-      </div>
-      <div id="mode-seg" class="mode-seg" role="tablist" aria-label="Chat or Home"><button id="mode-chat" class="on" type="button" role="tab" aria-selected="true">Chat</button><button id="mode-home" type="button" role="tab" aria-selected="false" tabindex="-1">Home</button></div>
-      <div class="topbar-right">
-      <button id="toggle-incognito" class="pill icon-only" type="button" aria-label="Incognito chat" aria-pressed="false" title="Incognito chat: no memory is used or kept, and the chat is not saved">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/></svg>
-      </button>
-      <button id="toggle-term" class="pill icon-only" type="button" aria-label="Show the terminal" aria-pressed="false" title="Terminal (Ctrl+`)">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"/></svg>
-      </button>
-      <button id="toggle-team" class="pill icon-only team-btn" type="button" aria-label="Team chat" aria-pressed="false" title="Team chat">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h1v3l3.5-3"/><path d="M12 10h7a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-1v3l-3.5-3H12a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z"/></svg><span id="team-dot" class="team-dot" hidden></span>
-      </button>
-      <button id="toggle-analysis" class="pill" type="button" title="Analysis" aria-label="Show the analysis pane" aria-pressed="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 16l3.5-4 2.5 2.5"/><circle cx="16.5" cy="8.5" r="3"/><path d="M18.7 10.7L21 13"/></svg><span class="pill-text">Analysis</span>
-      </button>
-      <button id="toggle-runs" class="pill" type="button" title="Runs" aria-label="Show the runs pane" aria-pressed="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/></svg><span class="pill-text">Runs</span><span id="seq-badge" class="badge seq-badge" hidden></span><span id="runs-dot" class="live-dot" hidden></span>
-      </button>
-      <button id="toggle-lab" class="pill" type="button" title="Lab" aria-label="Show the lab panel" aria-pressed="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="pill-text">Lab</span><span id="lab-badge" class="badge" hidden>0</span>
-      </button>
-      </div>
-    </header>
-
-    <div id="update-bar" class="update-bar" role="status" hidden>
-      <span id="update-text"></span>
-      <a id="update-notes" class="link soft" target="_blank" rel="noopener noreferrer" hidden>What's new</a>
-      <button id="update-go" class="btn small primary" type="button" hidden>Restart to update</button>
-    </div>
-    <div id="alerts" class="alerts" role="alert" hidden></div>
-    <div id="hands-banner" class="hands-banner" role="status" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg>
-      <div class="hb-body"><b>Hands on the sample</b><span id="hands-text"></span></div>
-      <button id="hands-done" class="btn small primary" type="button">Done: unlock…</button>
-    </div>
     <section id="homeview" class="homeview" aria-label="Home" hidden></section>
     <div id="scroller" class="scroller">
       <section id="empty" class="empty">
@@ -253,7 +257,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <div id="team-list" class="team-list" role="log" aria-live="polite"></div>
+    <div id="team-list" class="team-list" role="log" aria-live="polite" data-region="team"></div>
     <form id="team-name-form" class="team-name-form" hidden>
       <input id="team-name-input" maxlength="40" placeholder="Your name" aria-label="Your name in the team chat" autocomplete="name" spellcheck="false">
       <button class="btn small primary" type="submit">OK</button>
@@ -320,7 +324,6 @@
       <div id="runs-seg" class="seg runs-seg" role="tablist" aria-label="Sequence and history">
         <button id="open-schedule" class="on" type="button" role="tab" aria-selected="true" aria-controls="seq-view">Sequence<span id="queue-count" class="badge q-badge" hidden></span></button><button id="open-history" type="button" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1">History</button>
       </div>
-      <div class="spacer"></div>
       <button id="open-report" class="btn small ghost" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
       <button class="icon-btn full-btn" type="button" data-pane="runpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
@@ -364,7 +367,7 @@
             <datalist id="step-read-keys"></datalist>
           </div>
           <div class="step-foot">
-            <button id="queue-paste-open" class="btn small ghost" type="button" aria-expanded="false" aria-controls="queue-paste">Paste a plan</button>
+            <button id="queue-paste-open" class="btn small" type="button" aria-expanded="false" aria-controls="queue-paste">Paste a plan</button>
             <span id="step-msg" class="hint" role="status"></span>
           </div>
           <form id="queue-paste" class="q-paste" hidden>
@@ -427,7 +430,7 @@
         </div>
       </div>
       <div id="history-view" role="tabpanel" aria-labelledby="open-history" hidden>
-        <div id="runs-list" class="runs-list">
+        <div id="runs-list" class="runs-list" data-region="history">
           <input id="runs-filter" class="pane-filter" type="search" placeholder="Filter runs" aria-label="Filter runs" spellcheck="false" autocomplete="off">
           <ul id="runs-items" class="runs-items" aria-label="Recent runs"></ul>
         </div>
@@ -442,7 +445,7 @@
       <h2 id="ed-title" class="pane-title">Edit scan</h2>
       <span id="ed-from" class="ed-from"></span>
       <div class="spacer"></div>
-      <button id="ed-text" class="btn small ghost" type="button" aria-expanded="false" aria-controls="ed-plan" title="The plan it makes, as YAML">Plan text</button>
+      <button id="ed-text" class="btn small ghost ed-disclose" type="button" aria-expanded="false" aria-controls="ed-plan" title="The plan it makes, as YAML">Plan text<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
       <button class="icon-btn full-btn" type="button" data-pane="edpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
       </button>
@@ -450,7 +453,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <div id="ed-body" class="pane-body ed-body">
+    <div id="ed-body" class="pane-body ed-body" data-region="editor">
       <div id="ed-plan" class="ed-plan" hidden>
         <pre id="ed-plan-text"></pre>
         <button id="ed-copy" class="btn small ghost" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg><span>Copy</span></button>
@@ -466,31 +469,38 @@
         <div class="ed-line">
           <label class="ed-f"><span>Repeat</span><input id="ed-repeat" class="ed-in ed-short" inputmode="numeric" placeholder="1" autocomplete="off"><i>×</i></label>
           <label class="ed-f"><span>Settle</span><input id="ed-settle" class="ed-in ed-short" inputmode="decimal" placeholder="0" autocomplete="off" title="After setting each value, unless its loop says"><i>s</i></label>
-          <label class="ed-f"><span>Time series every</span><input id="ed-every" class="ed-in ed-short" inputmode="decimal" autocomplete="off" title="The innermost loop: a point this often"><i>s</i></label>
+          <label class="ed-f" title="A time series, the innermost loop: a point this often"><span>Every</span><input id="ed-every" class="ed-in ed-short" inputmode="decimal" autocomplete="off" aria-label="Time series: every (s)"><i>s</i></label>
           <label class="ed-f"><span id="ed-for-label">for</span><input id="ed-for" class="ed-in ed-short" inputmode="decimal" autocomplete="off"><i id="ed-for-unit">s</i></label>
         </div>
       </section>
-      <section class="ed-sec" aria-labelledby="ed-sets-h">
+      <!-- the parts after the loops: the title at the left of its rows; an empty one is only its button in the row of
+           buttons under them (renderEditor) -->
+      <section id="ed-sets-sec" class="ed-sec ed-side" aria-labelledby="ed-sets-h">
         <div class="ed-sec-head"><h3 id="ed-sets-h" title="Settings worked out at each point from the loops' variables and values, as Special Measure's function channels">Computed</h3><span class="hint" hidden>from the loops</span><div class="spacer"></div>
           <button id="ed-add-sets" class="link soft" type="button">+ Add</button></div>
         <div id="ed-sets" class="ed-rows"></div>
       </section>
-      <section class="ed-sec" aria-labelledby="ed-measure-h">
+      <section class="ed-sec ed-side" aria-labelledby="ed-measure-h">
         <div class="ed-sec-head"><h3 id="ed-measure-h">Record</h3><span class="hint" hidden>at each point</span></div>
         <div class="ed-chips"><span id="ed-measure" class="ed-chip-list"></span>
           <input id="ed-read" class="ed-in ed-add" list="ed-read-keys" placeholder="Add a reading" aria-label="Add a reading to record" spellcheck="false" autocomplete="off"></div>
       </section>
-      <section class="ed-sec" aria-labelledby="ed-setup-h">
+      <section id="ed-setup-sec" class="ed-sec ed-side" aria-labelledby="ed-setup-h">
         <div class="ed-sec-head"><h3 id="ed-setup-h">Setup</h3><span class="hint" hidden>set first</span><div class="spacer"></div>
           <button id="ed-add-setup" class="link soft" type="button">+ Add</button></div>
         <div id="ed-setup" class="ed-rows"></div>
       </section>
-      <section class="ed-sec" aria-labelledby="ed-after-h">
+      <section id="ed-after-sec" class="ed-sec ed-side" aria-labelledby="ed-after-h">
         <div class="ed-sec-head"><h3 id="ed-after-h">At the end</h3><div class="spacer"></div>
           <button id="ed-add-after" class="link soft" type="button">+ Add</button></div>
         <div id="ed-after" class="ed-rows"></div>
       </section>
-      <section id="ed-kept-sec" class="ed-sec" aria-labelledby="ed-kept-h" hidden>
+      <div id="ed-adds" class="ed-adds">
+        <button id="ed-new-sets" class="link soft" type="button" title="Settings worked out at each point from the loops' variables and values">+ Computed</button>
+        <button id="ed-new-setup" class="link soft" type="button" title="Set first">+ Setup</button>
+        <button id="ed-new-after" class="link soft" type="button">+ At the end</button>
+      </div>
+      <section id="ed-kept-sec" class="ed-sec ed-side" aria-labelledby="ed-kept-h" hidden>
         <div class="ed-sec-head"><h3 id="ed-kept-h">As written</h3><span class="hint" hidden>kept as it is</span></div>
         <pre id="ed-kept" class="ed-kept"></pre>
       </section>
@@ -498,8 +508,8 @@
       <datalist id="ed-read-keys"></datalist>
     </div>
     <footer class="ed-foot">
-      <div class="ed-state"><span id="ed-status" class="ed-status" role="status"></span><span id="ed-msg" class="ed-msg" role="status"></span></div>
       <ul id="ed-problems" class="ed-problems"></ul>
+      <div class="ed-state"><span id="ed-status" class="ed-status" role="status"></span><span id="ed-msg" class="ed-msg" role="status"></span></div>
       <div class="ed-actions">
         <button id="ed-queue" class="btn small primary" type="button" title="Last in the sequence">Add to sequence</button>
         <button id="ed-run" class="btn small" type="button" title="First in the sequence, then a pause">Run</button>
@@ -525,69 +535,98 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
+    <!-- the panel never scrolls as a whole: what waits for an answer, the sample and its safety, then the parts, each
+         open part scrolling inside with a fair share of the height (initLabFolds; "fit D" in app.css). Wide (full
+         screen), the parts stand in two columns: the sample and Instruments, then Watches, Lab memory and Activity -->
     <div class="lab-scroll">
-      <div id="lab-pending"></div>
-      <div id="lab-problem" class="callout small bad" hidden></div>
-      <div id="lab-setting-up" class="callout small calm" role="status" hidden></div>
-      <div id="lab-why" class="callout small calm" hidden>
-        <b>No instruments yet.</b> <span id="lab-why-text"></span>
-        <div class="why-actions"><button id="lab-why-details" class="link" type="button" aria-expanded="false" title="What Kelvin looked through">Details</button><button id="lab-why-setup" class="link" type="button">Set up…</button></div>
-        <ul id="lab-why-lines" class="why-lines" hidden></ul>
-      </div>
-      <div id="lab-observe" class="callout small calm" title="Kelvin asks before each output change on these until you review their limits" hidden>
-        <b>Limits not reviewed:</b> <span id="lab-observe-who"></span>
-        <button id="lab-observe-review" class="btn small" type="button">Review limits…</button>
-      </div>
-      <div id="lab-drafts" class="callout small calm" title="Kelvin asks before each setting or output change on these until you mark their cards reviewed" hidden>
-        <b>Cards not reviewed:</b> <span id="lab-drafts-who"></span>
-        <button id="lab-drafts-review" class="btn small" type="button">Review cards…</button>
-      </div>
-      <div class="inst-head-row"><h3>Sample</h3><span id="mount-summary" class="inst-summary"></span>
-        <button id="mount-new" class="btn small" type="button">New device…</button></div>
-      <select id="mount-select" class="mount-select" aria-label="The sample in the setup now"></select>
-      <div id="mount-protection" class="mount-protection" hidden>
-        <div class="mp-head"><span id="mp-state" class="mp-state"></span><button id="mount-protect" class="btn small" type="button">Protection…</button></div>
-        <ul id="mp-lines" class="mp-lines"></ul>
-      </div>
-      <button id="hands-on" class="btn small hands-btn" type="button" title="Before you touch the sample: Kelvin stops what runs, brings everything that reaches the sample to safe and keeps it there until you unlock"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg> Hands on the sample</button>
-      <button id="lab-safe" class="btn small hands-btn" type="button" title="Every instrument to the safe values its card declares: what runs stops, outputs go off, levels and the field to safe, heaters off. Positions and ramp rates stay.">Bring to safe</button>
-      <div id="hands-locked" class="hands-locked" role="status" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg><span>Locked: hands on the sample</span><button id="hands-done-panel" class="btn small" type="button">Unlock…</button></div>
-      <div class="inst-head-row"><h3>Instruments</h3><span id="inst-summary" class="inst-summary"></span>
-        <button id="open-lab-setup" class="btn small" type="button">Set up…</button>
-        <button id="open-cards-lab" class="btn small" type="button" title="Your instrument cards: review a draft, edit one, or make one from a manual">Cards…</button></div>
-      <div class="inst-tools">
-        <input id="inst-filter" type="search" placeholder="Filter" aria-label="Filter instruments" spellcheck="false" autocomplete="off">
-        <div id="inst-seg" class="seg" role="group" aria-label="Which instruments to show">
-          <button type="button" data-v="all">All</button><button type="button" data-v="active" id="seg-active">Active</button>
+      <div class="lab-pend"><div id="lab-pending" data-region="lab-part"></div></div>
+      <div class="lab-top">
+        <div id="lab-problem" class="callout small bad" hidden></div>
+        <div id="lab-setting-up" class="callout small calm" role="status" hidden></div>
+        <div id="lab-why" class="callout small calm" hidden>
+          <b>No instruments yet.</b> <span id="lab-why-text"></span>
+          <div class="why-actions"><button id="lab-why-details" class="link" type="button" aria-expanded="false" aria-controls="lab-why-lines" title="What Kelvin looked through">Details</button><button id="lab-why-setup" class="link" type="button">Set up…</button></div>
+          <ul id="lab-why-lines" class="why-lines" hidden></ul>
+        </div>
+        <div id="lab-observe" class="callout small calm" title="Kelvin asks before each output change on these until you review their limits" hidden>
+          <b>Limits not reviewed:</b> <span id="lab-observe-who"></span>
+          <button id="lab-observe-review" class="btn small" type="button">Review limits…</button>
+        </div>
+        <div id="lab-drafts" class="callout small calm" title="Kelvin asks before each setting or output change on these until you mark their cards reviewed" hidden>
+          <b>Cards not reviewed:</b> <span id="lab-drafts-who"></span>
+          <button id="lab-drafts-review" class="btn small" type="button">Review cards…</button>
+        </div>
+        <div class="lab-sample"><h3 id="lab-h-sample">Sample</h3>
+          <select id="mount-select" class="mount-select" aria-label="The sample in the setup now"></select>
+          <button id="mount-new" class="btn small" type="button">New device…</button></div>
+        <div id="mount-protection" class="mount-protection" hidden>
+          <div class="mp-head"><span id="mp-state" class="mp-state"></span><button id="mount-protect" class="btn small" type="button">Protection…</button></div>
+          <ul id="mp-lines" class="mp-lines"></ul>
+        </div>
+        <div class="hands-row">
+          <button id="hands-on" class="btn small hands-btn" type="button" title="Before you touch the sample: Kelvin stops what runs, brings everything that reaches the sample to safe and keeps it there until you unlock"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg> Hands on the sample</button>
+          <div id="hands-locked" class="hands-locked" role="status" title="Hands on the sample: everything that reaches it stays at safe until someone unlocks, above" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg><span>Locked</span></div>
+          <button id="lab-safe" class="btn small hands-btn" type="button" title="Every instrument to the safe values its card declares: what runs stops, outputs go off, levels and the field to safe, heaters off. Positions and ramp rates stay.">Bring to safe</button>
         </div>
       </div>
-      <div id="lab-status" class="inst-list"></div>
-      <div class="inst-head-row"><h3>Watches</h3><span id="watch-summary" class="inst-summary"></span>
-        <button id="watch-add-toggle" class="btn small" type="button">Add…</button></div>
-      <form id="watch-form" class="watch-form" hidden>
-        <select id="watch-key" aria-label="Reading to watch"></select>
-        <input id="watch-above" type="number" step="any" placeholder="above" title="Alarm when the reading goes above this" aria-label="Alarm above">
-        <input id="watch-below" type="number" step="any" placeholder="below" title="Alarm when the reading goes below this" aria-label="Alarm below">
-        <input id="watch-for" type="number" step="any" min="0" placeholder="for (s)" title="Only if it stays there this many seconds" aria-label="For how many seconds">
-        <button class="btn small" type="submit">Watch</button>
-        <label id="watch-sample-row" class="check watch-sample" hidden><input id="watch-sample" type="checkbox" checked> <span id="watch-sample-name">This sample only</span></label>
-      </form>
-      <ul id="watch-list" class="watch-list"></ul>
-      <details id="alarm-history" class="alarm-history" hidden><summary>Alarm history</summary><ul id="alarm-history-list" class="watch-list"></ul></details>
-      <div class="inst-head-row"><h3>Lab memory</h3><span id="labmem-summary" class="inst-summary"></span>
-        <button id="labmem-add" class="btn small" type="button">Add…</button></div>
-      <form id="labmem-form" class="labmem-form" hidden>
-        <select id="labmem-kind" aria-label="What kind of note">
-          <option value="lesson">Lesson</option><option value="wiring">Wiring</option><option value="reference">Reference</option>
-          <option value="excitation">Excitation</option><option value="fact">Fact</option>
-        </select>
-        <input id="labmem-instruments" placeholder="Instruments (pump, li)" aria-label="The instruments it concerns" spellcheck="false" autocomplete="off">
-        <textarea id="labmem-text" rows="2" maxlength="300" placeholder="e.g. Switch each OBIS's emission on before its power." aria-label="The note"></textarea>
-        <div class="labmem-actions"><button id="labmem-keep" class="btn small" type="submit">Keep</button><button id="labmem-cancel" class="link soft" type="button">Cancel</button></div>
-      </form>
-      <ul id="labmem-list" class="labmem-list"></ul>
-      <div class="inst-head-row"><h3>Activity</h3><button id="activity-all" class="btn small" type="button" aria-pressed="false" hidden>Everyone</button></div>
-      <ol id="lab-events" class="lab-events"></ol>
+      <div id="lab-strip" class="seg lab-strip" role="tablist" aria-label="Lab parts" hidden></div>
+      <div class="lab-col lab-col-1">
+      <section class="lab-part" data-part="instruments" aria-labelledby="lab-h-instruments">
+        <div class="inst-head-row lab-part-head"><h3 id="lab-h-instruments">Instruments</h3><span id="inst-summary" class="inst-summary"></span>
+          <button id="open-lab-setup" class="btn small" type="button">Set up…</button>
+          <button id="open-cards-lab" class="btn small" type="button" title="Your instrument cards: review a draft, edit one, or make one from a manual">Cards…</button></div>
+        <div id="lab-part-instruments" class="lab-part-body" data-region="lab-part">
+          <div class="inst-tools">
+            <input id="inst-filter" type="search" placeholder="Filter" aria-label="Filter instruments" spellcheck="false" autocomplete="off">
+            <div id="inst-seg" class="seg" role="radiogroup" aria-label="Which instruments to show">
+              <button type="button" role="radio" aria-checked="true" data-v="all">All</button><button type="button" role="radio" aria-checked="false" data-v="active" id="seg-active">Active</button>
+            </div>
+          </div>
+          <div id="lab-status" class="inst-list"></div>
+        </div>
+      </section>
+      </div>
+      <div class="lab-col lab-col-2">
+      <section class="lab-part" data-part="watches" aria-labelledby="lab-h-watches">
+        <div class="inst-head-row lab-part-head"><h3 id="lab-h-watches">Watches</h3><span id="watch-summary" class="inst-summary"></span>
+          <button id="watch-add-toggle" class="btn small disclose" type="button" aria-expanded="false" aria-controls="watch-form" title="Watch a reading: an alarm when it goes out of range">Add…<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button></div>
+        <div id="lab-part-watches" class="lab-part-body" data-region="lab-part">
+          <form id="watch-form" class="watch-form" hidden>
+            <select id="watch-key" aria-label="Reading to watch"></select>
+            <input id="watch-above" type="number" step="any" placeholder="above" title="Alarm when the reading goes above this" aria-label="Alarm above">
+            <input id="watch-below" type="number" step="any" placeholder="below" title="Alarm when the reading goes below this" aria-label="Alarm below">
+            <input id="watch-for" type="number" step="any" min="0" placeholder="for (s)" title="Only if it stays there this many seconds" aria-label="For how many seconds">
+            <button class="btn small" type="submit">Watch</button>
+            <label id="watch-sample-row" class="check watch-sample" hidden><input id="watch-sample" type="checkbox" checked> <span id="watch-sample-name">This sample only</span></label>
+          </form>
+          <ul id="watch-list" class="watch-list"></ul>
+          <details id="alarm-history" class="alarm-history" hidden><summary>Alarm history</summary><ul id="alarm-history-list" class="watch-list"></ul></details>
+        </div>
+      </section>
+      <section class="lab-part" data-part="memory" aria-labelledby="lab-h-memory">
+        <div class="inst-head-row lab-part-head"><h3 id="lab-h-memory">Lab memory</h3><span id="labmem-summary" class="inst-summary"></span>
+          <button id="labmem-add" class="btn small disclose" type="button" aria-expanded="false" aria-controls="labmem-form" title="Keep a note about this lab: for every chat and everyone here">Add…<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button></div>
+        <div id="lab-part-memory" class="lab-part-body" data-region="lab-part">
+          <form id="labmem-form" class="labmem-form" hidden>
+            <select id="labmem-kind" aria-label="What kind of note">
+              <option value="lesson">Lesson</option><option value="wiring">Wiring</option><option value="reference">Reference</option>
+              <option value="excitation">Excitation</option><option value="fact">Fact</option>
+            </select>
+            <input id="labmem-instruments" placeholder="Instruments (pump, li)" aria-label="The instruments it concerns" spellcheck="false" autocomplete="off">
+            <textarea id="labmem-text" rows="2" maxlength="300" placeholder="e.g. Switch each OBIS's emission on before its power." aria-label="The note"></textarea>
+            <div class="labmem-actions"><button id="labmem-keep" class="btn small" type="submit">Keep</button><button id="labmem-cancel" class="link soft" type="button">Cancel</button></div>
+          </form>
+          <ul id="labmem-list" class="labmem-list"></ul>
+        </div>
+      </section>
+      <section class="lab-part" data-part="activity" aria-labelledby="lab-h-activity">
+        <div class="inst-head-row lab-part-head"><h3 id="lab-h-activity">Activity</h3><span id="activity-summary" class="inst-summary"></span>
+          <div id="activity-who" class="seg" role="radiogroup" aria-label="Whose activity" hidden><button type="button" role="radio" aria-checked="true" data-v="mine">Mine</button><button type="button" role="radio" aria-checked="false" data-v="all">Everyone</button></div></div>
+        <div id="lab-part-activity" class="lab-part-body" data-region="lab-part">
+          <ol id="lab-events" class="lab-events"></ol>
+        </div>
+      </section>
+      </div>
     </div>
   </aside>
   </div>
@@ -614,7 +653,7 @@
         <button type="button" id="nav-phone" data-page="phone">Phone</button>
         <button type="button" id="nav-updates" data-page="updates">Updates</button>
       </nav>
-      <div id="set-pages" class="set-pages">
+      <div id="set-pages" class="set-pages" data-region="settings-page">
         <section class="set-page" data-page="account" hidden>
           <h3 class="set-title">Account</h3>
           <div id="account-field" class="field" hidden>
@@ -631,7 +670,8 @@
           </div>
           <div id="relay-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Your phone, through the Kelvin hub</span><span id="relay-status" class="hint"></span></div>
-            <label class="check wrap"><input id="relay-on" type="checkbox"> Let my phone reach this Kelvin through the hub while I'm signed in here</label>
+            <div class="sw-row"><span id="relay-on-label">Let my phone reach this Kelvin through the hub while I'm signed in here</span>
+              <button id="relay-on" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="relay-on-label"><span></span></button></div>
             <span class="hint">Sign in to the iPhone app with this account. Unshared work never goes through the hub.</span>
           </div>
           <div id="hub-field" class="field">
@@ -652,6 +692,8 @@
           <h3 class="set-title">Models</h3>
           <p id="hub-usage" class="hint" hidden></p>
           <p class="muted small own-keys">Keys stay on this computer.</p>
+          <!-- two columns where the page is wide enough: the keys and plans, then the choices -->
+          <div class="set-cols"><div class="set-col">
           <div class="field own-keys">
             <label for="k-anthropic">Claude</label>
             <div class="key-row"><input id="k-anthropic" name="anthropic_api_key" type="password" autocomplete="off" spellcheck="false" placeholder="Anthropic API key"><button type="button" class="link danger" data-clear="anthropic_api_key">Remove</button></div>
@@ -676,19 +718,20 @@
             <div class="key-row"><input id="k-gemini" name="gemini_api_key" type="password" autocomplete="off" spellcheck="false" placeholder="Google AI API key"><button type="button" class="link danger" data-clear="gemini_api_key">Remove</button></div>
             <span class="hint" data-hint="gemini_api_key"></span>
           </div>
-          <details class="field local">
-            <summary title="Ollama, vLLM, LM Studio…: for confidential projects">Local model</summary>
+          <div class="field local">
+            <span class="field-label" data-fold="local" title="Ollama, vLLM, LM Studio…: for confidential projects">Local model</span>
             <label for="local-url">Server URL</label>
             <input id="local-url" name="local_base_url" placeholder="http://localhost:11434/v1" spellcheck="false">
             <label for="local-models">Models</label>
             <input id="local-models" name="local_models" placeholder="qwen3:32b, llama3.3" spellcheck="false">
             <label for="local-key">API key</label>
             <input id="local-key" name="local_api_key" type="password" autocomplete="off" placeholder="Only if the server needs one">
-          </details>
-          <div class="field own-keys">
-            <span class="field-label">Other model services</span>
+          </div>
+          </div><div class="set-col">
+          <div class="field own-keys svc-field">
+            <span class="field-label" data-fold="services">Other model services</span>
             <span class="hint" hidden>Any OpenAI-compatible service: OpenRouter, OpenCode, DeepSeek, Groq, Mistral, xAI or your own. Its models must call tools.</span>
-            <ul id="service-list" class="memory-notes"></ul>
+            <ul id="service-list" class="memory-notes" data-region="settings-page"></ul>
             <div class="service-form">
               <select id="svc-preset" aria-label="Service"></select>
               <input id="svc-name" placeholder="Name" aria-label="Service name" hidden>
@@ -723,8 +766,12 @@
             <label for="reviewer" title="Another model reviews every plan before it runs">Second opinion on plans</label>
             <select id="reviewer" name="reviewer"></select>
           </div>
+          </div></div>
         </section>
         <section class="set-page" data-page="instruments" hidden>
+          <h3 class="set-title">Instruments</h3>
+          <!-- two columns where the page is wide enough: the instruments, then the lab owner's (set-owner, after them) -->
+          <div class="set-cols"><div class="set-col set-owner">
           <div class="field">
             <div class="field-row"><span class="field-label">Lab owner's PIN</span>
               <span class="field-actions"><button id="owner-pin-set" class="btn small" type="button">Set a PIN…</button>
@@ -748,7 +795,7 @@
             <span id="owner-notify-state" class="hint"></span>
             <span class="hint">The owner hears of every widened limit, removed interlock, auto mode and unlock. A copy of the owner's webhook and email settings stays here, readable by anyone on this computer. <button id="history-open" class="link" type="button">Lab config history…</button></span>
           </div>
-          <h3 class="set-title">Instruments</h3>
+          </div><div class="set-col">
           <p class="muted small" hidden>For everyone on this computer.</p>
           <div class="field">
             <div class="field-row"><span class="field-label">Connected instruments</span></div>
@@ -781,6 +828,7 @@
             <span id="collection-status" class="hint"></span>
             <span class="hint" hidden>Cards and manuals from Kelvin's public repository, kept for offline use. Never replaces a card you reviewed.</span>
           </div>
+          </div></div>
         </section>
         <section class="set-page" data-page="data" hidden>
           <h3 class="set-title">Data &amp; reports</h3>
@@ -818,19 +866,18 @@
             <label for="global-instructions">Instructions for every conversation</label>
             <textarea id="global-instructions" rows="4" maxlength="4000" spellcheck="true" placeholder="e.g. Give fields in tesla and temperatures in kelvin. Ask me before any overnight run."></textarea>
             <div class="field-row"><span class="field-label small">About you</span><span id="global-notes-count" class="hint"></span></div>
-            <ul id="global-notes" class="memory-notes"></ul>
+            <ul id="global-notes" class="memory-notes" data-region="settings-page"></ul>
             <span class="hint" hidden>What everyone knows about the lab itself is in the Lab panel → Lab memory.</span>
             <div class="field-row"><span class="field-label small" title="Skills and recipes for every project; type / in the message box to start one">Skills</span><span id="global-know-count" class="hint"></span><button id="global-know-add" class="link" type="button">Add a skill…</button></div>
             <input id="global-know-file" type="file" accept=".zip,.skill,.md" hidden>
-            <ul id="global-know" class="memory-notes"></ul>
+            <ul id="global-know" class="memory-notes" data-region="settings-page"></ul>
             <span class="hint">Add only skills from people you trust.</span>
           </div>
         </section>
         <section class="set-page" data-page="literature" hidden>
           <h3 class="set-title">Literature</h3>
           <div class="field">
-            <div class="field-row"><span class="field-label">Literature and web search</span>
-              <label class="check"><input id="literature" type="checkbox"> On</label></div>
+            <label class="check"><input id="literature" type="checkbox"> Literature and web search</label>
             <span class="hint">Only search words leave this computer.</span>
             <label for="k-openalex">OpenAlex key</label>
             <div class="key-row"><input id="k-openalex" name="openalex_api_key" type="password" autocomplete="off" spellcheck="false" placeholder="Optional"><button type="button" class="link danger" data-clear="openalex_api_key">Remove</button></div>
@@ -842,7 +889,7 @@
           <div class="field">
             <div class="field-row"><span class="field-label">Notifications</span>
               <button id="allow-notify" class="btn small" type="button">Allow on this computer</button></div>
-            <label for="k-webhook" title="An ntfy topic for your phone, or a Slack, Teams or Discord webhook">Webhook</label>
+            <label for="k-webhook" data-fold="webhook" title="An ntfy topic for your phone, or a Slack, Teams or Discord webhook">Webhook</label>
             <div class="key-row"><input id="k-webhook" name="webhook" type="password" autocomplete="off" spellcheck="false" placeholder="https://ntfy.sh/your-own-secret-topic"><button type="button" class="link danger" data-clear="webhook">Remove</button></div>
             <span class="hint" data-hint="webhook"></span>
             <div class="checks" id="notify-kinds">
@@ -856,7 +903,7 @@
             <span class="hint">Use a private topic or channel.</span>
           </div>
           <div class="field">
-            <label for="smtp-host" title="Your institution's or provider's mail server (SMTP)">Email</label>
+            <label for="smtp-host" data-fold="email" title="Your institution's or provider's mail server (SMTP)">Email</label>
             <div class="field-row">
               <input id="smtp-host" type="text" autocomplete="off" spellcheck="false" placeholder="smtp.example.edu" aria-label="Mail server" style="flex: 4 1 0">
               <input id="smtp-port" type="text" inputmode="numeric" maxlength="5" placeholder="587" aria-label="Port" style="flex: 1 1 0">
@@ -874,7 +921,7 @@
             <span class="hint" hidden>The ticked notices go here too. The password is kept like an API key.</span>
           </div>
           <div class="field">
-            <label for="k-heartbeat" title="A healthchecks.io check, or an Uptime Kuma push monitor: if the pings stop, that service tells you">Heartbeat</label>
+            <label for="k-heartbeat" data-fold="heartbeat" title="A healthchecks.io check, or an Uptime Kuma push monitor: if the pings stop, that service tells you">Heartbeat</label>
             <div class="key-row"><input id="k-heartbeat" name="heartbeat" type="password" autocomplete="off" spellcheck="false" placeholder="https://hc-ping.com/your-check"><button type="button" class="link danger" data-clear="heartbeat">Remove</button></div>
             <span class="hint" data-hint="heartbeat"></span>
             <select id="heartbeat-minutes" aria-label="How often">
@@ -911,27 +958,26 @@
         <section class="set-page" data-page="phone" hidden>
           <h3 class="set-title">Phone</h3>
           <div class="field">
-            <div class="field-row"><span class="field-label">Phone access</span>
-              <label class="check"><input id="phone-on" type="checkbox"> On</label></div>
+            <div class="field-row sw-row"><span id="phone-on-label" class="sw-text">Phone access</span>
+              <button id="phone-on" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="phone-on-label"><span></span></button></div>
             <span id="phone-status" class="hint phone-status"></span>
             <div id="firewall-row" class="field-row" hidden><span id="firewall-status" class="hint"></span>
               <button id="firewall-allow" class="btn small" type="button">Let phones through</button></div>
-            <ul id="device-list" class="memory-notes"></ul>
+            <ul id="device-list" class="memory-notes" data-region="settings-page"></ul>
             <span class="hint" hidden>The Kelvin iPhone app, signed in with your Kelvin account, reaches Kelvin through the Kelvin hub from anywhere. With Phone access on, it also connects directly on the lab network: faster, and the only way unshared work opens. When this computer's address is public, the iPhone connects through the hub; Tailscale gives the direct connection that opens unshared work.</span>
           </div>
         </section>
         <section class="set-page" data-page="display" hidden>
           <h3 class="set-title">Display</h3>
           <div class="field">
-            <span class="field-label">Text size</span>
-            <div class="zoom-row" role="group" aria-label="Text size">
-              <button id="zoom-out" class="btn small" type="button" aria-label="Smaller">A−</button>
-              <span id="zoom-now" class="zoom-now" aria-live="polite">100%</span>
-              <button id="zoom-in" class="btn small" type="button" aria-label="Bigger">A+</button>
-              <button id="zoom-reset" class="link soft" type="button" title="Back to 100% (Ctrl 0)">Reset</button>
+            <span class="field-label">Page size</span>
+            <div class="zoom-row" role="group" aria-label="Page size">
+              <button id="zoom-out" class="btn small" type="button" aria-label="Smaller">−</button>
+              <span id="zoom-now" class="zoom-now" aria-live="polite">Auto</span>
+              <button id="zoom-in" class="btn small" type="button" aria-label="Bigger">+</button>
+              <button id="zoom-reset" class="btn small" type="button" title="As the window suits (Ctrl 0 in the app)" hidden>Auto</button>
             </div>
-            <span id="zoom-hint" class="hint">Ctrl + / Ctrl −</span>
-            <span id="zoom-browser" class="hint" hidden>In a browser, use the browser's zoom.</span>
+            <span id="zoom-hint" class="hint" hidden>Ctrl + / Ctrl − / Ctrl 0</span>
           </div>
           <div class="field">
             <label for="card-language" title="Names, numbers and units stay; English on a card shows the original. The record stays in English.">Approval cards in</label>
@@ -975,6 +1021,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
+    <div class="dialog-body" data-region="dialog">
     <div class="field-row lab-which">
       <span id="lab-now" class="muted small"></span>
     </div>
@@ -994,16 +1041,16 @@
       <div class="field-row"><span class="field-label">Find instruments</span>
         <span class="field-actions"><button id="lab-scripts" class="btn small" type="button" title="Read your scripts (never run) for the instruments they use">Scripts…</button><button id="lab-labview" class="btn small" type="button" title="Read your LabVIEW VIs (never run) for the instruments they use">LabVIEW…</button><button id="lab-sm" class="btn small" type="button" title="Read your Special Measure (MATLAB) rack, scans and runs (never run)">Special Measure…</button><button id="lab-scan" class="btn small primary" type="button" title="Scanning sets nothing">Scan</button></span></div>
       <span class="hint">Scanning sets nothing.</span>
-      <div id="lab-from-scripts" class="found-list" hidden></div>
-      <div id="lab-vis" class="found-list" hidden></div>
-      <div id="lab-sm-extra" class="found-list" hidden></div>
+      <div id="lab-from-scripts" class="found-list" data-region="dialog" hidden></div>
+      <div id="lab-vis" class="found-list" data-region="dialog" hidden></div>
+      <div id="lab-sm-extra" class="found-list" data-region="dialog" hidden></div>
       <div class="field-actions" id="lab-scripts-actions" hidden>
         <button id="lab-add-scripts" class="btn small primary" type="button" title="Add the checked ones to the lab config">Add checked</button>
         <button id="lab-recipes" class="btn small" type="button" title="Turn the measurement scripts into recipes">Make recipes…</button>
         <button id="lab-keep-scans" class="btn small" type="button" hidden>Keep the checked VIs as scans</button>
       </div>
       <div id="lab-survey" class="survey-box" hidden><p id="lab-survey-why"></p><ul id="lab-survey-lines" class="why-lines"></ul></div>
-      <div id="lab-found" class="found-list" hidden></div>
+      <div id="lab-found" class="found-list" data-region="dialog" hidden></div>
       <button id="lab-add-found" class="btn small primary" type="button" title="Add the checked ones to the lab config" hidden>Add checked</button>
       <div class="add-row">
         <input id="lab-addr" placeholder="Address: GPIB0::24::INSTR, serial://COM3…" spellcheck="false" aria-label="Instrument address">
@@ -1019,12 +1066,13 @@
           <button type="button" data-view="instruments">By instrument</button><button type="button" data-view="file">Whole file</button>
         </div></div></div>
       <input id="lab-find" placeholder="Find: name, card or address" spellcheck="false" aria-label="Find an instrument" hidden>
-      <div id="lab-entries" class="lab-entries" hidden></div>
-      <textarea id="lab-yaml" class="mono" rows="12" spellcheck="false" placeholder="Scan, or add one by address."></textarea>
+      <div id="lab-entries" class="lab-entries" data-region="dialog" hidden></div>
+      <textarea id="lab-yaml" class="mono" rows="12" data-region="dialog" spellcheck="false" placeholder="Scan, or add one by address."></textarea>
       <input id="lab-change-why" placeholder="Why this change?" title="Kept with it in the lab config's history" aria-label="Why this change">
       <span class="hint" hidden>Kelvin refuses anything beyond the limits.</span>
     </div>
     <ul id="lab-health" class="health-list" hidden></ul>
+    </div>
     <footer class="dialog-foot">
       <span id="lab-msg" class="muted small"></span>
       <div class="spacer"></div>
@@ -1042,7 +1090,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <div id="exp-body" class="exp-body"></div>
+    <div id="exp-body" class="exp-body dialog-body" data-region="dialog"></div>
     <footer class="dialog-foot">
       <span id="exp-msg" class="muted small" role="status"></span>
       <div class="spacer"></div>
@@ -1062,6 +1110,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
+    <div class="dialog-body" data-region="dialog">
     <p class="muted small" hidden>Who changed what, when and why. <b>widens</b>: widened Kelvin's reach (the owner hears of it). <b>Roll back</b> puts a version back as a new change.</p>
     <div class="field-row history-filters">
       <select id="history-subject" aria-label="What">
@@ -1074,6 +1123,7 @@
       <label class="check" title="Only what widened Kelvin's reach: the owner hears of each"><input id="history-safety" type="checkbox"> Only widening</label>
     </div>
     <ul id="history-list" class="history-list"></ul>
+    </div>
     <footer class="dialog-foot">
       <span id="history-msg" class="muted small"></span>
       <div class="spacer"></div>
@@ -1085,7 +1135,7 @@
 <dialog id="chatgpt-dialog" class="dialog" aria-labelledby="chatgpt-dialog-title">
   <form method="dialog">
     <header class="dialog-head"><h2 id="chatgpt-dialog-title">Kelvin can now use your ChatGPT plan</h2></header>
-    <p>ChatGPT models now count toward your ChatGPT plan. Kelvin can't see your ChatGPT conversations.</p>
+    <div class="dialog-body" data-region="dialog"><p>ChatGPT models now count toward your ChatGPT plan. Kelvin can't see your ChatGPT conversations.</p></div>
     <footer class="dialog-foot">
       <div class="spacer"></div>
       <button class="btn" value="ok" type="submit">Continue</button>
@@ -1102,8 +1152,9 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
+    <div class="dialog-body" data-region="dialog">
     <p class="muted small">A <b>draft</b> asks before each change until you mark it reviewed.</p>
-    <ul id="card-list" class="memory-notes"></ul>
+    <ul id="card-list" class="memory-notes" data-region="dialog"></ul>
     <div class="field">
       <span class="field-label" title="From a manual's command pages or the maker's example scripts: a model drafts the card">New card</span>
       <div class="add-row">
@@ -1111,12 +1162,12 @@
         <select id="card-model" aria-label="Model that drafts the card"></select>
         <button id="card-draft" class="btn small primary" type="button">Draft the card</button>
       </div>
-      <textarea id="card-manual" class="mono" rows="6" spellcheck="false" placeholder="The manual's command pages, or the maker's example scripts"></textarea>
+      <textarea id="card-manual" class="mono" rows="6" data-region="dialog" spellcheck="false" placeholder="The manual's command pages, or the maker's example scripts"></textarea>
       <span class="hint"><label class="link file-pick" title="Scripts, a DLL header, the README">Load files<input id="card-file" type="file" multiple accept=".txt,.md,.text,.csv,.html,.htm,.py,.m,.h,.hpp,.c,.cpp,.cs,.vb,.ipynb,.json,.ini,.yaml,.yml" hidden></label> · sent to the model you pick</span>
     </div>
     <div id="card-edit" class="field" hidden>
       <div class="field-row"><label for="card-yaml">Card</label><span id="card-editing" class="hint"></span></div>
-      <textarea id="card-yaml" class="mono" rows="16" spellcheck="false"></textarea>
+      <textarea id="card-yaml" class="mono" rows="16" data-region="dialog" spellcheck="false"></textarea>
       <ul id="card-problems" class="health-list"></ul>
       <p id="card-notes" class="hint"></p>
       <div class="add-row">
@@ -1125,6 +1176,7 @@
       </div>
       <span class="hint">Trying sets nothing.</span>
       <ul id="card-try-results" class="health-list"></ul>
+    </div>
     </div>
     <footer class="dialog-foot">
       <span id="cards-msg" class="muted small"></span>
@@ -1143,10 +1195,13 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <div class="field">
+    <!-- the library at the left of the new report (one above the other in a narrow window) -->
+    <div class="dialog-body report-cols" data-region="dialog">
+    <div class="field report-lib">
       <div class="field-row"><span class="field-label">Library</span><button id="report-folder" class="link soft" type="button">Open folder</button></div>
-      <div id="report-library" class="report-library"></div>
+      <div id="report-library" class="report-library" data-region="dialog"></div>
     </div>
+    <div class="report-new">
     <div class="field">
       <label for="report-scope" class="field-label">New report</label>
       <select id="report-scope"></select>
@@ -1173,6 +1228,8 @@
       <span class="hint" hidden>That day's runs and record as Markdown with plots, in a .zip. A copy stays in the data folder's eln folder.</span>
     </div>
     <div id="report-files" class="report-files" hidden></div>
+    </div>
+    </div>
     <footer class="dialog-foot">
       <span id="report-msg" class="muted small"></span>
       <div class="spacer"></div>
@@ -1214,6 +1271,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
+    <div class="dialog-body" data-region="dialog">
     <p class="muted small"><b id="project-dialog-name"></b></p>
     <div class="field">
       <label for="project-instructions">Instructions</label>
@@ -1237,16 +1295,16 @@
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Notes</span><span id="notes-count" class="hint"></span></div>
-      <ul id="project-notes" class="memory-notes"></ul>
+      <ul id="project-notes" class="memory-notes" data-region="dialog"></ul>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Skills and recipes</span><span id="know-count" class="hint"></span><button id="project-know-add" class="link" type="button">Add a skill…</button></div>
       <input id="project-know-file" type="file" accept=".zip,.skill,.md" hidden>
-      <ul id="project-know" class="memory-notes"></ul>
+      <ul id="project-know" class="memory-notes" data-region="dialog"></ul>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Devices</span><span id="devices-count" class="hint"></span></div>
-      <ul id="project-devices" class="memory-notes"></ul>
+      <ul id="project-devices" class="memory-notes" data-region="dialog"></ul>
       <div class="add-row"><input id="device-name" placeholder="New device, e.g. D3" aria-label="Device name"><input id="device-material" placeholder="Material" aria-label="Material"><button id="device-add" class="btn small" type="button">Add</button></div>
     </div>
     <div class="field">
@@ -1256,7 +1314,8 @@
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Reading list</span><span id="papers-count" class="hint"></span></div>
-      <ul id="project-papers" class="memory-notes"></ul>
+      <ul id="project-papers" class="memory-notes" data-region="dialog"></ul>
+    </div>
     </div>
     <footer class="dialog-foot">
       <span id="project-msg" class="muted small"></span>
@@ -1275,6 +1334,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
+    <div class="dialog-body" data-region="dialog">
     <p class="muted small">While this device is mounted, every drive stays within these limits. Only a person changes them.</p>
     <div class="field">
       <div class="field-row"><span class="field-label">Gates</span><span class="hint">Limit from the dielectric: 0.3 V/nm for hBN and SiO₂, 0.2 V/nm for Al₂O₃ and HfO₂, well below breakdown</span></div>
@@ -1286,6 +1346,7 @@
       <div class="field-row"><span class="field-label">Other limits</span></div>
       <div id="protect-limits" class="prot-rows"></div>
       <button id="protect-add-limit" class="link soft prot-add" type="button">+ Add a limit</button>
+    </div>
     </div>
     <footer class="dialog-foot">
       <button id="protect-clear" class="btn ghost" type="button">Remove protection</button>
@@ -1305,6 +1366,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
+    <div class="dialog-body" data-region="dialog">
     <div class="field">
       <label for="hands-device" class="field-label">The sample in the setup now</label>
       <select id="hands-device" class="mount-select"></select>
@@ -1312,6 +1374,7 @@
     <div class="field checks-col">
       <label class="check wrap"><input type="checkbox" class="hands-check"> It is wired as the next measurement needs (cables, breakout box, grounding switches)</label>
       <label class="check wrap"><input type="checkbox" class="hands-check"> Nobody is touching the setup</label>
+    </div>
     </div>
     <footer class="dialog-foot">
       <span id="hands-msg" class="muted small"></span>
@@ -1328,6 +1391,7 @@
       <span id="setup-wait-spin" class="spinner" aria-hidden="true"></span>
       <h2 id="setup-wait-title">Setting up your instruments</h2>
     </header>
+    <div class="dialog-body" data-region="dialog">
     <p id="setup-wait-step" class="setup-wait-step" role="status"></p>
     <div id="setup-wait-bar" class="setup-wait-bar" hidden><span id="setup-wait-fill"></span></div>
     <p id="setup-wait-hint" class="muted small setup-wait-hint">This can take a few minutes.</p>
@@ -1337,6 +1401,7 @@
       <div class="field-actions"><button id="setup-scripts-choose" class="btn small primary" type="button" title="Python, notebooks or MATLAB">Choose folder…</button><button id="setup-scripts-none" class="btn small" type="button">No scripts</button></div>
     </section>
     <p id="setup-scripts-msg" class="muted small setup-scripts-msg" hidden></p>
+    </div>
     <footer class="dialog-foot">
       <div class="spacer"></div>
       <button id="setup-wait-close" class="btn" value="close" type="submit">Use Kelvin meanwhile</button>

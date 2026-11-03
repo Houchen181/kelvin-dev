@@ -1,82 +1,94 @@
-/* The Sequence (seq.js), the Runs pane's first view: the sequence as blocks on the page, the functions under them (a
-   column of their own when the pane is wide). Drawn with the kit at the end of app.css: cards on --page, a kind's
-   colour on the left edge, chips for states. Light and dark through its tokens only. */
+/* The Sequence (seq.js), the Runs pane's first view. It fills the pane's body and never scrolls as a whole: the bar on
+   top, then the blocks and the functions, each a region that scrolls on its own (data-region seq-blocks, seq-fns).
+   Under 600 px of pane the functions come with ＋ Add, in a lower split under the blocks; from 600 px they are a
+   column of their own beside them, and their rows stand in two columns when the pane is very wide (full screen).
+   Drawn with the kit at the end of app.css: cards on --page, a kind's colour on the left edge, chips for states.
+   Light and dark through its tokens only. */
 
 svg.seq-solid { fill: currentColor; stroke: none; }
 
-/* ---------- the bar's head: the sequence's name, a title one can edit, and its state */
+/* ---------- the view: as tall as the pane's body */
+#seq-view:not([hidden]) { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.seq-view { container: seqview / inline-size; background: var(--page); }
+.seq-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; background: var(--page); }
+
+/* ---------- the bar, one line: the sequence's name (it gives way first), its state (or what was just said, a
+   moment in its place), Start, Pause, Stop and ⋯ */
+.seq-bar { flex: none; position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: var(--sp-2, 8px) var(--sp-3, 12px); background: var(--page); box-shadow: 0 1px 0 var(--line); }
 .seq-head-main { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; margin-left: -6px; }
-.seq-name { flex: 0 1 auto; min-width: 4ch; max-width: 100%; field-sizing: content; padding: 3px 7px; border: 1px solid transparent;
-  border-radius: var(--radius-s); background: none; font-size: 16px; font-weight: 600; color: var(--text); text-overflow: ellipsis; }
+.seq-name { flex: 0 1 auto; min-width: 4ch; max-width: 100%; min-height: 28px; field-sizing: content; padding: 3px 7px; border: 1px solid transparent;
+  border-radius: var(--radius-s); background: none; font-size: var(--fs-title, 16px); font-weight: 600; color: var(--text);
+  text-overflow: ellipsis; }
 .seq-name::placeholder { color: var(--muted); font-weight: 500; }
 .seq-name:hover { border-color: var(--line-strong); }
 .seq-name:focus { outline: none; border-color: var(--accent); background: var(--panel); box-shadow: 0 0 0 3px var(--accent-soft); }
-.seq-head-main .chip { flex: none; }
-
-/* ---------- the body: the page the blocks lie on */
-.seq-view { min-height: 100%; background: var(--page); }
-.seq-body { background: var(--page); }
-.seq-bar { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 10px 12px;
-  background: var(--page); box-shadow: 0 1px 0 var(--line); }
+.seq-head-main .seq-state { flex: 0 1 auto; min-width: 0; display: block; overflow: hidden; text-overflow: ellipsis; }
+.seq-msg { flex: 0 1 auto; min-width: 0; font-size: 13px; color: var(--text-2); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.seq-msg:empty { display: none; }
+.seq-head-main.saying .seq-state { display: none; }
 .seq-bar .btn { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 14px; white-space: nowrap; }
 .seq-bar .btn[hidden] { display: none; }
 .seq-bar .btn svg { width: 14px; height: 14px; }
 .btn.seq-stop { background: transparent; border-color: var(--danger); color: var(--danger); }
 .btn.seq-stop:hover { background: var(--danger-soft); }
-.seq-msg { order: 9; flex: 1 0 100%; min-width: 0; font-size: 13px; color: var(--text-2); white-space: nowrap; overflow: hidden;
-  text-overflow: ellipsis; }
-.seq-msg:empty { display: none; }
 .seq-more { flex: none; }
 .seq-spin { flex: none; width: 13px; height: 13px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent;
   animation: seq-turn .8s linear infinite; }
 @keyframes seq-turn { to { transform: rotate(360deg); } }
 
-/* the sequence, and the functions under it (narrow) or beside it (wide) */
-.seq-cols { display: flex; flex-direction: column; }
-.seq-main { order: 1; min-width: 0; padding: 8px 12px 16px; }
-.seq-fns { order: 2; min-width: 0; padding: 4px 12px 20px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px;
-  align-content: start; }
+/* ---------- the blocks, and the functions: under them while ＋ Add is on (a lower split), or a column beside them */
+.seq-cols { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.seq-main { order: 1; flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.seq-view.seq-adding:not(.seq-wide) .seq-main { flex: 0 1 auto; max-height: 65%; }
+.seq-fns { order: 2; flex: 1 1 0; min-width: 0; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr);
+  gap: 6px; align-content: start; padding: 0 var(--sp-3, 12px) var(--sp-3, 12px); border-top: 1px solid var(--line); }
 .seq-fns[hidden] { display: none; }
-.seq-view.seq-wide { height: 100%; min-height: 0; display: flex; flex-direction: column; }
-.seq-view.seq-wide .seq-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.seq-view.seq-wide .seq-cols { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 300px minmax(0, 1fr); }
-.seq-view.seq-wide .seq-fns { order: 0; overflow-y: auto; padding: 8px 12px 20px; border-right: 1px solid var(--line); }
-.seq-view.seq-wide .seq-main { order: 0; overflow-y: auto; padding: 8px 18px 20px; }
-.seq-view.seq-wide .seq-main > * { max-width: 920px; }
+.seq-view.seq-wide .seq-cols { display: grid; grid-template-columns: clamp(240px, 38%, 300px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr); }
+.seq-view.seq-wide.seq-roomy .seq-cols { grid-template-columns: clamp(300px, 34%, 540px) minmax(0, 1fr); }
+.seq-view.seq-wide .seq-fns { order: 0; border-top: 0; border-right: 1px solid var(--line); }
+.seq-view.seq-wide .seq-main { order: 0; }
+.seq-view.seq-wide .seq-list > *, .seq-view.seq-wide .seq-add { max-width: 920px; }
 
-/* ---------- the blocks */
-.seq-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+/* ---------- the blocks: a region of their own, ＋ Add under it (it stays in sight however long the sequence is) */
+.seq-list { flex: 0 1 auto; min-height: 0; overflow-y: auto; list-style: none; margin: 0; padding: 8px var(--sp-3, 12px);
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; align-content: start; }
 .seq-list[hidden] { display: none; }
-.seq-card { --indent: 46px; min-width: 0; padding: 10px 12px; cursor: pointer; user-select: none; -webkit-user-select: none; }
-.seq-r1 { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 24px; }
+/* a block is two lines (about 50 px): the number, its name (it gives way first) and its state; then what it runs. Its
+   tools stand at its right across both lines, always faintly there (full on hover or focus: no hover on a touch screen) */
+.seq-card { --indent: 46px; --seq-pad: 4px; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 6px;
+  align-items: center; padding: var(--seq-pad) 8px var(--seq-pad) 10px; cursor: pointer; user-select: none; -webkit-user-select: none; }
+:root.fit-roomy .seq-card { --seq-pad: 6px; }
+.seq-card > .seq-r1 { grid-column: 1; grid-row: 1; }
+.seq-card > .seq-r2 { grid-column: 1; grid-row: 2; }
+.seq-card > .seq-acts { grid-column: 2; grid-row: 1 / span 2; }
+.seq-card > .seq-ed { grid-column: 1 / -1; }
+.seq-r1 { display: flex; align-items: center; gap: 8px; min-width: 0; height: 22px; }
 .seq-grip { flex: none; width: 14px; display: grid; place-items: center; color: var(--muted); opacity: .7; cursor: grab; touch-action: none; }
 .seq-grip svg { width: 14px; height: 14px; }
 .seq-card:hover .seq-grip { opacity: 1; }
 .seq-num { flex: none; min-width: 16px; text-align: right; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.seq-title { flex: 1 1 auto; min-width: 0; font-size: 15px; font-weight: 600; color: var(--text); white-space: nowrap;
+.seq-title { flex: 1 1 auto; min-width: 0; font-size: 15px; line-height: 22px; font-weight: 600; color: var(--text); white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 .seq-flag { flex: none; display: grid; place-items: center; color: var(--warn); }
 .seq-flag svg { width: 16px; height: 16px; stroke-width: 2.4; }
-.seq-card .seq-r1 .chip { flex: none; }
-.seq-r2 { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 22px; margin: 2px 0 0 var(--indent); }
-.seq-sub { flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seq-card .seq-r1 .chip { flex: none; line-height: 1.35; }
+.seq-card .chip.run, .seq-head-main .seq-state.run { background: var(--accent-soft); color: var(--accent); }   /* a tinted pill, as every state */
+.seq-r2 { display: flex; align-items: center; gap: 8px; min-width: 0; height: 20px; margin-left: var(--indent); }
+.seq-sub { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 18px; color: var(--text-2); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
 .seq-note { color: var(--muted); }
-.seq-card.done, .seq-card.skipped { opacity: .85; }
+.seq-sub.seq-err { color: var(--danger); }   /* a failed block says why where it said what it runs */
+/* its state: done dims only its name; skipped, the whole block; the running block has a ring */
+.seq-card.done .seq-title { color: var(--muted); }
+.seq-card.skipped { opacity: .6; }
 .seq-card.running { border-top-color: var(--accent); border-right-color: var(--accent); border-bottom-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent), var(--card-shadow); }
-.seq-err { margin: 3px 0 0 var(--indent); font-size: 13px; color: var(--danger); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* its tools: on hover or focus; on a touch screen always */
-.seq-acts { flex: none; display: flex; align-items: center; gap: 2px; margin: -4px -6px -4px 0; opacity: 0; transition: opacity .12s; }
-.seq-card:hover .seq-acts, .seq-card:focus-within .seq-acts, .seq-card.confirming .seq-acts { opacity: 1; }
-@media (hover: none) { .seq-acts { opacity: 1; } }
-@media (hover: hover) {   /* with a mouse they come over the end of the line, which keeps its whole width meanwhile */
-  .seq-r2 { position: relative; }
-  .seq-acts { position: absolute; right: -6px; top: 50%; transform: translateY(-50%); margin: 0; padding-left: 18px;
-    background: linear-gradient(to right, transparent, var(--card) 16px); }
-  /* a block whose name says it all is one line: its tools come over the end of that line */
-  .seq-card.bare .seq-r2 { position: absolute; top: 10px; right: 12px; width: 0; min-height: 24px; margin: 0; }
-}
+.seq-acts { display: flex; align-items: center; gap: 2px; opacity: .35; transition: opacity .12s; }
+.seq-card:is(:hover, :focus-within, .confirming) .seq-acts { opacity: 1; }
 .seq-act { width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--radius-s); background: none; color: var(--text-2);
   display: grid; place-items: center; cursor: pointer; }
 .seq-act:hover { background: var(--hover); color: var(--text); }
@@ -85,17 +97,23 @@ svg.seq-solid { fill: currentColor; stroke: none; }
 .seq-act.ask { width: auto; padding: 0 10px; font-size: 13px; font-weight: 600; color: var(--danger); background: var(--danger-soft); }
 .seq-act.ask:hover { color: var(--danger); filter: brightness(.97); }
 
-/* the running block's progress */
-.seq-prog { display: flex; align-items: center; gap: 10px; margin: 8px 0 1px var(--indent); }
-.seq-track { position: relative; flex: 1 1 auto; height: 4px; border-radius: 999px; background: var(--muted-soft); overflow: hidden; }
-.seq-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: inherit; background: var(--accent); transition: width .5s ease; }
-.seq-track.indef .seq-bar-fill { width: 30%; transition: none; animation: seq-slide 1.6s ease-in-out infinite; }
-@keyframes seq-slide { from { left: -30%; } to { left: 100%; } }
-@media (prefers-reduced-motion: reduce) {
-  .seq-track.indef .seq-bar-fill { animation: none; left: 0; width: 100%; opacity: .4; }
-  .seq-spin { animation-duration: 2.4s; }
-}
+/* the running block's progress is its own tint, filling it from the left, its front edge softly blinking; with no
+   end known, the whole block lightly tinted. The tint is pale enough that its text keeps 4.5:1 */
+@property --seq-p { syntax: "<percentage>"; inherits: true; initial-value: 0%; }
+.seq-card.running { --seq-tint: color-mix(in srgb, var(--kind, var(--accent)) 16%, var(--card));
+  background: linear-gradient(to right, var(--seq-tint) var(--seq-p), var(--card) var(--seq-p)); transition: --seq-p .6s linear; }
+.seq-card.running.indef { background: color-mix(in srgb, var(--kind, var(--accent)) 8%, var(--card)); }
+.seq-edge { position: absolute; top: 4px; bottom: 4px; left: var(--seq-p); width: 2px; margin-left: -1px; border-radius: 2px;
+  background: var(--kind, var(--accent)); pointer-events: none; animation: seq-blink 1.8s ease-in-out infinite; }
+.seq-card.indef .seq-edge { display: none; }
+@keyframes seq-blink { 50% { opacity: .3; } }
 .seq-ptext { flex: none; font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.seq-ptext:empty { display: none; }
+@media (prefers-reduced-motion: reduce) {   /* nothing moves: the edge stands still, the busy mark is a faint ring */
+  .seq-edge { animation: none; }
+  .seq-card.running { transition: none; }
+  .seq-spin { animation: none; opacity: .5; }
+}
 
 /* ---------- a block's editor, in place */
 .seq-ed { margin: 10px 0 2px var(--indent); padding-top: 10px; border-top: 1px solid var(--line); display: grid;
@@ -114,66 +132,65 @@ svg.seq-solid { fill: currentColor; stroke: none; }
 .seq-ed > .seq-none { justify-self: start; }
 .seq-yaml { margin: 0; padding: 8px 10px; max-height: 200px; overflow: auto; border-radius: var(--radius-s); background: var(--code);
   color: var(--text-2); font: 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-.seq-switch { justify-self: start; display: inline-flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-2); cursor: pointer; }
-.seq-switch input { appearance: none; -webkit-appearance: none; position: relative; flex: none; width: 34px; height: 20px; margin: 0;
-  border-radius: 999px; background: var(--line-strong); cursor: pointer; transition: background .15s; }
-.seq-switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%;
-  background: var(--card); transition: transform .15s; }
-.seq-switch input:checked { background: var(--accent); }
-.seq-switch input:checked::after { transform: translateX(14px); }
-.seq-switch input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (prefers-color-scheme: dark) {
-  :root:where(:not([data-theme="light"])) .seq-switch input::after { background: var(--text-2); }
-  :root:where(:not([data-theme="light"])) .seq-switch input:checked::after { background: var(--accent-ink); }
-}
+.seq-switch { justify-self: start; display: inline-flex; align-items: center; gap: 8px; margin-left: -3px; font-size: 13px;
+  color: var(--text-2); cursor: pointer; }   /* Pause after: the one switch (app.css .switch) and its name */
 
-/* ---------- ＋ Add under the list; the dashed card of an empty sequence */
-.seq-add { width: 100%; min-height: 42px; margin-top: 8px; display: flex; align-items: center; justify-content: center; gap: 6px;
-  border: 1.5px dashed var(--line-strong); border-color: color-mix(in srgb, var(--muted) 60%, transparent);
+/* ---------- ＋ Add under the blocks (a disclosure: the functions under it); the dashed card of an empty sequence */
+.seq-add { flex: none; width: auto; min-height: 36px; margin: 2px var(--sp-3, 12px) var(--sp-2, 8px); display: flex; align-items: center;
+  justify-content: center; gap: 6px; border: 1.5px dashed var(--line-strong); border-color: color-mix(in srgb, var(--muted) 60%, transparent);
   border-radius: var(--radius); background: none; color: var(--text-2); font-size: 14px; font-weight: 600; cursor: pointer; }
 .seq-add:hover, .seq-add.on, .seq-add.drop-on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.seq-add.on { border-style: solid; }
 .seq-add:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.seq-add.empty { min-height: 104px; margin-top: 0; font-size: 15px; }
+.seq-add.empty { min-height: 72px; margin-top: var(--sp-2, 8px); font-size: 15px; }
 .seq-view.seq-wide .seq-add:not(.empty) { display: none; }
 
 /* ---------- dragging: the block under the pointer, and where it lands */
 .seq-card.dragging { opacity: .35; }
 .seq-card.drop-before::before, .seq-card.drop-after::after { content: ""; position: absolute; left: 4px; right: 4px; height: 3px;
   border-radius: 999px; background: var(--accent); pointer-events: none; }
-.seq-card.drop-before::before { top: -7px; }
-.seq-card.drop-after::after { bottom: -7px; }
+.seq-card.drop-before::before { top: -5px; }
+.seq-card.drop-after::after { bottom: -5px; }
 .seq-ghost { position: fixed; left: 0; top: 0; z-index: 90; display: block; margin: 0; list-style: none; pointer-events: none;
   box-shadow: var(--shadow), 0 0 0 1px var(--accent); }
 body.seq-dragging, body.seq-dragging * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
 body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !important; }
 
-/* ---------- the functions: what goes into the sequence */
+/* ---------- the functions: what goes into the sequence, one line each (the name, then where it is when there is room;
+   the whole of it in its tip); the search stays on top of their region */
+.seq-find { position: sticky; top: 0; z-index: 1; margin: 0 calc(-1 * var(--sp-3, 12px)); padding: var(--sp-2, 8px) var(--sp-3, 12px) 2px;
+  background: var(--page); }
 .seq-search { width: 100%; }
-.seq-groups { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
-.seq-grp { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr)); gap: 6px; }
-.seq-gh { grid-column: 1 / -1; margin: 8px 2px 0; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+.seq-groups { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
+.seq-grp { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)); gap: 4px 6px; }
+.seq-gh { grid-column: 1 / -1; margin: 6px 2px 0; font-size: 12px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
   color: var(--muted); }
-.seq-fn { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 4px; min-height: 52px;
-  padding: 7px 6px 7px 11px; cursor: pointer; user-select: none; -webkit-user-select: none; }
+.seq-fn { min-width: 0; display: flex; align-items: center; gap: 8px; height: var(--row-h, 36px); padding: 0 2px 0 10px;
+  border-radius: var(--radius-s); cursor: pointer; user-select: none; -webkit-user-select: none; }
 .seq-fn:hover { border-top-color: var(--line-strong); border-right-color: var(--line-strong); border-bottom-color: var(--line-strong); }
-.seq-fn-name { grid-column: 1; min-width: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.seq-fn-sub { grid-column: 1; min-width: 0; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.seq-fn > .seq-fn-more, .seq-fn > .ask { grid-column: 2; grid-row: 1 / span 2; }
-.seq-fn-more { padding: 4px; opacity: 0; transition: opacity .12s; }
+.seq-fn-name { flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seq-fn-sub { flex: 1 1 0; min-width: 0; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seq-fn > .seq-fn-more, .seq-fn > .ask { flex: none; margin-left: auto; }
+.seq-fn > .ask { height: 28px; }
+.seq-fn-more { width: 28px; height: 28px; padding: 0; opacity: .35; transition: opacity .12s; }
 .seq-fn-more svg { width: 16px; height: 16px; }
-.seq-fn:hover .seq-fn-more, .seq-fn:focus-within .seq-fn-more { opacity: 1; }
-@media (hover: none) { .seq-fn-more { opacity: 1; } }
-.seq-fn-rename { grid-column: 1; width: 100%; padding: 2px 6px; font-size: 14px; font-weight: 600; }
+.seq-fn:is(:hover, :focus-within) .seq-fn-more { opacity: 1; }
+.seq-fn-rename { flex: 1 1 auto; width: 100%; padding: 2px 6px; font-size: 14px; font-weight: 600; }
 .seq-fn.fresh { box-shadow: 0 0 0 2px var(--accent), var(--card-shadow); }
 .seq-fn.sent { box-shadow: 0 0 0 2px var(--accent-soft), var(--card-shadow); }
 .seq-fn.missing .seq-fn-name { text-decoration: line-through; color: var(--muted); }
-.seq-fns-foot { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.seq-fns-foot { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
 
-/* a step, typed: a card of the step's colour with the functions (app.js's step row); a pasted item under them */
-.seq-step-part { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
-.seq-step-part > .seq-gh { margin-top: 8px; }
-.seq-stepcard { padding: 10px 10px 10px 12px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
-.seq-step-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+/* a step, typed: a card of the step's colour with the functions (app.js's step row), one line (Step, Set | Wait |
+   Settle) until it is used: then its fields under that line; a pasted item under them */
+.seq-step-part { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-top: 4px; }
+.seq-stepcard { padding: 3px 4px 3px 10px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; border-radius: var(--radius-s); }
+.seq-stepcard.used { padding-bottom: 8px; }
+.seq-step-head { display: flex; align-items: center; gap: 8px; min-height: calc(var(--row-h, 36px) - 8px); cursor: default; }
+.seq-step-name { flex: none; font-size: 14px; font-weight: 600; }
+.seq-step-head .seq-kinds button { min-height: 28px; padding-inline: 9px; }   /* at least 28 px tall, as every control */
+.seq-step-head { flex-wrap: wrap; row-gap: 4px; }
+.seq-stepcard:not(.used) > :not(.seq-step-head), .seq-stepcard:not(.used) .step-go { display: none; }
 .seq-step-head .step-go { margin-left: auto; }
 .seq-stepcard .step-row { padding-top: 0; border-top: 0; gap: 6px; }
 .seq-stepcard .step-f { flex: 1 1 100%; min-width: 0; gap: 6px; }
@@ -231,3 +248,20 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
 .seq-unit-tag[hidden] { display: none; }
 .seq-count { font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
 .seq-count.bad { color: var(--danger); }
+
+/* ---------- by the pane's width (last: they override what is above) */
+@container seqview (max-width: 460px) {   /* a narrow pane: Pause and Stop by their icons, their names their tips */
+  .seq-bar .seq-hold, .seq-bar .seq-stop { padding: 6px 9px; }
+  .seq-bar .seq-hold > span, .seq-bar .seq-stop > span { display: none; }
+}
+@media (pointer: coarse) {   /* a touch screen: every target 40 px or more (a block's tools fit its two lines) */
+  .seq-act { width: 40px; height: 40px; }
+  .seq-grip { width: 28px; height: 40px; margin: -9px -7px; }   /* on touch only the grip drags */
+  .seq-fn { height: 44px; }
+  .seq-fn-more { width: 40px; height: 40px; }
+  .seq-fn > .ask { height: 40px; }
+  .seq-add { min-height: 44px; }
+  .seq-name, .seq-bar .btn { min-height: 40px; }
+  .seq-more { min-width: 40px; min-height: 40px; }
+  .seq-step-head .seq-kinds button { min-height: 40px; }
+}

@@ -3,20 +3,21 @@
 // app, in AlphainZ's wizard form: three steps, each one card of rows (a title, its value under it, the control at the
 // right), with no sentences. Workspace: the lab's scripts folders, the data folder, and the scripts to import as
 // functions. Model: an API key, ChatGPT, Claude Code, a local model. Instruments: a scan, and the ones found added to
-// the lab. Done or Skip: never again in this browser (lh.welcome), and Home shows. While it shows, body has the class
-// welcome-on (app.js's setupWait waits for it) and the app behind it is inert.
+// the lab. What a step asks for is done by Next (Done: by every step); Back and the dots (to a step already seen) only
+// move. Done or Skip (a quiet link at the top right): never again in this browser (lh.welcome), and Home shows. The
+// page fits the window: a list too long for it (the scripts, the instruments found) scrolls in its own region. While it
+// shows, body has the class welcome-on (app.js's setupWait waits for it) and the app behind it is inert.
 (() => {
   let K = null;   // window.Kelvin, from kelvin:ready
   const SETUP_BUSY = new Set(["connecting", "scanning", "drafting", "reading"]);
   const STEPS = [["workspace", "Workspace"], ["model", "Model"], ["instruments", "Instruments"]];
   const KEYS = [["anthropic_api_key", "Claude"], ["openai_api_key", "OpenAI"], ["gemini_api_key", "Gemini"]];
-  const SHOWN = 12;   // the scripts listed before "N more"
   const W = {
-    boot: null, state: null, gated: false, open: false, step: 0, busy: 0, moving: false, els: {}, setupKey: "",
+    boot: null, state: null, gated: false, open: false, step: 0, seen: 0, busy: 0, moving: false, els: {}, setupKey: "",
     changed: false,   // a key, the local model or ChatGPT is new: the page's list of models is redone at the end
     scripts: { folders: [], counts: null, msg: "", full: "", note: "" },
     data: { path: null, msg: "", full: "" },
-    files: { list: null, all: false, ticked: new Set(), have: new Set(), failed: new Map(), done: 0, todo: 0, running: false,
+    files: { list: null, ticked: new Set(), have: new Set(), failed: new Map(), done: 0, todo: 0, running: false,
              labels: null },   // labels: each folder's name in the list, when its scripts come from several
     keys: {}, typed: {}, keyMsg: {},
     gpt: { signed: null, waiting: false, timer: 0, msg: "" },
@@ -158,7 +159,7 @@
       const r = await K.api("/api/instruments/scripts-folder", { body: { folder } });
       Object.assign(st, { folders: r.folders || [], counts: { scripts: r.scripts || 0, instruments: r.instruments || 0 },
                           msg: "", full: "", note: (r.folded || []).join("; ") });
-      Object.assign(W.files, { list: null, all: false });
+      W.files.list = null;
       W.files.failed.clear();
       ok = true;
     } catch (e) {
@@ -268,22 +269,15 @@
     el.textContent = text;
     el.className = "wl-value" + (tone ? " " + tone : "");
   }
+  // a list in the card, every line of it: it takes the room left under the rows above it, and scrolls there when longer
+  const list = (...items) => K.h("div", { class: "wl-list", "data-region": "welcome-list" }, ...items);
   function filesBlock() {
     const f = W.files;
     if (!W.scripts.folders.length || !f.list) return block("files");
     const [text, tone] = filesCount();
     const count = value(text, tone);
     count.setAttribute("data-v", "count");
-    const shown = f.all ? f.list : f.list.slice(0, SHOWN);
-    const more = f.list.length - shown.length;
-    return block("files", row("Import", count), ...shown.map(fileItem),
-      more > 0 ? K.h("button", { class: "wl-row wl-more", type: "button", "data-f": "files-more",
-        onclick: () => {   // the rest of the list, the focus on the first of them
-          f.all = true;
-          redraw("files");
-          const first = W.els.group.querySelectorAll('[data-row="files"] .wl-check')[SHOWN];
-          if (first) first.focus({ preventScroll: true });
-        } }, more + " more") : null);
+    return block("files", row("Import", count), f.list.length ? list(...f.list.map(fileItem)) : null);
   }
   function fileItem(x) {   // its name, then where it is in its folder (after the folder's name, from several folders)
     const f = W.files, done = f.have.has(norm(x.path)), failed = f.failed.get(x.path);
@@ -471,7 +465,7 @@
   function foundBlock() {
     const s = W.scan;
     if (s.phase === "scanning" || !s.found.length) return block("found");
-    return block("found", ...s.found.map((f) => {
+    return block("found", list(...s.found.map((f) => {
       const added = s.added.has(f.address);
       const label = f.in_lab || (f.card_id ? f.model || f.card_id
         : String(f.idn || "").split(",").slice(0, 2).join(" ").trim() || "Unknown");
@@ -483,7 +477,7 @@
         });
       return item(box, label, f.address, added ? chip("Added", "ok") : f.in_lab ? chip("In lab", "line") : null,
         f.idn || f.how || null);
-    }));
+    })));
   }
   async function scan() {
     const s = W.scan;
@@ -546,11 +540,13 @@
   function build(root) {
     const h = K.h;
     const dots = STEPS.map(([, title], i) => h("button", { class: "wl-dot", type: "button", role: "tab", title,
-                                                          "aria-label": title, onclick: () => safe(go, i) }));
+                                                          "aria-label": title, onclick: () => safe(goTo, i) }));
     const where = h("span", { class: "wl-where" });
     const group = h("div", { class: "wl-group", role: "group" });
-    const back = btn("Skip", "ghost", () => (W.step === 0 ? finish() : go(W.step - 1)), { f: "back" });
-    const next = btn("Next", "primary", () => go(W.step + 1), { f: "next" });
+    const skip = h("button", { class: "wl-skip", type: "button", "data-f": "skip", title: "Settings has all of this",
+                               onclick: () => safe(finish) }, "Skip");
+    const back = btn("Back", "ghost", () => goTo(W.step - 1), { f: "back" });
+    const next = btn("Next", "primary", () => forward(), { f: "next" });
     const spin = spinner();
     spin.hidden = true;
     root.setAttribute("role", "dialog");
@@ -560,19 +556,20 @@
       h("header", { class: "wl-head" },
         h("span", { class: "logo", "aria-hidden": "true", html: K.MARK }),
         h("div", { class: "wl-titles" }, h("h1", { class: "display wl-h1", id: "wl-title" }, "Welcome to Kelvin"),
-          W.boot && W.boot.version ? chip("v" + W.boot.version, "line") : null)),
+          W.boot && W.boot.version ? chip("v" + W.boot.version, "line") : null), skip),
       h("div", { class: "wl-steps" }, h("div", { class: "wl-dots", role: "tablist", "aria-label": "Steps" }, ...dots), where),
       group,
       h("footer", { class: "wl-foot" }, back, h("span", { class: "spacer" }), spin, next)));
-    W.els = { root, dots, where, group, back, next, spin };
+    W.els = { root, dots, where, group, skip, back, next, spin };
   }
   function footer() {
     const e = W.els;
     if (!e.next) return;
     const busy = W.busy > 0 || W.moving;
-    e.back.textContent = W.step === 0 ? "Skip" : "Back";
+    e.back.hidden = W.step === 0;   // nothing before the first step
     e.next.textContent = W.step === STEPS.length - 1 ? "Done" : "Next";
-    e.back.disabled = e.next.disabled = busy;
+    e.back.disabled = e.next.disabled = e.skip.disabled = busy;
+    e.dots.forEach((d, i) => { d.disabled = busy || i > W.seen; });   // only to a step already seen
     e.spin.hidden = !W.moving;   // an action in the card shows its own
   }
   function render() {
@@ -590,34 +587,52 @@
       if (W.boot && W.boot.claude_code && !W.cc) ccStatus();
     }
   }
-  // leaving a step: what was typed and not yet used is used; going on, the ticked scripts are imported and the ticked
-  // instruments added. false: stay (something to see first, or a refusal on its row)
-  async function leave(forward) {
-    const id = STEPS[W.step][0];
-    if (id === "workspace") return forward ? importTicked() : true;   // its folders were kept as they were chosen
+  // what a step asks for, done: the ticked scripts imported, what was typed saved, the ticked instruments added.
+  // false: stay (a refusal on its row)
+  async function apply(id) {
+    if (id === "workspace") return importTicked();   // its folders were kept as they were chosen
     if (id === "model") {
       let ok = true;
       for (const [name] of KEYS) if (!W.keys[name]) ok = (await saveKey(name, null, true)) && ok;
       if (!W.local.url) ok = (await saveLocal(null, true)) && ok;
       return ok;
     }
-    return forward && toAdd().length ? addFound(null) : true;
+    return toAdd().length ? addFound(null) : true;
   }
-  async function go(target) {
-    if (!W.open || W.moving || W.busy || target === W.step || target < 0) return;
+  // Next: this step's, then the next step. Done: every step's (one reached by its dot was never left by Next), then
+  // the end; a step that refuses is shown, its refusal on its row
+  async function forward() {
+    if (!W.open || W.moving || W.busy) return;
+    const last = W.step === STEPS.length - 1;
     W.moving = true;
     footer();
-    let ok = false;
-    try { ok = await leave(target > W.step); } catch (e) { warn(e); }
+    let ok = true, at = W.step;
+    try {
+      for (const i of last ? STEPS.map((s, k) => k) : [W.step]) {
+        at = i;
+        ok = await apply(STEPS[i][0]);
+        if (!ok) break;
+      }
+    } catch (e) { ok = false; warn(e); }
     W.moving = false;
     footer();
-    if (ok && W.open && target >= STEPS.length) { finish(); return; }
-    if (ok && W.open) {
-      W.step = target;
-      render();
-      W.els.root.scrollTop = 0;
-    }
+    if (!W.open) return;
+    if (ok && last) { finish(); return; }
+    toStep(ok ? W.step + 1 : at);
     refocus();
+  }
+  // Back and the dots: a step already seen, as it was left; nothing is imported or saved on the way
+  function goTo(target) {
+    if (!W.open || W.moving || W.busy || target === W.step || target < 0 || target > W.seen) return;
+    toStep(target);
+    refocus();
+  }
+  function toStep(step) {
+    if (step === W.step) return;
+    W.step = step;
+    W.seen = Math.max(W.seen, step);
+    render();
+    W.els.root.scrollTop = 0;
   }
   function show() {
     const root = document.getElementById("welcome");
@@ -701,6 +716,6 @@
     if (t && t.closest && t.closest("button, a, textarea, select, [contenteditable], input:not([type=checkbox])")) return;
     if (document.querySelector("dialog[open]")) return;   // a PIN asked meanwhile
     e.preventDefault();
-    safe(go, W.step + 1);
+    safe(forward);
   });
 })();

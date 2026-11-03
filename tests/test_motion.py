@@ -45,7 +45,7 @@ def test_the_top_bar_buttons_never_move_and_say_their_names():
     assert "transition-delay: .12s" in motion
     assert (".topbar .topbar-right .pill { transition: background-color .25s ease, color .25s ease, border-color .25s ease, "
             "box-shadow .25s ease; }") in motion   # their colours fade; nothing that moves them
-    # the menu button's words (Hide / Show conversations) too, in the same tip, from its left at the window's edge
+    # the menu button's name (Conversations, always) too, in the same tip, from its left at the window's edge
     assert "b.dataset.tip = say;" in _fn(JS, "syncSide")
     assert "#toggle-sidebar { position: relative; }" in motion
     assert "#toggle-sidebar[data-tip]::after { left: 0; transform: translate(0, -4px); }" in motion
@@ -61,7 +61,14 @@ def test_what_comes_in_and_what_moves():
         assert text in motion, text
     ease = _fn(JS, "easeIn")
     assert 'el.classList.add("k-in")' in ease and 'el.classList.remove("k-in")' in ease and "e.target !== el" in ease
-    assert "if (ease && !folded) easeIn(part);" in JS and "if (!folded) easeIn(part);" in JS   # the Lab's, Settings'
+    assert "if (!folded) easeIn(part);" in JS   # Settings' folds
+    # the Lab's parts open by height: their rows go from 0fr to 1fr (.2 s; shut in .12 s), at once from the keyboard
+    folds = _fn(JS, "initLabFolds")
+    assert 'part.classList.toggle("open", !folded)' in folds and "body.inert = folded" in folds
+    assert 'part.classList.toggle("still", !e.detail)' in folds
+    lab = CSS[CSS.index("/* ===== fit D"):CSS.index("/* ===== end fit D")]
+    assert "#labpanel .lab-part.open { grid-template-rows: auto 1fr; transition-duration: .2s; }" in lab
+    assert "transition: grid-template-rows .12s var(--ease-in)" in lab and ".lab-part.still" in lab
     flip_from, flip_to = _fn(SEQ, "flipFrom"), _fn(SEQ, "flipTo")
     assert "if (!SEQ.drawn || calm()) return null;" in flip_from and "getBoundingClientRect().top" in flip_from
     assert "c.el.animate(" in flip_to and "rise(c.el)" in flip_to and "id === skip" in flip_to

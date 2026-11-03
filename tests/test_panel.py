@@ -44,3 +44,31 @@ def test_unresponsive_instrument_shows_as_error(tmp_path):
     lockin = panel(rt)["lockin"]
     assert lockin["state"] == "error"
     assert all(r["value"] == "no response" for r in lockin["readings"])
+
+
+def test_the_lab_panel_never_scrolls_and_its_controls_say_their_state():
+    """The page's Lab panel (fit D): it never scrolls as a whole, each open part scrolls inside (a region); the folds
+    are kept by their part's id; Add… and Settings (n) are disclosures; the one switch; Mine | Everyone a radio group;
+    the panel only says Locked (the one Unlock… is in the notice row); Team chat's messages are its region."""
+    import pytest
+    pytest.importorskip("starlette")
+    from labharness.web.app import STATIC
+    page = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    css = (STATIC / "app.css").read_text(encoding="utf-8")
+    for part in ("instruments", "watches", "memory", "activity"):
+        assert 'data-part="%s"' % part in page and 'id="lab-part-%s" class="lab-part-body" data-region="lab-part"' % part in page
+    assert '<div id="lab-pending" data-region="lab-part">' in page and 'data-region="team"' in page
+    assert 'id="hands-done-panel"' not in page and "<span>Locked</span>" in page
+    assert 'id="watch-add-toggle" class="btn small disclose" type="button" aria-expanded="false" aria-controls="watch-form"' in page
+    assert 'id="labmem-add" class="btn small disclose" type="button" aria-expanded="false" aria-controls="labmem-form"' in page
+    assert 'id="activity-who" class="seg" role="radiogroup"' in page and 'id="inst-seg" class="seg" role="radiogroup"' in page
+    start = js.index("function initLabFolds(")
+    folds = js[start:js.index("\n  }\n", start)]
+    assert '"lh.labFold." + id' in folds and 'store("lh.fold." + name)' in folds and "body.inert = folded" in folds
+    assert 'class: "switch inst-switch"' in js and '"aria-busy"' in js and '"Not switched: "' in js
+    assert '"Settings (" + inst.settings.length + ")"' in js and '"Show settings"' not in js
+    assert 'b.setAttribute("aria-checked", String(on))' in js and 'store("lh.labEveryone"' in js
+    lab = css[css.index("/* ===== fit D"):css.index("/* ===== end fit D")]
+    assert "grid-auto-rows: minmax(var(--lab-row), auto); align-content: start; overflow: clip;" in lab
+    assert "@container lab (min-width: 900px)" in lab and "/* v3A */" in lab and "/* /v3A */" in lab

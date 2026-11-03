@@ -72,6 +72,9 @@
     const a = document.activeElement;
     return !!(a && root && root.contains(a) && (a.matches("input, select, textarea") || a.isContentEditable));
   };
+  // the page's size (a CSS zoom on the page): a length from the pointer or a rect, written into the page, is divided by
+  // it (rects and the pointer are the window's pixels, the page's lengths its own)
+  const zoom = () => (K && typeof K.zoom === "function" && Number(K.zoom())) || 1;
   const items = () => (SEQ.q && SEQ.q.items) || [];
   const running = () => !!SEQ.q && (SEQ.q.state === "running" || SEQ.q.state === "pausing");
   const base = (p) => String(p || "").split(/[\\/]/).pop();
@@ -388,13 +391,15 @@
   }
   // in sight: the Runs pane open on the Sequence
   const inSight = () => !K.$("runpane").hidden && !K.$("seq-view").hidden;
-  function say(text) {
+  function say(text) {   // in the state's place in the bar, for a few seconds
     const m = SEQ.el.msg;
     if (!m) return;
-    m.textContent = firstLine(text);
+    const line = firstLine(text);
+    m.textContent = line;
     m.title = String(text || "");
+    SEQ.el.head.classList.toggle("saying", !!line);
     clearTimeout(SEQ.msgTimer);
-    SEQ.msgTimer = setTimeout(() => { m.textContent = ""; m.title = ""; }, 6000);
+    SEQ.msgTimer = setTimeout(() => { m.textContent = ""; m.title = ""; SEQ.el.head.classList.remove("saying"); }, 6000);
   }
 
   // ------------------------------------------------------------------ building the pane once
@@ -436,7 +441,8 @@
     const name = h("input", { class: "seq-name", type: "text", spellcheck: "false", autocomplete: "off", maxlength: "80",
                               "aria-label": "Sequence name", placeholder: "Sequence" });
     const chip = h("span", { class: "chip line seq-state" }, "Idle");
-    const head = h("div", { class: "seq-head-main" }, name, chip);
+    const msg = h("span", { class: "seq-msg", role: "status" });
+    const head = h("div", { class: "seq-head-main" }, name, chip, msg);
     name.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); guard(renameSeq); name.blur(); }
       else if (e.key === "Escape") { e.preventDefault(); name.value = (SEQ.q && SEQ.q.name) || ""; sizeName(); name.blur(); }
@@ -444,13 +450,16 @@
     name.addEventListener("input", sizeName);
     name.addEventListener("blur", () => guard(renameSeq));
 
-    const start = h("button", { class: "btn primary seq-go", type: "button" }, ico("play", true), h("span", {}, "Start"));
-    const pause = h("button", { class: "btn seq-hold", type: "button", hidden: true }, ico("pause", true), h("span", {}, "Pause"));
-    const stop = h("button", { class: "btn seq-stop", type: "button", hidden: true }, ico("stop", true), h("span", {}, "Stop"));
-    const msg = h("span", { class: "seq-msg", role: "status" });
+    // each button keeps its name as its label and tip: in a narrow pane Pause and Stop show only their icons
+    const start = h("button", { class: "btn primary seq-go", type: "button", "aria-label": "Start" }, ico("play", true),
+      h("span", {}, "Start"));
+    const pause = h("button", { class: "btn seq-hold", type: "button", hidden: true, title: "Pause", "aria-label": "Pause" },
+      ico("pause", true), h("span", {}, "Pause"));
+    const stop = h("button", { class: "btn seq-stop", type: "button", hidden: true, title: "Stop", "aria-label": "Stop" },
+      ico("stop", true), h("span", {}, "Stop"));
     const more = h("button", { class: "icon-btn seq-more", type: "button", title: "More", "aria-label": "More",
                                "aria-haspopup": "menu" }, K.icon("dots"));
-    const bar = h("div", { class: "seq-bar" }, head, start, pause, stop, more, msg);
+    const bar = h("div", { class: "seq-bar" }, head, start, pause, stop, more);
     start.addEventListener("click", () => guard(startSeq));
     pause.addEventListener("click", () => guard(op, { op: "pause" }));
     stop.addEventListener("click", () => guard(stopSeq));
@@ -460,16 +469,31 @@
                                 autocomplete: "off", "aria-label": "Search functions" });
     const groups = h("div", { class: "seq-groups" });
     const newFn = h("button", { class: "btn small primary", type: "button" }, "＋ New function");   // as the portal's map names it
-    const newScan = h("button", { class: "btn small ghost", type: "button" }, "New scan");
-    // a step typed (Set, Wait, Wait until settled) and any item as written: app.js's step row and paste form
+    const newScan = h("button", { class: "btn small", type: "button" }, "New scan");
+    // a step typed (Set, Wait, Wait until settled) and any item as written: app.js's step row and paste form. The step
+    // is one line (Step, Set | Wait | Settle) until it is used
     const stepRow = K.$("step-row"), paste = K.$("queue-paste"), pasteOpen = K.$("queue-paste-open");
-    const step = stepRow ? h("div", { class: "seq-step-part" }, h("div", { class: "seq-gh" }, "Step"),
-      h("div", { class: "kcard k-step seq-stepcard" },
-        h("div", { class: "seq-step-head" }, stepKinds(), stepRow.querySelector(".step-go")), stepRow, K.$("step-msg"))) : null;
-    const fns = h("section", { class: "seq-fns", "aria-label": "Functions", hidden: true }, search, groups, step,
-      h("div", { class: "seq-fns-foot" }, newFn, newScan, pasteOpen), paste);
+    const stepCard = stepRow ? h("div", { class: "kcard k-step seq-stepcard" },
+      h("div", { class: "seq-step-head" }, h("span", { class: "seq-step-name" }, "Step"), stepKinds(),
+        stepRow.querySelector(".step-go")), stepRow, K.$("step-msg")) : null;
+    const step = stepCard ? h("div", { class: "seq-step-part" }, stepCard) : null;
+    const fns = h("section", { id: "seq-fns", class: "seq-fns", "aria-label": "Functions", "data-region": "seq-fns", hidden: true },
+      h("div", { class: "seq-find" }, search), groups, step, h("div", { class: "seq-fns-foot" }, newFn, newScan, pasteOpen), paste);
     const holder = K.$("seq-step");
     if (holder && stepRow) holder.remove();   // its parts are the functions' now
+    if (stepCard) {
+      stepCard.addEventListener("focusin", () => guard(syncStep));
+      stepCard.addEventListener("focusout", () => setTimeout(() => guard(syncStep), 0));
+      stepCard.addEventListener("input", () => guard(syncStep));
+      stepCard.querySelector(".seq-step-head").addEventListener("click", (e) => guard(() => {
+        if (stepCard.classList.contains("used") || e.target.closest("button, input, select")) return;
+        stepCard.classList.add("used");   // a click on its line opens it, at its first field
+        const first = stepRowField();
+        if (first) first.focus();
+      }));
+      const save = K.$("step-save");   // a queued step opened here to edit (Save to #n): its fields show
+      if (save && window.MutationObserver) new MutationObserver(() => guard(syncStep)).observe(save, { attributes: true, attributeFilter: ["hidden"] });
+    }
     search.addEventListener("input", () => { SEQ.filter = search.value; guard(renderFns); });
     search.addEventListener("keydown", (e) => {
       if (e.key !== "Escape" || !search.value) return;
@@ -480,20 +504,30 @@
     newFn.addEventListener("click", () => guard(newFunction));
     newScan.addEventListener("click", () => guard(() => K.openEditor()));
 
-    const list = h("ol", { class: "seq-list", "aria-label": "Sequence" });
-    const add = h("button", { class: "seq-add", type: "button", "aria-expanded": "false" }, "＋ Add");
+    const list = h("ol", { class: "seq-list", "aria-label": "Sequence", "data-region": "seq-blocks" });
+    // ＋ Add: in a narrow pane the functions open under the blocks (both in sight, each scrolling on its own), and it
+    // closes them again; beside the blocks (wide) they are always there, and it goes to their search
+    const add = h("button", { class: "seq-add", type: "button", "aria-expanded": "false", "aria-controls": "seq-fns" }, "＋ Add");
     add.addEventListener("click", () => guard(() => {
       if (SEQ.wide) { search.focus(); return; }
       SEQ.adding = !SEQ.adding;
       showFns();
-      if (SEQ.adding) { loadLib(); requestAnimationFrame(() => fns.scrollIntoView({ block: "nearest" })); }
+      if (SEQ.adding) loadLib();
     }));
     const main = h("div", { class: "seq-main" }, list, add);
     const cols = h("div", { class: "seq-cols" }, fns, main);
     const body = K.$("seq-body");
     body.replaceChildren(bar, cols);
-    Object.assign(SEQ.el, { pane: K.$("seq-view"), body, name, chip, start, pause, stop, msg, more, bar, fns, search, groups,
-                            newFn, list, add, main, cols });
+    Object.assign(SEQ.el, { pane: K.$("seq-view"), body, name, chip, msg, head, start, pause, stop, more, bar, fns, search, groups,
+                            newFn, list, add, main, cols, stepCard });
+  }
+  // the step's card: open while it has the keyboard, a value typed, or a queued step in it to edit; else one line
+  function syncStep() {
+    const card = SEQ.el.stepCard, row = K.$("step-row"), save = K.$("step-save");
+    if (!card || !row) return;
+    const typed = [...row.querySelectorAll("input")].some((x) => x.value.trim());
+    const used = card.contains(document.activeElement) || typed || !!(save && !save.hidden);
+    card.classList.toggle("used", used);
   }
   // the step row's kind (its own list, kept for app.js) as a switch: Set | Wait | Settle
   function stepKinds() {
@@ -512,9 +546,12 @@
       const b = h("button", { type: "button", role: "radio", title }, label);
       b.dataset.v = v;
       b.addEventListener("click", () => guard(() => {
-        if (sel.value === v) return;
-        sel.value = v;
-        sel.dispatchEvent(new Event("change"));   // app.js shows that kind's fields
+        const card = box.closest(".seq-stepcard");
+        if (card) card.classList.add("used");   // its fields show, to be typed in
+        if (sel.value !== v) {
+          sel.value = v;
+          sel.dispatchEvent(new Event("change"));   // app.js shows that kind's fields
+        }
         const first = stepRowField();
         if (first) first.focus();
       }));
@@ -532,18 +569,24 @@
     if (window.CSS && CSS.supports && CSS.supports("field-sizing", "content")) return;
     n.size = Math.max(6, Math.min(48, (n.value || n.placeholder).length + 1));
   }
-  function fit() {   // wide (full screen, or dragged wide): the functions are a column of their own
-    const w = SEQ.el.pane.getBoundingClientRect().width;
-    const wide = w >= 820;
-    if (wide === SEQ.wide && SEQ.fitted) return;
+  // from 600 px of pane (in the page's own pixels) the functions are a column of their own beside the blocks; from
+  // 1100 (full screen) a wider one, their rows in two columns
+  function fit() {
+    const w = SEQ.el.pane.getBoundingClientRect().width / zoom();
+    if (!w) return;   // out of sight: as it was
+    const wide = w >= 600, roomy = w >= 1100;
+    if (wide === SEQ.wide && roomy === SEQ.roomy && SEQ.fitted) return;
     SEQ.fitted = true;
     SEQ.wide = wide;
+    SEQ.roomy = roomy;
     SEQ.el.pane.classList.toggle("seq-wide", wide);
+    SEQ.el.pane.classList.toggle("seq-roomy", roomy);
     showFns();
   }
   function showFns() {
     const on = SEQ.wide || SEQ.adding;
     SEQ.el.fns.hidden = !on;
+    SEQ.el.pane.classList.toggle("seq-adding", !SEQ.wide && SEQ.adding);
     SEQ.el.add.setAttribute("aria-expanded", String(!SEQ.wide && SEQ.adding));
     SEQ.el.add.classList.toggle("on", !SEQ.wide && SEQ.adding);
     if (on) renderFns();
@@ -583,13 +626,34 @@
     if (chip.textContent !== label) chip.textContent = label;
     chip.title = title;
   }
+  // what Start does now, offered only when it can act: Start; Resume after a pause; Retry after a pause at a failed
+  // block (that block again, then on). Its name stays while it works (a turning mark instead of ▶)
+  function startKind(q) {
+    const all = q.items || [];
+    if (q.state !== "paused" || !all.length) return { label: "Start" };
+    const last = all.filter((i) => FINISHED.has(i.status) && i.finished).sort((a, b) => a.finished - b.finished).pop();
+    const asked = /^(paused by|stopped by|paused after|Kelvin restarted)/.test(q.reason || "");   // a person's pause, or a restart
+    if (last && last.status === "failed" && !asked) return { label: "Retry", item: last };
+    return { label: "Resume" };
+  }
   function renderBar() {
     const q = SEQ.q, st = q.state || "idle", busy = st === "running" || st === "pausing";
     const { start, pause, stop } = SEQ.el;
     start.hidden = busy;
-    start.disabled = SEQ.starting || !q.waiting;
-    const label = st === "paused" && !SEQ.starting && (q.items || []).length ? "Resume" : "Start";
-    start.replaceChildren(SEQ.starting ? K.h("span", { class: "seq-spin", "aria-hidden": "true" }) : ico("play", true), K.h("span", {}, label));
+    const kind = SEQ.starting ? SEQ.starting : startKind(q);
+    const can = !!kind.item || !!q.waiting;
+    start.disabled = !!SEQ.starting || !can;
+    const n = kind.item ? items().indexOf(kind.item) + 1 : 0;
+    const tip = SEQ.starting ? "" : kind.item ? "Run block " + n + " again, then go on"
+      : can ? "" : (q.items || []).length ? "Nothing waiting: ↺ on a block puts it back in line" : "Nothing to run yet: ＋ Add";
+    if (start.title !== tip) start.title = tip;
+    if (start.getAttribute("aria-label") !== kind.label) start.setAttribute("aria-label", kind.label);
+    const text = start.lastChild && start.lastChild.textContent;
+    if (text !== kind.label || start.classList.contains("busy") !== !!SEQ.starting) {
+      start.classList.toggle("busy", !!SEQ.starting);
+      start.replaceChildren(SEQ.starting ? K.h("span", { class: "seq-spin", "aria-hidden": "true" }) : ico(kind.label === "Retry" ? "again" : "play", kind.label !== "Retry"),
+        K.h("span", {}, kind.label));
+    }
     pause.hidden = st !== "running";
     stop.hidden = !busy;
   }
@@ -659,10 +723,11 @@
   }
   function flipTo(at, skip) {
     if (!at) return;
+    const z = zoom();
     for (const [id, c] of SEQ.cards) {
       if (id === skip || !c.el.isConnected) continue;
       if (!at.has(id)) { rise(c.el); continue; }
-      const dy = at.get(id) - c.el.getBoundingClientRect().top;
+      const dy = (at.get(id) - c.el.getBoundingClientRect().top) / z;   // the window's pixels, as the page's
       if (Math.abs(dy) > 1 && c.el.animate) {
         c.el.animate([{ transform: "translateY(" + dy + "px)" }, { transform: "none" }],
                      { duration: 340, easing: "cubic-bezier(.2, .75, .2, 1)" });
@@ -702,29 +767,29 @@
     const r1 = h("div", { class: "seq-r1" },
       h("span", { class: "seq-grip", "aria-hidden": "true" }, ico("grip", true)),
       h("span", { class: "seq-num" }, String(i + 1)),
-      h("span", { class: "seq-title" }, look.name),
+      h("span", { class: "seq-title", title: look.name }, look.name),
       it.then_pause && !FINISHED.has(it.status)
         ? h("span", { class: "seq-flag", title: "Pause after", "aria-label": "Pause after" }, ico("hold")) : null,
       chip ? h("span", { class: "chip " + chip[1] }, chip[0]) : null);
-    const sub = summaryOf(it, look);
-    if (!sub && !it.note) li.classList.add("bare");   // its name says it all: one line
-    const r2 = h("div", { class: "seq-r2" },
-      h("span", { class: "seq-sub", title: [sub, it.note].filter(Boolean).join(" · ") || null }, sub,
-        it.note ? h("span", { class: "seq-note" }, (sub ? " · " : "") + it.note) : null),
-      acts(it));
-    const parts = [r1, r2];
-    if (it.status === "running") parts.push(progressRow());
-    if (it.status === "failed" && it.message) parts.push(h("div", { class: "seq-err", title: it.message }, firstLine(it.message)));
-    else if (it.kind === "script" && it.problem && !FINISHED.has(it.status)) {   // its file is gone or can't be read
-      parts.push(h("div", { class: "seq-err", title: it.problem }, firstLine(it.problem)));
-    }
+    // the second line: what it runs; a failed block's reason, or a script whose file is gone, in its place
+    const sub = summaryOf(it, look), what = [sub, it.note].filter(Boolean).join(" · ");
+    const why = it.status === "failed" && it.message ? it.message
+      : it.kind === "script" && it.problem && !FINISHED.has(it.status) ? it.problem : "";
+    const line = why
+      ? h("span", { class: "seq-sub seq-err", title: why + (what ? "\n" + what : "") }, firstLine(why))
+      : h("span", { class: "seq-sub", title: what || null }, sub, it.note ? h("span", { class: "seq-note" }, (sub ? " · " : "") + it.note) : null);
+    const running = it.status === "running";
+    const r2 = h("div", { class: "seq-r2" }, line, running ? h("span", { class: "seq-ptext" }) : null);
+    const parts = [r1, r2, acts(it)];   // its tools at its right, across both lines (seq.css)
+    if (running) parts.push(h("span", { class: "seq-edge", "aria-hidden": "true" }));
     if (SEQ.edit.has(it.id)) {
       const ed = editor(it, look);
       if (SEQ.opening === it.id) { ed.classList.add("seq-ed-in"); SEQ.opening = null; }
       parts.push(ed);
     }
     li.replaceChildren(...parts);
-    if (it.status === "running") updateProgress(li.querySelector(".seq-prog"), it);
+    if (running) updateProgress(li, it);
+    else { li.style.removeProperty("--seq-p"); li.classList.remove("indef"); }
   }
   function acts(it) {
     const h = K.h, box = h("span", { class: "seq-acts" }), id = it.id;
@@ -791,12 +856,7 @@
     }
   }
 
-  // ---------- the running block's progress, in place on every tick
-  function progressRow() {
-    const h = K.h;
-    return h("div", { class: "seq-prog" }, h("span", { class: "seq-track" }, h("span", { class: "seq-bar-fill" })),
-      h("span", { class: "seq-ptext" }));
-  }
+  // ---------- the running block's progress, in place on every tick: its tint (--seq-p) and how far, in words
   function etaNow(id, eta) {   // the time left the server last said, counted down since
     if (eta == null || !isFinite(eta)) return null;
     const s = SEQ.seen.get(id);
@@ -827,18 +887,21 @@
     }
     return { frac: null, text: it.started ? clock(now - it.started) : "" };
   }
-  function updateProgress(row, it) {
-    if (!row) return;
-    const p = progressOf(it), track = row.firstChild, fill = track.firstChild, text = row.lastChild;
-    track.classList.toggle("indef", p.frac == null);
-    fill.style.width = p.frac == null ? "" : Math.max(0, Math.min(100, 100 * p.frac)).toFixed(1) + "%";
-    if (text.textContent !== p.text) text.textContent = p.text;
+  function updateProgress(card, it) {
+    if (!card) return;
+    const p = progressOf(it), text = card.querySelector(".seq-ptext");
+    card.classList.toggle("indef", p.frac == null);
+    const at = p.frac == null ? "" : Math.max(0, Math.min(100, 100 * p.frac)).toFixed(1) + "%";
+    if (card.style.getPropertyValue("--seq-p") !== at) {
+      if (at) card.style.setProperty("--seq-p", at); else card.style.removeProperty("--seq-p");
+    }
+    if (text && text.textContent !== p.text) text.textContent = p.text;
   }
   function tick() {
     const it = items().find((i) => i.status === "running");
     if (!it) return;
     const c = SEQ.cards.get(it.id);
-    if (c) updateProgress(c.el.querySelector(".seq-prog"), it);
+    if (c) updateProgress(c.el, it);
   }
 
   // ---------- a block's editor, in place
@@ -908,21 +971,35 @@
       const b = h("button", { class: "btn small", type: "button" }, K.icon("pencil"), h("span", {}, "Edit scan"));
       b.addEventListener("click", (e) => { e.stopPropagation(); guard(() => K.openEditor(null, it.id)); });
       box.append(b);
-    } else box.append(h("pre", { class: "seq-yaml" }, String(it.text || "").trim()));
-    const sw = h("input", { type: "checkbox", role: "switch", "aria-label": "Pause after" });
-    sw.checked = !!it.then_pause;
-    sw.addEventListener("change", () => guard(op, { op: "then_pause", item: it.id, value: sw.checked }));
+    } else box.append(h("pre", { class: "seq-yaml", "data-region": "seq-blocks" }, String(it.text || "").trim()));
+    // Pause after: the one switch (app.css .switch). It turns at once, busy while the server answers; a refusal puts
+    // it back as the server has it (op draws the blocks again) and says why
+    const sw = h("button", { class: "switch", type: "button", role: "switch", "aria-checked": String(!!it.then_pause),
+                             "aria-label": "Pause after", "data-k": "then-pause" }, h("span", { "aria-hidden": "true" }));
+    sw.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (sw.getAttribute("aria-busy") === "true") return;
+      const want = sw.getAttribute("aria-checked") !== "true";
+      sw.setAttribute("aria-checked", String(want));
+      sw.setAttribute("aria-busy", "true");
+      guard(() => op({ op: "then_pause", item: it.id, value: want }).finally(() => sw.removeAttribute("aria-busy")));
+    });
     box.append(h("label", { class: "seq-switch" }, sw, h("span", {}, "Pause after")));
     return box;
   }
 
   // ------------------------------------------------------------------ the control bar
   async function startSeq() {
-    SEQ.starting = true;
+    if (SEQ.starting || !SEQ.q) return;
+    const kind = startKind(SEQ.q);
+    SEQ.starting = kind;
     renderBar();
     const pending = setTimeout(() => { if (SEQ.starting) say("Waiting for approval"); }, 1200);
-    try { await op({ op: "start" }); }
-    finally {
+    try {
+      // Retry: the failed block back in line where it is (the first waiting), then the queue on from there
+      if (kind.item && !(await op({ op: "again", item: kind.item.id }))) return;
+      await op({ op: "start" });
+    } finally {
       clearTimeout(pending);
       SEQ.starting = false;
       if (SEQ.el.msg.textContent === "Waiting for approval") say("");
@@ -945,9 +1022,11 @@
   }
   function moreMenu(anchor) {
     const q = SEQ.q || {}, all = q.items || [], cont = q.on_error === "continue";
+    // a choice of two (radio items, a dot on the chosen one) and a setting that acts at once (a checkbox item, its box
+    // drawn ticked or empty): popMenu draws them by their role
     const menu = [{ heading: "On a failure" },
-      { label: "Pause", checked: !cont, onClick: () => { if (cont) op({ op: "on_error", value: "pause" }); } },
-      { label: "Go on", checked: cont, onClick: () => { if (!cont) op({ op: "on_error", value: "continue" }); } },
+      { label: "Pause", role: "menuitemradio", checked: !cont, onClick: () => { if (cont) op({ op: "on_error", value: "pause" }); } },
+      { label: "Go on", role: "menuitemradio", checked: cont, onClick: () => { if (!cont) op({ op: "on_error", value: "continue" }); } },
       { sep: true }];
     if (all.length) menu.push({ label: "Sweep…", icon: "sliders", onClick: () => guard(openSweep) });
     if (all.length) menu.push({ label: "Save as…", icon: "download", onClick: () => guard(openSave) });
@@ -962,7 +1041,7 @@
     // the person's switch (notices.py): a stop or a failed block continues the chat it concerns at once
     const react = !!(K.S.settings && K.S.settings.sequence_react);
     menu.push({ sep: true }, { heading: "Stops and failures" },
-      { label: "Kelvin replies at once", checked: react, onClick: () => guard(() => setReact(!react)) });
+      { label: "Kelvin replies at once", role: "menuitemcheckbox", checked: react, onClick: () => guard(() => setReact(!react)) });
     K.popMenu(anchor, menu);
   }
   async function setReact(on) {
@@ -1030,8 +1109,10 @@
       nameEl.addEventListener("blur", () => guard(finish, true));
       nameEl.addEventListener("click", (e) => e.stopPropagation());
     } else nameEl = h("span", { class: "seq-fn-name" }, fn.name);
+    // one line: its name, then where it is while there is room; the whole of it in its tip
+    const tip = [fn.name, fn.sub, fn.entry && fn.entry.note].filter(Boolean).join("\n");
     const card = h("div", { class: "kcard seq-fn " + fn.kind + (SEQ.fresh === fn.key ? " fresh" : "") + (fn.missing ? " missing" : ""),
-                            tabindex: "0", role: "button", "aria-label": fn.name, title: fn.entry && fn.entry.note ? fn.entry.note : null },
+                            tabindex: "0", role: "button", "aria-label": fn.name, title: tip },
       nameEl, fn.sub ? h("span", { class: "seq-fn-sub" }, fn.sub) : null, tail);
     card.dataset.key = fn.key;
     if (fn.color) card.style.setProperty("--kind", fn.color);
@@ -1123,10 +1204,11 @@
     pop.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); closePop(); anchor.focus(); } });
     document.body.append(pop);
     if (anchor.isConnected) anchor.scrollIntoView({ block: "nearest" });
-    const r = anchor.getBoundingClientRect();
-    const top = r.bottom + 6 + pop.offsetHeight + 8 <= window.innerHeight ? r.bottom + 6 : r.top - pop.offsetHeight - 6;
-    pop.style.top = Math.max(8, Math.min(top, window.innerHeight - pop.offsetHeight - 8)) + "px";
-    pop.style.left = Math.max(8, Math.min(r.right - pop.offsetWidth, window.innerWidth - pop.offsetWidth - 8)) + "px";
+    // placed in the window's pixels (the anchor's rect, the window), written in the page's (÷ the page size)
+    const z = zoom(), r = anchor.getBoundingClientRect(), ph = pop.offsetHeight * z, pw = pop.offsetWidth * z;
+    const top = r.bottom + 6 + ph + 8 <= window.innerHeight ? r.bottom + 6 : r.top - ph - 6;
+    pop.style.top = Math.max(8, Math.min(top, window.innerHeight - ph - 8)) / z + "px";
+    pop.style.left = Math.max(8, Math.min(r.right - pw, window.innerWidth - pw - 8)) / z + "px";
     SEQ.pop = pop;
     const first = pop.querySelector("button");
     if (first) first.focus();
@@ -1155,7 +1237,8 @@
     g.classList.remove("open", "fresh", "dragging");
     g.removeAttribute("tabindex");
     g.setAttribute("aria-hidden", "true");
-    g.style.width = r.width + "px";
+    d.z = zoom();   // the pointer and the rect are the window's pixels; the ghost's lengths the page's
+    g.style.width = r.width / d.z + "px";
     document.body.append(g);
     d.ghost = g;
     if (d.src.kind === "item") el.classList.add("dragging");
@@ -1175,7 +1258,7 @@
       guard(dragBegin, d);
     }
     e.preventDefault();
-    d.ghost.style.transform = "translate(" + Math.round(d.x - d.dx) + "px," + Math.round(d.y - d.dy) + "px)";
+    d.ghost.style.transform = "translate(" + Math.round((d.x - d.dx) / d.z) + "px," + Math.round((d.y - d.dy) / d.z) + "px)";
     guard(dragTarget, d);
   }
   function clearMarks() {
@@ -1183,8 +1266,9 @@
   }
   function dragTarget(d) {
     clearMarks();
-    const list = SEQ.el.list, mr = SEQ.el.main.getBoundingClientRect();
-    const over = d.x >= mr.left && d.x <= mr.right && d.y >= mr.top - 24 && d.y <= mr.bottom + 24;
+    // over the blocks (a little beyond them, except where the functions lie just under them)
+    const list = SEQ.el.list, mr = SEQ.el.main.getBoundingClientRect(), under = SEQ.wide || SEQ.el.fns.hidden ? 24 : 0;
+    const over = d.x >= mr.left && d.x <= mr.right && d.y >= mr.top - 24 && d.y <= mr.bottom + under;
     if (d.src.kind === "fn" && !over) { d.to = null; return; }
     const cards = [...list.children].filter((c) => c !== d.src.el);
     let at = cards.length;
@@ -1198,16 +1282,16 @@
     else if (at < cards.length) cards[at].classList.add("drop-before");
     else cards[cards.length - 1].classList.add("drop-after");
   }
-  function autoScroll(d) {
+  function autoScroll(d) {   // near the top or the foot of the blocks' region, it scrolls (the window's pixels ÷ the page size)
     if (!d.active) return;
-    const sc = SEQ.wide ? SEQ.el.main : SEQ.el.body, r = sc.getBoundingClientRect();
-    const top = r.top + (SEQ.wide ? 0 : SEQ.el.bar.offsetHeight);
+    const sc = SEQ.el.list, r = sc.getBoundingClientRect();
+    if (!r.height || d.x < r.left || d.x > r.right || d.y < r.top - 44 || d.y > r.bottom + 44) return;
     let dy = 0;
-    if (d.y < top + 44) dy = -Math.ceil((top + 44 - d.y) / 4);
+    if (d.y < r.top + 44) dy = -Math.ceil((r.top + 44 - d.y) / 4);
     else if (d.y > r.bottom - 44) dy = Math.ceil((d.y - r.bottom + 44) / 4);
     if (!dy) return;
     const was = sc.scrollTop;
-    sc.scrollTop += Math.max(-24, Math.min(24, dy));
+    sc.scrollTop += Math.max(-24, Math.min(24, dy)) / (d.z || 1);
     if (sc.scrollTop !== was) dragTarget(d);
   }
   function dragStop() {
@@ -1300,7 +1384,7 @@
     const st = { path: "", touched: false, color: "", files: [], folders: [], labels: null, seq: 0, busy: false };
     const filter = h("input", { class: "kfield", type: "search", placeholder: "Filter", spellcheck: "false", autocomplete: "off",
                                 "aria-label": "Filter files" });
-    const files = h("div", { class: "seq-files", role: "listbox", "aria-label": "Files" });
+    const files = h("div", { class: "seq-files", role: "listbox", "aria-label": "Files", "data-region": "dialog" });
     const moreFiles = h("div", { class: "seq-files-more", hidden: true });   // how many more: the filter finds them
     const filesBox = h("div", { class: "seq-lab", hidden: true }, filter, files, moreFiles);
     const path = h("input", { class: "kfield", type: "text", placeholder: "Path", spellcheck: "false", autocomplete: "off",
@@ -1501,7 +1585,7 @@
     };
     const lab = (text, el) => h("label", { class: "seq-lab" }, h("span", {}, text), el);
     dlg = dialog("Sweep", [
-      h("div", { class: "seq-ticks", role: "group", "aria-label": "Blocks" }, ...ticks.map((t) => t.row)),
+      h("div", { class: "seq-ticks", role: "group", "aria-label": "Blocks", "data-region": "dialog" }, ...ticks.map((t) => t.row)),
       h("label", { class: "seq-lab" }, h("span", {}, "Setting"), h("span", { class: "seq-line" }, key, unit)), options,
       h("div", { class: "seq-range" }, lab("From", from), lab("To", to), lab("Step", step)),
       lab("List", listed),
