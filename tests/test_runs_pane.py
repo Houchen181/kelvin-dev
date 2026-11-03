@@ -29,7 +29,7 @@ def test_every_id_the_portal_script_uses_is_on_the_page():
 
 
 def test_the_header_is_sequence_and_history_and_the_open_runs_have_a_row_below_it():
-    head = PAGE[PAGE.index('<section id="runpane"'):PAGE.index('<section id="anpane"')]
+    head = PAGE[PAGE.index('<section id="runpane"'):PAGE.index('<section id="edpane"')]
     header = head[head.index("<header"):head.index("</header>")]
     seg = re.search(r'<div id="runs-seg"[^>]*>', header).group(0)
     assert 'role="tablist"' in seg and 'aria-label="Sequence and history"' in seg
@@ -110,9 +110,10 @@ def test_the_side_panels_stay_independent():
 
 
 def test_the_scan_editor_is_a_side_panel_of_its_own():
+    """It has no button of its own: it stands right after Runs, in Runs' column (tests/test_panel_layout.py)."""
     work = PAGE[PAGE.index('<div id="workcol"'):PAGE.index('<div id="sidecol"')]
-    assert work.index('<section id="runpane"') < work.index('<section id="edpane"') < work.index('<section id="anpane"')
-    pane = PAGE[PAGE.index('<section id="edpane"'):PAGE.index('<section id="anpane"')]
+    assert work.index('<section id="anpane"') < work.index('<section id="runpane"') < work.index('<section id="edpane"')
+    pane = PAGE[PAGE.index('<section id="edpane"'):PAGE.index('<div id="sidecol"')]
     assert 'id="edpane-resize"' in pane and 'id="close-editor"' in pane and 'aria-labelledby="ed-title"' in pane
     assert re.search(r'edpane: \[\(\) => ED\.open, "workcol", \d+, "lh\.edWidth"\]', JS)
     assert "PANE_W.edpane" in _js("initPanes")

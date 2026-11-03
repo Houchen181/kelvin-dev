@@ -1390,18 +1390,19 @@
   }
 
   // The side panels each open and close on their own, and each keeps the width it was left at (drag its left edge).
-  // Beside the conversation, which keeps at least CHAT_MIN pixels, they stand side by side: Runs, the scan editor and
-  // Analysis, then Lab and Team chat. When they need more room than there is, they shrink alike; then the sidebar steps
-  // aside (the menu button brings it back over the page); then each group shares a column, one above the other; and if
-  // even that doesn't fit, the Lab column floats over. Below 1100 px they float over the conversation in one column
-  // (app.css), below 820 px the sidebar too.
+  // Beside the conversation, which keeps at least CHAT_MIN pixels, they stand side by side in the order of the top
+  // bar's buttons: Team chat, Analysis, Runs with the scan editor beside it, then Lab. When they need more room than
+  // there is, they shrink alike; then the sidebar steps aside (the menu button brings it back over the page); then
+  // Team chat, Analysis, Runs and the scan editor share a column, one above the other, beside Lab's; and if even that
+  // doesn't fit, the Lab column floats over. Below 1100 px they float over the conversation in one column, in the same
+  // order from the top (app.css), below 820 px the sidebar too.
   const CHAT_MIN = 520, SIDEBAR_W = 264;
-  const PANES = {   // id: [open?, its column, its least width, where its width is kept]
+  const PANES = {   // id: [open?, its column, its least width, where its width is kept], in the page's order
+    teampanel: [() => TEAM.open, "workcol", 280, "lh.teamWidth"],
+    anpane: [() => ANA.open, "workcol", 340, "lh.anWidth"],
     runpane: [() => RUNS.open, "workcol", 340, "lh.runsWidth"],
     edpane: [() => ED.open, "workcol", 360, "lh.edWidth"],
-    anpane: [() => ANA.open, "workcol", 340, "lh.anWidth"],
     labpanel: [() => S.labOpen, "sidecol", 300, "lh.labWidth"],
-    teampanel: [() => TEAM.open, "sidecol", 280, "lh.teamWidth"],
   };
   const PANE_W = {};   // each pane's width as the person left it
   let DRAG = null;     // while an edge moves: the panes' widths when it began
@@ -1444,11 +1445,11 @@
       document.documentElement.style.setProperty("--topbar-h", document.querySelector(".topbar").offsetHeight + "px");
     } else {
       const room = paneRoom();
-      if (stacked) {   // a column for each pair, as wide as its wider pane
+      if (stacked) {   // a column for each group, as wide as its widest pane
         const cols = ["workcol", "sidecol"].filter((c) => !$(c).hidden && !(floatLab && c === "sidecol"));
         const got = share(cols.map(colWant), cols.map(colLeast), room);
         cols.forEach((c, i) => { $(c).style.width = got[i] + "px"; });
-        if (floatLab) {   // over the Runs column, never over the conversation
+        if (floatLab) {   // over the column beside it, never over the conversation
           $("sidecol").style.width = Math.max(colLeast("sidecol"), Math.min(colWant("sidecol"), w - CHAT_MIN)) + "px";
         }
       } else {
@@ -1462,7 +1463,7 @@
   }
   // a pane's left edge, dragged or moved with the arrow keys: its width, or in a shared column the column's. Only the
   // conversation gives or takes the room; the other panes keep the widths they show, so the edge follows the pointer
-  // and what is seen when it is let go stays. In a shared column the other pane is as wide at most.
+  // and what is seen when it is let go stays. In a shared column the others are as wide at most.
   function sizePane(id, want) {
     const app = $("app"), col = PANES[id][1], floatLab = app.classList.contains("float-lab");
     const stacked = app.classList.contains("stacked");

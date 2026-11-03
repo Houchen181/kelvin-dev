@@ -236,8 +236,84 @@
     </section>
   </main>
 
-  <!-- the side panels: each opens on its own; side by side, or a pair to a column (fitLayout in app.js) -->
+  <!-- the side panels, left to right as the top bar's buttons: Team chat, Analysis, Runs with the scan editor beside it,
+       then Lab. Each opens on its own; side by side, or short of room one above the other in their column (fitLayout
+       in app.js) -->
   <div id="workcol" class="dock-col" hidden>
+  <aside id="teampanel" class="labpanel teampanel" aria-label="Team chat" hidden>
+    <div id="teampanel-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the team chat" tabindex="0"></div>
+    <header class="lab-head">
+      <h2>Team chat</h2>
+      <div class="spacer"></div>
+      <button id="team-name" class="team-me" type="button" title="Your name in the team chat, on this browser"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg><span id="team-name-text"></span></button>
+      <button class="icon-btn full-btn" type="button" data-pane="teampanel" aria-label="Full screen" aria-pressed="false" title="Full screen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+      </button>
+      <button id="close-team" class="icon-btn" type="button" aria-label="Close the team chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div id="team-list" class="team-list" role="log" aria-live="polite"></div>
+    <form id="team-name-form" class="team-name-form" hidden>
+      <input id="team-name-input" maxlength="40" placeholder="Your name" aria-label="Your name in the team chat" autocomplete="name" spellcheck="false">
+      <button class="btn small primary" type="submit">OK</button>
+    </form>
+    <form id="team-form" class="team-form">
+      <textarea id="team-input" rows="1" maxlength="4000" placeholder="Message the team" aria-label="Message the team"></textarea>
+      <button id="team-send" class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+    </form>
+  </aside>
+
+  <section id="anpane" class="runpane anpane" aria-label="Analysis" hidden>
+    <div id="anpane-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the analysis pane" tabindex="0"></div>
+    <header class="pane-head">
+      <h2 class="pane-title">Analysis</h2>
+      <div class="spacer"></div>
+      <button id="an-ask" class="btn small ghost" type="button" title="Ask Kelvin about this analysis">Ask Kelvin</button>
+      <button class="icon-btn full-btn" type="button" data-pane="anpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+      </button>
+      <button id="close-analysis" class="icon-btn" type="button" aria-label="Close the analysis pane">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div id="an-body" class="pane-body an-body">
+      <div class="an-row">
+        <select id="an-run" class="an-run" aria-label="Run"></select>
+        <div class="pane-menu-wrap">
+          <button id="an-more-run" class="icon-btn" type="button" aria-label="Compare with another run" title="Compare with another run" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+          <div id="an-run-menu" class="pane-menu" role="menu" hidden></div>
+        </div>
+      </div>
+      <div id="an-chips" class="an-chips" hidden></div>
+      <div class="an-row">
+        <label class="an-field"><span>y</span><input id="an-y" list="an-cols" spellcheck="false" autocomplete="off" aria-label="y: a column or an expression of columns"></label>
+        <label class="an-field"><span>x</span><input id="an-x" list="an-cols" spellcheck="false" autocomplete="off" aria-label="x: a column or an expression of columns"></label>
+      </div>
+      <div class="an-row">
+        <label class="an-field an-where"><span>where</span><input id="an-where" placeholder="all points" spellcheck="false" autocomplete="off" aria-label="Only the points where"></label>
+        <label class="an-field an-per"><span>per</span><input id="an-group" list="an-cols" placeholder="one curve" spellcheck="false" autocomplete="off" aria-label="A curve per value of"></label>
+      </div>
+      <datalist id="an-cols"></datalist>
+      <div id="an-steps" class="an-steps"></div>
+      <select id="an-add-step" class="an-add-step" aria-label="Add a step"></select>
+      <div id="an-msg" class="an-msg" role="status" hidden></div>
+      <div id="an-plot" class="an-plot"></div>
+      <div class="an-row an-fitrow">
+        <select id="an-model" aria-label="Fit"></select>
+        <input id="an-expr" placeholder="a*exp(-x/tau) + c" spellcheck="false" autocomplete="off" aria-label="Model: an expression in x" hidden>
+        <input id="an-lo" type="number" step="any" placeholder="from" aria-label="Fit from x">
+        <input id="an-hi" type="number" step="any" placeholder="to" aria-label="Fit to x">
+      </div>
+      <div id="an-fitparams" class="an-fitparams"></div>
+      <div id="an-fit" class="an-fit"></div>
+      <div class="an-row an-actions">
+        <button id="an-keep" class="btn small" type="button" disabled title="Keep the fit with its run: in its run.h5 and its report">Keep fit</button>
+        <button id="an-csv" class="btn small ghost" type="button" disabled title="Every point, as CSV">CSV</button>
+      </div>
+    </div>
+  </section>
+
   <section id="runpane" class="runpane" aria-label="Runs" hidden>
     <div id="runpane-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the runs pane" tabindex="0"></div>
     <header class="pane-head">
@@ -433,56 +509,6 @@
       </div>
     </footer>
   </section>
-
-  <section id="anpane" class="runpane anpane" aria-label="Analysis" hidden>
-    <div id="anpane-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the analysis pane" tabindex="0"></div>
-    <header class="pane-head">
-      <h2 class="pane-title">Analysis</h2>
-      <div class="spacer"></div>
-      <button id="an-ask" class="btn small ghost" type="button" title="Ask Kelvin about this analysis">Ask Kelvin</button>
-      <button class="icon-btn full-btn" type="button" data-pane="anpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
-      </button>
-      <button id="close-analysis" class="icon-btn" type="button" aria-label="Close the analysis pane">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-      </button>
-    </header>
-    <div id="an-body" class="pane-body an-body">
-      <div class="an-row">
-        <select id="an-run" class="an-run" aria-label="Run"></select>
-        <div class="pane-menu-wrap">
-          <button id="an-more-run" class="icon-btn" type="button" aria-label="Compare with another run" title="Compare with another run" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
-          <div id="an-run-menu" class="pane-menu" role="menu" hidden></div>
-        </div>
-      </div>
-      <div id="an-chips" class="an-chips" hidden></div>
-      <div class="an-row">
-        <label class="an-field"><span>y</span><input id="an-y" list="an-cols" spellcheck="false" autocomplete="off" aria-label="y: a column or an expression of columns"></label>
-        <label class="an-field"><span>x</span><input id="an-x" list="an-cols" spellcheck="false" autocomplete="off" aria-label="x: a column or an expression of columns"></label>
-      </div>
-      <div class="an-row">
-        <label class="an-field an-where"><span>where</span><input id="an-where" placeholder="all points" spellcheck="false" autocomplete="off" aria-label="Only the points where"></label>
-        <label class="an-field an-per"><span>per</span><input id="an-group" list="an-cols" placeholder="one curve" spellcheck="false" autocomplete="off" aria-label="A curve per value of"></label>
-      </div>
-      <datalist id="an-cols"></datalist>
-      <div id="an-steps" class="an-steps"></div>
-      <select id="an-add-step" class="an-add-step" aria-label="Add a step"></select>
-      <div id="an-msg" class="an-msg" role="status" hidden></div>
-      <div id="an-plot" class="an-plot"></div>
-      <div class="an-row an-fitrow">
-        <select id="an-model" aria-label="Fit"></select>
-        <input id="an-expr" placeholder="a*exp(-x/tau) + c" spellcheck="false" autocomplete="off" aria-label="Model: an expression in x" hidden>
-        <input id="an-lo" type="number" step="any" placeholder="from" aria-label="Fit from x">
-        <input id="an-hi" type="number" step="any" placeholder="to" aria-label="Fit to x">
-      </div>
-      <div id="an-fitparams" class="an-fitparams"></div>
-      <div id="an-fit" class="an-fit"></div>
-      <div class="an-row an-actions">
-        <button id="an-keep" class="btn small" type="button" disabled title="Keep the fit with its run: in its run.h5 and its report">Keep fit</button>
-        <button id="an-csv" class="btn small ghost" type="button" disabled title="Every point, as CSV">CSV</button>
-      </div>
-    </div>
-  </section>
   </div>
 
   <div id="sidecol" class="dock-col" hidden>
@@ -563,30 +589,6 @@
       <div class="inst-head-row"><h3>Activity</h3><button id="activity-all" class="btn small" type="button" aria-pressed="false" hidden>Everyone</button></div>
       <ol id="lab-events" class="lab-events"></ol>
     </div>
-  </aside>
-
-  <aside id="teampanel" class="labpanel teampanel" aria-label="Team chat" hidden>
-    <div id="teampanel-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the team chat" tabindex="0"></div>
-    <header class="lab-head">
-      <h2>Team chat</h2>
-      <div class="spacer"></div>
-      <button id="team-name" class="team-me" type="button" title="Your name in the team chat, on this browser"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg><span id="team-name-text"></span></button>
-      <button class="icon-btn full-btn" type="button" data-pane="teampanel" aria-label="Full screen" aria-pressed="false" title="Full screen">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
-      </button>
-      <button id="close-team" class="icon-btn" type="button" aria-label="Close the team chat">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-      </button>
-    </header>
-    <div id="team-list" class="team-list" role="log" aria-live="polite"></div>
-    <form id="team-name-form" class="team-name-form" hidden>
-      <input id="team-name-input" maxlength="40" placeholder="Your name" aria-label="Your name in the team chat" autocomplete="name" spellcheck="false">
-      <button class="btn small primary" type="submit">OK</button>
-    </form>
-    <form id="team-form" class="team-form">
-      <textarea id="team-input" rows="1" maxlength="4000" placeholder="Message the team" aria-label="Message the team"></textarea>
-      <button id="team-send" class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
-    </form>
   </aside>
   </div>
 </div>
