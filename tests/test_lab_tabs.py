@@ -58,11 +58,12 @@ def test_every_way_into_a_part_chooses_its_tab_or_opens_its_fold():
     assert reveal.index("if (labTabs()) { chooseLabPart(part.dataset.part); return; }") < reveal.index("LAB_FOLDS.get(")
     assert "labPartOpen(form.closest(\".lab-part\"));" in _function(js, "partForm")   # Add… and a note's pencil
     assert "partForm(\"labmem-form\", true);" in _function(js, "editLabNote")
-    # nothing else opens a fold or chooses a part: every reveal goes through labPartOpen, the strip or its keys
+    # nothing else opens a fold or chooses a part: every reveal goes through labPartOpen, the strip or its keys (and,
+    # narrowing, the part that holds the focus)
     outside = js.replace(_function(js, "initLabFolds"), "").replace(reveal, "")
     assert "LAB_FOLDS.get(" not in outside and 'store("lh.labFold."' not in outside
     callers = [m.start() for m in re.finditer(r"chooseLabPart\(", js)]
-    allowed = [_function(js, n) for n in ("labPartOpen", "initLabTabs", "labTabKeys", "chooseLabPart")]
+    allowed = [_function(js, n) for n in ("labPartOpen", "initLabTabs", "labTabKeys", "chooseLabPart", "labTabRoles")]
     for at in callers:
         assert any(js.index(body) <= at < js.index(body) + len(body) for body in allowed), js[at - 80:at + 40]
     # a request waiting is asked above every part, so it shows whichever part is chosen
@@ -136,6 +137,12 @@ def test_the_part_used_last_wide_is_the_one_shown_when_the_lab_narrows():
     assert 'e.target.closest("#labpanel .lab-part")' in used
     assert "if (part && part.dataset.part !== LAB_TABS.chosen) chooseLabPart(part.dataset.part);" in used
     assert 'panel.addEventListener("focusin", used);' in build and 'panel.addEventListener("pointerdown", used);' in build
+    # and when the Lab narrows, the part that holds the focus is chosen even if no focus event said so (a page focused
+    # while its window was not), before the strip hides the others
+    roles = _function(_read("app.js"), "labTabRoles")
+    at = 'const at = !wide && document.activeElement && document.activeElement.closest("#labpanel .lab-part");'
+    assert at in roles and roles.index(at) < roles.index("for (const [id, tab] of LAB_TABS.tabs)")
+    assert "if (at && at.dataset.part !== LAB_TABS.chosen) chooseLabPart(at.dataset.part);" in roles
 
 
 def test_3c_is_fenced_to_go_in_one_pass():

@@ -238,7 +238,7 @@ def test_a_services_pictures_is_a_choice_that_acts_at_once():
         named = re.search(r'\bname="(\w+)"', sel)
         assert (named and named.group(1) in sent) or 'id="svc-preset"' in sel, sel   # the service form's preset: Add's
     css = re.sub(r"/\*.*?\*/", "", _read("app.css"), flags=re.S)
-    assert ".seg.svc-pics > button { min-height: 28px;" in css
+    assert ".seg.svc-pics > button { min-height: 30px;" in css
 
 
 def test_saving_closes_and_a_refusal_keeps_what_waits():

@@ -2369,7 +2369,7 @@ body.incognito .composer { background: color-mix(in srgb, var(--text) 4%, var(--
 /* a service's Pictures (Models → Other model services): a choice of three that acts at once, on a line of its own under
    the service's address, as a skill's switch acts in its row */
 .svc-pics-label { font-size: 13px; color: var(--text-2); }
-.seg.svc-pics > button { min-height: 28px; padding: 3px 10px; }
+.seg.svc-pics > button { min-height: 30px; padding: 3px 10px; }   /* 28 px or more at every page size (90 % rounds) */
 .seg.svc-pics[aria-busy="true"] { cursor: progress; }
 @media (pointer: coarse) {   /* a touch screen: every target 40 px or more */
   #settings-x { min-width: 40px; min-height: 40px; }

@@ -9775,11 +9775,14 @@
     tab.focus();
   }
   // the parts are the tabs' panels while the strip shows; wide, where it has stepped aside, plain sections under their
-  // headings. Read whenever the Lab changes size (its container query decides)
+  // headings. Read whenever the Lab changes size (its container query decides). Narrowing, the part holding the focus
+  // is the one shown, even where no focus event said so (focused while the window itself was not)
   function labTabRoles() {
     const wide = getComputedStyle($("lab-strip")).display === "none";
     if (wide === LAB_TABS.wide) return;
     LAB_TABS.wide = wide;
+    const at = !wide && document.activeElement && document.activeElement.closest("#labpanel .lab-part");
+    if (at && at.dataset.part !== LAB_TABS.chosen) chooseLabPart(at.dataset.part);
     for (const [id, tab] of LAB_TABS.tabs) {
       const part = $("lab-sec-" + id);
       if (wide) { part.removeAttribute("role"); part.removeAttribute("tabindex"); }
