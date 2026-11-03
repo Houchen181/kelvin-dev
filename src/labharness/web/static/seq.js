@@ -1282,14 +1282,27 @@
     return b;
   }
 
-  // ---------- New function: one of the lab's scripts (or any file) into the library, named and coloured
+  // how many of each of several lists to show, at most n in all: one of each in turn while there is room, so a long list
+  // leaves the others room (scanlibrary.shares)
+  function shares(sizes, n) {
+    const room = sizes.map(() => 0);
+    let left = n;
+    while (left > 0 && room.some((r, i) => r < sizes[i])) {
+      room.forEach((r, i) => { if (left > 0 && r < sizes[i]) { room[i] += 1; left -= 1; } });
+    }
+    return room;
+  }
+
+  // ---------- New function: one of the lab's scripts (or any file) into the library, named and coloured; the scripts
+  // of several folders each under their folder's name
   function newFunction() {
     const h = K.h;
-    const st = { path: "", touched: false, color: "", files: [], seq: 0, busy: false };
+    const st = { path: "", touched: false, color: "", files: [], folders: [], labels: null, seq: 0, busy: false };
     const filter = h("input", { class: "kfield", type: "search", placeholder: "Filter", spellcheck: "false", autocomplete: "off",
                                 "aria-label": "Filter files" });
     const files = h("div", { class: "seq-files", role: "listbox", "aria-label": "Files" });
-    const filesBox = h("div", { class: "seq-lab", hidden: true }, filter, files);
+    const moreFiles = h("div", { class: "seq-files-more", hidden: true });   // how many more: the filter finds them
+    const filesBox = h("div", { class: "seq-lab", hidden: true }, filter, files, moreFiles);
     const path = h("input", { class: "kfield", type: "text", placeholder: "Path", spellcheck: "false", autocomplete: "off",
                               "aria-label": "Path" });
     const choose = K.hasFilePicker() ? h("button", { class: "btn", type: "button" }, "Choose…") : null;
@@ -1299,14 +1312,25 @@
     let dlg = null;
     const drawFiles = () => {
       const f = filter.value.trim().toLowerCase();
-      const shown = st.files.filter((x) => !f || String(x.rel || x.name).toLowerCase().includes(f)).slice(0, 300);
-      files.replaceChildren(...shown.map((x) => {
+      const match = st.files.filter((x) => !f || String(x.rel || x.name).toLowerCase().includes(f));
+      const option = (x) => {
         const on = x.path === st.path;
         const b = h("button", { class: "seq-file" + (on ? " on" : ""), type: "button", role: "option", "aria-selected": String(on),
                                 title: x.path }, x.rel || x.name);
         b.addEventListener("click", () => guard(choosePath, x.path));
         return b;
-      }));
+      };
+      // at most 300 shown; from several folders, each under its name with its share (a big one hides none of the others)
+      const groups = !st.labels ? [["", match]]
+        : st.folders.map((d) => [d, match.filter((x) => x.folder === d)]).filter(([, xs]) => xs.length);
+      const room = shares(groups.map(([, xs]) => xs.length), 300);
+      const left = match.length - room.reduce((a, n) => a + n, 0);
+      moreFiles.textContent = left + " more";
+      moreFiles.hidden = left <= 0;
+      if (!st.labels) { files.replaceChildren(...match.slice(0, room[0]).map(option)); return; }
+      files.replaceChildren(...groups.map(([d, xs], i) => h("div", { class: "seq-folder", role: "group", "aria-label": d },
+        h("div", { class: "seq-folder-head", title: d, "aria-hidden": "true" }, st.labels.get(d)),
+        ...xs.slice(0, room[i]).map(option))));
     };
     async function choosePath(p) {
       st.path = String(p || "").trim();
@@ -1391,6 +1415,8 @@
       try {
         const r = await K.api("/api/library", { body: { op: "files" } });
         st.files = (r && Array.isArray(r.files) ? r.files : []);
+        st.folders = (r && Array.isArray(r.folders) ? r.folders : []);
+        st.labels = st.folders.length > 1 ? K.folderLabels(st.folders) : null;
       } catch (e) { st.files = []; }
       filesBox.hidden = !st.files.length;
       drawFiles();

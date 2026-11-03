@@ -40,7 +40,7 @@
 .wl-ctl .btn, .wl-ctl .chip, .wl-ctl .spinner { flex: none; }
 .wl-ctl .btn { white-space: nowrap; }
 
-/* a list in the card: the scripts to import, the instruments a scan found */
+/* a list in the card: the lab's scripts folders (with Remove), the scripts to import, the instruments a scan found */
 .wl-item { flex-wrap: nowrap; gap: 12px; min-height: 44px; padding: 9px 16px; cursor: pointer; }
 .wl-item:hover { background: var(--hover); }
 .wl-item.off { cursor: default; }
@@ -48,7 +48,7 @@
 .wl-check { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: inherit; }
 .wl-label { flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wl-sub { flex: 1 1 0; min-width: 0; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wl-item .chip { flex: none; }
+.wl-item .chip, .wl-item .link, .wl-item .spinner { flex: none; }
 .wl-more { width: 100%; min-height: 44px; border: 0; background: none; cursor: pointer; text-align: left;
   font-size: 13px; font-weight: 600; color: var(--accent); }
 .wl-more:hover { background: var(--hover); }

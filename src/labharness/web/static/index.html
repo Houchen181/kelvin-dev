@@ -761,9 +761,11 @@
             <span class="hint" hidden>Setting up only asks each instrument who it is. On the network, Windows may ask once: allow private networks.</span>
           </div>
           <div class="field">
-            <label class="field-label" for="scripts-python">Your lab's scripts</label>
-            <input id="scripts-python" spellcheck="false" autocomplete="off" placeholder="Python to run them (found when empty)">
-            <span id="scripts-folder" class="hint"></span>
+            <div class="field-row"><span class="field-label">Your lab's scripts</span>
+              <button id="scripts-add" class="btn small" type="button">Add folder…</button></div>
+            <ul id="scripts-folders" class="env-list"></ul>
+            <span id="scripts-msg" class="hint" hidden></span>
+            <input id="scripts-python" spellcheck="false" autocomplete="off" aria-label="Python to run them" placeholder="Python to run them (found when empty)">
             <span class="hint" hidden>Kelvin runs one when you ask in a chat, after you approve the run.</span>
           </div>
           <div class="field">

@@ -48,9 +48,9 @@ def test_a_lab_scripts_run_from_the_chat_follows_live_and_gets_its_card(tmp_path
     turns = [[{"type": "tool_call", "id": "c1", "name": "run_script", "input": {"script": "sweep.py"}}],
              [{"type": "text", "text": "Done."}]]
     settings, store = Settings(tmp_path / "settings.json"), ChatStore(tmp_path / "chats")
-    folder, python = rt.scripts_folder, rt.scripts_python
+    folders, python = rt.scripts_folders, rt.scripts_python
     app = create_app(rt, settings, store, hosts=["testserver"], providers={"scripted": Scripted(turns)})
-    rt.scripts_folder, rt.scripts_python = folder, python   # the test's own, as Settings would have them
+    rt.scripts_folders, rt.scripts_python = folders, python   # the test's own, as Settings would have them
     client, headers = TestClient(app), {"X-Kelvin-Token": settings.access_key}
     with client:
         chat = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()

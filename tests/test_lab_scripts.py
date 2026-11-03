@@ -1,4 +1,4 @@
-"""Setting a lab up from its own scripts in the portal (Set up → From your scripts…), Kelvin reading them in a chat,
+"""Setting a lab up from its own scripts in the portal (Set up → Scripts…), Kelvin reading them in a chat,
 and a person's limits for one instrument (Limits… on its row): changed in the lab config and in force at once."""
 import pytest
 
@@ -169,10 +169,11 @@ def test_the_first_setup_asks_for_the_labs_scripts(bench):
         assert r.status_code == 400 and settings.lab_scripts is None
         r = client.post("/api/instruments/scripts-folder", json={"folder": str(folder)}, headers=headers).json()
         assert r["ok"] and r["instruments"] == 4 and r["now"] is False             # the setup isn't running now
-        assert settings.lab_scripts == str(folder) and client.app.app.state.setup.scripts is not None
+        assert r["folder"] == str(folder) and r["folders"] == [str(folder)] and r["folded"] == []
+        assert settings.lab_scripts == [str(folder)] and client.app.app.state.setup.scripts is not None
         assert client.get("/api/state", headers=headers).json()["ask_scripts"] is False   # asked once
         assert client.post("/api/instruments/scripts-folder", json={"folder": ""}, headers=headers).json()["ok"]
-        assert settings.lab_scripts == ""                                           # no scripts: not asked again
+        assert settings.lab_scripts == []                                           # no scripts: not asked again
 
         assert client.post("/api/lab", json={"yaml": LAB}, headers=headers).json()["ok"]   # smu in the lab now
         view = client.post("/api/instruments/scripts", json={"folder": str(folder)}, headers=headers).json()

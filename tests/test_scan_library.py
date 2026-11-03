@@ -84,7 +84,7 @@ def script_lab():
 def script_runtime(tmp_path, folder, approver):
     from labharness.agent.runtime import LabRuntime
     rt = LabRuntime(script_lab(), approver, tmp_path / "data")
-    rt.scripts_folder = lambda: str(folder)
+    rt.scripts_folders = lambda: [str(folder)]
     rt.scripts_python = lambda: sys.executable
     rt.auto_report = "off"
     return rt
@@ -354,11 +354,11 @@ def portal(rt, tmp_path):
     from labharness.web.settings import Settings
     from labharness.web.store import ChatStore
     from test_web import Scripted
-    folder, python = rt.scripts_folder, rt.scripts_python
+    folders, python = rt.scripts_folders, rt.scripts_python
     settings = Settings(tmp_path / "settings.json")
     guard = create_app(rt, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"],
                        providers={"scripted": Scripted([])})
-    rt.scripts_folder, rt.scripts_python = folder, python    # the test's own, as Settings would have them
+    rt.scripts_folders, rt.scripts_python = folders, python    # the test's own, as Settings would have them
     client = TestClient(guard)
     client.headers["X-Kelvin-Token"] = settings.access_key
     return client, guard

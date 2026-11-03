@@ -521,7 +521,7 @@ def test_run_script_over_mcp_with_a_person_approving_at_the_page(lab, folder, tm
     from labharness.agent.server import build_server
     write(folder, "sweep.py", SWEEP)
     rt = LabRuntime(lab, WebApprover(timeout=20), tmp_path / "data")
-    rt.scripts_folder = lambda: str(folder)
+    rt.scripts_folders = lambda: [str(folder)]
     rt.scripts_python = lambda: sys.executable
     rt.auto_report = "off"
     asked = []
@@ -565,7 +565,7 @@ def script_runtime(lab, folder, tmp_path, timeout=10):
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
     rt = LabRuntime(lab, WebApprover(timeout=timeout), tmp_path / "data")
-    rt.scripts_folder = lambda: str(folder)
+    rt.scripts_folders = lambda: [str(folder)]
     rt.scripts_python = lambda: sys.executable
     rt.auto_report = "off"
     return rt

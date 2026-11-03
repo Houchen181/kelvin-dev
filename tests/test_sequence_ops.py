@@ -362,7 +362,8 @@ def test_the_library_lists_reads_and_describes_functions(tmp_path, scripts):
         write(scripts / hidden, "nope.py", "x = 1\n")
     rt = script_runtime(tmp_path, scripts, ScriptedApprover([]))
     files = rt.library_files()
-    assert files["folder"] == str(scripts) and files["more"] is False
+    assert files["folder"] == str(scripts) and files["folders"] == [str(scripts)] and files["more"] is False
+    assert {f["folder"] for f in files["files"]} == {str(scripts)}
     assert [f["rel"] for f in files["files"]] == ["notes.ipynb", "sub/probe.py", "sweep.py", "trap.py"]
     assert [f["kind"] for f in files["files"]] == ["ipynb", "py", "py", "py"]
     assert files["files"][1]["path"] == str(scripts / "sub" / "probe.py") and files["files"][1]["name"] == "probe.py"
@@ -403,8 +404,8 @@ def test_the_library_lists_reads_and_describes_functions(tmp_path, scripts):
     assert rt.queue_add(SWEEP).startswith("added")
     assert rt.queue_view()["items"][-1]["color"] == "#123456"
 
-    rt.scripts_folder = lambda: None
-    assert rt.library_files() == {"folder": None, "files": [], "more": False}
+    rt.scripts_folders = lambda: []
+    assert rt.library_files() == {"folder": None, "folders": [], "files": [], "more": False}
 
 
 # ------------------------------------------------------------------ over HTTP, and for the AI
@@ -488,7 +489,7 @@ def test_through_the_hub_a_block_of_unshared_work_shows_none_of_it(tmp_path, scr
     rt.queue_add(WAIT)
     rt.queue_rename("Acme run")
     ask = _relay(rt, tmp_path, monkeypatch)
-    rt.scripts_folder = lambda: str(scripts)                   # as Settings would have it
+    rt.scripts_folders = lambda: [str(scripts)]                # as Settings would have it
     assert rt.queue_view()["items"][0]["settable"] == {"VMAX": 0.4}   # on the lab's own network: all of it
     status, raw = ask("GET", "/api/state")
     assert status == 200 and b"Acme" not in raw and b"VMAX" not in raw, raw[:3000]

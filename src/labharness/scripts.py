@@ -111,11 +111,12 @@ class Script:
 
 @dataclass
 class Survey:
-    folder: str
+    folder: str                # the folder read, or the folders, in words ("C:\Lab and D:\Shared")
     instruments: List[Instrument] = field(default_factory=list)
     scripts: List[Script] = field(default_factory=list)
     others: int = 0            # files read that hold no instrument work
     skipped: List[str] = field(default_factory=list)
+    folders: List[str] = field(default_factory=list)   # each folder read
 
     def text(self) -> str:
         """The report, for Kelvin's model: per instrument, then each script's outline."""
@@ -141,8 +142,8 @@ class Survey:
 
     def view(self) -> Dict[str, Any]:
         """For the portal's Set up: each instrument with its likely card and proposed limits."""
-        return {"folder": self.folder, "scripts": [s.path for s in self.scripts], "others": self.others,
-                "skipped": self.skipped, "instruments": [view_of(i) for i in self.instruments]}
+        return {"folder": self.folder, "folders": self.folders, "scripts": [s.path for s in self.scripts],
+                "others": self.others, "skipped": self.skipped, "instruments": [view_of(i) for i in self.instruments]}
 
 
 def view_of(i: Instrument) -> Dict[str, Any]:
@@ -1208,12 +1209,9 @@ def _files(root: Path, own: Iterable[Any] = ()) -> Tuple[List[Path], List[str]]:
     return found, skipped
 
 
-def survey(path: Any, registry: Any = None, own: Iterable[Any] = ()) -> Survey:
-    """Read the scripts in a folder (or one script) and list the instruments and the work in them. registry:
-    Kelvin's cards, to name the card that fits each instrument (match()). own: Kelvin's own folders, never read (a
-    folder that holds one is read without it)."""
-    from .folderfiles import mine
-    root = Path(path).expanduser()
+def _readable(root: Path, own: Iterable[Any] = ()) -> None:
+    """Raises why a folder or a script can't be surveyed: it isn't there, or it is in Kelvin's own folder or a run."""
+    from .folderfiles import mine, run_of
     if not root.exists():
         raise FileNotFoundError("%s does not exist" % root)
     kelvins = mine(root.resolve(), own)
@@ -1221,18 +1219,45 @@ def survey(path: Any, registry: Any = None, own: Iterable[Any] = ()) -> Survey:
         raise ValueError("%s is in Kelvin's own folder (%s), which holds the lab config, the settings, the accounts, "
                          "the instrument cards, and everyone's chats and runs: Kelvin's AI never reads there"
                          % (root, kelvins))
-    from .folderfiles import run_of
     if run_of(root.resolve()) is not None:
         raise ValueError("%s is in a Kelvin run, not the lab's scripts: describe_run and get_run_data read runs"
                          % root)
-    files, skipped = _files(root, own)
-    out = Survey(folder=str(root))
+
+
+def survey(path: Any, registry: Any = None, own: Iterable[Any] = ()) -> Survey:
+    """Read the scripts in a folder (or one script) and list the instruments and the work in them. path may also be a
+    list of folders (the lab's scripts folders), read as one: each script is then named by its full path, and a
+    folder that can't be read now is said in skipped (when none can be, why the first can't is raised). registry:
+    Kelvin's cards, to name the card that fits each instrument (match()). own: Kelvin's own folders, never read (a
+    folder that holds one is read without it)."""
+    paths = list(path) if isinstance(path, (list, tuple)) else [path]
+    read: List[Tuple[Path, List[Path]]] = []   # each folder read, with its scripts
+    skipped: List[str] = []
+    first: Optional[Exception] = None
+    for p in paths:
+        root = Path(p).expanduser()
+        try:
+            _readable(root, own)
+        except (OSError, ValueError) as e:
+            if len(paths) == 1:
+                raise
+            first = first or e
+            skipped.append(str(e))
+            continue
+        found, more = _files(root, own)
+        read.append((root, found))
+        skipped += ["%s: %s" % (root, m) for m in more] if len(paths) > 1 else more
+    if not read:
+        raise first or FileNotFoundError("no folder named to read")
+    several = len(read) > 1
+    names = [str(root) for root, _ in read]
+    files = [(f, str(f) if several else str(f.relative_to(root if root.is_dir() else root.parent)))
+             for root, found in read for f in found]
+    out = Survey(folder=names[0] if not several else ", ".join(names[:-1]) + " and " + names[-1], folders=names)
     out.skipped += skipped
     collect = _Collector()
-    base = root if root.is_dir() else root.parent
     pending: List[Tuple[Script, Any]] = []
-    for f in files:
-        rel = str(f.relative_to(base))
+    for f, rel in files:
         try:
             if f.stat().st_size > MAX_BYTES:
                 out.skipped.append("%s (over %d MB)" % (rel, MAX_BYTES // 1_000_000))

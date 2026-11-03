@@ -1,6 +1,6 @@
 """The person's library of scans and scripts, for the Runs panel: every plan and every script Kelvin ran, kept by what
 it is, so the exact same measurement is a click away; and the scripts a person imported, which may run though they
-are outside the lab's scripts folder (a person chose each one; scriptrun.locate).
+are outside the lab's scripts folders (a person chose each one; scriptrun.locate).
 
     library.json, in the data folder (each person's own, beside queue.json):
     {"entries": [{"id", "kind": "plan" | "script", "name", "source": "kelvin" | "you" | "labview" | "specialmeasure",
@@ -19,7 +19,7 @@ in place; one that can't be read as a library is kept aside (library.json.broken
 broken file never stops Kelvin.
 
 The portal calls the entries functions (the Sequence's list, as labMaster's): a person gives one a colour and a
-note as well as a name (meta), and picks a new one from the scripts in the lab's scripts folder (runnable_files)."""
+note as well as a name (meta), and picks a new one from the scripts in the lab's scripts folders (runnable_files)."""
 from __future__ import annotations
 
 import hashlib
@@ -27,6 +27,7 @@ import json
 import math
 import os
 import re
+import stat
 import threading
 import time
 from pathlib import Path
@@ -144,10 +145,20 @@ def plain_note(note: Any) -> str:
     return text
 
 
+def _link(path: Any) -> bool:
+    """A link, or a junction (Windows' link to a folder): either may lead out of the folder it is in."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return True
+    return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) == 0xA0000003   # IO_REPARSE_TAG_MOUNT_POINT
+
+
 def runnable_files(root: Path, most: int = MAX_FILES) -> Tuple[List[Dict[str, str]], bool]:
-    """The scripts Kelvin can run in a folder and its sub-folders (.py, .ipynb), SKIP_DIRS and hidden folders left out:
-    ([{path, rel (with /), name, kind: py | ipynb}], at most `most`, by their path in it; whether there were more).
-    Read only: no file is opened."""
+    """The scripts Kelvin can run in a folder and its sub-folders (.py, .ipynb), SKIP_DIRS, hidden folders, links and
+    junctions left out (what one leads to is listed where it is, if that is a folder Kelvin runs from: scriptrun.locate
+    runs nothing reached out of them): ([{path, rel (with /), name, kind: py | ipynb}], at most `most`, by their path
+    in it; whether there were more). Read only: no file is opened."""
     found: List[Dict[str, str]] = []
     more, looked = False, 0
     try:
@@ -155,13 +166,16 @@ def runnable_files(root: Path, most: int = MAX_FILES) -> Tuple[List[Dict[str, st
         if not root.is_dir():
             return [], False
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith("."))
+            dirnames[:] = sorted(d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")
+                                 and not _link(os.path.join(dirpath, d)))
             looked += len(dirnames) + len(filenames)
             for name in sorted(filenames):
                 kind = os.path.splitext(name)[1].lower().lstrip(".")
                 if kind not in ("py", "ipynb") or name.startswith("."):
                     continue
                 path = Path(dirpath) / name
+                if _link(path):
+                    continue
                 found.append({"path": str(path), "rel": path.relative_to(root).as_posix(), "name": name,
                               "kind": kind})
             if len(found) > most or looked > MAX_LOOKED:
@@ -173,6 +187,18 @@ def runnable_files(root: Path, most: int = MAX_FILES) -> Tuple[List[Dict[str, st
     if len(found) > most:
         found, more = found[:most], True
     return found, more
+
+
+def shares(sizes: List[int], most: int) -> List[int]:
+    """How many of each of several lists to keep, at most `most` in all: one of each in turn while there is room, so a
+    long list leaves the others room, and a short one gives them what it doesn't use (the first ones first)."""
+    room = [0] * len(sizes)
+    while most > 0 and any(r < s for r, s in zip(room, sizes)):
+        for i, s in enumerate(sizes):
+            if most > 0 and room[i] < s:
+                room[i] += 1
+                most -= 1
+    return room
 
 
 class Library:
@@ -238,7 +264,7 @@ class Library:
         return found[entry_id]
 
     def chosen(self) -> List[str]:
-        """The scripts a person imported: they may run though they are outside the lab's scripts folder."""
+        """The scripts a person imported: they may run though they are outside the lab's scripts folders."""
         try:
             return [str(e["path"]) for e in self.entries()
                     if e.get("kind") == "script" and e.get("source") == "you" and e.get("path")]
@@ -340,7 +366,7 @@ class Library:
 
     def add_script(self, path: Any) -> Dict[str, Any]:
         """A script a person imported (its path, checked by the caller): it may run from now on. One already in the
-        library (Kelvin ran it from the scripts folder) keeps its runs and becomes theirs."""
+        library (Kelvin ran it from the scripts folders) keeps its runs and becomes theirs."""
         entry_id = script_id(path)
         with _LOCK:
             found = self._read()

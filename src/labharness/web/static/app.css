@@ -1289,7 +1289,7 @@ body.resizing .plot-svg { pointer-events: none; }
 #app.full .full-on { flex: 1 1 auto; width: auto !important; height: auto !important; min-width: 0; min-height: 0;
   border-left: 0; border-top: 0; }
 
-/* Settings, Instruments: what Kelvin installed for instruments */
+/* Settings, Instruments: the lab's scripts folders, and what Kelvin installed for instruments */
 .env-list { list-style: none; padding: 0; margin: 4px 0 6px; }
 .env-list li { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; padding: 6px 0;
   border-bottom: 1px solid var(--line); }
@@ -1590,6 +1590,7 @@ button.link { border: 1px solid var(--line-strong); background: var(--panel); bo
 button.link:hover { background: var(--hover); color: var(--text); border-color: var(--line-strong); }
 button.link.danger { color: var(--danger); }
 button.link.danger:hover { background: var(--danger-soft); }
+button.link:disabled { opacity: .5; cursor: default; }   /* waiting, as a .btn does */
 /* the Lab panel: a heading per part, larger, a line between parts, each part folds under its heading */
 #labpanel .lab-scroll h3 { font-size: 15px; font-weight: 650; color: var(--text); margin: 0; }
 #labpanel .inst-head-row { align-items: center; margin: 16px 0 10px; }

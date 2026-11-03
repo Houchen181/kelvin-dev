@@ -10,7 +10,7 @@ reading to settle and/or waits a fixed time: the safe counterpart of Special Mea
 
 or one of the lab's own scripts, run as run_script runs it (scriptrun.py), with its values and arguments:
 
-    script: sweep.py           # in the lab's scripts folder, or one a person imported (the Runs panel)
+    script: sweep.py           # in the lab's scripts folders, or one a person imported (the Runs panel)
     params: { VMAX: 2 }
     args: [--fast]
     version: 20261031-101500-sweep.py   # optional: that run's script.py, as it ran then

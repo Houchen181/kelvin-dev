@@ -642,9 +642,10 @@ class LabRuntime:
         self.cards_dir: Optional[Path] = None   # the user's own cards (~/Kelvin/cards); set by the app
         self.home: Optional[Path] = None        # ~/Kelvin, where each instrument has its folder; set by the app
         self.collection: Any = None             # the instrument collection (collection.py) while it is switched on
-        # the lab's scripts folder a person named (Set up), the only one run_script runs from, and the Python a person
-        # set for those scripts ("" = the best one found); the app keeps both in Settings, for everyone on this computer
-        self.scripts_folder: Callable[[], Optional[str]] = lambda: None
+        # the lab's scripts folders a person named (Settings, Set up), the only ones run_script runs from, and the
+        # Python a person set for those scripts ("" = the best one found); the app keeps both in Settings, for everyone
+        # on this computer
+        self.scripts_folders: Callable[[], List[str]] = lambda: []
         self.scripts_python: Callable[[], str] = lambda: ""
         self.setup_status: Dict[str, Any] = {"state": "idle"}   # setting up connected instruments (autosetup.py)
         self.data_problem: Optional[str] = None   # why the chosen data folder is not in use, if it is not
@@ -3017,11 +3018,11 @@ class LabRuntime:
 
     def _seq_file(self, spec: ScriptItem, changed: float) -> Optional[Path]:
         """The file a script item runs (one of the lab's experiments' versions, a run's script.py for a version:, or
-        the script in the scripts folder or the library), found once: finding a bare name walks the scripts folder.
+        the script in the scripts folders or the library), found once: finding a bare name walks the scripts folders.
         One not found is looked for again only after the queue changed."""
         from .. import scriptrun
-        folder = self.scripts_folder()
-        key = (spec.path, spec.version or "", str(folder or ""))
+        folders = self.scripts_folders()
+        key = (spec.path, spec.version or "", tuple(folders))
         hit = self._seq_found.get(key)
         if hit is not None and (hit[0] is not None or hit[1] == changed):
             return hit[0]
@@ -3033,7 +3034,7 @@ class LabRuntime:
             elif spec.version:
                 path = self._run_dir(spec.version) / "script.py"
             else:
-                path = scriptrun.locate(spec.path, [folder] if folder else [], self.library.chosen())
+                path = scriptrun.locate(spec.path, folders, self.library.chosen())
         except Exception:
             path = None
         if len(self._seq_found) > 500:
@@ -4133,7 +4134,7 @@ class LabRuntime:
 
     def library_import(self, path: Any, by: str = "human") -> Dict[str, Any]:
         """A script a person chose (the Runs panel's Import): in their library from now on, where it may run though it
-        is outside the lab's scripts folder, with the same check and approval as any; and what check_script says of
+        is outside the lab's scripts folders, with the same check and approval as any; and what check_script says of
         it now ({entry, check}). ValueError: it can't be imported, in words."""
         from .. import scriptrun
         raw = str(path or "").strip().strip('"')
@@ -4179,29 +4180,33 @@ class LabRuntime:
         return self._entry_view(entry)
 
     def library_files(self) -> Dict[str, Any]:
-        """The scripts a person may add as functions: every .py and .ipynb in the lab's scripts folder (Settings) and
-        its sub-folders, environments, caches and hidden folders left out, at most scanlibrary.MAX_FILES, by their
-        path in it: {folder, files: [{path, rel, name, kind}], more}; folder None when none is set. Read only."""
-        from ..scanlibrary import runnable_files
-        folder = self.scripts_folder()
-        if not folder:
-            return {"folder": None, "files": [], "more": False}
-        root = Path(folder).expanduser()
-        files, more = runnable_files(root)
-        return {"folder": str(root), "files": files, "more": more}
+        """The scripts a person may add as functions: every .py and .ipynb in the lab's scripts folders (Settings) and
+        their sub-folders, environments, caches, hidden folders and links left out (scanlibrary.runnable_files), at
+        most scanlibrary.MAX_FILES in all, each folder its share (a big one hides none of the others), each by its
+        path in its folder: {folders, files: [{path, rel, name, kind, folder}], more, folder: the first of them, None
+        when none is set}. Read only."""
+        from ..scanlibrary import MAX_FILES, runnable_files, shares
+        roots = [Path(f).expanduser() for f in self.scripts_folders()]
+        lists = [runnable_files(root, MAX_FILES) for root in roots]
+        room = shares([len(found) for found, _ in lists], MAX_FILES)
+        files = [dict(f, folder=str(root)) for root, (found, _), n in zip(roots, lists, room) for f in found[:n]]
+        return {"folder": str(roots[0]) if roots else None, "folders": [str(r) for r in roots], "files": files,
+                "more": any(cut or len(found) > n for (found, cut), n in zip(lists, room))}
 
     def library_inspect(self, path: Any) -> Dict[str, Any]:
         """What a script offers as a function, read and never run or imported: {name (the file's), path, settable
         ({name: value in the file}), notes ({name: the comment beside it}), problem (why it can't be read or run,
-        else None)}. A path relative to the lab's scripts folder is read there. ValueError: no path."""
+        else None)}. A path relative to the lab's scripts folders is read in the first that has it. ValueError: no
+        path."""
         from .. import scriptrun
         raw = str(path or "").strip().strip('"')
         if not raw:
             raise ValueError("give the script's path")
         p = Path(raw).expanduser()
-        folder = self.scripts_folder()
-        if not p.is_absolute() and folder:
-            p = Path(folder).expanduser() / p
+        roots = [Path(f).expanduser() for f in self.scripts_folders()]
+        if not p.is_absolute() and roots:
+            rel = p
+            p = next((r / rel for r in roots if (r / rel).exists()), roots[0] / rel)
         out: Dict[str, Any] = {"name": p.name, "path": str(p), "settable": {}, "notes": {}, "problem": None}
         if not p.is_absolute():
             out["problem"] = "give the script's full path, such as C:\\Lab\\scripts\\sweep.py"
@@ -4250,8 +4255,7 @@ class LabRuntime:
         if not python:
             return None
         from .. import scriptrun
-        folder = self.scripts_folder()
-        roots = [Path(folder).expanduser().resolve()] if folder else []
+        roots = [Path(f).expanduser().resolve() for f in self.scripts_folders()]
         if scriptrun.python_named(Path(script), roots, self.scripts_python() or "", str(python)):
             return str(python)
         notes.append("It ran with %s, which isn't here now: it runs with the Python Kelvin picks" % python)
@@ -5780,13 +5784,18 @@ class LabRuntime:
             self._script_cards = (stamp, lab_registry(self.home))
         return self._script_cards[1]
 
-    def survey_scripts(self, path: str) -> str:
+    def survey_scripts(self, path: str = "") -> str:
         """The lab's own scripts, read for how the lab works now (scripts.py): each instrument's address, settings,
-        commands and the values used, the card that fits, and each script's outline. Nothing in them is run."""
+        commands and the values used, the card that fits, and each script's outline. path: a folder or a script; ""
+        for every one of the lab's scripts folders, read as one. Nothing in them is run."""
         from .. import scripts as lab_scripts
         from ..adapters import resource_name
+        where: Any = str(path or "").strip() or self.scripts_folders()
+        if not where:
+            return ("not read: this lab has no scripts folders yet (a person adds them in Settings → Instruments → "
+                    "Your lab's scripts): survey the folder the person names")
         try:
-            found = lab_scripts.survey(path, self.script_cards(), own=self._kelvins())
+            found = lab_scripts.survey(where, self.script_cards(), own=self._kelvins())
         except (OSError, ValueError) as e:
             return "not read: %s" % e
         in_lab = {resource_name(ic.address): name for name, ic in self.lab.config.instruments.items()}
@@ -5794,11 +5803,11 @@ class LabRuntime:
                 if i.address and resource_name(i.address) in in_lab]
         return found.text() + ("\n\nAlready in this lab: " + ", ".join(here) if here else "") + "\n\n" + SCRIPTS_NEXT
 
-    def scripts_found(self, folder: str) -> Dict[str, Any]:
-        """The lab's scripts read for the Set up panel (a person chose the folder): each instrument with its likely
-        card, the limits from the values the scripts use, and who answers at its address now, asked as a scan asks
-        (*IDN? only; a serial port isn't tried, as its framing takes long to find). An identity reply decides the
-        card. Raises OSError for a folder that isn't there."""
+    def scripts_found(self, folder: Any) -> Dict[str, Any]:
+        """The lab's scripts read for the Set up panel (folder: the one a person chose, or the lab's scripts folders, a
+        list read as one): each instrument with its likely card, the limits from the values the scripts use, and who
+        answers at its address now, asked as a scan asks (*IDN? only; a serial port isn't tried, as its framing takes
+        long to find). An identity reply decides the card. Raises OSError for a folder that isn't there."""
         from .. import scripts as lab_scripts
         registry = self.script_cards()
         found = lab_scripts.survey(folder, registry)
@@ -6782,7 +6791,7 @@ class LabRuntime:
     def _prepare_script(self, path: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
                         drives: Optional[Dict[str, Any]] = None, version: Optional[str] = None,
                         python: str = "", action: str = "") -> Any:
-        """A script from the lab's scripts folder, or one the person imported into their library, read and ready
+        """A script from the lab's scripts folders, or one the person imported into their library, read and ready
         (nothing is run, no instrument is asked). version: a run of it whose script.py runs, as it ran then. python:
         the Python to run it in, one Kelvin runs the lab's scripts with (scriptrun.python_named). action: an
         experiment's action to run (scriptrun.prepare). scriptrun.ScriptError (KeyError for a version that isn't
@@ -6801,8 +6810,7 @@ class LabRuntime:
             prep.fenced = True   # and its process fenced as a rehearsal's is: kelvin.lab, and nothing past it
             prep.title = kept.name
             return prep
-        folder = self.scripts_folder()
-        folders, chosen = [folder] if folder else [], self.library.chosen()
+        folders, chosen = self.scripts_folders(), self.library.chosen()
         source = sha = None
         if version:   # that run's copy runs in the file's folder, under its name, though the file may be gone
             source, sha = self._script_as_run(version, scriptrun.locate(path, folders, chosen, missing=True))
@@ -6855,8 +6863,7 @@ class LabRuntime:
         if kept is not None:   # one of the lab's experiments: its version's file
             path, text = kept.path, scriptrun.source_of(kept.path)
         else:
-            folder = self.scripts_folder()
-            path = scriptrun.locate(spec.path, [folder] if folder else [], self.library.chosen(),
+            path = scriptrun.locate(spec.path, self.scripts_folders(), self.library.chosen(),
                                     missing=bool(spec.version))
             text = self._script_as_run(spec.version, path)[0] if spec.version else scriptrun.source_of(path)
         source, _ = scriptrun.with_params(text, dict(spec.params))
