@@ -2139,13 +2139,12 @@ class ChatAgent:
 
     def _kept(self) -> List[Any]:
         """What Kelvin runs as a person chose it, which a chat's write_file never saves (folderfiles.off_limits): the
-        lab's scripts folder, and the scripts a person imported into their library, each with its whole folder (a
+        lab's scripts folders, and the scripts a person imported into their library, each with its whole folder (a
         Python environment, wherever it is, folderfiles refuses itself)."""
         rt = self.runtime
         kept: List[Any] = []
         try:
-            folder = rt.scripts_folder()
-            kept += [folder] if folder else []
+            kept += [f for f in rt.scripts_folders() if f]
             kept += list(rt.library.chosen())   # none while the library can't be read: none of them runs then either
         except Exception:
             pass

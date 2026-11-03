@@ -1282,10 +1282,11 @@
     return b;
   }
 
-  // ---------- New function: one of the lab's scripts (or any file) into the library, named and coloured
+  // ---------- New function: one of the lab's scripts (or any file) into the library, named and coloured; the scripts
+  // of several folders each under their folder's name
   function newFunction() {
     const h = K.h;
-    const st = { path: "", touched: false, color: "", files: [], seq: 0, busy: false };
+    const st = { path: "", touched: false, color: "", files: [], folders: [], labels: null, seq: 0, busy: false };
     const filter = h("input", { class: "kfield", type: "search", placeholder: "Filter", spellcheck: "false", autocomplete: "off",
                                 "aria-label": "Filter files" });
     const files = h("div", { class: "seq-files", role: "listbox", "aria-label": "Files" });
@@ -1300,13 +1301,17 @@
     const drawFiles = () => {
       const f = filter.value.trim().toLowerCase();
       const shown = st.files.filter((x) => !f || String(x.rel || x.name).toLowerCase().includes(f)).slice(0, 300);
-      files.replaceChildren(...shown.map((x) => {
+      const option = (x) => {
         const on = x.path === st.path;
         const b = h("button", { class: "seq-file" + (on ? " on" : ""), type: "button", role: "option", "aria-selected": String(on),
                                 title: x.path }, x.rel || x.name);
         b.addEventListener("click", () => guard(choosePath, x.path));
         return b;
-      }));
+      };
+      if (!st.labels) { files.replaceChildren(...shown.map(option)); return; }
+      files.replaceChildren(...st.folders.map((d) => [d, shown.filter((x) => x.folder === d)]).filter(([, xs]) => xs.length)
+        .map(([d, xs]) => h("div", { class: "seq-folder", role: "group", "aria-label": d },
+          h("div", { class: "seq-folder-head", title: d, "aria-hidden": "true" }, st.labels.get(d)), ...xs.map(option))));
     };
     async function choosePath(p) {
       st.path = String(p || "").trim();
@@ -1391,6 +1396,8 @@
       try {
         const r = await K.api("/api/library", { body: { op: "files" } });
         st.files = (r && Array.isArray(r.files) ? r.files : []);
+        st.folders = (r && Array.isArray(r.folders) ? r.folders : []);
+        st.labels = st.folders.length > 1 ? K.folderLabels(st.folders) : null;
       } catch (e) { st.files = []; }
       filesBox.hidden = !st.files.length;
       drawFiles();

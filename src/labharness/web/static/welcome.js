@@ -1,7 +1,7 @@
 "use strict";
 // The first start (welcome.js). A lab with nothing in it yet (no lab.yaml, no instruments) opens on this page, over the
 // app, in AlphainZ's wizard form: three steps, each one card of rows (a title, its value under it, the control at the
-// right), with no sentences. Workspace: the lab's scripts folder, the data folder, and the scripts to import as
+// right), with no sentences. Workspace: the lab's scripts folders, the data folder, and the scripts to import as
 // functions. Model: an API key, ChatGPT, Claude Code, a local model. Instruments: a scan, and the ones found added to
 // the lab. Done or Skip: never again in this browser (lh.welcome), and Home shows. While it shows, body has the class
 // welcome-on (app.js's setupWait waits for it) and the app behind it is inert.
@@ -14,9 +14,10 @@
   const W = {
     boot: null, state: null, gated: false, open: false, step: 0, busy: 0, moving: false, els: {}, setupKey: "",
     changed: false,   // a key, the local model or ChatGPT is new: the page's list of models is redone at the end
-    scripts: { folder: "", counts: null, typed: "", editing: false, msg: "", full: "" },
+    scripts: { folders: [], counts: null, typed: "", msg: "", full: "", note: "" },
     data: { path: null, typed: "", editing: false, msg: "", full: "" },
-    files: { list: null, all: false, ticked: new Set(), have: new Set(), failed: new Map(), done: 0, todo: 0, running: false },
+    files: { list: null, all: false, ticked: new Set(), have: new Set(), failed: new Map(), done: 0, todo: 0, running: false,
+             labels: null },   // labels: each folder's name in the list, when its scripts come from several
     keys: {}, typed: {}, keyMsg: {},
     gpt: { signed: null, waiting: false, timer: 0, msg: "" },
     cc: null,
@@ -116,11 +117,11 @@
   function end() { W.busy = Math.max(0, W.busy - 1); footer(); }
 
   // ------------------------------------------------------------------ step 1: Workspace
-  function pathField(st, key, use, label) {   // in a browser (no folder picker): the path typed, then Use
+  function pathField(st, key, use, label, verb) {   // in a browser (no folder picker): the path typed, then Use (or Add)
     const input = K.h("input", { class: "kfield", type: "text", spellcheck: "false", autocomplete: "off",
                                  placeholder: "Folder path", "aria-label": label + " folder", "data-f": key + "-field" });
     input.value = st.typed;
-    const useBtn = btn("Use", "small", (b) => use(input.value, b), { f: key + "-use" });
+    const useBtn = btn(verb || "Use", "small", (b) => use(input.value, b), { f: key + "-use" });
     input.addEventListener("input", () => { st.typed = input.value; input.classList.remove("bad"); });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); e.stopPropagation(); safe(use, input.value, useBtn); }
@@ -134,33 +135,35 @@
     });
     return [input, useBtn];
   }
+  // the lab's scripts folders: Add folder… (in a browser, the path typed, then Add), then a row for each with Remove
   function scriptsBlock() {
     const st = W.scripts, picker = K.hasPicker();
     let val;
     if (st.msg) val = value(st.msg, "bad", st.full);
-    else if (st.folder) {   // the folder · its scripts (the runnable ones listed, else the survey's) · the instruments in them
-      const parts = [st.folder], listed = W.files.list;
+    else if (st.note) val = value(st.note, "", st.note, true);   // what was folded: a folder there already, or in another
+    else if (st.folders.length) {   // their scripts (the runnable ones listed, else the survey's) · the instruments in them
+      const parts = [], listed = W.files.list;
       if (listed || st.counts) parts.push(plural(listed ? listed.length : st.counts.scripts, "script"));
       if (st.counts && st.counts.instruments) parts.push(plural(st.counts.instruments, "instrument"));
-      val = value(parts.join(" · "), "", st.folder, true);
+      val = parts.length ? value(parts.join(" · ")) : null;
     } else val = value("—");
-    let ctl, wide = false;
-    if (picker) ctl = [btn(st.folder ? "Change…" : "Choose…", "small", chooseScripts, { f: "scripts-pick" })];
-    else if (!st.folder || st.editing) { ctl = pathField(st, "scripts", useScripts, "Scripts"); wide = true; }
-    else {
-      ctl = [btn("Change…", "small", () => {
-        Object.assign(st, { editing: true, typed: st.folder, msg: "", full: "" });
-        redraw("scripts");
-        focusField("scripts");
-      }, { f: "scripts-change" })];
-    }
-    return block("scripts", row("Scripts", val, ctl, wide ? "wide" : ""));
+    const ctl = picker ? [btn("Add folder…", "small", chooseScripts, { f: "scripts-pick" })]
+      : pathField(st, "scripts", useScripts, "Scripts", "Add");
+    return block("scripts", row("Scripts", val, ctl, picker ? "" : "wide"), ...st.folders.map(folderRow));
+  }
+  function folderRow(path, i) {   // one of them: its name, its whole path, Remove
+    const name = String(path).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+    return K.h("div", { class: "wl-row wl-item off", title: path }, K.h("span", { class: "wl-label" }, name),
+      K.h("span", { class: "wl-sub" }, path),
+      btn("Remove", "small ghost", (b) => removeScripts(path, b), { f: "scripts-remove-" + i }));
   }
   async function chooseScripts(button) {
-    const path = await K.pickFolder(W.scripts.folder || "");
+    const folders = W.scripts.folders;
+    const path = await K.pickFolder(folders[folders.length - 1] || "");
     if (path) await useScripts(path, button);
   }
-  // the lab's scripts: Kelvin reads them (never runs them) for its instruments; then the runnable ones to import
+  // a folder of the lab's scripts added: Kelvin reads them all (never runs them) for its instruments; then the
+  // runnable ones to import
   async function useScripts(typed, button) {
     const st = W.scripts, folder = unquote(typed);
     if (!folder) { markBad("scripts"); return false; }
@@ -168,17 +171,35 @@
     begin(button);
     try {
       const r = await K.api("/api/instruments/scripts-folder", { body: { folder } });
-      Object.assign(st, { folder: r.folder || folder, counts: { scripts: r.scripts || 0, instruments: r.instruments || 0 },
-                          typed: "", editing: false, msg: "", full: "" });
+      Object.assign(st, { folders: r.folders || [], counts: { scripts: r.scripts || 0, instruments: r.instruments || 0 },
+                          typed: "", msg: "", full: "", note: (r.folded || []).join("; ") });
       Object.assign(W.files, { list: null, all: false });
       W.files.failed.clear();
       ok = true;
     } catch (e) {
-      Object.assign(st, { msg: short(e), full: e.message, typed: folder });
+      Object.assign(st, { msg: short(e), full: e.message, typed: folder, note: "" });
     } finally {
       end();
       redraw("scripts");
       refocus(ok ? "" : K.hasPicker() ? "scripts-pick" : "scripts-field");
+    }
+    if (ok) await loadFiles();
+    return ok;
+  }
+  async function removeScripts(path, button) {
+    const st = W.scripts;
+    let ok = false;
+    begin(button);
+    try {
+      const r = await K.api("/api/instruments/scripts-folder", { body: { remove: path } });
+      Object.assign(st, { folders: r.folders || [], counts: null, msg: "", full: "", note: "" });
+      ok = true;
+    } catch (e) {
+      Object.assign(st, { msg: short(e), full: e.message, note: "" });
+    } finally {
+      end();
+      redraw("scripts");
+      refocus(K.hasPicker() ? "scripts-pick" : "scripts-field");
     }
     if (ok) await loadFiles();
     return ok;
@@ -232,21 +253,25 @@
     }
     return ok;
   }
-  // the runnable scripts under the scripts folder (library op files), all ticked; Next imports the ticked ones
+  // the runnable scripts under the scripts folders (library op files), all ticked; Next imports the ticked ones
   async function loadFiles() {
-    const f = W.files, seq = (f.seq = (f.seq || 0) + 1);   // only the latest folder's list is kept
-    if (!W.scripts.folder) return;
-    try {
-      const [r, lib] = await Promise.all([K.api("/api/library", { body: { op: "files" } }),
-        K.api("/api/library").catch(() => null)]);
-      if (seq !== f.seq) return;
-      f.list = Array.isArray(r.files) ? r.files : [];
-      f.have = new Set(((lib && lib.scripts) || []).map((s) => norm(s.path)));
-      f.ticked = new Set(f.list.filter((x) => !f.have.has(norm(x.path))).map((x) => x.path));
-    } catch (e) {   // no list from this Kelvin: nothing offered to import here
-      if (seq !== f.seq) return;
+    const f = W.files, seq = (f.seq = (f.seq || 0) + 1);   // only the latest folders' list is kept
+    if (!W.scripts.folders.length) {
       f.list = null;
-      warn(e);
+    } else {
+      try {
+        const [r, lib] = await Promise.all([K.api("/api/library", { body: { op: "files" } }),
+          K.api("/api/library").catch(() => null)]);
+        if (seq !== f.seq) return;
+        f.list = Array.isArray(r.files) ? r.files : [];
+        f.labels = Array.isArray(r.folders) && r.folders.length > 1 ? K.folderLabels(r.folders) : null;
+        f.have = new Set(((lib && lib.scripts) || []).map((s) => norm(s.path)));
+        f.ticked = new Set(f.list.filter((x) => !f.have.has(norm(x.path))).map((x) => x.path));
+      } catch (e) {   // no list from this Kelvin: nothing offered to import here
+        if (seq !== f.seq) return;
+        f.list = null;
+        warn(e);
+      }
     }
     redraw("files");
     redraw("scripts");   // its count of scripts is the list's now
@@ -269,7 +294,7 @@
   }
   function filesBlock() {
     const f = W.files;
-    if (!W.scripts.folder || !f.list) return block("files");
+    if (!W.scripts.folders.length || !f.list) return block("files");
     const [text, tone] = filesCount();
     const count = value(text, tone);
     count.setAttribute("data-v", "count");
@@ -284,21 +309,21 @@
           if (first) first.focus({ preventScroll: true });
         } }, more + " more") : null);
   }
-  function fileItem(x) {
+  function fileItem(x) {   // its name, then where it is in its folder (after the folder's name, from several folders)
     const f = W.files, done = f.have.has(norm(x.path)), failed = f.failed.get(x.path);
     const rel = String(x.rel || x.name || x.path || "").replace(/\\/g, "/");
     const cut = rel.lastIndexOf("/");
     const name = x.name || rel.slice(cut + 1);
+    const where = [f.labels && f.labels.get(x.folder), cut > 0 ? rel.slice(0, cut) : ""].filter(Boolean).join(" · ");
     const box = tick(done || f.ticked.has(x.path), done || f.running, name, (on) => {
       if (on) f.ticked.add(x.path); else f.ticked.delete(x.path);
       setFilesCount();
     });
-    return item(box, name, cut > 0 ? rel.slice(0, cut) : "",
-      done ? chip("Added", "ok") : failed ? chip("Failed", "bad", failed) : null, x.path);
+    return item(box, name, where, done ? chip("Added", "ok") : failed ? chip("Failed", "bad", failed) : null, x.path);
   }
   async function importTicked() {   // false: one failed, shown on its line (Next again goes on)
     const f = W.files;
-    if (!W.scripts.folder || !f.list || f.running) return !f.running;
+    if (!W.scripts.folders.length || !f.list || f.running) return !f.running;
     const todo = f.list.filter((x) => f.ticked.has(x.path) && !f.have.has(norm(x.path)));
     if (!todo.length) return true;
     Object.assign(f, { running: true, done: 0, todo: todo.length });
@@ -595,7 +620,7 @@
     const id = STEPS[W.step][0];
     if (id === "workspace") {
       const sc = W.scripts, dt = W.data;
-      if (!K.hasPicker() && (!sc.folder || sc.editing) && unquote(sc.typed) && norm(sc.typed) !== norm(sc.folder)) {
+      if (!K.hasPicker() && unquote(sc.typed) && !sc.folders.some((f) => norm(f) === norm(unquote(sc.typed)))) {
         const used = await useScripts(sc.typed, null);
         return used && !(W.files.list && W.files.list.length);   // its scripts show first; Next again imports them
       }
@@ -632,7 +657,7 @@
     const set = (W.boot && W.boot.settings) || {};
     W.keys = Object.assign({}, set.keys || {});
     W.local.url = set.local_base_url || "";
-    W.scripts.folder = set.lab_scripts || "";
+    W.scripts.folders = [].concat(set.lab_scripts || []);   // a list; one folder as text from an older Kelvin
     W.open = true;
     build(root);
     document.body.classList.add("welcome-on");
@@ -646,7 +671,7 @@
     render();
     W.els.next.focus({ preventScroll: true });
     loadData();
-    if (W.scripts.folder) loadFiles();
+    if (W.scripts.folders.length) loadFiles();
   }
   function hide() {
     W.open = false;
@@ -657,7 +682,7 @@
     const app = document.getElementById("app");
     if (app) app.inert = false;
   }
-  // Done or Skip: not again in this browser; Home. With no scripts folder chosen, the first setup's question about
+  // Done or Skip: not again in this browser; Home. With no scripts folder added, the first setup's question about
   // the lab's scripts is answered "none", as here, so it doesn't come back as a dialog. A new key, local model or
   // ChatGPT sign-in: the page's list of models is redone (Kelvin.refreshModels when the page lends it, else a reload)
   async function finish() {
@@ -667,7 +692,7 @@
     W.typed = {};
     W.local.typed = "";
     clearInterval(W.gpt.timer);
-    if (W.state && W.state.ask_scripts && !W.scripts.folder) {
+    if (W.state && W.state.ask_scripts && !W.scripts.folders.length) {
       try { await K.api("/api/instruments/scripts-folder", { body: { folder: "" } }); } catch (e) { warn(e); }
     }
     safe(K.setMode, "home");

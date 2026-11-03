@@ -98,19 +98,20 @@ class AutoSetup:
         self.status = dict(more, state=state, at=time.time(), first=self.first)
         self.runtime.setup_status = self.status
 
-    def use_scripts(self, folder: str) -> Dict[str, Any]:
-        """The lab's own scripts, which a person pointed Kelvin to: read now (never run; files only, so not waiting
-        for the instruments) for the first lab config, if it isn't written yet. now: they shape it; otherwise
-        Set up's From your scripts adds what they show. Raises OSError for a folder that isn't there."""
+    def use_scripts(self, folder: Any) -> Dict[str, Any]:
+        """The lab's own scripts, which a person pointed Kelvin to (folder: a folder, or the lab's scripts folders, a
+        list read as one): read now (never run; files only, so not waiting for the instruments) for the first lab
+        config, if it isn't written yet. now: they shape it; otherwise Set up's From your scripts adds what they show.
+        Raises OSError for a folder that isn't there."""
         from .scripts import survey
         found = survey(folder, self.runtime.script_cards())
         with self._scripts_lock:
             self.scripts = found
             now = self.first and not self._drafted and self._thread is not None and self._thread.is_alive()
-        log.info("The lab's scripts in %s: %d instrument(s) in %d script(s)%s", folder, len(found.instruments),
+        log.info("The lab's scripts in %s: %d instrument(s) in %d script(s)%s", found.folder, len(found.instruments),
                  len(found.scripts), "; used for the first lab config" if now else "")
-        return {"folder": str(folder), "instruments": len(found.instruments), "scripts": len(found.scripts),
-                "now": now}
+        return {"folder": found.folder, "folders": found.folders, "instruments": len(found.instruments),
+                "scripts": len(found.scripts), "now": now}
 
     def _with_scripts(self, matched: List[Dict[str, Any]], found: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """What the scan matched, with what the lab's scripts say of each (the name, the values used), and the

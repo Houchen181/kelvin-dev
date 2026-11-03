@@ -3221,6 +3221,11 @@
   // ------------------------------------------------------------------ the chat's folder: where its runs go
   const FOLDER = { path: "", own: false };
   function folderName(path) { const parts = path.split(/[\\/]+/).filter(Boolean); return parts[parts.length - 1] || path; }
+  // folders by their names, and by their whole paths where two have the same name (the lab's scripts folders)
+  function folderLabels(paths) {
+    const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+    return new Map(paths.map((p) => [p, paths.some((q) => q !== p && same(folderName(q), folderName(p))) ? p : folderName(p)]));
+  }
   function showFolder(path, own) {
     FOLDER.path = path || "";
     FOLDER.own = !!own;
@@ -6525,15 +6530,16 @@
     } catch (e) { $("lab-msg").textContent = e.message; }
   }
   // ------------------------------------------------------------------ setting up from the lab's own scripts
+  // the folder chosen joins the lab's scripts folders, and they are read together
   async function fromScripts() {
     const folder = await pickFolder(LAB.scriptsFolder || "", "The folder with your lab's scripts (Python, notebooks, MATLAB):");
     if (folder) await surveyScripts(folder);
   }
   async function surveyScripts(folder) {
     LAB.scriptsFolder = folder;
-    const btn = $("lab-scripts");
+    const btn = $("lab-scripts"), label = btn.textContent;
     btn.disabled = true; btn.textContent = "Reading your scripts…";
-    $("lab-msg").textContent = "Reading the scripts in " + folder + " (never running them), then asking each instrument who it is…";
+    $("lab-msg").textContent = "Reading your scripts (never running them), then asking each instrument who it is…";
     try {
       LAB.scripts = await api("/api/instruments/scripts", { body: { folder } });
       renderScripts();
@@ -6541,7 +6547,7 @@
       $("lab-msg").textContent = n ? "Found " + n + " instrument" + (n === 1 ? "" : "s") + " in " + s + " script" + (s === 1 ? "" : "s") +
         ". Check the cards and limits, then add the ones you want." : "No instrument work in the scripts there.";
     } catch (e) { $("lab-msg").textContent = e.message; }
-    finally { btn.disabled = false; btn.textContent = "From your scripts…"; }
+    finally { btn.disabled = false; btn.textContent = label; }
   }
   // ------------------------------------------------------------------ setting up from the lab's LabVIEW
   // NI MAX and the folder's projects and VIs, read (no VI is run) into the same review as the scripts', and each VI
@@ -6805,9 +6811,11 @@
   function recipesFromScripts() {   // in a new chat: Kelvin proposes a recipe per script, and keeps each one you agree to
     const folder = LAB.scripts && LAB.scripts.folder;
     if (!folder) return;
+    const several = (LAB.scripts.folders || []).length > 1;   // the lab's scripts folders, read together
     $("lab-dialog").close();
     newChat();
-    $("input").value = "Turn the measurement scripts in " + folder + " into recipes: read them with survey_scripts, " +
+    $("input").value = "Turn the measurement scripts in " + (several ? "my lab's scripts folders" : folder) + " into recipes: " +
+      "read them with survey_scripts" + (several ? " (no path: every folder)" : "") + ", " +
       "then propose a recipe for each measurement script, with this lab's instruments, and keep each with " +
       "save_recipe once I agree. Say what a recipe can't carry over.";
     autosize();
@@ -7481,6 +7489,39 @@
     }));
   }
 
+  // Settings → Instruments → Your lab's scripts: one row per folder (its path, Remove); Add folder… names another (the
+  // computer's folder picker, or the path typed in a browser). Each change is kept at once, for everyone here
+  function renderScriptFolders(folders, said) {
+    $("scripts-folders").replaceChildren(...(folders.length ? folders.map((f) => {
+      const remove = h("button", { class: "link danger", type: "button", "aria-label": "Remove " + f }, "Remove");
+      remove.addEventListener("click", () => changeScriptFolders({ remove: f }, remove));
+      return h("li", {}, h("span", { class: "env-what", title: f }, f), remove);
+    }) : [h("li", { class: "muted small" }, "No folders yet.")]));
+    showScriptsMsg(said || "");
+  }
+  function showScriptsMsg(text, bad) {   // what was folded, or why a change was refused
+    $("scripts-msg").textContent = text;
+    $("scripts-msg").hidden = !text;
+    $("scripts-msg").classList.toggle("bad", !!bad);
+  }
+  async function loadScriptFolders() {
+    try { renderScriptFolders((await api("/api/instruments/scripts-folder")).folders); } catch (e) { /* as it was drawn */ }
+  }
+  async function changeScriptFolders(body, btn) {   // {folder} adds one (folded with the others), {remove} takes one off
+    btn.disabled = true;
+    try {
+      const r = await api("/api/instruments/scripts-folder", { body });
+      if (S.settings) S.settings.lab_scripts = r.folders;
+      renderScriptFolders(r.folders, (r.folded || []).join("; "));
+    } catch (e) { showScriptsMsg(e.message, true); }
+    finally { btn.disabled = false; }
+  }
+  async function addScriptFolder() {
+    const now = (S.settings && S.settings.lab_scripts) || [];
+    const folder = await pickFolder(now[now.length - 1] || LAB.scriptsFolder || "", "The folder with your lab's scripts (Python, notebooks, MATLAB):");
+    if (folder) await changeScriptFolders({ folder }, $("scripts-add"));
+  }
+
   // a select's option for a stored value, added when the value is one the list doesn't offer
   function pickOption(select, value, label) {
     if (![...select.options].some((o) => o.value === value)) select.append(h("option", { value }, label(value)));
@@ -7518,8 +7559,8 @@
     $("collection").checked = !S.settings || S.settings.collection !== false;
     loadCollection();
     $("scripts-python").value = (S.settings && S.settings.lab_scripts_python) || "";
-    const scriptsFolder = S.settings && S.settings.lab_scripts;
-    $("scripts-folder").textContent = scriptsFolder ? "Scripts folder: " + scriptsFolder : "No scripts folder";
+    renderScriptFolders((S.settings && S.settings.lab_scripts) || []);
+    loadScriptFolders();   // as they are now: Set up or the first setup may have added one meanwhile
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
     ownerPinState();
     rolesState();
@@ -8620,7 +8661,7 @@
     setMode, ask, sendMessage, newChat, openChat, pollState,
     toggleSeq, toggleRuns, toggleLab, toggleAnalysis, openRun, openRunList, fitLayout, exitFull, thumb,
     openEditor, openVersions, openLabSetup, openSettings, settingsPage, openCards,
-    pickFolder, hasPicker, hasFilePicker, popMenu, closeMenu, lineChart, getRun, runCharts,
+    pickFolder, hasPicker, hasFilePicker, folderLabels, popMenu, closeMenu, lineChart, getRun, runCharts,
   };
 
   async function init() {
@@ -8743,6 +8784,7 @@
       const path = await pickFolder($("data-path").value.trim());
       if (path) { $("data-path").value = path; dataPathChanged(); }
     });
+    $("scripts-add").addEventListener("click", addScriptFolder);
     $("data-open").addEventListener("click", () => api("/api/data-folder", { body: { open: true } }).catch((e) => showDataFolder(e.message, true)));
     $("firewall-allow").addEventListener("click", allowFirewall);
     document.addEventListener("click", (e) => {

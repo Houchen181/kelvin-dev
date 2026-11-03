@@ -1,6 +1,6 @@
 """The person's library of scans and scripts, for the Runs panel: every plan and every script Kelvin ran, kept by what
 it is, so the exact same measurement is a click away; and the scripts a person imported, which may run though they
-are outside the lab's scripts folder (a person chose each one; scriptrun.locate).
+are outside the lab's scripts folders (a person chose each one; scriptrun.locate).
 
     library.json, in the data folder (each person's own, beside queue.json):
     {"entries": [{"id", "kind": "plan" | "script", "name", "source": "kelvin" | "you" | "labview" | "specialmeasure",
@@ -19,7 +19,7 @@ in place; one that can't be read as a library is kept aside (library.json.broken
 broken file never stops Kelvin.
 
 The portal calls the entries functions (the Sequence's list, as labMaster's): a person gives one a colour and a
-note as well as a name (meta), and picks a new one from the scripts in the lab's scripts folder (runnable_files)."""
+note as well as a name (meta), and picks a new one from the scripts in the lab's scripts folders (runnable_files)."""
 from __future__ import annotations
 
 import hashlib
@@ -238,7 +238,7 @@ class Library:
         return found[entry_id]
 
     def chosen(self) -> List[str]:
-        """The scripts a person imported: they may run though they are outside the lab's scripts folder."""
+        """The scripts a person imported: they may run though they are outside the lab's scripts folders."""
         try:
             return [str(e["path"]) for e in self.entries()
                     if e.get("kind") == "script" and e.get("source") == "you" and e.get("path")]
@@ -340,7 +340,7 @@ class Library:
 
     def add_script(self, path: Any) -> Dict[str, Any]:
         """A script a person imported (its path, checked by the caller): it may run from now on. One already in the
-        library (Kelvin ran it from the scripts folder) keeps its runs and becomes theirs."""
+        library (Kelvin ran it from the scripts folders) keeps its runs and becomes theirs."""
         entry_id = script_id(path)
         with _LOCK:
             found = self._read()

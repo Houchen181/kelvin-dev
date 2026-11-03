@@ -375,7 +375,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                            [item.chat, runtime.queue_started_by], "sequence", urgent=True)
     runtime.queue_heard = failed_heard
     team = TeamChat(home)                                 # the lab's team chat, everyone's (teamchat.py)
-    runtime.scripts_folder = lambda: settings.lab_scripts or None   # run_script runs only the scripts in it
+    runtime.scripts_folders = lambda: settings.lab_scripts or []   # run_script runs only the scripts in them
     runtime.scripts_python = lambda: settings.lab_scripts_python
     from .. import envs
     envs.set_home(home)          # the instrument environments Kelvin installs makers' packages into (envs.py)
@@ -2986,22 +2986,29 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse({"yaml": text, "already": already})
 
     async def scripts_view(request: Request) -> Response:
-        """The lab's own scripts, read (never run) to set the lab up the way it already works: {folder}. Each
-        instrument comes with its likely card, the limits from the values the scripts use, and who answers at its
-        address now (asked as a scan asks)."""
+        """The lab's own scripts, read (never run) to set the lab up the way it already works: {folder}, a folder that
+        joins the lab's scripts folders (run_script runs the scripts in them from now on), read with the others (one
+        script is read alone). Each instrument comes with its likely card, the limits from the values the scripts
+        use, and who answers at its address now (asked as a scan asks)."""
         problem = busy_problem()
         if problem:
             return error(409, problem)
         body = await request.json()
-        folder = str(body.get("folder") or "").strip()
+        folder = str(body.get("folder") or "").strip().strip('"').strip()
         if not folder:
             return error(400, "Choose the folder with your scripts.")
+        folders = None
+        if Path(folder).expanduser().is_dir():
+            try:
+                folders, _ = settings.lab_scripts_with((settings.lab_scripts or []) + [folder])
+            except ValueError as e:
+                return error(400, str(e))
         try:
-            found = await asyncio.to_thread(runtime.scripts_found, folder)
+            found = await asyncio.to_thread(runtime.scripts_found, folders or folder)
         except (OSError, ValueError) as e:
             return error(400, str(e))
-        if Path(folder).expanduser().is_dir():
-            settings.set_lab_scripts(folder)   # a person's choice: run_script runs the scripts in it from now on
+        if folders:
+            settings.set_lab_scripts(folders)   # a person's choice: run_script runs the scripts in them from now on
         return JSONResponse(found)
 
     async def labview_view(request: Request) -> Response:
@@ -3409,19 +3416,45 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse(await asyncio.to_thread(board.view))
 
     async def scripts_folder(request: Request) -> Response:
-        """POST {folder}: a person's answer to the first setup's question, the folder of the scripts the lab runs its
-        instruments with. The setup reads them (never runs them) for the names, settings and values the lab uses,
-        and for instruments the scan can't tell; "" when there are none (not asked again)."""
-        folder = str((await request.json()).get("folder") or "").strip()
-        if not folder:
-            settings.set_lab_scripts("")
-            return JSONResponse({"ok": True, "now": False})
+        """The folders of the scripts the lab runs its instruments with (Settings → Your lab's scripts, the first
+        setup's question, the first start): POST {folder} adds one; the setup reads the lab's scripts folders (never
+        runs them) for the names, settings and values the lab uses, and for instruments the scan can't tell
+        ({scripts, instruments, now} in all). {folder: ""}: there are none (not asked again). {remove: folder} takes
+        one off; {folders: [...]} names them all. Each answers {ok, folders, folded}: the same folder twice is kept
+        once and one inside another is left out (folded: what was, in words). GET: {folders}."""
+        if request.method == "GET":
+            return JSONResponse({"folders": settings.lab_scripts or []})
         try:
-            answer = await asyncio.to_thread(setup.use_scripts, folder)
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return error(400, "send {folder}, {remove} or {folders}")
+        if "remove" in body:
+            try:
+                return JSONResponse({"ok": True, "folders": settings.remove_lab_scripts(str(body["remove"] or "")),
+                                     "folded": []})
+            except KeyError as e:
+                return error(400, e.args[0])
+        if "folders" in body:
+            if not isinstance(body["folders"], list):
+                return error(400, "folders is a list of folders")
+            try:
+                folders, said = settings.set_lab_scripts(body["folders"])
+            except ValueError as e:
+                return error(400, str(e))
+            return JSONResponse({"ok": True, "folders": folders, "folded": said})
+        folder = str(body.get("folder") or "").strip().strip('"').strip()
+        if not folder:
+            settings.set_lab_scripts([])
+            return JSONResponse({"ok": True, "now": False, "folders": [], "folded": []})
+        try:
+            folders, said = settings.lab_scripts_with((settings.lab_scripts or []) + [folder])
+            answer = await asyncio.to_thread(setup.use_scripts, folders)
         except (OSError, ValueError) as e:
             return error(400, str(e))
-        settings.set_lab_scripts(folder)
-        return JSONResponse(dict(answer, ok=True))
+        settings.set_lab_scripts(folders)
+        return JSONResponse(dict(answer, ok=True, folder=folder, folders=folders, folded=said))
 
     async def approval_mode(request: Request) -> Response:
         """Ask before every drive increase, or auto-approve low-risk ones. People only: no agent tool reaches this."""
@@ -3687,9 +3720,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         plan's text, nothing kept (Save puts it back into the queue item with /api/queue op edit); {op: save, parts,
         from?} → {entry, new, library}, an entry of its own; {op: run, parts, from?, queue?} → {queue, message,
         entry, library}: saved, then run as above. The Sequence's functions: {op: meta, id, name?, color?,
-        note?} → {entry, library} (a colour is #rrggbb, "" for none); {op: files} → {folder, files: [{path, rel, name,
-        kind}], more}, the scripts in the lab's scripts folder (folder null when none is set); {op: inspect, path} →
-        {name, path, settable, notes, problem}, a script read (never run)."""
+        note?} → {entry, library} (a colour is #rrggbb, "" for none); {op: files} → {folders, files: [{path, rel, name,
+        kind, folder}], more, folder}, the scripts in the lab's scripts folders (folder: the first, null when none is
+        set); {op: inspect, path} → {name, path, settable, notes, problem}, a script read (never run)."""
         if role_of(request) != "owner":   # remote.py lists none of it either
             return error(403, ON_THIS_COMPUTER)
         if request.method == "GET":
@@ -4142,7 +4175,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/notify/test", notify_test, methods=["POST"]),
         Route("/api/instruments/scan", scan_view, methods=["POST"]),
         Route("/api/instruments/scripts", scripts_view, methods=["POST"]),
-        Route("/api/instruments/scripts-folder", scripts_folder, methods=["POST"]),
+        Route("/api/instruments/scripts-folder", scripts_folder, methods=["GET", "POST"]),
         Route("/api/instruments/labview", labview_view, methods=["POST"]),
         Route("/api/instruments/labview/scans", labview_scans, methods=["POST"]),
         Route("/api/instruments/specialmeasure", specialmeasure_view, methods=["POST"]),

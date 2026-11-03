@@ -136,12 +136,13 @@ You are connected to a physics lab through Kelvin.
   yourself: web_search, read_web_page (a page's text and its links, PDFs first), save_manual (keeps the PDF, with the
   instrument's address), then draft_card with manual. Never use the screen to search or to download.
 - A lab that already runs its instruments from its own scripts (Python, notebooks, MATLAB): survey_scripts on the
-  folder the person names reads how it works (addresses, connection settings, commands, the values used, the card
-  that fits each instrument) without running anything; set the lab up from it with the person, and offer each
-  measurement script as a recipe. When the person wants one of their scripts run as it is (from the lab's scripts
-  folder, or one they imported in the Runs panel), use run_script: it runs in the lab's own Python with every
-  command it sends through the gate, after one approval, and its readings become a run like a plan's. params
-  changes its settings for that run (check_script lists them); never edit the person's script to change a value.
+  folder the person names, or with no path on every one of the lab's scripts folders, reads how it works
+  (addresses, connection settings, commands, the values used, the card that fits each instrument) without running
+  anything; set the lab up from it with the person, and offer each measurement script as a recipe. When the person
+  wants one of their scripts run as it is (from the lab's scripts folders, or one they imported in the Runs panel),
+  use run_script: it runs in the lab's own Python with every command it sends through the gate, after one
+  approval, and its readings become a run like a plan's. params changes its settings for that run (check_script
+  lists them); never edit the person's script to change a value.
 - A lab that runs its instruments from LabVIEW: survey_labview on its LabVIEW folder reads NI MAX and its projects
   and VIs the same way (never running a VI) and translates each VI it could read into a scan, saying what didn't
   translate; a scan is a plan, run with run_plan once the person agrees. Never guess what a VI not read does.
@@ -440,12 +441,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return outside(rt, "a maker's example files", rt.read_examples(path))
 
     @server.tool(annotations=READ, structured_output=False)
-    def survey_scripts(path: str) -> str:
+    def survey_scripts(path: str = "") -> str:
         """Read the lab's own measurement scripts (Python, notebooks, MATLAB) in a folder or file the person named,
-        to set Kelvin up the way the lab already works: each instrument's address and connection settings, the
-        commands it takes and the values the lab uses, the Kelvin card that fits, limits from those values, and an
-        outline of each script (sweeps, waits, readings, files saved) to keep as recipes. Only reads them: nothing
-        is run, and nothing is sent to an instrument."""
+        or with no path in every one of the lab's scripts folders (each script then by its full path), to set Kelvin
+        up the way the lab already works: each instrument's address and connection settings, the commands it takes
+        and the values the lab uses, the Kelvin card that fits, limits from those values, and an outline of each
+        script (sweeps, waits, readings, files saved) to keep as recipes. Only reads them: nothing is run, and
+        nothing is sent to an instrument."""
         return outside(rt, "the lab's scripts", rt.survey_scripts(path))
 
     @server.tool(annotations=READ, structured_output=False)
@@ -532,11 +534,11 @@ def build_server(rt: LabRuntime) -> MCPServer:
                    drives: Optional[Dict[str, Any]] = None, action: str = "", dry_run: bool = False,
                    background: bool = False) -> str:
         """Run one of the lab's own measurement scripts (Python or a notebook) as it is, in the lab's own Python:
-        script is its file name or path in the lab's scripts folder (the one the person named in Set up), or one the
-        person imported in the Runs panel; Kelvin runs nothing from elsewhere. Every command it sends to a lab
-        instrument (pyvisa, pyserial, a socket) goes through
-        the safety gate on Kelvin's own connection: readings and settings run, drives are checked against the
-        limits, ramped and watched. A person approves the run once; Kelvin reads the script first for the drive
+        script is its file name or path in one of the lab's scripts folders (those the person named in Settings or
+        Set up; a name in several of them is given by its path), or one the person imported in the Runs panel;
+        Kelvin runs nothing from elsewhere. Every command it sends to a lab instrument (pyvisa, pyserial, a socket)
+        goes through the safety gate on Kelvin's own connection: readings and settings run, drives are checked against
+        the limits, ramped and watched. A person approves the run once; Kelvin reads the script first for the drive
         ranges it uses. params: values for its settings for this run, without editing the file ({"VMAX": 2});
         args: its command-line arguments; drives: the range of a drive the script works out as it runs, when you
         know it ({"smu.V": [0, 5]}), else such a drive is approved within its limits. A refusal, a person's no or
@@ -1259,7 +1261,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--approval-timeout", type=float, default=120, help="seconds before an unanswered request is declined")
     ap.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
     ap.add_argument("--mcp-port", type=int, default=8766, help="port for --transport streamable-http (127.0.0.1 only)")
-    ap.add_argument("--scripts", help="the lab's scripts folder: run_script runs only the scripts in it")
+    ap.add_argument("--scripts", action="append", default=[],
+                    help="one of the lab's scripts folders (again for each other one): run_script runs only the "
+                         "scripts in them")
     ap.add_argument("--scripts-python", default="",
                     help="the Python that runs them (default: the first found that has what a script imports)")
     args = ap.parse_args(argv)
@@ -1288,7 +1292,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     from .. import expstore
     runtime.experiments = expstore.Store(home / "experiments")   # the lab's experiments, the app's too
     runtime.labview_map = home / "labview-map.yaml"
-    runtime.scripts_folder = lambda: args.scripts
+    runtime.scripts_folders = lambda: list(args.scripts)
     runtime.scripts_python = lambda: args.scripts_python
     from .. import envs
     envs.cleanup()
