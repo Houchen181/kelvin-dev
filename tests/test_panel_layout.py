@@ -1,9 +1,11 @@
 """Where the side panels stand, and the sidebar's button. The panels stand in the order of the top bar's buttons, left to
 right: Team chat, Analysis, Runs (with the scan editor, which has no button, right after it), then Lab; the terminal
 is the split under the chat. Short of room, panels that share a column are neighbours in that order, one above the
-other (fitLayout in app.js); below 1100 px they float in one column, in that order from the top. The sidebar's button
-is in the top bar at every width: where the sidebar stands beside the page it hides it and shows it again, kept for
-next time, and the panels take its room; where the sidebar floats it opens it over the page, as before."""
+other: Team chat, Analysis, Runs and the scan editor in one column, beside Lab's, so every set of panels without Team
+chat stands and stacks as it did (fitLayout in app.js); below 1100 px they float in one column, in that order from the
+top, each open one an equal share of its height. The sidebar's button is in the top bar at every width: where the
+sidebar stands beside the page it hides it and shows it again, kept for next time, and the panels take its room as it
+slides; where the sidebar floats it opens it over the page, below the top bar, so the same button closes it."""
 import re
 
 import pytest
@@ -70,21 +72,55 @@ def test_panels_that_share_a_column_are_neighbours_in_that_order():
     assert PAGE.index('<div id="workcol"') < PAGE.index('<div id="sidecol"')   # the columns too, left to right
     # below 1100 px one column, the first above the second; with only Team chat or Lab open, as narrow as they are
     narrow = _block(CSS, "@media (max-width: 1100px)")
-    assert ".app.float-two #workcol { bottom: 50%; }" in narrow and ".app.float-two #sidecol { top: 50%; }" in narrow
     assert (".app:not(:has(.dock-col > .runpane:not([hidden]))) .dock-col { width: min(380px, 100vw) !important; }"
             in narrow)
     assert "#sidecol { width" not in narrow and ".app.float-two #workcol, .app.float-two #sidecol {" not in narrow
     assert "Team chat, Analysis, Runs and the scan editor (#workcol), then Lab (#sidecol)" in CSS
+    assert "Team chat, Analysis, Runs and the scan editor share a column, one above the other, beside Lab's" in JS
+
+
+def test_below_1100_px_each_open_panel_has_an_equal_share_of_the_height():
+    """Both columns float, the first above the second: the first's part of the height is as many shares as it has
+    panels open, so with Team chat, Analysis, Runs and Lab open each has a quarter, never Lab a half."""
+    narrow = _block(CSS, "@media (max-width: 1100px)")
+    assert (".app.float-two #workcol { bottom: calc((100% - var(--topbar-h, 57px)) * (1 - var(--float-top, .5))); }"
+            in narrow)
+    assert (".app.float-two #sidecol { top: calc(var(--topbar-h, 57px) + (100% - var(--topbar-h, 57px)) * "
+            "var(--float-top, .5)); }") in narrow
+    assert "50%" not in narrow
+    assert ".dock-col > * { width: auto !important; flex: 1 1 0; min-height: 0; }" in narrow   # alike in a column
+    fit = _js("fitLayout")
+    assert 'if (both) app.style.setProperty("--float-top", colPanes("workcol").length / open.length);' in fit
+    assert fit.index("if (floating) {") < fit.index('"--float-top"')
 
 
 def test_the_sidebar_button_is_in_the_top_bar_at_every_width():
     left = PAGE[PAGE.index('<div class="topbar-left">'):PAGE.index('<div id="chat-title"')]
     btn = re.search(r'<button id="toggle-sidebar"[^>]*>', left).group(0)
-    for text in ('aria-controls="sidebar"', 'aria-expanded="true"', 'aria-label="Hide conversations"'):
+    for text in ('aria-controls="sidebar"', 'aria-expanded="true"', 'aria-label="Hide conversations"',
+                 'data-tip="Hide conversations"'):
         assert text in btn, text
-    assert CSS.count("#toggle-sidebar") == 1   # never hidden by the window's width ...
+    assert "title=" not in btn   # its words ease in as the other top-bar buttons' names do, never the browser's tip
+    rules = re.findall(r"([^{}]*#toggle-sidebar[^{}]*)\{([^}]*)\}", CSS)
+    hiding = [sel for sel, body in rules if "display" in body]
+    assert len(hiding) == 1 and "#app.full #toggle-sidebar," in hiding[0]   # never hidden by the window's width ...
     assert "#app.full .sidebar, #app.full #toggle-sidebar," in CSS   # ... only in full screen, with the sidebar
     assert '$("toggle-sidebar").addEventListener("click", toggleSidebar);' in JS
+
+
+def test_over_the_page_the_list_starts_below_the_top_bar_so_its_button_closes_it():
+    """Opened by the button while the panels need its room, or below 820 px, the list never covers the button that
+    opened it, so closing it never needs the scrim, which closes every panel too."""
+    assert ("\n.app.compact .sidebar { position: fixed; left: 0; top: var(--topbar-h, 57px); bottom: 0; z-index: 30;"
+            in CSS)
+    small = _block(CSS, "@media (max-width: 820px)")
+    assert "  .sidebar { position: fixed; left: 0; top: var(--topbar-h, 57px); bottom: 0; z-index: 30;" in small
+    assert not re.search(r"\.sidebar \{[^}]*\btop: 0", CSS)
+    fit = _js("fitLayout")   # measured whenever the list or the panels float, never kept from another width
+    assert fit.index("if (floating || compact) {") < fit.index('setProperty("--topbar-h"')
+    wide = _block(CSS, "@media (min-width: 1101px)")   # the fixed top bar stays above the scrim
+    assert "z-index: 25;" in wide and "background: rgba(0, 0, 0, 0.35); z-index: 20; }" in CSS
+    assert 'if (sideFloats()) app.classList.toggle("side-open");' in _js("toggleSidebar")   # the same button closes it
 
 
 def test_beside_the_page_it_hides_the_sidebar_and_the_panels_take_its_room():
@@ -104,6 +140,7 @@ def test_beside_the_page_it_hides_the_sidebar_and_the_panels_take_its_room():
     said = _js("syncSide")   # the button says what it will do
     assert 'shown ? "Hide conversations" : "Show conversations"' in said
     assert 'b.setAttribute("aria-expanded", String(shown));' in said and 'b.setAttribute("aria-label", say);' in said
+    assert "b.dataset.tip = say;" in said and "title" not in said   # on hover as the top bar's other buttons
     assert "sideFloats() ? $(\"app\").classList.contains(\"side-open\") : !SIDE.hidden" in said
     assert ("@media (min-width: 821px) { .app.side-hidden:not(.compact) .sidebar { margin-left: -264px; "
             "visibility: hidden; } }") in CSS
@@ -112,11 +149,14 @@ def test_beside_the_page_it_hides_the_sidebar_and_the_panels_take_its_room():
 
 
 def test_it_slides_on_the_motion_curve_and_never_for_less_motion():
+    """The panels widen or narrow on the sidebar's curve, so its width and theirs change alike and the conversation
+    never drops below its least width meanwhile."""
     motion = CSS[CSS.index("/* motion, as labMaster moves"):]
     assert ".app.side-slide .sidebar { transition: margin-left .42s var(--ease-switch), visibility .42s; }" in motion
     assert ".app.side-slide .topbar { transition: left .42s var(--ease-switch); }" in motion
+    assert ".app.side-slide :is(.dock-col, .dock-col > *) { transition: width .42s var(--ease-switch); }" in motion
     calm = motion[motion.index("@media (prefers-reduced-motion: reduce)"):]
-    assert "#app .sidebar, #app .topbar { transition: none; }" in calm
+    assert "#app .sidebar, #app .topbar, #app.side-slide :is(.dock-col, .dock-col > *) { transition: none; }" in calm
     toggle = _js("toggleSidebar")   # for the button's change alone: never as the panels make room, nor on loading
     assert toggle.index('app.classList.add("side-slide");') < toggle.index("fitLayout();")
     assert 'setTimeout(() => app.classList.remove("side-slide"), 500)' in toggle

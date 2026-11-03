@@ -1395,8 +1395,8 @@
   // there is, they shrink alike; then the sidebar steps aside (the menu button brings it back over the page); then
   // Team chat, Analysis, Runs and the scan editor share a column, one above the other, beside Lab's; and if even that
   // doesn't fit, the Lab column floats over. Below 1100 px they float over the conversation in one column, in the same
-  // order from the top (app.css), below 820 px the sidebar too. The sidebar counts only while it stands beside the
-  // page: its button may have hidden it there (SIDE.hidden).
+  // order from the top, each open one an equal share of its height (app.css), below 820 px the sidebar too. The
+  // sidebar counts only while it stands beside the page: its button may have hidden it there (SIDE.hidden).
   const CHAT_MIN = 520, SIDEBAR_W = 264;
   const PANES = {   // id: [open?, its column, its least width, where its width is kept], in the page's order
     teampanel: [() => TEAM.open, "workcol", 280, "lh.teamWidth"],
@@ -1443,8 +1443,12 @@
     app.classList.toggle("float-lab", floatLab);
     app.classList.toggle("float-two", floating && both);
     if (!compact && w > 820) app.classList.remove("side-open");
-    if (floating) {   // they float below the top bar, so its buttons still open and close each one (app.css)
+    if (floating || compact) {   // the panels or the list float below the top bar, so its buttons still open and close
+                                 // each one (app.css)
       document.documentElement.style.setProperty("--topbar-h", document.querySelector(".topbar").offsetHeight + "px");
+    }
+    if (floating) {   // one column, the first above the second, each open panel an equal share of its height (app.css)
+      if (both) app.style.setProperty("--float-top", colPanes("workcol").length / open.length);
     } else {
       const room = paneRoom();
       if (stacked) {   // a column for each group, as wide as its widest pane
@@ -7844,7 +7848,8 @@
   // The sidebar's button, at the top bar's left at every width. Where the sidebar stands beside the page, the button
   // hides it and shows it again, as ChatGPT's does: it slides away and the page and the panels take its room, and the
   // page keeps the choice (lh.sideHidden). Where it floats (below 820 px, or while the panels need its room) the button
-  // opens and closes it over the page; shown again while the panels need its room, it opens over the page.
+  // opens and closes it over the page, below the top bar (app.css); shown again while the panels need its room, it
+  // opens over the page.
   const sideFloats = () => window.innerWidth <= 820 || $("app").classList.contains("compact");
   function toggleSidebar() {
     const app = $("app");
@@ -7861,12 +7866,14 @@
     syncScrim();
     syncSide();
   }
-  function syncSide() {   // the button says what it will do
+  // the button says what it will do, and on hover its words ease in under it as the top bar's other buttons' names do
+  // (app.css), never in the browser's tip
+  function syncSide() {
     const shown = sideFloats() ? $("app").classList.contains("side-open") : !SIDE.hidden;
     const b = $("toggle-sidebar"), say = shown ? "Hide conversations" : "Show conversations";
     b.setAttribute("aria-expanded", String(shown));
     b.setAttribute("aria-label", say);
-    b.title = say;
+    b.dataset.tip = say;
   }
 
 

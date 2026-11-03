@@ -1224,8 +1224,9 @@ body.resizing .plot-svg { pointer-events: none; }
 /* ---------- fitting the side panels (fitLayout in app.js): the conversation keeps its room ---------- */
 .main { container-type: inline-size; }
 /* the sidebar: beside the page, where its button (always in the top bar) hides it and the page and the panels take its
-   room (.side-hidden); over the page, opened by the button, while the panels need its room (.compact) or below 820 px */
-.app.compact .sidebar { position: fixed; left: 0; top: 0; bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow); }
+   room (.side-hidden); over the page, opened by the button, while the panels need its room (.compact) or below 820 px,
+   below the top bar (fitLayout measures it), so the button that opened it is there to close it */
+.app.compact .sidebar { position: fixed; left: 0; top: var(--topbar-h, 57px); bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow); }
 .app.compact.side-open .sidebar { transform: none; }
 @media (min-width: 821px) { .app.side-hidden:not(.compact) .sidebar { margin-left: -264px; visibility: hidden; } }
 /* in the top bar's buttons' order: Team chat, Analysis, Runs and the scan editor (#workcol), then Lab (#sidecol); side
@@ -1244,20 +1245,22 @@ body.resizing .plot-svg { pointer-events: none; }
 
 /* ---------- narrow screens ---------- */
 @media (max-width: 1100px) {   /* the panels float over the conversation, one column in the buttons' order from the top,
-                                  each open one a share of it */
+                                  each open one an equal share of it */
   .dock-col { position: fixed; right: 0; top: 0; bottom: 0; z-index: 30; box-shadow: var(--shadow); flex-direction: column;
     width: min(640px, 100vw) !important; }
   /* with only Team chat or Lab open, as narrow as they are */
   .app:not(:has(.dock-col > .runpane:not([hidden]))) .dock-col { width: min(380px, 100vw) !important; }
-  .app.float-two #workcol { bottom: 50%; }
-  .app.float-two #sidecol { top: 50%; }
+  /* both columns: the first above the second, with a share of the height for each panel it holds open (--float-top,
+     which fitLayout sets) */
+  .app.float-two #workcol { bottom: calc((100% - var(--topbar-h, 57px)) * (1 - var(--float-top, .5))); }
+  .app.float-two #sidecol { top: calc(var(--topbar-h, 57px) + (100% - var(--topbar-h, 57px)) * var(--float-top, .5)); }
   .dock-col > * { width: auto !important; flex: 1 1 0; min-height: 0; }
   .dock-col > :not([hidden]) ~ :not([hidden]) { border-top: 1px solid var(--line); }
   .dock-col, .scrim { top: var(--topbar-h, 57px); }   /* below the top bar (fitLayout measures it): its buttons open and close each panel */
   .pane-resize { display: none; }
 }
 @media (max-width: 820px) {
-  .sidebar { position: fixed; left: 0; top: 0; bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow); }
+  .sidebar { position: fixed; left: 0; top: var(--topbar-h, 57px); bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow); }
   .app.side-open .sidebar { transform: none; }
   .thread, .empty { padding-left: 16px; padding-right: 16px; }
   .composer-wrap { padding: 0 12px 10px; }
@@ -1691,7 +1694,8 @@ select.kfield { padding-right: 26px; }
 :is(#mode-seg, #runs-seg, .seg).has-thumb > button.on { background: none; border-color: transparent; box-shadow: none; }
 /* the top bar's buttons: their states fade; each one's name eases in under it on hover (none of them moves) */
 .topbar .topbar-right .pill { transition: background-color .25s ease, color .25s ease, border-color .25s ease, box-shadow .25s ease; }
-.topbar-right .pill[data-tip]::after { content: attr(data-tip); position: absolute; top: calc(100% + 10px); left: 50%; z-index: 40;
+.topbar-right .pill[data-tip]::after, #toggle-sidebar[data-tip]::after { content: attr(data-tip); position: absolute;
+  top: calc(100% + 10px); left: 50%; z-index: 40;
   width: max-content; max-width: 240px; padding: 4px 10px; border-radius: 10px; background: var(--text); color: var(--page);
   font-size: 12px; font-weight: 550; line-height: 1.4; text-align: center; white-space: normal; pointer-events: none; opacity: 0;
   transform: translate(-50%, -4px);
@@ -1699,6 +1703,11 @@ select.kfield { padding-right: 26px; }
 .topbar-right .pill[data-tip]:is(:hover, :focus-visible)::after { opacity: 1; transform: translate(-50%, 0); transition-delay: .12s; }
 .topbar-right .pill[data-tip]:last-child::after { left: auto; right: 0; transform: translate(0, -4px); }
 .topbar-right .pill[data-tip]:last-child:is(:hover, :focus-visible)::after { transform: none; }
+/* the menu button's words (syncSide in app.js), at the window's left edge: from its left, as the last button's from its
+   right */
+#toggle-sidebar { position: relative; }
+#toggle-sidebar[data-tip]::after { left: 0; transform: translate(0, -4px); }
+#toggle-sidebar[data-tip]:is(:hover, :focus-visible)::after { opacity: 1; transform: none; transition-delay: .12s; }
 /* buttons, tabs and chips: their states fade */
 .btn, .icon-btn, .run-tab, .chip, button.link { transition: background-color .2s ease, color .2s ease, border-color .2s ease, box-shadow .2s ease; }
 .fold-btn svg, .fold-field .fold-btn svg { transition: transform .32s var(--ease-switch); }
@@ -1717,13 +1726,15 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
 .seq-card.seq-in { animation: k-card-in .36s var(--ease-switch); }
 .seq-fn { transition: border-color .14s ease, box-shadow .2s ease, transform .2s var(--ease-switch); }
 .seq-fn:hover { transform: translateY(-1px); }
-/* the sidebar its button hides or shows slides away or back, the top bar's left edge with it (.side-slide: for that
-   change alone, never as the panels make room) */
+/* the sidebar its button hides or shows slides away or back, the top bar's left edge with it, and the panels widen or
+   narrow on the same curve, so the conversation never gives up its room meanwhile (.side-slide: for that change alone,
+   never as the panels make room) */
 .app.side-slide .sidebar { transition: margin-left .42s var(--ease-switch), visibility .42s; }
 .app.side-slide .topbar { transition: left .42s var(--ease-switch); }
+.app.side-slide :is(.dock-col, .dock-col > *) { transition: width .42s var(--ease-switch); }
 @media (prefers-reduced-motion: reduce) {
-  .seg-thumb, .topbar-right .pill[data-tip]::after, .seq-fn, .fold-btn svg { transition: none; }
-  #app .sidebar, #app .topbar { transition: none; }
+  .seg-thumb, .topbar-right .pill[data-tip]::after, #toggle-sidebar[data-tip]::after, .seq-fn, .fold-btn svg { transition: none; }
+  #app .sidebar, #app .topbar, #app.side-slide :is(.dock-col, .dock-col > *) { transition: none; }
   :is(#runpane, #edpane, #anpane, #termpane, #labpanel, #teampanel, #seq-view, #history-view, .run-view, #homeview, #scroller,
       .seq-fns, .k-in, .seq-ed, .seq-card), dialog[open], dialog[open]::backdrop { animation: none; }
   .seq-fn:hover { transform: none; }
