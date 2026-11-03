@@ -3792,15 +3792,64 @@ class LabRuntime:
         return {"ok": True, "grants": grants, "actions": frozenset(starting) | frozenset(running), "title": title,
                 "duration": duration}
 
-    def queue_pause(self, by: str = "agent") -> str:
-        """Finish the item that is running, then stop there. Stop (the Stop button) also ends the running scan."""
-        with self.queue.lock:
-            if self.queue.state != "running":
-                return "the queue is not running\n" + self._queue_text()
-            self.queue.state, self.queue.reason = "pausing", "paused by %s" % by
-            self.queue.save()
+    def queue_pause(self, by: str = "agent", want: Optional[str] = None) -> str:
+        """Finish the item that is running, then stop there. Stop (the Stop button) also ends the running scan.
+        want: the state a person's Pause showed as it was pressed (the portal's), so a screen a poll out of date never
+        flips it the wrong way: "running" (it read Pause) pauses as above; "pausing" (it read Pausing…) takes back a
+        person's own pause that has not taken effect (_own_pause): the item running goes on, then the queue as
+        approved, and nothing starts that was not running. Kelvin's pause, or one a failure, a guard, a block's Pause
+        after or a stop made, is never taken back (Resume or Retry once it has paused). With want, a queue no longer
+        in that state changes nothing: "not changed: ..." saying why in a few words, cause first (the portal's 409,
+        shown in the Sequence's one-line bar); without it, as ever."""
+        if want not in (None, "running", "pausing"):
+            raise ValueError("want is the state the button showed: running or pausing")
+        q = self.queue
+        with q.lock:
+            if want == "pausing":
+                why = self._pause_kept()
+                if why:
+                    return "not changed: " + why
+                q.state, q.reason = "running", ""   # the loop, still on its item, goes on after it
+                q.save()
+            elif q.state != "running":
+                if want is None:
+                    return "the queue is not running\n" + self._queue_text()
+                return "not changed: " + ("already " + q.state if q.state in ("pausing", "paused") else "not running")
+            else:
+                q.state, q.reason = "pausing", "paused by %s" % by
+                q.save()
+        if want == "pausing":   # logged as the pause is: the lab's record, and the chats told (web/notices.py)
+            self.gate.log.write("queue_pause_taken_back", by=by)
+            return "the pause is taken back: the queue goes on"
         self.gate.log.write("queue_pause", by=by)
         return "the queue pauses after the item that is running"
+
+    def _pause_asked(self) -> bool:
+        """The queue pausing because someone asked (queue_pause: a person, or Kelvin), not yet in effect. A failure,
+        a guard trip, a declined check, a block's Pause after or a stop meanwhile makes the pause theirs (_queue_loop,
+        _queue_ask_again, stop), which is never taken back. Under the queue's lock."""
+        q = self.queue
+        return q.state == "pausing" and q.reason.startswith("paused by ")
+
+    def _own_pause(self) -> bool:
+        """The queue pausing because a person pressed Pause (the portal's, by "human"), not yet in effect: the one
+        pause that can be taken back (queue_pause's want "pausing"); Kelvin's is not. Under the queue's lock."""
+        return self._pause_asked() and self.queue.reason.startswith("paused by human")
+
+    def _pause_kept(self) -> Optional[str]:
+        """Why the queue's pause can't be taken back now, in a few words, cause first, that name no item: the
+        Sequence's bar shows them on one line (None: it can). Under the queue's lock."""
+        q = self.queue
+        if q.state in ("running", "paused"):
+            return "already " + q.state
+        if q.state != "pausing" or self._queue_thread is None or not self._queue_thread.is_alive():
+            return "not running"
+        if self._own_pause():
+            return None
+        return "%s made this pause" % (
+            "Kelvin" if q.reason.startswith("paused by ") else "Stop" if q.reason.startswith("stopped by ") else
+            "Pause after" if q.reason.startswith("paused after ") else
+            "a change" if q.reason.endswith("(added or changed after the queue was approved)") else "a failure")
 
     def _queue_loop(self, grants: Dict[str, Allowed], by: str, approved: Optional[Dict[str, str]] = None,
                     only: Optional[List[str]] = None) -> None:
@@ -3875,13 +3924,15 @@ class LabRuntime:
                 skipped = skip is not None and not ok and not tripped   # it ended at the skip (a trip still pauses)
                 if skipped:   # a person skipped it: it ends there, and the queue goes on whatever on a failure says
                     q.mark(item, "skipped", "skipped by %s" % skip[1])
-                if not ok and not skipped and q.state == "running" and (
+                # a pause asked for meanwhile (queue_pause) becomes this one, the failure's or the block's Pause
+                # after, which is never taken back: a take-back then can't run the queue past either
+                if not ok and not skipped and (q.state == "running" or self._pause_asked()) and (
                         q.on_error == "pause" or item.status == "stopped" or tripped):
                     q.state, q.reason = "pausing", "%s: %s%s" % (item.name, message, "; a guard tripped, so the "
                                                                  "queue pauses whatever on a failure says"
                                                                  if tripped and q.on_error != "pause" else "")
                     q.save()
-                elif item.then_pause and q.state == "running" and q.next_waiting() is not None:
+                elif item.then_pause and (q.state == "running" or self._pause_asked()) and q.next_waiting() is not None:
                     q.state, q.reason = "pausing", "paused after %s, as asked" % item.name   # the rest wait for you
                     q.save()
             if not ok and not skipped and item.status == "failed" and self.queue_heard is not None:
@@ -3926,7 +3977,7 @@ class LabRuntime:
             self.gate.log.write("queue_approved", by=by, items=len(items))
             return got
         with q.lock:
-            if q.state == "running":
+            if q.state == "running" or self._pause_asked():   # one asked for meanwhile is this one now (queue_pause)
                 q.state = "pausing"
                 q.reason = "%s (added or changed after the queue was approved)" % got["said"].splitlines()[0]
                 q.save()

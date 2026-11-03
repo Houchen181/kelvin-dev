@@ -596,9 +596,8 @@
     }
     if (visible) paint(s);
   }
-  function onMode(mode) {
+  function onMode(mode) {   // Home chosen: the page has brought the main column back already (setMode)
     if (mode !== "home") return;
-    if (K.$("app").classList.contains("full")) K.exitFull();   // a panel in full screen: Home asked for, Home shown
     onShow();
   }
 

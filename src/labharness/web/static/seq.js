@@ -461,7 +461,10 @@
                                "aria-haspopup": "menu" }, K.icon("dots"));
     const bar = h("div", { class: "seq-bar" }, head, start, pause, stop, more);
     start.addEventListener("click", () => guard(startSeq));
-    pause.addEventListener("click", () => guard(op, { op: "pause" }));
+    // Pause flips (pauseSeq), so as askYes it ignores the second click of a double-click, a press within 0.4 s of its
+    // words changing or of its coming (aimed at what was there before) and a held key's repeats
+    pause.addEventListener("click", (e) => { if (e.detail < 2 && Date.now() - pauseAt >= 400) guard(pauseSeq); });
+    pause.addEventListener("keydown", (e) => { if (e.repeat) e.preventDefault(); });
     stop.addEventListener("click", () => guard(stopSeq));
     more.addEventListener("click", (e) => { e.stopPropagation(); guard(moreMenu, more); });
 
@@ -608,11 +611,11 @@
   function stateChip(q) {
     const all = q.items || [];
     if (!all.length && q.state !== "running" && q.state !== "pausing") return ["Idle", "line", ""];   // nothing to resume
-    if (q.state === "running") {
+    if (q.state === "running" || ownPause(q)) {   // the person's own pause: still running, and Pause says Pausing…
       const at = all.findIndex((i) => i.status === "running");
-      return [at >= 0 ? "Running " + (at + 1) + " of " + all.length : "Running", "run", ""];
+      return [at >= 0 ? "Running " + (at + 1) + " of " + all.length : "Running", "run", q.state === "running" ? "" : q.reason];
     }
-    if (q.state === "pausing") return ["Pausing", "warn", q.reason || ""];
+    if (q.state === "pausing") return ["Pausing", "warn", q.reason || ""];   // Kelvin's, a failure's, a guard's or Stop's
     if (q.state === "paused") return ["Paused", "warn", q.reason || ""];
     if (all.length && !q.waiting && !q.running) return ["Done", "ok", q.reason && q.reason !== "finished" ? q.reason : ""];
     return ["Idle", "line", ""];
@@ -638,7 +641,7 @@
   }
   function renderBar() {
     const q = SEQ.q, st = q.state || "idle", busy = st === "running" || st === "pausing";
-    const { start, pause, stop } = SEQ.el;
+    const { start, pause, stop, more } = SEQ.el;
     start.hidden = busy;
     const kind = SEQ.starting ? SEQ.starting : startKind(q);
     const can = !!kind.item || !!q.waiting;
@@ -654,8 +657,56 @@
       start.replaceChildren(SEQ.starting ? K.h("span", { class: "seq-spin", "aria-hidden": "true" }) : ico(kind.label === "Retry" ? "again" : "play", kind.label !== "Retry"),
         K.h("span", {}, kind.label));
     }
-    pause.hidden = st !== "running";
+    // Pause, an armed action: Pausing… (amber) while the person's own pause waits for the running block, and a second
+    // press takes it back. Kelvin's pause, or one a failure, a guard, a block's Pause after or Stop made, has no button:
+    // the state says Pausing, why in its tip. The button's want is the state it shows (pauseSeq)
+    const own = ownPause(q), want = own ? "pausing" : "running", held = document.activeElement === pause;
+    const came = pause.hidden && (st === "running" || own);
+    pause.hidden = st !== "running" && !own;
+    if (came || pause.dataset.want !== want) pauseAt = Date.now();
+    if (pause.dataset.want !== want) {
+      const label = own ? "Pausing…" : "Pause";
+      pause.dataset.want = want;
+      pause.classList.toggle("armed", own);
+      pause.title = own ? "Pausing after the running block: press again to go on" : label;
+      pause.setAttribute("aria-label", label);
+      pause.lastChild.textContent = label;
+    }
     stop.hidden = !busy;
+    // the keyboard on Pause as it went (paused; or Kelvin, a failure, a guard or Stop made the pause): Resume or Retry
+    // takes it once offered, and till then ⋯ holds it (never Stop, which acts at once); not once the person is on
+    // Pause again or moved on
+    if (held && pause.hidden) pauseFocus = true;
+    if (pauseFocus) {
+      const at = document.activeElement;
+      if (held ? !pause.hidden : at && at !== document.body && at !== more) pauseFocus = false;
+      else if (!start.hidden && !start.disabled) { pauseFocus = false; start.focus({ preventScroll: true }); }
+      else { if (held) more.focus({ preventScroll: true }); if (!busy) pauseFocus = false; }
+    }
+  }
+  // the person's own pause (Pause here, by "human"), not yet in effect: the one pause that can be taken back
+  // (runtime.py _own_pause; not Kelvin's, and a failure, a guard trip, a Pause after or a stop meanwhile makes it theirs)
+  const ownPause = (q) => q.state === "pausing" && /^paused by human/.test(q.reason || "");
+  // a press of Pause carries want, the state the button showed (running: Pause; pausing: Pausing…), so a screen a poll
+  // out of date never flips it the wrong way: the server refuses (409) and the bar says why, then shows the queue as it is
+  let holdSent = false;   // a press on its way: another waits for its answer
+  let pauseAt = 0;        // when Pause last came or changed its words: a press in the next 0.4 s is ignored
+  let pauseFocus = false; // the keyboard was on Pause as it went: Resume or Retry takes it when offered
+  async function pauseSeq() {
+    const b = SEQ.el.pause, want = b.dataset.want;
+    if (holdSent || !want) return;
+    holdSent = true;
+    b.setAttribute("aria-busy", "true");
+    try {
+      accept(await K.api("/api/queue", { body: { op: "pause", want } }));
+    } catch (e) {   // the server's words without its "not changed:"
+      const why = String(e.message || "").replace(/^not changed: /, "");
+      say(why.charAt(0).toUpperCase() + why.slice(1));
+      loadQueue();
+    } finally {
+      holdSent = false;
+      b.removeAttribute("aria-busy");
+    }
   }
   function cardSig(it, i, look) {
     return JSON.stringify([i, it.status, it.name, it.summary, it.note, it.message, it.then_pause, it.text, it.params,
@@ -1349,10 +1400,13 @@
   }
 
   // ------------------------------------------------------------------ dialogs: New function, Sweep, Save as
+  // its head and its buttons stay; what is between them scrolls when the window is short (app.css .dialog-body)
   function dialog(title, body, foot, submit) {
     const h = K.h;
     const form = h("form", { class: "seq-dlg", novalidate: true },
-      h("div", { class: "dialog-head" }, h("h2", {}, title)), ...body, h("div", { class: "dialog-foot" }, ...foot));
+      h("div", { class: "dialog-head" }, h("h2", {}, title)),
+      h("div", { class: "dialog-body", "data-region": "dialog" }, ...body),
+      h("div", { class: "dialog-foot" }, ...foot));
     const dlg = h("dialog", { class: "dialog seq-dialog" }, form);
     form.addEventListener("submit", (e) => { e.preventDefault(); guard(submit); });
     dlg.addEventListener("close", () => dlg.remove());

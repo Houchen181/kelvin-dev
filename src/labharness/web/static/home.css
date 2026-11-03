@@ -3,7 +3,8 @@
    blocks Kelvin keeps, in a region of their own that scrolls when there are more than fit. Home fits by construction
    (brief 1.1): the page never scrolls. Drawn with the kit at the end of app.css (its tokens, .kcard, .chip) and the fit
    tokens of the density tier (the value after each comma is the roomy tier's, for a page without them); light and dark
-   come from the tokens alone. Variant 2B (html[data-v2="B"]) keeps the 2 + 1 large tiles where Home is tall. */
+   come from the tokens alone. Variant 2B (html[data-v2="B"]) keeps the 2 + 1 large tiles where Home is tall; 2C does
+   too, in a column of 1180 px (four columns of blocks) instead of 1440. */
 
 /* the conversation's place (as .scroller: from a zero basis, so the top bar keeps its own height when it wraps), and the
    container Home's parts are sized by: its width (one-line tiles under 700 px) and its height (one-line tiles when it
@@ -101,7 +102,11 @@ html.fit-tight .home-spark { height: 28px; }
 .kcard.home-block { display: flex; flex-direction: column; gap: var(--sp-2, 8px); min-width: 0; padding: var(--pad-card, 18px 20px);
   border-radius: 14px; border-left-width: 3px; box-shadow: var(--home-shadow); transition: box-shadow .4s ease; }
 .kcard.home-block.fresh { box-shadow: 0 0 0 2px var(--accent), var(--home-shadow); transition: none; }   /* it just arrived */
-.hk-head { display: flex; align-items: flex-start; gap: var(--sp-2, 8px); min-width: 0; }
+/* the head: the kind, the name, the tools. The tools stand 2 px out of its line above, beside and below (.hk-tools);
+   its box takes them in, its margin out and its padding back, so it sits where it did and nothing spills out of it at
+   any page size (2 px are 2.2 at 110 %) */
+.hk-head { display: flex; align-items: flex-start; gap: var(--sp-2, 8px); min-width: 0; margin: -2px -2px -2px 0;
+  padding: 2px 2px 2px 0; }
 .hk-kind { flex: none; display: grid; place-items: center; height: 22px; color: var(--kind); }
 .hk-kind svg { width: 17px; height: 17px; }
 .hk-name { flex: 1 1 auto; min-width: 0; line-height: 22px; overflow-wrap: anywhere; }   /* the title, and how long ago after it */
@@ -190,3 +195,17 @@ html:is(.fit-compact, .fit-tight) .hk-text { -webkit-line-clamp: 2; }
   html[data-v2="B"] .home-watches { width: min(100%, 560px); }   /* a reading's value near its name, not a window away */
 }
 /* /v2B */
+/* v2C */
+/* 2C: 2B's large 2 + 1 tiles where Home is tall, in the narrower column the big monitor had before: 1180 px, four
+   columns of blocks */
+html[data-v2="C"] .home-col { max-width: calc(1180px + 2 * var(--pad-page, 24px)); }
+@container home (min-width: 700px) and (min-height: 940px) {
+  html[data-v2="C"] .home-greet { flex-basis: 100%; }
+  html[data-v2="C"] .home-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  html[data-v2="C"] .home-tile-lab { grid-column: 1 / -1; }
+  html[data-v2="C"] .home-tile { max-height: none; gap: 10px; padding: 24px 26px 20px; }
+  html[data-v2="C"] .home-tile-go { font-size: 20px; line-height: 26px; }
+  html[data-v2="C"] .home-kpi-n { font-size: 44px; }
+  html[data-v2="C"] .home-watches { width: min(100%, 560px); }
+}
+/* /v2C */

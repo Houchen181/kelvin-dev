@@ -292,8 +292,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .crumb svg { width: 15px; height: 15px; color: var(--accent); }
 .crumb.incog { color: var(--text); font-weight: 600; }
 .crumb.incog svg { color: var(--text); }
-#toggle-incognito.on { background: var(--text); color: var(--bg); border-color: var(--text); }
-body.incognito .composer { border-style: dashed; border-color: var(--text-2); }
+body.incognito .composer { border-style: dashed; border-color: var(--text-2); }   /* its toggle's on look: "fit I" */
 body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .recall { font-size: 13px; color: var(--muted); }
 .recall summary { cursor: pointer; display: inline-flex; align-items: center; gap: 6px; list-style: none; }
@@ -421,18 +420,26 @@ body:not(.incognito) #empty-sub { display: none; }
 .approval-code { margin: 2px 0; max-height: 340px; overflow: auto; white-space: pre; padding: 8px 10px; border: 1px solid var(--line);
   border-radius: 8px; background: var(--raised); font: 12.5px/1.45 ui-monospace, Consolas, monospace; }
 .approval-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.approval.done { background: var(--card); border-color: var(--card-line); padding: 7px 12px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 10px; }
-/* a decided request is one line (what, and the answer); a click on it shows the details again */
-.approval.done .approval-title { grid-column: 1; grid-row: 1; cursor: pointer; min-width: 0; font-weight: 550; }
+.approval.done { background: var(--card); border-color: var(--card-line); padding: 7px 12px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 10px; row-gap: 0; }
+/* a decided request is one line (what, and the answer); its title is a disclosure (foldable in app.js): its chevron
+   turns and it looks pressed while the details under it (.k-fold: what it asked, its pictures, the lab's lessons) are
+   open */
+.approval.done .approval-title { grid-column: 1; grid-row: 1; cursor: pointer; min-width: 0; font-weight: 550; min-height: 28px;
+  margin: -3px -6px; padding: 0 6px; border-radius: var(--radius-s); }
+.approval.done .approval-title:hover { background: var(--hover); }
+.approval.done.open .approval-title { background: var(--active); }
 .approval.done .approval-title > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .approval.done.open .approval-title > span { white-space: normal; }
+.approval.done .approval-title > svg.chev { margin-left: auto; color: var(--muted); }
+.approval.done .approval-title > .where ~ svg.chev { margin-left: 0; }
+.approval.done.open .approval-title > svg.chev { transform: rotate(90deg); }
 .approval.done .approval-actions { grid-column: 2; grid-row: 1; }
-.approval.done ul { grid-column: 1 / -1; grid-row: 2; }
-.approval.done:not(.open) ul, .approval.done:not(.open) .approval-actions .muted { display: none; }
+.approval.done > .k-fold { grid-column: 1 / -1; grid-row: 2; }
+.approval.done > .k-fold > .k-fold-in { display: grid; gap: 8px; }
+.approval.done > .k-fold > .k-fold-in > :first-child { margin-top: 8px; }
+.approval.done:not(.open) .approval-actions .muted { display: none; }
 .approval-figure { margin: 0; display: grid; gap: 4px; }
 .approval-figure img { max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
-.approval.done .approval-figure { grid-column: 1 / -1; }
-.approval.done:not(.open) .approval-figure { display: none; }
 .approval.done .approval-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
 .verdict { font-weight: 600; font-size: 14px; }
 .verdict.yes { color: var(--ok); } .verdict.no { color: var(--muted); }
@@ -564,7 +571,6 @@ body:not(.incognito) #empty-sub { display: none; }
 .slash-item.on, .slash-item:hover { background: var(--hover); }
 .slash-item b { font-family: ui-monospace, Consolas, monospace; font-weight: 600; white-space: nowrap; }
 .slash-item span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.know-on { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
 .composer-row .mode-picker, .composer-row .model-picker { min-width: 0; flex: 0 1 auto; display: inline-flex; }
 .composer-row select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 .composer-row .send { flex: none; }
@@ -622,7 +628,6 @@ body:not(.incognito) #empty-sub { display: none; }
 .inst-row:hover { background: var(--hover); }
 .inst-head { display: flex; align-items: center; }
 .inst-head .inst-row { flex: 1; min-width: 0; }
-.inst-switch { margin: 0 6px 0 0; }   /* the one switch (.switch, "fit A"), at the row's end */
 .inst.off .inst-row { opacity: .5; }
 .inst.off .inst-sub { color: var(--muted); }
 .inst-icon { width: 22px; height: 22px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; }
@@ -976,7 +981,6 @@ body.resizing { cursor: col-resize; user-select: none; }
   background: var(--accent-soft); font-size: 13px; }
 .survey-box[hidden] { display: none; }
 .survey-box p { margin: 0; }
-.lab-chip { cursor: pointer; }
 .check.wrap { white-space: normal; }
 .check.wrap input { flex: none; width: auto; }
 .key-row .btn { white-space: nowrap; }
@@ -1245,48 +1249,32 @@ body.resizing .plot-svg { pointer-events: none; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .3; } }
 
-/* ---------- fitting the side panels (fitLayout in app.js): the conversation keeps its room ---------- */
+/* ---------- fitting the side panels (fitLayout in app.js): the main column keeps its room ---------- */
 .main { container-type: inline-size; }
 /* the sidebar: beside the page, unless its button (always in the top bar) hid it (.side-hidden), and then the page and
-   the panels take its room; the panels never hide it. Where the page has no room for it beside (.side-floats, which
-   fitLayout sets in the page's own pixels) it stands over the page (narrow screens, below) */
-.app.side-hidden:not(.side-floats) .sidebar { margin-left: -264px; visibility: hidden; }
-/* in the top bar's buttons' order: Team chat, Analysis, Runs and the scan editor (#workcol), then Lab (#sidecol); side
-   by side, or, short of room, one above the other in their column */
+   the panels take its room; the panels never hide it. Where it cannot stand beside the main column it takes the
+   content area instead (.side-solo: narrow screens, below) */
+.app.side-hidden .sidebar { margin-left: -264px; visibility: hidden; }
+/* side by side, as wide as fitLayout makes each, in the top bar's buttons' order:
+   Team chat, Analysis, Runs and the scan editor (#workcol), then Lab (#sidecol).
+   Never one above another, nor one over another: short of room, the one looked at least recently is put away */
 .dock-col { display: flex; flex: none; min-width: 0; }
-.app.stacked .dock-col { flex-direction: column; }
-.app.stacked .dock-col > * { width: auto !important; flex: 1 1 0; min-height: 0; }
-.app.stacked .dock-col > :not([hidden]) ~ :not([hidden]) { border-top: 1px solid var(--line); }
-/* and when even two columns don't fit, Lab's goes under the others, one column for all, as wide as fitLayout makes
-   both, each open panel an equal share of the height (--float-top): nothing over anything */
-#app.lab-under:not(.full) #workcol { align-self: flex-start; height: calc(100% * var(--float-top, .5)); }
-#app.lab-under:not(.full) #sidecol { position: fixed; right: 0; bottom: 0; z-index: 30; border-top: 1px solid var(--line);
-  top: calc(var(--chrome-h, 52px) + (100% - var(--chrome-h, 52px)) * var(--float-top, .5)); }
 @container (max-width: 640px) {
   .pill .pill-text { display: none; }
   .pill { padding-left: 9px; padding-right: 9px; }
   .folder-label { display: none; }
 }
 
-/* ---------- narrow screens: where the page has no room for the panels or the sidebar beside it (.floating and
-   .side-floats, which fitLayout sets in the page's own pixels, so they follow the page size), they stand over it,
-   below the top bar and the notice row: their buttons still open and close each one, and no alarm is covered ---------- */
-/* the panels over the conversation, one column in the buttons' order from the top, each open one an equal share of it */
-.app.floating .dock-col { position: fixed; right: 0; top: var(--chrome-h, 52px); bottom: 0; z-index: 30;
-  box-shadow: var(--shadow); flex-direction: column; width: min(640px, calc(100 * var(--vw, 1vw))) !important; }
-/* with only Team chat or Lab open, as narrow as they are */
-.app.floating:not(:has(.dock-col > .runpane:not([hidden]))) .dock-col { width: min(380px, calc(100 * var(--vw, 1vw))) !important; }
-/* both columns: the first above the second, with a share of the height for each panel it holds open (--float-top,
-   which fitLayout sets) */
-.app.floating.float-two #workcol { bottom: calc((100% - var(--chrome-h, 52px)) * (1 - var(--float-top, .5))); }
-.app.floating.float-two #sidecol { top: calc(var(--chrome-h, 52px) + (100% - var(--chrome-h, 52px)) * var(--float-top, .5)); }
-.app.floating .dock-col > * { width: auto !important; flex: 1 1 0; min-height: 0; }
-.app.floating .dock-col > :not([hidden]) ~ :not([hidden]) { border-top: 1px solid var(--line); }
-.app.floating .pane-resize { display: none; }
-/* the sidebar over the page at its left, the page dimmed under it (the scrim: a click there hides it); hidden by its
-   button, it waits out of sight to the left */
-.app.side-floats .sidebar { position: fixed; left: 0; top: var(--chrome-h, 52px); bottom: 0; z-index: 30; box-shadow: var(--shadow); }
-.app.side-floats.side-hidden .sidebar { transform: translateX(-100%); visibility: hidden; box-shadow: none; }
+/* ---------- narrow screens: a pane that cannot stand beside the main column even alone (.solo), or the sidebar where it
+   cannot (.side-solo; fitLayout sets both in the page's own pixels, so they follow the page size), takes the content
+   area by itself, below the top bar and the notice row, and the main column waits out of sight. Nothing stands over
+   anything and nothing is dimmed: Chat or Home brings the main column back, a chat chosen in the list the chat ---------- */
+#app.solo .main, #app.solo .pane-resize, #app.side-solo .main, #app.side-solo .dock-col { display: none !important; }
+#app.solo .dock-col:not([hidden]), #app.solo .dock-col > :not([hidden]) { flex: 1 1 auto; width: auto !important;
+  min-width: 0; border-left: 0; }
+/* a pane alone with the list hidden already has all full screen would give it: no ⤢ that changes nothing */
+#app.solo.side-hidden .full-btn { display: none; }
+#app.side-solo .sidebar { flex: 1 1 auto; width: auto; border-right: 0; }
 @media (max-width: 820px) {
   .thread, .empty { padding-left: 16px; padding-right: 16px; }
   .composer-wrap { padding: 0 12px 10px; }
@@ -1307,7 +1295,7 @@ body.resizing .plot-svg { pointer-events: none; }
 #app.full .pane-resize, #app.full .term-resize { display: none !important; }
 #app.full:not(.full-term) { flex-direction: column; }
 #app.full:not(.full-term) .main { flex: none; }
-#app.full #workcol, #app.full #sidecol { position: static; flex: 1 1 auto; min-height: 0; width: auto !important; box-shadow: none; }
+#app.full #workcol, #app.full #sidecol { flex: 1 1 auto; min-height: 0; width: auto !important; }
 #app.full .full-on { flex: 1 1 auto; width: auto !important; height: auto !important; min-width: 0; min-height: 0;
   border-left: 0; border-top: 0; }
 
@@ -1618,24 +1606,14 @@ button.link:disabled { opacity: .5; cursor: default; }   /* waiting, as a .btn d
 #labpanel .inst-model { display: none; }
 #labpanel .inst-headline { text-align: right; justify-self: end; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 #labpanel .inst-id { overflow: hidden; text-overflow: ellipsis; }
-/* Settings: larger titles, every item's alike; an item with more than two fields folds under its title (initSettingFolds
+/* Settings: larger titles, every item's alike; an item with a title marked data-fold folds under it (initSettingFolds
    in app.js hides what follows the title, .fold-hide, and marks the title .folded) */
 .set-title { font-size: 20px; font-weight: 650; }
 .set-page > .field > .field-row:first-child > .field-label, .set-page > .field > :is(label:not(.check), .field-label):first-child,
 .set-page .fold-btn { font-size: 15px; font-weight: 650; color: var(--text); }
 .set-page > .field { padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .set-page .fold-btn { padding: 2px 0; text-align: left; }
-.set-page .fold-btn:hover, .set-page > details.field > summary:hover { color: var(--accent); }
-/* the Local model folds by itself (a <details>): its title as the others', with the same chevron */
-.set-page > details.field > summary { display: flex; align-items: center; gap: 6px; width: fit-content; margin: 0; padding: 2px 0;
-  list-style: none; font-size: 15px; font-weight: 650; color: var(--text); }
-.set-page > details.field > summary::-webkit-details-marker { display: none; }
-.set-page > details.field > summary::before { content: ""; flex: none; width: 13px; height: 13px; background: var(--muted);
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 6l6 6-6 6'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 6l6 6-6 6'/%3E%3C/svg%3E") center / contain no-repeat;
-  transition: transform .15s; }
-.set-page > details.field[open] > summary { margin-bottom: 6px; }
-.set-page > details.field[open] > summary::before { transform: rotate(90deg); }
+.set-page .fold-btn:hover { color: var(--accent); }
 /* Home takes the conversation's place */
 .app.home-on #scroller, .app.home-on .composer-wrap, .app.home-on #chat-title, .app.home-on #wake-bar { display: none !important; }
 /* the parts apart, by hairlines only: under the top bar at every width, between a conversation's turns, and between the
@@ -1755,14 +1733,15 @@ select.kfield { padding-right: 26px; }
 /* buttons, tabs and chips: their states fade */
 .btn, .icon-btn, .run-tab, .chip, button.link { transition: background-color .2s ease, color .2s ease, border-color .2s ease, box-shadow .2s ease; }
 .fold-btn svg, .fold-field .fold-btn svg { transition: transform .32s var(--ease-switch); }
-/* what comes in: a panel from its side, a view, a dialog, what a fold or a block's editor opens, a new block */
-@keyframes k-pane-in { from { opacity: 0; transform: translateX(18px); } }
+/* what comes in: a panel (a fade only, .15 s: content never waits, and nothing moves), a view, a dialog, what a fold or
+   a block's editor opens, a new block */
+@keyframes k-pane-in { from { opacity: 0; } }
 @keyframes k-view-in { from { opacity: 0; transform: translateY(6px); } }
 @keyframes k-pop-in { from { opacity: 0; transform: translateY(10px) scale(.985); } }
 @keyframes k-reveal { from { opacity: 0; transform: translateY(-4px); } }
 @keyframes k-card-in { from { opacity: 0; transform: translateY(10px) scale(.98); } }
 @keyframes k-fade { from { opacity: 0; } }
-:is(#runpane, #edpane, #anpane, #termpane, #labpanel, #teampanel) { animation: k-pane-in .34s var(--ease-switch); }
+:is(#runpane, #edpane, #anpane, #termpane, #labpanel, #teampanel) { animation: k-pane-in .15s var(--ease-in); }
 :is(#seq-view, #history-view, .run-view, #homeview, #scroller, .seq-fns) { animation: k-view-in .26s var(--ease-in); }
 dialog[open] { animation: k-pop-in .28s var(--ease-switch); }
 dialog[open]::backdrop { animation: k-fade .28s ease; }
@@ -1876,12 +1855,6 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
 /* ===== end fit A ===== */
 
 /* ===== fit B: panes and full screen ===== */
-/* the sidebar over the page slides in and out on the switch curve, for its button's change alone (.side-slide), never
-   as the layout fits again; with less motion it comes and goes at once (the motion section above) */
-.app.side-slide.side-floats .sidebar { transition: transform .42s var(--ease-switch), visibility .42s; }
-/* where both stand over the page, the one asked for last is on top: the sidebar its button showed (.side-above),
-   until a panel is asked for */
-.app.side-floats.side-above .sidebar { z-index: 31; }
 /* a panel already on the screen, asked for again (paneShow, ring in app.js): its head rings once, an accent ring that
    holds, then fades. Colour only, so it is the same with less motion */
 @keyframes k-ring { from, 70% { box-shadow: inset 0 0 0 2px var(--accent); background-color: var(--accent-soft); } }
@@ -1923,6 +1896,9 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
    sides 28 px */
 #labpanel .fold-btn { min-height: max(30px, calc(var(--lab-row) - 4px)); }
 #labpanel .inst-switch { height: max(30px, calc(var(--lab-row) - 4px)); }
+/* the switch (the one .switch, "fit A") at the row's end: its track as far in from the list's right edge as the icon is
+   from its left, 10 px (the button is 3 px wider than the track on each side; on touch 5 px, below) */
+#labpanel .inst-head > .inst-switch { margin-right: 7px; }
 #labpanel .inst-row { height: var(--lab-row); }
 #labpanel .row-btn { min-width: 30px; min-height: 30px; }
 #labpanel .seg:not(.lab-strip) > button { min-height: 28px; }
@@ -1990,6 +1966,7 @@ dialog[open]::backdrop { animation: k-fade .28s ease; }
   #labpanel { --lab-row: max(var(--row-h, 36px), 40px); }
   #labpanel :is(.btn.small, button.link, .row-btn, .fold-btn, .inst-tools input, .mount-select) { min-height: 40px; }
   #labpanel .inst-switch { height: 40px; }
+  #labpanel .inst-head > .inst-switch { margin-right: 5px; }   /* 44 px wide on touch: the track still 10 px in */
   :is(#labpanel, #teampanel) .lab-head .icon-btn { min-width: 40px; min-height: 40px; }
   #teampanel :is(.team-me, .btn.small, .send, textarea, input) { min-height: 40px; }
   #teampanel .send { width: 40px; }
@@ -2213,13 +2190,127 @@ div.run-tab { padding: 0 3px 0 0; gap: 0; cursor: default; }
 /* ===== end fit F ===== */
 
 /* ===== fit I: the chat column, sidebar, composer and menu items ===== */
+/* Incognito, a mode of the chat (toggleIncognito in app.js): a toggle, never a pane's look. On, a dashed outline and a
+   tint, as the composer has then */
+.topbar .topbar-right #toggle-incognito[aria-pressed="true"] { background: color-mix(in srgb, var(--text) 9%, transparent);
+  border: 1px dashed var(--text-2); color: var(--text); box-shadow: none; }
+body.incognito .composer { background: color-mix(in srgb, var(--text) 4%, var(--raised)); }
+
+/* the start screen fits the chat's height: its top a share of the window (16 to 72 px), the mark 56 px (40 when tight),
+   the greeting at the display size, each suggestion 48 px or more */
+.empty { padding-top: clamp(16px, calc(6 * var(--vh)), 72px); padding-bottom: var(--sp-4); }
+.hero-mark { width: 56px; height: 56px; margin-bottom: var(--sp-4); border-radius: 14px; }
+:root.fit-tight .hero-mark { width: 40px; height: 40px; margin-bottom: var(--sp-3); border-radius: 10px; }
+.empty h1 { font-size: var(--fs-display); }
+.suggestions { margin-top: var(--sp-5); gap: var(--sp-3); }
+.suggestion { display: flex; align-items: center; min-height: 48px; padding: 10px 16px; }
+
+/* a tool step's head and a decided request's title are disclosures: pressed while open; what they show or hide
+   (.k-fold, foldOpen in app.js) is a grid row going from 0fr to 1fr with its opacity, .2 s in and .12 s out; from the
+   keyboard (the step or request .still) the part and the chevron change at once; shut, it is inert */
+.step.open > .step-head { background: var(--active); }
+.k-fold { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 0fr; opacity: 0;
+  transition: grid-template-rows .12s ease, opacity .12s ease; }
+.open > .k-fold { grid-template-rows: 1fr; opacity: 1; transition-duration: .2s; transition-timing-function: var(--ease-in), ease; }
+.k-fold > .k-fold-in { min-height: 0; overflow: hidden; }
+.still > .k-fold, .step.still .chev, .approval.done.still .approval-title > svg.chev { transition: none; }
+
+/* a card's language (localizeCard in app.js): the kit's choice of two, small; on a decided card it stands between the
+   title and the verdict, never inside the title */
+.approval .card-lang { padding: 1px; font-size: 12px; }
+.approval .card-lang > button { min-height: 28px; padding: 2px 10px; font-size: 12px; }
+.approval.done:has(> .card-lang) { grid-template-columns: minmax(0, 1fr) auto auto; }
+.approval.done > .card-lang { grid-column: 2; grid-row: 1; }
+.approval.done:has(> .card-lang) > .approval-actions { grid-column: 3; }
+
+/* popMenu's checkable items (app.js), in the icons' place and drawn in both states: a box for a setting that acts at
+   once, ticked while on; a ring for a choice, the chosen one's with a dot */
+.menu-check { flex: none; display: grid; place-items: center; width: 15px; height: 15px; border: 1.5px solid var(--muted);
+  border-radius: 4px; }
+.menu-item .menu-check svg { width: 11px; height: 11px; stroke-width: 2.8; color: var(--accent-ink); opacity: 0; }
+.menu-check.menu-radio { border-radius: 50%; }
+.menu-check.menu-radio::after { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); opacity: 0; }
+.menu-item[aria-checked="true"] .menu-check { border-color: var(--accent); }
+.menu-item[aria-checked="true"] .menu-check.menu-box { background: var(--accent); }
+.menu-item[aria-checked="true"] .menu-check svg, .menu-item[aria-checked="true"] .menu-check.menu-radio::after { opacity: 1; }
+
+/* the sidebar: its buttons 28 px or more (the row buttons 30, so 24 at 85 %), its rows as tall as before; a project's
+   chats come in by height when a pointer opens it (projectGroup in app.js); the lab's name is words, not a control */
+.sidebar .row-btn { min-width: 30px; min-height: 30px; }
+.chat-item, .proj-row { padding-top: 2px; padding-bottom: 2px; }
+.side-label.row { padding-top: 2px; padding-bottom: 0; }
+.sidebar button.link { min-height: 28px; }
+.proj-fold { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 1fr; }   /* a long name cut, never wider */
+.proj-fold > .proj-chats { min-height: 0; }
+.proj-fold.k-open { animation: k-fold-in .2s var(--ease-in); }
+.proj-fold.k-open > .proj-chats { overflow: hidden; }
+@keyframes k-fold-in { from { grid-template-rows: 0fr; opacity: 0; } }
+
+/* the composer's controls: 28 px or more (30, so 24 at 85 %), the message box too; an attachment's × as well, reaching
+   into its chip's padding so the chip stays as low as it was */
+.composer-row :is(select, .compare-btn) { min-height: 30px; }
+.composer textarea { min-height: 30px; padding-block: 4px; }
+.attach-x { display: inline-grid; place-items: center; min-width: 28px; min-height: 28px; margin-block: -3px; }
+
+@container (max-width: 480px) {   /* a chat as narrow as a phone's: the composer's controls on two rows, never squeezed */
+  .composer-row { flex-wrap: wrap; row-gap: 6px; }
+  .composer-row .mode-picker { flex: 1 1 30%; }
+  .composer-row .model-picker { flex: 1 1 40%; }
+  .composer-row :is(.mode-picker, .model-picker) select { flex: 1; }
+}
+@media (max-width: 560px) {   /* a phone: the greeting a size smaller */
+  .empty h1 { font-size: min(var(--fs-display), 26px); }
+}
+@media (pointer: coarse) {   /* touch: every target 40 px or more; a row's buttons faintly there, as there is no hover */
+  .chat-item, .proj-row { min-height: 44px; }
+  .sidebar .row-btn { min-width: 40px; min-height: 40px; }
+  .chat-item .row-btn, .proj-row .row-btn { opacity: .35; }
+  .chat-item.active .row-btn, .sidebar .row-btn:focus-visible { opacity: 1; }
+  .side-btn, .side-hint, .sidebar button.link { min-height: 44px; }
+  .side-input { min-height: 40px; }
+  .menu-item { min-height: 44px; }
+  .thread :is(button.link, .btn, .step-head), .approval.done .approval-title, .approval .card-lang > button { min-height: 40px; }
+  .composer textarea { min-height: 40px; padding-top: 8px; padding-bottom: 8px; }
+  .composer-row :is(select, .compare-btn) { min-height: 40px; }
+  .composer-row .compare-btn { min-width: 40px; justify-content: center; }
+  .composer-row .send { width: 40px; height: 40px; }
+  .attach-x { min-width: 40px; min-height: 40px; }
+  .wake-bar .btn, :is(.compare-menu, .review-menu) .pane-menu-item { min-height: 40px; }
+  .slash-item { min-height: 40px; align-items: center; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .k-fold, .open > .k-fold { transition: opacity .15s ease; }
+  .still > .k-fold { transition: none; }
+  .proj-fold.k-open { animation: none; }
+  .chev, .chev-s, .approval.done .approval-title > svg.chev { transition: none; }
+}
 /* ===== end fit I ===== */
 
 /* ===== fit B2: panes make room, solo panes, the sidebar as a pane ===== */
+/* a touch screen: a pane head's own buttons (full screen, close, the terminal's clear) 40 px, as every target; the
+   Lab's and Team chat's heads have theirs ("fit D") */
+@media (pointer: coarse) {
+  :is(.pane-head, .term-head) > .icon-btn { min-width: 40px; min-height: 40px; }
+}
 /* ===== end fit B2 ===== */
 
 /* ===== fit X: round-one leftovers and the big-screen variants ===== */
 /* ===== end fit X ===== */
 
 /* ===== fit P: Pause as an armed action ===== */
+/* the Sequence's Pause while the person's own pause waits for the running block (seq.js renderBar): it reads
+   Pausing… in amber, a promise held, not the open-pane look; pressed again it takes the pause back. Amber text on the
+   warn background is 4.6:1 in light and 7.9:1 in dark */
+.seq-bar .btn.seq-hold.armed { background: var(--warn-bg); border-color: var(--warn-line); color: var(--warn); }
+.seq-bar .btn.seq-hold.armed:hover { border-color: var(--warn); }
+.seq-bar .btn.seq-hold[aria-busy="true"] { cursor: progress; }
+/* while the bar says something in the state's place (seq.js say: a refused press's why, in a few words), the name
+   gives way first, down to its least width, so the words are read whole; the two shrank alike, and a long name cut
+   them. Not while the person is renaming */
+.seq-head-main.saying .seq-name:not(:focus) { flex-shrink: 1000; }
+/* a narrow pane shows Pause by its icon alone (seq.css), but Pausing… keeps its word: the promise is read, not only
+   coloured, and a second press is not made by someone who thought the first did nothing */
+@container seqview (max-width: 460px) {
+  .seq-bar .btn.seq-hold.armed > span { display: inline; }
+}
 /* ===== end fit P ===== */

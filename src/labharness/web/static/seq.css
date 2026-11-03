@@ -213,15 +213,19 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
 .seq-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ---------- dialogs: New function, Sweep, Save as */
-.seq-dialog .seq-dlg { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.seq-dialog .seq-dlg, .seq-dialog .dialog-body { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.seq-dialog .dialog-body { grid-auto-rows: max-content; }   /* its parts keep their height and it scrolls: no list squashed */
 .seq-lab { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; font-size: 13px; font-weight: 550; color: var(--text-2); }
 .seq-lab[hidden] { display: none; }
 .seq-lab .kfield { font-weight: 400; }
 .seq-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .seq-line .kfield { flex: 1 1 auto; }
 .seq-line .btn { flex: none; }
-.seq-files { max-height: 248px; overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr); border: 1px solid var(--line-strong);
-  border-radius: var(--radius-s); background: var(--panel); }
+/* the lists inside a dialog's body (regions of their own) keep to a third of a short window, so the wheel still finds
+   the body around them and the fields under them; their rows keep their height (max-content) and the list scrolls,
+   where a grid held to its max-height would squash them and cut their words */
+.seq-files { max-height: min(248px, calc(35 * var(--vh))); overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: max-content; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--panel); }
 .seq-file { padding: 6px 10px; border: 0; border-bottom: 1px solid var(--line); background: none; text-align: left; font-size: 13px;
   font-weight: 400; color: var(--text); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .seq-file:last-child { border-bottom: 0; }
@@ -237,8 +241,9 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
 .seq-found { display: flex; flex-wrap: wrap; gap: 6px; }
 .seq-found:empty { display: none; }
 .seq-bad { font-size: 13px; color: var(--danger); overflow-wrap: anywhere; }
-.seq-ticks { max-height: 210px; overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 4px;
-  border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--panel); }
+.seq-ticks { max-height: min(210px, calc(35 * var(--vh))); overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: max-content; gap: 1px; padding: 4px; border: 1px solid var(--line-strong); border-radius: var(--radius-s);
+  background: var(--panel); }
 .seq-tick { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 5px 8px; border-radius: 6px; font-size: 13px; cursor: pointer; }
 .seq-tick:hover { background: var(--hover); }
 .seq-tick input { flex: none; margin: 0; accent-color: var(--accent); }
@@ -264,4 +269,6 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
   .seq-name, .seq-bar .btn { min-height: 40px; }
   .seq-more { min-width: 40px; min-height: 40px; }
   .seq-step-head .seq-kinds button { min-height: 40px; }
+  .seq-file, .seq-tick { min-height: 40px; }   /* the dialogs' rows: a file, a block to sweep */
+  .seq-swatch { width: 40px; height: 40px; }
 }

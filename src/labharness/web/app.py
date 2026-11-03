@@ -3723,8 +3723,16 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         elif op == "start":
             msg = await asyncio.to_thread(runtime.queue_start, by)
             ok = msg.startswith("queue started")
-        elif op == "pause":
-            msg, ok = runtime.queue_pause(by), True
+        elif op == "pause":   # {want}: the state the Sequence's Pause showed, "running" (Pause) or "pausing" (Pausing…,
+            # whose second press takes the pause back): a queue no longer in it is left as it is, 409 saying why
+            want = body.get("want")
+            try:
+                msg = runtime.queue_pause(by, None if want is None else str(want))
+            except ValueError as e:
+                return error(400, str(e))
+            if msg.startswith("not changed"):
+                return error(409, msg)
+            ok = True
         elif op == "on_error":
             try:
                 runtime.queue_set_on_error(str(body.get("value") or ""), by)

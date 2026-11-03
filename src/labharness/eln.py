@@ -27,7 +27,7 @@ DAY_TYPES = {"ask", "answer", "run_start", "run_end", "run_refused", "run_declin
              "stop", "lab_changed", "approval_mode", "preflight", "queue_start", "queue_end", "queue_declined",
              "queue_pause", "mount", "unmount", "protection", "limits", "lab_reviewed", "hands_on", "hands_off",
              "owner_pin", "calibration", "instrument_switched", "instrument_added", "incident", "incident_safe",
-             "idle_off", "data_folder", "report", "watch", "review"}
+             "idle_off", "data_folder", "report", "watch", "review", "queue_pause_taken_back"}
 
 
 def _cell(text: Any) -> str:

@@ -122,7 +122,9 @@ def test_the_scan_editor_is_a_side_panel_of_its_own():
     assert '$("edpane").hidden = !ED.open' in toggle and "fitLayout()" in toggle
     assert "edpane: toggleEditor," in JS and "if (ED.open) toggleEditor(false);" not in JS   # the scrim closes no panel
     opened = _js("openEditor")
-    assert 'op: "parts", id: id || null' in opened and "toggleEditor(true)" in opened and "await edLeave()" in opened
+    assert 'op: "parts", id: id || null' in opened and "await edLeave()" in opened
+    # to the screen like every opener that is not its own button: there already, its head rings (the click model)
+    assert 'Kelvin.paneShow("edpane")' in opened and "toggleEditor(true)" not in opened
     # with changes, × and another scan ask in the page: Save, Discard or Keep editing (never confirm())
     leave = _js("edLeave")
     assert "Kelvin.askYes(" in leave and '{ ok: "Save", alt: "Discard"' in leave and 'cancel: "Keep editing"' in leave

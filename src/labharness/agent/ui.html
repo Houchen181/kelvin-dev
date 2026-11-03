@@ -10,12 +10,14 @@
     --bg: #f6f8fb; --panel: #ffffff; --text: #14202c; --muted: #66768a; --line: #dde5ee;
     --accent: #2f6fb0; --accent-text: #ffffff; --ok: #1a7f37; --warn-bg: #fff8e6; --warn-line: #e3b341;
     --danger: #c62828; --danger-text: #ffffff; --away: #9a6700; --away-bg: #fff4d6;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 6px 24px rgba(0, 0, 0, .06); --scrim: rgba(0, 0, 0, .4);
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0f151c; --panel: #141c25; --text: #e6edf4; --muted: #8d9aa8; --line: #24303c;
       --accent: #5aa2e6; --accent-text: #08111a; --ok: #3fb950; --warn-bg: #2a2410; --warn-line: #9e7a1d;
       --danger: #ef5350; --danger-text: #0b0d10; --away: #e3b341; --away-bg: #2a2410;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 28px rgba(0, 0, 0, .35); --scrim: rgba(0, 0, 0, .55);
     }
   }
   * { box-sizing: border-box; }
@@ -60,6 +62,20 @@
   .mode { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
   .mode select { font: inherit; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 5px 8px; }
   .mode.auto select { border-color: var(--warn-line); background: var(--warn-bg); font-weight: 600; }
+  /* a question asked in the page (ask), never in the browser's own boxes: its heading, what it means, a box for the
+     answer when one is typed, Cancel and OK at its foot */
+  dialog.ask { width: min(440px, calc(100% - 32px)); padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px;
+               background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
+  dialog.ask::backdrop { background: var(--scrim); }
+  /* why a change of the mode, or Stop, did not go through: in the bar beside them, until the next one does */
+  .said { font-size: 13px; color: var(--danger); overflow-wrap: anywhere; }
+  .said:empty { display: none; }
+  dialog.ask form { display: grid; gap: 10px; }
+  dialog.ask h2 { margin: 0; font-size: 16px; font-weight: 650; }
+  dialog.ask p { margin: 0; color: var(--muted); white-space: pre-line; overflow-wrap: anywhere; }
+  dialog.ask input { width: 100%; font: inherit; border-radius: 8px; border: 1px solid var(--line); background: var(--panel);
+                     color: var(--text); padding: 7px 10px; }
+  dialog.ask .actions { justify-content: flex-end; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -70,6 +86,7 @@
   <span class="muted"><span id="conn" class="dot"></span><span id="conntext">connecting…</span></span>
   <span id="busy" class="muted"></span>
   <span class="spacer"></span>
+  <span id="said" class="said" role="status"></span>
   <label id="mode-box" class="mode" title="Who approves drive changes">Approvals
     <select id="mode"><option value="ask">Ask me every time</option><option value="auto">Auto for low-risk changes</option></select>
   </label>
@@ -103,6 +120,11 @@ const token = decodeURIComponent(location.hash.slice(1));
 const $ = (id) => document.getElementById(id);
 const seen = new Set();
 let firstLoad = true;
+// the approval mode the server last gave, and whether a change of it is on its way (asked, then sent): meanwhile the
+// poll leaves the select alone, and when it ends the select shows what holds, the mode chosen or the one before; ends
+// counts the changes ended, so a state asked for before one ended is not its last word
+const MODE = { now: "ask", busy: false, ends: 0 };
+const say = (text) => { $("said").textContent = text || ""; };   // why the last change or Stop did not go through
 
 function el(tag, attrs, ...children) {
   const node = document.createElement(tag);
@@ -111,6 +133,43 @@ function el(tag, attrs, ...children) {
   }
   for (const c of children) node.append(c instanceof Node ? c : document.createTextNode(String(c)));
   return node;
+}
+
+// A question asked in the page, never in the browser's own boxes, as Kelvin's own page asks (askYes): the first line
+// is its heading, the rest says what it means. o.pin: a box for the lab owner's PIN, and the answer is what
+// was typed ("" for no); else true or false. Esc means no, and so does the backdrop, only when the press started on it.
+// A click in its first 0.4 s, or the second of a double-click, is no answer; a key always is one. o.focus "cancel":
+// it starts on Cancel.
+function ask(text, o) {
+  o = o || {};
+  const lines = String(text).split("\n").map((s) => s.trim()).filter(Boolean), head = lines.shift();
+  const box = o.pin ? el("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "12",
+                                    "aria-label": "Lab owner's PIN" }) : null;
+  const no = el("button", { type: "button" }, "Cancel");
+  const yes = el("button", { type: "button", class: "primary" }, o.ok || "OK");
+  const form = el("form", {}, el("h2", { id: "ask-head" }, head), ...lines.map((l) => el("p", {}, l)), ...(box ? [box] : []),
+    el("div", { class: "actions" }, no, yes));
+  const dlg = el("dialog", { class: "ask", "aria-labelledby": "ask-head" }, form);
+  const none = box ? "" : false, opened = Date.now();
+  return new Promise((resolve) => {
+    let over = false, downOut = false;
+    const early = (e) => e.detail > 0 && (e.detail > 1 || Date.now() - opened < 400);
+    const outside = (e) => {
+      const r = dlg.getBoundingClientRect();
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    const finish = (v) => { if (over) return; over = true; if (dlg.open) dlg.close(); dlg.remove(); resolve(v); };
+    yes.addEventListener("click", (e) => { if (!early(e)) finish(box ? box.value.trim() : true); });
+    no.addEventListener("click", (e) => { if (!early(e)) finish(none); });
+    form.addEventListener("submit", (e) => e.preventDefault());
+    if (box) box.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); finish(box.value.trim()); } });
+    dlg.addEventListener("cancel", (e) => { e.preventDefault(); finish(none); });
+    dlg.addEventListener("pointerdown", (e) => { downOut = e.target === dlg && outside(e); });
+    dlg.addEventListener("click", (e) => { if (e.target === dlg && downOut && outside(e) && !early(e)) finish(none); downOut = false; });
+    document.body.append(dlg);
+    dlg.showModal();
+    (box || (o.focus === "cancel" ? no : yes)).focus();
+  });
 }
 
 async function api(path, body) {
@@ -123,8 +182,14 @@ async function api(path, body) {
     let data = null;
     try { data = await res.json(); } catch (e) { /* not JSON */ }
     if (res.status === 403 && data && data.pin && body) {   // the lab owner's PIN: ask, try again
-      const pin = prompt(data.error + "\n\nThe lab owner's PIN:");
+      // the server's reason is the question: its heading, and after a colon the line under it, each a sentence
+      const why = String(data.error || "this needs the lab owner's PIN").split(/:\s+/)
+        .map((s) => s.charAt(0).toUpperCase() + s.slice(1));
+      const pin = await ask(why.join("\n"), { pin: true });
       if (pin) return api(path, Object.assign({}, body, { pin }));
+      const no = new Error("not changed");   // Cancel: nothing changes, and there is nothing to say
+      no.cancelled = true;
+      throw no;
     }
     throw new Error((data && data.error) || res.status);
   }
@@ -175,37 +240,52 @@ function render(s) {
     el("tr", {}, el("td", { class: "name" }, name),
       el("td", {}, ...params.map((p) => el("span", { class: "chip" + (p.away ? " away" : "") }, p.name + " " + p.value))))));
   $("events").replaceChildren(...s.events.map((e) => el("li", {}, e)));
-  if (document.activeElement !== $("mode")) $("mode").value = s.approval_mode || "ask";
+  MODE.now = s.approval_mode || "ask";
+  if (!MODE.busy && $("mode").value !== MODE.now) $("mode").value = MODE.now;
   $("mode-box").classList.toggle("auto", s.approval_mode === "auto");
   firstLoad = false;
 }
 
 async function refresh() {
   if (!token) { $("nokey").style.display = "block"; return; }
+  const ends = MODE.ends;
   try {
-    render(await api("/api/state"));
+    const s = await api("/api/state");
+    if (ends !== MODE.ends) return;   // asked for before a change of the mode ended: the next poll's is newer
+    render(s);
     $("conn").className = "dot on"; $("conntext").textContent = "connected";
   } catch (e) {
     $("conn").className = "dot"; $("conntext").textContent = e.message === "401" ? "wrong access key" : "server not reachable";
   }
 }
 
+// a change of the mode: auto mode is asked first (Cancel has the focus), and may ask for the PIN; a no to either keeps
+// the mode as it was, saying nothing. Meanwhile the poll leaves the select alone (MODE.busy)
 $("mode").addEventListener("change", async (e) => {
-  const mode = e.target.value;
-  if (mode === "auto") {
-    let rule = "";
-    try { rule = (await api("/api/state")).approval_rule || ""; } catch (err) { /* keep it short */ }
-    if (!confirm("Turn on auto mode?\n\nKelvin then approves low-risk changes for you: " + rule +
-                 "\n\nEverything else still waits for you. It goes back to asking when Kelvin restarts.")) {
-      e.target.value = "ask"; return;
+  const sel = e.target, mode = sel.value;
+  MODE.busy = true;
+  try {
+    if (mode === "auto") {
+      let rule = "";
+      try { rule = (await api("/api/state")).approval_rule || ""; } catch (err) { /* keep it short */ }
+      if (!(await ask("Turn on auto mode?\nKelvin then approves low-risk changes for you: " + rule +
+                      "\nEverything else still waits for you. It goes back to asking when Kelvin restarts.",
+                      { ok: "Turn on", focus: "cancel" }))) return;
     }
+    MODE.now = (await api("/api/mode", { mode })).mode || mode;
+    say("");
+  } catch (err) {
+    if (!err.cancelled) say("Could not change the mode: " + err.message);
+  } finally {
+    MODE.busy = false;
+    MODE.ends += 1;
+    sel.value = MODE.now;   // what holds now, though the select kept the focus
+    refresh();
   }
-  try { await api("/api/mode", { mode }); } catch (err) { alert("Could not change the mode: " + err.message); }
-  refresh();
 });
 
 $("stop").addEventListener("click", async () => {   // at once: no dialog on the stop path
-  try { await api("/api/stop", {}); } catch (e) { alert("Stop failed: " + e.message); }
+  try { await api("/api/stop", {}); say(""); } catch (e) { say("Stop failed: " + e.message); }
   refresh();
 });
 

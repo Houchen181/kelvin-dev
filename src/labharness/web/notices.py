@@ -108,10 +108,12 @@ def queue_said(op: str, body: Dict[str, Any], before: Dict[str, Any], after: Dic
     if op == "start":
         waiting = [i for i in before.get("items") or [] if i.get("status") == "waiting"]
         return "You started the sequence%s." % (" (%d blocks waiting)" % len(waiting) if waiting else ""), working, False
-    if op == "pause":
+    if op == "pause":   # want "pausing": a second press of Pause, which took the pause back
         running = next((i for i in before.get("items") or [] if i.get("status") == "running"), None)
-        return "You paused the sequence%s." % (" after %s" % (running.get("name") or "the running block")
-                                               if running else ""), conductor, False
+        after_it = " after %s" % (running.get("name") or "the running block") if running else ""
+        if body.get("want") == "pausing":
+            return "You took back the pause%s; the sequence goes on." % after_it, conductor, False
+        return "You paused the sequence%s." % after_it, conductor, False
     if op == "load" and new:
         return "You loaded the saved sequence '%s' (%d block%s)." % (body.get("name"), len(new),
                                                                      "" if len(new) == 1 else "s"), [], False

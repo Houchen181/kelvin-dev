@@ -1469,31 +1469,48 @@
   }
 
   // The side panels each open and close on their own, and each keeps the width it was left at (drag its left edge).
-  // Beside the conversation, which keeps at least CHAT_MIN pixels, they stand side by side in the order of the top
-  // bar's buttons: Team chat, Analysis, Runs with the scan editor beside it, then Lab. Short of room, they shrink
-  // alike; then Team chat, Analysis, Runs and the scan editor share a column, one above the other, beside Lab's; and
-  // if even that doesn't fit, Lab's goes under theirs, one column for all (.lab-under). At FLOAT_W or less they float
-  // over the conversation in one column, in the same order from the top; in one column each open one has an equal
-  // share of its height (app.css, .floating). They
-  // never hide the sidebar: only its button does (SIDE.hidden), and while it stands beside the page they take the
-  // room it leaves. Every width here is in the page's own pixels: the window's divided by the page size (layoutZoom),
-  // so a panel keeps its width whatever the page size.
-  const CHAT_MIN = 520, SIDEBAR_W = 264, FLOAT_W = 1100;
-  const PANES = {   // id: [open?, its column, its least width, where its width is kept], in the page's order
+  // Beside the main column (the chat or Home), which keeps at least CHAT_MIN pixels, they stand side by side in the
+  // order of the top bar's buttons: Team chat, Analysis, Runs with the scan editor beside it, then Lab. Short of room,
+  // they shrink alike down to their least widths; when one more will not fit even so, the pane looked at least
+  // recently (opened, pressed or focused: LOOK) is put away, its button flat and what it showed kept for next time.
+  // A pane that cannot stand beside the main column even alone takes the content area by itself (.solo), and the main
+  // column waits out of sight until Chat or Home brings it back. Nothing stands over or under anything. They never
+  // hide the sidebar: only its button does (SIDE.hidden), and while it stands beside the page they take the room it
+  // leaves; where it cannot stand beside the main column it takes the content area as a pane alone does (.side-solo).
+  // Every width here is in the page's own pixels: the window's divided by the page size (layoutZoom), so a panel keeps
+  // its width whatever the page size.
+  // A least width is the narrowest each pane's head and rows hold at, at 85, 90 and 100 %: Runs' is its head on History
+  // (Sequence | History with a two-digit count, Report…, ⤢, ×), 362 on a touch screen, whose head buttons are 40 px.
+  // So Runs stands beside Lab or Analysis at 1280×720 (90 %: 1422 page px) with the list shown, and on an iPad's 1180
+  // with the list hidden. The scan editor does not fit beside Runs there (it holds down to 318) and takes its place
+  const CHAT_MIN = 520, SIDEBAR_W = 264;
+  const PANES = {   // id: [open?, its column, its least width, where its width is kept, its least on a touch screen]
     teampanel: [() => TEAM.open, "workcol", 280, "lh.teamWidth"],
-    anpane: [() => ANA.open, "workcol", 340, "lh.anWidth"],
-    runpane: [() => RUNS.open, "workcol", 340, "lh.runsWidth"],
+    anpane: [() => ANA.open, "workcol", 292, "lh.anWidth"],
+    runpane: [() => RUNS.open, "workcol", 346, "lh.runsWidth", 362],
     edpane: [() => ED.open, "workcol", 360, "lh.edWidth"],
-    labpanel: [() => S.labOpen, "sidecol", 300, "lh.labWidth"],
+    labpanel: [() => S.labOpen, "sidecol", 292, "lh.labWidth"],
   };
+  const COARSE = window.matchMedia("(pointer: coarse)");   // a touch screen
   const PANE_W = {};   // each pane's width as the person left it
-  let DRAG = null;     // while an edge moves: the panes' widths when it began
   const sum = (xs) => xs.reduce((a, b) => a + b, 0);
   const openPanes = () => Object.keys(PANES).filter((id) => PANES[id][0]());
-  const colPanes = (col) => openPanes().filter((id) => PANES[id][1] === col);
-  const paneWant = (id) => PANE_W[id] || PANES[id][2];
-  const colWant = (col) => Math.max(0, ...colPanes(col).map(paneWant));
-  const colLeast = (col) => Math.max(0, ...colPanes(col).map((id) => PANES[id][2]));
+  const least = (id) => (COARSE.matches && PANES[id][4]) || PANES[id][2];
+  const paneWant = (id) => PANE_W[id] || least(id);
+  // when each pane was last looked at (opened, or a press or the focus inside it), as a count that only grows; the
+  // panes open at the last layout; whether the window is still changing size (wait); and whether the pane opening now
+  // was asked for by the person or a waiting request (asked: paneShow)
+  const LOOK = {}, ROOM = { looks: 0, shown: [], wait: false, timer: 0, away: null, asked: false };
+  const look = (id) => { LOOK[id] = ++ROOM.looks; };
+  const byLook = (ids) => [...ids].sort((a, b) => (LOOK[a] || 0) - (LOOK[b] || 0));   // least recently looked at first
+  // the pane being typed in: the one that holds the focus in a field
+  function typedIn(open) {
+    const a = document.activeElement;
+    if (!a || !(a.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(a.tagName))) return null;
+    return open.find((id) => $(id).contains(a)) || null;
+  }
+  // the chat and Home out of sight: under full screen, a pane alone or the list in the main column's place
+  const mainOut = (app) => ["full", "solo", "side-solo"].some((c) => app.classList.contains(c));
   // the page size (Kelvin.zoom: 1, .9, .85 or the person's choice), and the window in the page's own pixels; pointer
   // and rect lengths are the screen's, divided by it before they become a width
   function layoutZoom() {
@@ -1502,86 +1519,74 @@
   }
   const layoutW = () => window.innerWidth / layoutZoom();
   const layoutH = () => window.innerHeight / layoutZoom();
-  const sideBeside = () => (SIDE.hidden || sideFloats() ? 0 : SIDEBAR_W);   // the sidebar's width beside the page
-  // widths that fit in `room`: each as wanted, or, when they don't fit, shrunk alike, none below its least, in whole
-  // pixels that add up to the room
-  function share(want, least, room) {
+  const sideBeside = () => (SIDE.hidden || sideNarrow() ? 0 : SIDEBAR_W);   // the sidebar's width beside the page
+  // widths that fit in `room`: each as wanted, or, when they don't fit, shrunk alike, none below its least (lo), in
+  // whole pixels that fill the room to its last whole pixel (never past it: a width shown, read back and given again
+  // stays as it is)
+  function share(want, lo, room) {
     if (sum(want) <= room) return want;
-    const slack = want.map((w, i) => w - least[i]);
-    const k = Math.max(0, room - sum(least)) / Math.max(1, sum(slack));
-    const out = want.map((w, i) => Math.floor(least[i] + slack[i] * k));
-    out[out.length - 1] += Math.max(0, room - sum(out));
+    const slack = want.map((w, i) => w - lo[i]);
+    const k = Math.max(0, room - sum(lo)) / Math.max(1, sum(slack));
+    const out = want.map((w, i) => Math.floor(lo[i] + slack[i] * k));
+    out[out.length - 1] += Math.max(0, Math.floor(room - sum(out)));
     return out;
   }
-  // the width the panes may take beside the conversation: the window's, less the sidebar's while it stands beside them
+  // the width the panes may take beside the main column: the window's, less the sidebar's while it stands beside them
   function paneRoom() {
     return layoutW() - sideBeside() - CHAT_MIN;
+  }
+  // the one pane open, when it cannot stand beside the main column even alone: it takes the content area by itself
+  function soloPane() {
+    const open = openPanes();
+    return open.length === 1 && paneRoom() < least(open[0]) ? open[0] : null;
   }
   // the layout for the panels open now, the sidebar and the window, after anything that opens, closes or sizes one
   // and on every resize; the classes say how app.css places them, in the page's own pixels (no media query: they
   // follow the page size)
   function fitLayout() {
-    const app = $("app"), w = layoutW(), open = openPanes();
-    for (const col of ["workcol", "sidecol"]) $(col).hidden = !colPanes(col).length;
-    const floating = w <= FLOAT_W, both = !$("workcol").hidden && !$("sidecol").hidden;
-    const side = sideBeside();   // the sidebar beside the page: not over it, nor hidden
-    const rowLeast = sum(open.map((id) => PANES[id][2])), stackLeast = colLeast("workcol") + colLeast("sidecol");
-    const stacked = !floating && side + CHAT_MIN + rowLeast > w;
-    const under = stacked && both && side + CHAT_MIN + stackLeast > w;   // even two columns don't fit: Lab's under
+    if (FULL.length && !isOpen(FULL[0])) FULL.length = 0;   // the pane in full screen closed: full screen ends with it
+    const app = $("app"), open = openPanes(), out = mainOut(app);
+    for (const id of open) if (!ROOM.shown.includes(id)) look(id);   // opened since the last layout: looked at now
+    ROOM.shown = open;
+    // One more will not fit beside the main column even at the least widths: the pane looked at least recently is put
+    // away, and its toggle lays out again. Never the pane being typed in, unless the room is for one the person or a
+    // waiting request asked for (paneShow): a run that starts, or Kelvin's analyze, never takes it away mid-sentence
+    // (with no other to go, the newcomer goes, and waits for its button). Not while full screen covers them (they wait
+    // under it), nor while the window is still changing size or out of sight: a window being sized, or minimized,
+    // closes nothing
+    const typing = ROOM.asked ? null : typedIn(open);
+    const away = byLook(open.filter((id) => id !== typing))[0];
+    if (open.length > 1 && !FULL.length && !ROOM.wait && !document.hidden && ROOM.away !== away &&
+        sum(open.map(least)) > paneRoom()) {
+      ROOM.away = away;   // once: a toggle that kept it open would come back here
+      try { TOGGLE[away](false); } finally { ROOM.away = null; }
+      return;
+    }
+    const solo = FULL.length ? null : soloPane();
+    for (const col of ["workcol", "sidecol"]) $(col).hidden = !open.some((id) => PANES[id][1] === col);
     app.classList.toggle("side-hidden", SIDE.hidden);
-    app.classList.toggle("side-floats", sideFloats());
-    app.classList.toggle("floating", floating);
-    app.classList.toggle("stacked", stacked);
-    app.classList.toggle("lab-under", under);
-    app.classList.toggle("float-two", floating && both);
-    for (const id of Object.keys(PANES)) if ($(id).hidden) $(id).style.animation = "";   // closed: comes in again next time
-    // one column, the first above the second, each open panel an equal share of its height (app.css): floating, or
-    // Lab's under the others
-    if (both) app.style.setProperty("--float-top", colPanes("workcol").length / open.length);
-    if (!floating) {
-      const room = paneRoom();
-      if (stacked) {   // a column for each group, as wide as its widest pane; Lab's under the others: as wide as theirs
-        const cols = under ? ["workcol"] : ["workcol", "sidecol"].filter((c) => !$(c).hidden);
-        const want = under ? [Math.max(colWant("workcol"), colWant("sidecol"))] : cols.map(colWant);
-        const least = under ? [Math.max(colLeast("workcol"), colLeast("sidecol"))] : cols.map(colLeast);
-        const got = share(want, least, room);
-        cols.forEach((c, i) => { $(c).style.width = got[i] + "px"; });
-        if (under) $("sidecol").style.width = got[0] + "px";
-      } else {
-        $("workcol").style.width = $("sidecol").style.width = "";
-        const got = share(open.map(paneWant), open.map((id) => PANES[id][2]), room);
-        open.forEach((id, i) => { $(id).style.width = got[i] + "px"; });
-      }
+    app.classList.toggle("side-solo", sideSolo());
+    app.classList.toggle("solo", !!solo);
+    for (const id of ["termpane", ...Object.keys(PANES)]) if ($(id).hidden) $(id).style.animation = "";   // closed: comes in again next time
+    if (!solo) {   // side by side, each as wide as it was left, shrunk alike to fit, none below its least
+      const got = share(open.map(paneWant), open.map(least), paneRoom());
+      open.forEach((id, i) => { $(id).style.width = got[i] + "px"; });
     }
     syncFull();
-    syncScrim();
     syncSide();
+    // the chat or Home in sight again (full screen ended, a pane alone or the list gone): there already, not coming in
+    // (setMode lets the next switch of Chat | Home come in)
+    if (out && !mainOut(app)) for (const v of ["scroller", "homeview"]) $(v).style.animation = "none";
     layoutSaid();
   }
-  // a pane's left edge, dragged or moved with the arrow keys: its width, or in a shared column the column's. Only the
-  // conversation gives or takes the room; the other panes keep the widths they show, so the edge follows the pointer
-  // and what is seen when it is let go stays. In a shared column the others are as wide at most (Lab's under the
-  // others: all of them).
+  // a pane's left edge, dragged or moved with the arrow keys: its width. Only the main column gives or takes the room;
+  // the other panes keep the widths they show, so the edge follows the pointer and what is seen when it is let go stays
   function sizePane(id, want) {
-    const app = $("app"), col = PANES[id][1], under = app.classList.contains("lab-under");
-    const stacked = app.classList.contains("stacked");
-    const start = DRAG || (DRAG = Object.fromEntries(openPanes().map((p) => [p, paneWant(p)])));
-    const shown = (el) => Math.round($(el).getBoundingClientRect().width / layoutZoom());   // in the page's pixels
-    let least = PANES[id][2], most;
-    if (stacked) {
-      least = under ? Math.max(colLeast("workcol"), colLeast("sidecol")) : colLeast(col);
-      const other = col === "workcol" ? "sidecol" : "workcol";
-      const beside = $(other).hidden || under ? 0 : shown(other);
-      if (beside) for (const p of colPanes(other)) PANE_W[p] = Math.min(start[p] || paneWant(p), beside);
-      most = paneRoom() - beside;
-    } else {
-      const others = openPanes().filter((p) => p !== id);
-      for (const p of others) PANE_W[p] = shown(p);
-      most = paneRoom() - sum(others.map((p) => PANE_W[p]));
-    }
-    const width = Math.round(Math.min(Math.max(least, most), Math.max(least, want || 0)));
-    PANE_W[id] = width;
-    if (stacked) for (const p of under ? openPanes() : colPanes(col)) if (p !== id) PANE_W[p] = Math.min(start[p] || paneWant(p), width);   // opened since: as it is
+    const shown = (p) => Math.round($(p).getBoundingClientRect().width / layoutZoom());   // in the page's pixels
+    const others = openPanes().filter((p) => p !== id);
+    for (const p of others) PANE_W[p] = shown(p);
+    const most = Math.floor(paneRoom() - sum(others.map((p) => PANE_W[p])));   // whole pixels: no width creeps
+    PANE_W[id] = Math.round(Math.min(Math.max(least(id), most), Math.max(least(id), want || 0)));
     fitLayout();
   }
   // a side panel's left edge, dragged or moved with the arrow keys, sets its width: set(w) takes the width and keeps it
@@ -1617,7 +1622,8 @@
   // button again, Esc, or closing it ends it, and the layout under it comes back. A panel the person asks for meanwhile
   // (another top-bar button, Analyze, Edit on a scan) or one with a request waiting for them takes the screen in its
   // place, and full screen stays. Chat or Home ends it (either side, even the one chosen), as does whatever needs the
-  // chat: an approval asked there, another chat, Ask Kelvin.
+  // chat: an approval asked there, another chat, Ask Kelvin. A pane alone (.solo) is the same picture without asking:
+  // the one pane that cannot stand beside the main column, with nothing under it.
   const FULL = [];   // the panel in full screen: one at most
   const isOpen = (id) => (id === "termpane" ? TERM.open : PANES[id][0]());
   // the panels' top-bar buttons, each raised exactly when its panel is on the screen; and how each panel opens or closes
@@ -1625,8 +1631,10 @@
                   labpanel: "toggle-lab" };
   const TOGGLE = { termpane: toggleTerm, teampanel: toggleTeam, anpane: toggleAnalysis, runpane: toggleRuns,
                    edpane: toggleEditor, labpanel: toggleLab };
-  // a panel on the screen now: open, and in full screen the one shown
-  const paneVisible = (id) => !!TOGGLE[id] && isOpen(id) && (!FULL.length || FULL[0] === id);
+  // a panel on the screen now: open, and not out of sight: in full screen the one shown; else not under the sidebar
+  // that takes the content area, and the terminal (under the chat) not while a pane alone has the main column's place
+  const paneVisible = (id) => !!TOGGLE[id] && isOpen(id) && (FULL.length ? FULL[0] === id
+    : !sideSolo() && !(id === "termpane" && soloPane()));
   function syncFull() {
     if (FULL.length && !isOpen(FULL[0])) FULL.length = 0;   // closed: full screen ends with it
     const top = FULL[0] || null, app = $("app");
@@ -1651,15 +1659,28 @@
     if (FULL[0] === id) FULL.length = 0; else FULL[0] = id;
     fitLayout();
   }
-  function fullShow(id) {   // in full screen, an open panel to the screen, in place of the one there
-    if (!FULL.length || !isOpen(id) || FULL[0] === id) return;
-    FULL[0] = id;
-    fitLayout();
+  // an open panel to the screen, wherever it waits: in full screen in place of the one there (full screen stays); under
+  // the sidebar that takes the content area (that hidden for now: its button keeps the person's choice); and the
+  // terminal, under the chat, in place of a pane alone (that put away: the main column back)
+  function fullShow(id) {
+    if (!isOpen(id) || paneVisible(id)) return;
+    look(id);
+    if (FULL.length) FULL[0] = id;
+    else if (sideSolo()) SIDE.hidden = true;
+    fitLayout();   // the panes make room first; then a pane left alone in the terminal's way goes
+    const solo = !FULL.length && id === "termpane" ? soloPane() : null;
+    if (solo) TOGGLE[solo](false);
   }
-  function exitFull() {   // the layout under it back: the main column, beside the open panels
-    if (!FULL.length) return;
+  // the main column back on the screen, as Chat or Home brings it (so do another chat, an approval asked in the chat and
+  // Ask Kelvin): full screen ended, the sidebar that takes the content area hidden for now, the panes that waited under
+  // full screen making room as ever, and then a pane left alone in the main column's place put away, what it showed
+  // kept for next time
+  function exitFull() {
     FULL.length = 0;
+    if (sideSolo()) SIDE.hidden = true;
     fitLayout();
+    const solo = soloPane();
+    if (solo) TOGGLE[solo](false);
   }
   // One click model for every way of opening a panel. Its own top-bar button (and Ctrl+` the terminal's) puts it away
   // when it is on the screen, else brings it there (pillClick). Anything else that asks for a panel (a Home tile,
@@ -1674,12 +1695,16 @@
     if (!TOGGLE[id]) return false;
     const there = id !== "runpane" || !view ? true
       : view === "history" ? RUNS.view === "history" && !RUNS.active : RUNS.view === view;
+    if (isOpen(id)) look(id);   // asked for: looked at (one that opens is looked at as it opens)
     if (paneVisible(id) && there) { ring($(id).querySelector(":scope > header")); return true; }
-    $("app").classList.remove("side-above");   // asked for last: above the sidebar where both stand over the page
-    if (id === "runpane" && view === "schedule") toggleSeq(true);
-    else if (id === "runpane" && view === "history") openRunList();
-    else if (!isOpen(id) && (id !== "edpane" || ED.parts)) TOGGLE[id](true);   // the editor only with a scan in it
-    fullShow(id);
+    const was = ROOM.asked;
+    ROOM.asked = true;   // asked for: it may take the room of the pane being typed in (fitLayout)
+    try {
+      if (id === "runpane" && view === "schedule") toggleSeq(true);
+      else if (id === "runpane" && view === "history") openRunList();
+      else if (!isOpen(id) && (id !== "edpane" || ED.parts)) TOGGLE[id](true);   // the editor only with a scan in it
+      fullShow(id);
+    } finally { ROOM.asked = was; }
     return isOpen(id);
   }
   function paneHide(id) {   // closed, wherever it is; what it showed is kept for next time
@@ -1697,40 +1722,50 @@
     RINGS.set(el, setTimeout(() => el.classList.remove("k-ring"), 650));
   }
   // The layout as this browser leaves it (per browser, never in the link, whose hash holds the key): the panels open,
-  // full screen and Sequence | History, beside what each part keeps itself (the widths above, Chat | Home, the sidebar,
-  // the terminal and its height). After every change the parts kept apart hear of it (kelvin:layout: the panels on the
-  // screen, the one in full screen, Chat | Home, the sidebar shown).
-  const LAYOUT = { back: false, said: "" };
+  // in the order they were looked at, full screen and Sequence | History, beside what each part keeps itself (the
+  // widths above, Chat | Home, the sidebar, the terminal and its height). After every change the parts kept apart hear
+  // of it (kelvin:layout: the panels on the screen, the one in full screen, Chat | Home, the sidebar shown).
+  const LAYOUT = { back: false, said: "", kept: "" };
   function layoutSaid() {
     const now = { panes: Object.keys(TOGGLE).filter(paneVisible), full: FULL[0] || null,
                   mode: S.mode === "home" ? "home" : "chat", side: !SIDE.hidden };
-    const sig = JSON.stringify(now) + openPanes().join() + RUNS.view;
-    if (sig === LAYOUT.said) return;
-    LAYOUT.said = sig;
-    if (LAYOUT.back) {   // never before what was kept is back
-      store("lh.panes", JSON.stringify(openPanes().filter((id) => id !== "edpane")));
+    const panes = byLook(openPanes()).filter((id) => id !== "edpane");   // the one looked at last, last
+    const kept = JSON.stringify([panes, now.full, RUNS.view]);
+    if (LAYOUT.back && kept !== LAYOUT.kept) {   // never before what was kept is back
+      LAYOUT.kept = kept;
+      store("lh.panes", JSON.stringify(panes));
       store("lh.full", now.full && now.full !== "edpane" ? now.full : "");
       store("lh.runsView", RUNS.view);
     }
+    const said = JSON.stringify(now);
+    if (said === LAYOUT.said) return;
+    LAYOUT.said = said;
     emit("layout", now);
   }
-  // once the page is ready, what was kept comes back: not a panel that cannot stand beside the main column now, nor
-  // the scan editor
+  // once the page is ready, what was kept comes back: the panes looked at last first, as many as stand beside the main
+  // column at their least widths; never one that cannot stand there even alone (it would hide the main column, as on a
+  // phone), nor the scan editor
   function restoreLayout() {
     let kept = [];
     try { kept = JSON.parse(store("lh.panes") || "[]"); } catch (e) { /* none kept */ }
     if (!Array.isArray(kept)) kept = [];
     const view = store("lh.runsView");
     if (view === "schedule" || view === "history") RUNS.view = view;
-    for (const id of Object.keys(PANES)) {   // in the page's order
-      if (id === "edpane" || !kept.includes(id) || isOpen(id) || layoutW() <= FLOAT_W || paneRoom() < PANES[id][2]) continue;
+    let room = paneRoom() - sum(openPanes().map(least));   // a pane open already (a waiting request) keeps its place
+    const back = [];
+    for (const id of [...kept].reverse()) {
+      if (!PANES[id] || id === "edpane" || isOpen(id) || back.includes(id) || least(id) > room) continue;
+      room -= least(id);
+      back.unshift(id);
+    }
+    for (const id of back) {   // in the order they were looked at: the last one is the newest look
       TOGGLE[id](true);
       $(id).style.animation = "none";   // there already, not coming in (cleared when it closes: fitLayout)
     }
     const full = store("lh.full");
     if (full && full !== "edpane" && TOGGLE[full] && isOpen(full)) FULL[0] = full;
     LAYOUT.back = true;
-    LAYOUT.said = "";
+    LAYOUT.said = LAYOUT.kept = "";
     fitLayout();
   }
   function initPanes() {
@@ -1740,19 +1775,35 @@
     PANE_W.edpane = kept("lh.edWidth") || 460;
     PANE_W.labpanel = kept("lh.labWidth") || 380;
     PANE_W.teampanel = kept("lh.teamWidth") || PANE_W.labpanel;
+    if (sideNarrow()) SIDE.hidden = true;   // a narrow window opens on the chat or Home, never on the list (not kept)
     for (const id of Object.keys(PANES)) {
-      $(id + "-resize").addEventListener("pointerdown", () => { DRAG = null; });   // each drag starts from what is shown
       edgeResize($(id + "-resize"), $(id), (w) => sizePane(id, w), () => {
-        DRAG = null;
         for (const p of Object.keys(PANES)) store(PANES[p][3], String(PANE_W[p]));
       });
+      // looking at a pane: a press or the focus inside it (opening it is one too: fitLayout); kept with the layout
+      const looked = () => { look(id); layoutSaid(); };
+      $(id).addEventListener("pointerdown", looked, true);
+      $(id).addEventListener("focusin", looked);
     }
+    // a pane comes in once: in sight again later (full screen ended, the sidebar or a pane alone gone) it is just there
+    for (const id of ["termpane", ...Object.keys(PANES)]) {
+      const el = $(id);
+      el.addEventListener("animationend", (e) => { if (e.target === el) el.style.animation = "none"; });
+    }
+    // while the window changes size the panes only fit; once it rests (and the page size has followed it, 50 ms),
+    // the least recently looked at makes room. A page brought back to sight fits again too
+    window.addEventListener("resize", () => {
+      ROOM.wait = true;
+      clearTimeout(ROOM.timer);
+      ROOM.timer = setTimeout(() => { ROOM.wait = false; fitLayout(); }, 160);
+    });
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) fitLayout(); });
     for (const b of document.querySelectorAll(".full-btn")) b.addEventListener("click", () => toggleFull(b.dataset.pane));
     document.addEventListener("keydown", (e) => {   // Esc ends full screen, unless a field, a menu or a dialog takes it
       if (e.key !== "Escape" || !FULL.length || e.defaultPrevented) return;
       if (document.querySelector("dialog[open], .pane-menu:not([hidden])")) return;
       if (e.target.closest && e.target.closest("input, textarea, select, [contenteditable]")) return;
-      exitFull();
+      toggleFull(FULL[0]);   // as its own button: the layout under it back
     });
     Object.assign(window.Kelvin, { paneShow, paneHide, paneVisible, ring });   // the click model, lent to home.js, seq.js
     document.addEventListener("kelvin:seq", layoutSaid);   // Sequence | History, kept as the person leaves it
@@ -2380,18 +2431,32 @@
         /\b(refused|declined|tripped|aborted|timeout|failed|error)\b/.test(head)) return "warn";
     return "ok";
   }
+  // a part shown or hidden in place, in the chat (a tool step's input and result, a decided request's details): its
+  // toggle says aria-expanded; the part (.k-fold, a grid row going from 0fr to 1fr) opens by height, at once from the
+  // keyboard (an event's detail 0: the step or request .still, so neither the part nor the chevron moves) or with less
+  // motion, and is inert as soon as it shuts. A second press closes it
+  const FOLDS = { n: 0 };
+  function foldOpen(el, toggle, fold, open, e) {
+    el.classList.toggle("still", !!e && !e.detail);
+    el.classList.toggle("open", open);
+    toggle.setAttribute("aria-expanded", String(open));
+    fold.inert = !open;
+  }
   function makeStep(name, input) {
     const state = h("span", { class: "state" }, h("span", { class: "spinner" }));
     const summary = h("span", { class: "step-summary" });
     const chev = icon("chev"); chev.classList.add("chev");
     const label = h("span", { class: "step-label", html: stepLabel(name, input, false) });
-    const head = h("button", { class: "step-head", type: "button" }, state, label, summary, chev);
+    // its head a disclosure: aria-expanded, its label kept, its chevron turning; what it holds opens by height
+    const id = "step-" + ++FOLDS.n;
+    const head = h("button", { class: "step-head", type: "button", "aria-expanded": "false", "aria-controls": id }, state, label, summary, chev);
     const inputText = name === "run_plan" || name === "simulate_plan" || name === "validate_plan"
       ? String((input && input.plan) || "") : JSON.stringify(input || {}, null, 1);
     const result = h("pre", {}, "…");
-    const body = h("div", { class: "step-body", hidden: true }, h("div", { class: "k" }, "Input"), h("pre", {}, inputText), h("div", { class: "k" }, "Result"), result);
-    const el = h("div", { class: "step" }, head, body);
-    head.addEventListener("click", () => { body.hidden = !body.hidden; el.classList.toggle("open", !body.hidden); });
+    const body = h("div", { class: "step-body" }, h("div", { class: "k" }, "Input"), h("pre", {}, inputText), h("div", { class: "k" }, "Result"), result);
+    const fold = h("div", { class: "k-fold", id, inert: true }, h("div", { class: "k-fold-in" }, body));
+    const el = h("div", { class: "step" }, head, fold);
+    head.addEventListener("click", (e) => foldOpen(el, head, fold, !el.classList.contains("open"), e));
     return {
       el,
       finish(content, isError) {
@@ -2451,28 +2516,50 @@
       parts.list.replaceChildren(...c.items.map(approvalItem));
       if (parts.where && c.where) parts.where.textContent = c.where;
     };
-    put(shown);
     const words = cardWords() || {};
-    let inEnglish = false;
-    const flip = h("button", { class: "link soft card-lang", type: "button", title: "The card as Kelvin wrote it" }, words.english || "English");
-    flip.addEventListener("click", (e) => {
-      e.stopPropagation();
-      inEnglish = !inEnglish;
-      put(inEnglish ? english : shown);
-      flip.textContent = inEnglish ? (words.shown || lang) : (words.english || "English");
-    });
-    flip.addEventListener("keydown", (e) => e.stopPropagation());
-    parts.title.after(flip);
+    // which language it shows: a choice of two (the kit's .seg), its words kept, the chosen one aria-checked; beside
+    // the title, never in it once the title is a decided card's disclosure (foldable moves it out then)
+    const pick = h("div", { class: "seg card-lang", role: "radiogroup", "aria-label": "Card language" });
+    const choose = (v) => {
+      put(v === "en" ? english : shown);
+      for (const b of pick.querySelectorAll(":scope > button")) {
+        const on = b.dataset.v === v;
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-checked", String(on));
+        b.tabIndex = on ? 0 : -1;
+      }
+    };
+    for (const [v, label, tip] of [["shown", words.shown || lang, null], ["en", words.english || "English", "The card as Kelvin wrote it"]]) {
+      const b = h("button", { type: "button", role: "radio", title: tip }, label);
+      b.dataset.v = v;
+      b.addEventListener("click", () => choose(v));
+      pick.append(b);
+    }
+    segKeys(pick, choose);
+    choose("shown");
+    const head = parts.title.closest(".approval-title");
+    (head && head.getAttribute("role") === "button" ? head : parts.title).after(pick);
+    thumb(pick);
   }
-  // a decided request shows one line; its title opens and closes the details
+  // a decided request shows one line; its title is a disclosure (aria-expanded, its words kept, a chevron that turns)
+  // for the details under it (what it asked, its pictures, the lab's lessons), which open by height (foldOpen)
   function foldable(el, title) {
+    const id = "appr-" + ++FOLDS.n, chev = icon("chev");
+    chev.classList.add("chev");
+    const fold = h("div", { class: "k-fold", id, inert: true }, h("div", { class: "k-fold-in" },
+      ...el.querySelectorAll(":scope > ul, :scope > .approval-figure, :scope > .approval-lessons")));
+    title.after(fold);
+    const pick = title.querySelector(".card-lang");   // the card's language: a control of its own, not in the button
+    if (pick) title.after(pick);
+    title.append(chev);
     title.setAttribute("role", "button");
     title.setAttribute("tabindex", "0");
     title.setAttribute("aria-expanded", "false");
-    title.title = "Show the details";
-    const flip = () => title.setAttribute("aria-expanded", String(el.classList.toggle("open")));
+    title.setAttribute("aria-controls", id);
+    title.title = "Details";
+    const flip = (e) => foldOpen(el, title, fold, !el.classList.contains("open"), e);
     title.addEventListener("click", flip);
-    title.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } });
+    title.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(e); } });
   }
 
   // where a request acts (runtime.where): a request on the simulator once looked just like one on the instruments
@@ -2850,10 +2937,18 @@
     return c ? c.project : SIDE.newProject;
   }
 
-  function rowButton(name, label, onClick) {
-    const b = h("button", { class: "row-btn", type: "button", "aria-label": label, title: label }, icon(name));
+  function rowButton(name, label, onClick) {   // ⋯ opens a menu, and says so (aria-haspopup; popMenu marks it open)
+    const b = h("button", { class: "row-btn", type: "button", "aria-label": label, title: label,
+      "aria-haspopup": name === "dots" ? "menu" : null }, icon(name));
     b.addEventListener("click", (e) => { e.stopPropagation(); onClick(e); });
     return b;
+  }
+  // a row's name tip: its whole name, only while the row cuts it short (an ellipsis), read as the pointer comes
+  function nameTip(row, name) {
+    row.addEventListener("pointerenter", () => {
+      const t = row.querySelector(".t");
+      if (t && t.scrollWidth > t.clientWidth) row.title = name; else row.removeAttribute("title");
+    });
   }
   // an inline name field; the same element survives re-renders of the list, so typing is never lost
   function nameInput(key, value, placeholder, onSubmit, onCancel) {
@@ -2905,11 +3000,17 @@
     const mark = S.asking.has(c.id) ? ["asking", "Kelvin asks for your approval here"]
       : answering ? ["answering", "Kelvin is answering here"] : S.unread.has(c.id) ? ["unread", "A new answer"] : null;
     const item = h("div", { class: "chat-item" + (c.id === S.chatId ? " active" : "") + (mark ? " " + mark[0] : ""),
-      role: "button", tabindex: "0", draggable: "true" },
+      role: "button", tabindex: "0", draggable: "true", "data-key": "chat:" + c.id },
       mark ? h("span", { class: "chat-dot", title: mark[1], "aria-label": mark[1] }) : null,
       h("span", { class: "t" }, c.title || "New chat"), lockMark(chatPrivacy(c)), more);
+    nameTip(item, c.title || "New chat");
     item.addEventListener("click", () => openChat(c.id));
-    item.addEventListener("keydown", (e) => { if (e.key === "Enter") openChat(c.id); });
+    // its own Enter or Space (not its ⋯'s), used up here: the key goes on to nothing, not even the question it may ask
+    item.addEventListener("keydown", (e) => {
+      if (e.target !== item || (e.key !== "Enter" && e.key !== " ")) return;
+      e.preventDefault();
+      openChat(c.id);
+    });
     item.addEventListener("dragstart", (e) => {
       e.dataTransfer.setData("text/x-kelvin-chat", c.id);
       e.dataTransfer.effectAllowed = "move";
@@ -2919,34 +3020,47 @@
     item.addEventListener("dragend", () => { item.classList.remove("dragging"); $("chat-list").classList.remove("dragging-chat"); });
     return item;
   }
+  // a project folds under its head, the one holding the open chat too (its head then looks chosen, as the chat's row
+  // would); kept per browser (lh.collapsed). A disclosure: aria-expanded and aria-controls, its chevron turning; what
+  // it opens comes in by height (.k-open, once; at once from the keyboard)
+  function unfoldProject(id) {   // a chat of a folded project opened (a toast's Open): its project shows it
+    if (!id || !SIDE.collapsed.delete(id)) return;
+    store("lh.collapsed", JSON.stringify([...SIDE.collapsed]));
+  }
   function projectGroup(p, chats) {
     const holdsActive = currentProject() === p.id;
-    const open = !SIDE.collapsed.has(p.id) || holdsActive;
+    const open = !SIDE.collapsed.has(p.id), listId = "proj-chats-" + p.id;
     let head;
     if (SIDE.renaming === p.id) {
       head = nameInput("project:" + p.id, p.name, "Project name", (name) => renameProject(p, name), () => { SIDE.renaming = null; renderChats(); });
     } else {
-      head = h("div", { class: "proj-row" + (holdsActive && !S.chatId ? " active" : ""), role: "button", tabindex: "0", "aria-expanded": String(open), title: p.name },
+      head = h("div", { class: "proj-row" + (holdsActive && (!S.chatId || !open) ? " active" : ""), role: "button", tabindex: "0",
+        "aria-expanded": String(open), "aria-controls": listId, "data-key": "project:" + p.id },
         h("span", { class: "chev-s" + (open ? " open" : "") }, icon("chev")), icon("folder"),
         h("span", { class: "t" }, p.name), lockMark(privacyOf(p.rules, p)),
         h("span", { class: "count" }, chats.length ? String(chats.length) : ""),
         rowButton("plus", "New chat in " + p.name, () => newChat(p.id, true)),
         rowButton("dots", "Options for " + p.name, (e) => projectMenu(e.currentTarget, p, chats)));
-      const toggle = () => {
-        if (SIDE.collapsed.has(p.id) || !open) SIDE.collapsed.delete(p.id); else SIDE.collapsed.add(p.id);
+      const toggle = (e) => {
+        if (open) SIDE.collapsed.add(p.id); else SIDE.collapsed.delete(p.id);
+        SIDE.opened = !open && e && e.detail > 0 ? p.id : null;   // a pointer's: it opens by height
         store("lh.collapsed", JSON.stringify([...SIDE.collapsed]));
         renderChats();
       };
+      nameTip(head, p.name);
       head.addEventListener("click", toggle);
-      head.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+      // its own Enter or Space: those of its ＋ and ⋯ are theirs (a new chat in it, its menu), never a fold
+      head.addEventListener("keydown", (e) => {
+        if (e.target !== head || (e.key !== "Enter" && e.key !== " ")) return;
+        e.preventDefault();
+        toggle();
+      });
       dropTarget(head, p.id);
     }
-    const group = h("div", { class: "proj" }, head);
-    if (open) {
-      group.append(h("div", { class: "proj-chats" }, ...(chats.length ? chats.map(chatItem)
-        : [h("div", { class: "side-empty" }, "No conversations yet")])));
-    }
-    return group;
+    const list = h("div", { class: "proj-chats" }, ...(chats.length ? chats.map(chatItem)
+      : [h("div", { class: "side-empty" }, "No conversations yet")]));
+    return h("div", { class: "proj" }, head,
+      h("div", { class: "proj-fold" + (open && SIDE.opened === p.id ? " k-open" : ""), id: listId, hidden: !open }, list));
   }
   function renderChats() {
     const byProject = new Map(S.projects.map((p) => [p.id, []]));
@@ -2968,7 +3082,13 @@
     if (!loose.length) kids.push(h("div", { class: "side-empty" }, S.chats.length ? "Every conversation is in a project." : "No conversations yet."));
     const ed = SIDE.editor;
     const typing = ed && document.activeElement === ed.input;
+    const had = document.activeElement && document.activeElement.closest && document.activeElement.closest("#chat-list [data-key]");
     $("chat-list").replaceChildren(...kids);
+    SIDE.opened = null;   // a project opened by a pointer comes in by height once, not at every redraw
+    if (had) {   // the row that had the focus (a fold pressed from the keyboard) keeps it, drawn again
+      const again = [...$("chat-list").querySelectorAll("[data-key]")].find((el) => el.dataset.key === had.dataset.key);
+      if (again) again.focus({ preventScroll: true });
+    }
     if (ed && ed.el.isConnected && (ed.fresh || typing)) {
       ed.input.focus();
       if (ed.fresh) ed.input.select();
@@ -2976,27 +3096,44 @@
     }
   }
 
-  // a small menu under a button: [{label, icon, onClick, danger, checked} | {heading} | {sep: true}]
-  let openMenu = null;
-  function closeMenu() { if (openMenu) { openMenu.remove(); openMenu = null; } }
+  // a small menu under a button: [{label, icon, onClick, danger, role, checked} | {heading} | {sep: true}]. A checkable
+  // item says its state (aria-checked) and draws it in both states: a setting that acts at once (role
+  // "menuitemcheckbox") a box, ticked when on; a choice (role "menuitemradio", or an item given `checked` without a
+  // role) a ring, with a dot in the chosen one, its items a group named by the heading over them. Choosing an item
+  // closes the menu, whatever its kind; the arrows, Home and End move along it; Esc and Tab close it. Its button says
+  // it opens a menu (aria-haspopup) and, while it is open, aria-expanded
+  let openMenu = null, menuFrom = null;
+  function closeMenu() {
+    if (openMenu) { openMenu.remove(); openMenu = null; }
+    if (menuFrom) { menuFrom.setAttribute("aria-expanded", "false"); menuFrom = null; }
+  }
   function popMenu(anchor, items) {
     closeMenu();
+    anchor.setAttribute("aria-haspopup", "menu");
+    anchor.setAttribute("aria-expanded", "true");
+    menuFrom = anchor;
     const menu = h("div", { class: "menu", role: "menu" });
+    let head = null, group = null, n = 0;   // the heading just over, and the choice being filled
     for (const it of items) {
-      if (it.sep) { menu.append(h("div", { class: "menu-sep", role: "separator" })); continue; }
-      if (it.heading) { menu.append(h("div", { class: "menu-head" }, it.heading)); continue; }
-      const b = h("button", { class: "menu-item" + (it.danger ? " danger" : ""), type: "button", role: "menuitem" },
-        it.icon ? icon(it.icon) : h("span", { class: "menu-gap" }), h("span", { class: "menu-label" }, it.label),
-        it.checked ? icon("check") : null);
+      if (it.sep) { menu.append(h("div", { class: "menu-sep", role: "separator" })); head = group = null; continue; }
+      if (it.heading) { head = h("div", { class: "menu-head", id: "menu-head-" + ++n }, it.heading); menu.append(head); group = null; continue; }
+      const role = it.role || ("checked" in it ? "menuitemradio" : "menuitem"), checks = role !== "menuitem";
+      const lead = checks ? h("span", { class: "menu-check " + (role === "menuitemradio" ? "menu-radio" : "menu-box"), "aria-hidden": "true" },
+        role === "menuitemcheckbox" ? icon("check") : null) : it.icon ? icon(it.icon) : h("span", { class: "menu-gap" });
+      const b = h("button", { class: "menu-item" + (it.danger ? " danger" : ""), type: "button", role,
+        "aria-checked": checks ? String(!!it.checked) : null }, lead, h("span", { class: "menu-label" }, it.label));
       b.addEventListener("click", (e) => { e.stopPropagation(); closeMenu(); it.onClick(); });
-      menu.append(b);
+      if (role !== "menuitemradio") { menu.append(b); head = group = null; continue; }
+      if (!group) { group = h("div", { class: "menu-group", role: "group", "aria-labelledby": head ? head.id : null }); menu.append(group); }
+      group.append(b);
     }
     menu.addEventListener("keydown", (e) => {
       const buttons = [...menu.querySelectorAll(".menu-item")];
       const i = buttons.indexOf(document.activeElement);
       if (e.key === "ArrowDown") { e.preventDefault(); buttons[(i + 1) % buttons.length].focus(); }
       if (e.key === "ArrowUp") { e.preventDefault(); buttons[(i - 1 + buttons.length) % buttons.length].focus(); }
-      if (e.key === "Escape") { e.preventDefault(); closeMenu(); anchor.focus(); }
+      if (e.key === "Home" || e.key === "End") { e.preventDefault(); buttons[e.key === "Home" ? 0 : buttons.length - 1].focus(); }
+      if (e.key === "Escape" || e.key === "Tab") { e.preventDefault(); closeMenu(); anchor.focus(); }
     });
     document.body.append(menu);
     const z = pageZoom(), a = anchor.getBoundingClientRect(), W = window.innerWidth / z, H = window.innerHeight / z;
@@ -3012,14 +3149,18 @@
   document.addEventListener("click", (e) => { if (openMenu && !openMenu.contains(e.target)) closeMenu(); });
   window.addEventListener("resize", closeMenu);
 
+  // a chat's project, a choice with one always chosen: a project, or No project (under Conversations)
   function chatMenu(anchor, c) {
     const items = [{ label: "Rename", icon: "pencil", onClick: () => { SIDE.renaming = c.id; renderChats(); } }];
     items.push({ heading: "Move to project" });
-    for (const p of S.projects) {
-      items.push({ label: p.name, icon: "folder", checked: c.project === p.id, onClick: () => { if (c.project !== p.id) moveChat(c.id, p.id); } });
+    if (S.projects.length) {
+      for (const p of S.projects) {
+        items.push({ label: p.name, role: "menuitemradio", checked: c.project === p.id, onClick: () => { if (c.project !== p.id) moveChat(c.id, p.id); } });
+      }
+      const loose = !S.projects.some((p) => p.id === c.project);   // a project gone meanwhile: under Conversations too
+      items.push({ label: "No project", role: "menuitemradio", checked: loose, onClick: () => { if (c.project) moveChat(c.id, null); } });
     }
     items.push({ label: "New project…", icon: "plus", onClick: () => startNewProject(c.id) });
-    if (c.project) items.push({ label: "Remove from project", icon: "x", onClick: () => moveChat(c.id, null) });
     items.push({ sep: true }, { label: "Delete", icon: "trash", danger: true, onClick: () => deleteChat(c) });
     popMenu(anchor, items);
   }
@@ -3347,30 +3488,49 @@
       } catch (e) { /* the next change tries again */ }
     }
   }
+  // Incognito, a mode of the chat: a toggle button (aria-pressed) with a look of its own, dashed as the composer is
+  // then. On, from anywhere (Home too), an incognito chat takes the chat's place; the chat open before is kept to come
+  // back to. Off, or another chat opened meanwhile, forgets it: asked first ("Forget this chat?") when it holds
+  // messages, and Cancel keeps it. Off goes back to the chat before. Never remembered: a reload starts without it
+  const INCOG = { before: null };   // the chat open when it began: { id } or, a new one, { project }
+  const incogSaid = () => S.incognito && !!S.chatId && !!thread.querySelector(".msg");
+  async function mayLeaveIncognito() {   // true: nothing in it to lose, or the person agreed to forget it
+    if (!incogSaid()) return true;
+    return (await askYes("Forget this chat?\nIt is incognito: nothing of it is kept once you leave it.",
+      { ok: "Forget", danger: true })) === true;
+  }
   // an incognito chat is forgotten as soon as you leave it
   function leaveIncognito() {
     if (S.incognito && S.chatId) api("/api/chats/" + S.chatId, { method: "DELETE" }).catch(() => {});
-    if (S.incognito) { S.incognito = false; applyIncognito(); }
+    if (S.incognito) { S.incognito = false; INCOG.before = null; applyIncognito(); }
   }
   const askHint = () => S.incognito ? "Ask anything; nothing here is remembered" : "Ask Kelvin…";
   function applyIncognito() {
     document.body.classList.toggle("incognito", S.incognito);
     const b = $("toggle-incognito");
-    b.setAttribute("aria-pressed", String(S.incognito));
-    b.classList.toggle("on", S.incognito);
-    // always there: from a saved chat it starts a new incognito one; in incognito it leaves (and forgets) it
-    b.title = S.incognito ? "Leave incognito: this chat is forgotten and a normal chat starts"
-      : S.chatId ? "New incognito chat: none of your memory is used or kept, and the chat is not saved"
-        : "Make this chat incognito: none of your memory is used or kept, and the chat is not saved";
+    b.setAttribute("aria-pressed", String(S.incognito));   // its own on look (app.css "fit I"), never an open pane's .on
+    if (b.dataset.tip !== "Incognito chat") b.title = "Incognito chat";   // its name, on or off (the top bar's tip)
     $("greeting").textContent = S.incognito ? "Incognito chat" : "What are we measuring today?";
     $("empty-sub").textContent = S.incognito
       ? "No memory, and forgotten when you leave. Instrument commands and runs are still logged."
       : S.labSub || "";
     $("input").placeholder = askHint();
   }
-  function toggleIncognito() {
+  async function toggleIncognito() {
     exitFull();
-    if (S.incognito) { newChat(); return; }   // leaving: forget it and start a normal chat
+    setMode("chat", true);   // the chat is where it shows, on or off (from Home too)
+    if (S.incognito) {   // off: forgotten (asked first when it holds messages), then the chat before again
+      if (!(await mayLeaveIncognito())) return;   // kept: the focus goes back to the button
+      const back = INCOG.before || {};
+      leaveIncognito();
+      // the chat or the project before, unless deleted meanwhile (then a new chat); a chat made just before it began
+      // may not be listed yet, so the list is read once more before giving it up
+      if (back.id && !S.chats.some((c) => c.id === back.id)) await refreshChats();
+      const id = S.chats.some((c) => c.id === back.id) ? back.id : null;
+      if (!id || !(await openChat(id))) newChat(S.projects.some((p) => p.id === back.project) ? back.project : null);
+      return;
+    }
+    INCOG.before = S.chatId ? { id: S.chatId } : { project: SIDE.newProject };
     if (S.chatId) newChat();
     S.incognito = true;
     SIDE.newProject = null;
@@ -3381,14 +3541,16 @@
   }
 
   async function openChat(id) {   // another chat may go on answering meanwhile: its answer waits for you there
+    if (!(await mayLeaveIncognito())) return false;   // leaving an incognito chat forgets it: asked first
     let chat;
-    try { chat = await api("/api/chats/" + id); } catch (e) { toast(e.message); return; }
+    try { chat = await api("/api/chats/" + id); } catch (e) { toast(e.message); return false; }
     exitFull();
     setMode("chat", true);
     leaveIncognito();
     S.chatId = id;
     S.unread.delete(id);
     SIDE.newProject = null;
+    unfoldProject(chat.project);   // its project shows it, though folded before
     S.chatRules = chat.rules || null;
     showChat(chat);
     setTitle(chat.title, chat.project);
@@ -3399,6 +3561,7 @@
     refreshComposer();
     closeSidebar();
     refreshAnalysisRuns();   // the runs this chat's model may see
+    return true;
   }
   function showChat(chat) {   // a chat still answering in this window: what it said before, then its answer as it goes
     const live = S.live.get(chat.id);
@@ -3409,7 +3572,12 @@
     requestAnimationFrame(toBottom);
   }
   const titleOf = (id) => (S.chats.find((c) => c.id === id) || {}).title || "a chat";
-  function newChat(projectId, ask) {   // ask: the person started it, so they are asked for its folder
+  // ask: the person started it, so they are asked for its folder. A promise of whether it started one: false when the
+  // person kept the incognito chat they were asked about; else at once (the new chat is there as it returns)
+  function newChat(projectId, ask) {
+    if (incogSaid()) {   // leaving an incognito chat forgets it: asked first, and Cancel keeps it
+      return mayLeaveIncognito().then((ok) => ok && (leaveIncognito(), newChat(projectId, ask)));
+    }
     exitFull();
     setMode("chat", true);
     leaveIncognito();
@@ -3429,6 +3597,7 @@
     loadStartChecklist();
     refreshAnalysisRuns();   // the runs a new chat's model may see
     $("input").focus();
+    return Promise.resolve(true);
   }
 
   // ------------------------------------------------------------------ the chat's folder: where its runs go
@@ -3635,23 +3804,26 @@
     const path = await pickFolder(FOLDER.path, "Choose where this chat saves its runs", { create: true });
     if (path && !S.chatId) { try { await useFolder(path); } catch (e) { toast(e.message); } }
   }
+  // where the chat saves its runs is a choice with one always chosen: the data folder, or one of the recent folders (the
+  // chat's own among them, though it fell off the list)
   async function folderMenu() {   // like a code editor's folder menu: the whole path, recent folders, another one
     let recent = [];
     try { recent = (await api("/api/folder" + (SIDE.newProject ? "?project=" + encodeURIComponent(SIDE.newProject) : ""))).recent || []; } catch (e) { /* the rest still works */ }
     const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+    if (FOLDER.own && !recent.some((p) => same(p, FOLDER.path))) recent.unshift(FOLDER.path);
     const items = [{ heading: FOLDER.path }];
     if (recent.length) {
-      items.push({ heading: "Recent folders" });
+      items.push({ heading: "Recent folders" }, { label: "Data folder", role: "menuitemradio", checked: !FOLDER.own,
+        onClick: () => { if (FOLDER.own) useFolder(null).catch((e) => toast(e.message)); } });
       for (const p of recent) {
         const twin = recent.some((q) => q !== p && same(folderName(q), folderName(p)));   // two "data" folders: say which
-        items.push({ label: twin ? p : folderName(p), icon: "folder", checked: FOLDER.own && same(p, FOLDER.path),
+        items.push({ label: twin ? p : folderName(p), role: "menuitemradio", checked: FOLDER.own && same(p, FOLDER.path),
           onClick: () => { if (!(FOLDER.own && same(p, FOLDER.path))) useFolder(p).catch((e) => toast(e.message)); } });
       }
       items.push({ sep: true });
     }
     items.push({ label: "Choose folder…", icon: "folder-open", onClick: changeFolder },
       { label: "Open folder", icon: "doc", onClick: () => api("/api/folder", { body: { open: true, chat: S.chatId, project: SIDE.newProject } }).catch((e) => toast(e.message)) });
-    if (FOLDER.own) items.push({ label: "Use the data folder", icon: "x", onClick: () => useFolder(null).catch((e) => toast(e.message)) });
     popMenu($("folder-btn"), items);
   }
 
@@ -4654,10 +4826,8 @@
     const badge = $("lab-badge");
     badge.textContent = String(s.pending.length);
     badge.hidden = !s.pending.length;
-    if (fresh) {   // a request no conversation shows: the Lab panel, on the screen even in full screen
-      if (!S.labOpen) toggleLab(true);
-      fullShow("labpanel");
-    }
+    // a request no conversation shows: the Lab panel to the screen, even in full screen; there already, its head rings
+    if (fresh) Kelvin.paneShow("labpanel");
     showMode(s.approval_mode, s.approval_rule);
     renderAlerts(s.alarms, s.incident);
     renderWatches(s.watches || [], s.status);
@@ -6018,10 +6188,10 @@
   }
   // the scan with this library id in the editor, the scan waiting in the queue as this item (item: its id), or a new
   // scan (neither); the one open there with changes stays open when asked for again, and goes only when the person
-  // says so
+  // says so. The editor comes to the screen (even in full screen); there already, its head rings (Kelvin.paneShow)
   async function openEditor(id, item) {
     const same = !!ED.parts && ED.id === (id || null) && ED.item === (item || null);
-    if (same && edDirty()) { toggleEditor(true); fullShow("edpane"); $("ed-name").focus(); return; }
+    if (same && edDirty()) { Kelvin.paneShow("edpane"); $("ed-name").focus(); return; }
     if (ED.parts && !same && edDirty() && !(await edLeave())) return;
     let d;
     try { d = await api("/api/library", { body: Object.assign({ op: "parts", id: id || null }, item ? { item } : {}) }); }
@@ -6045,8 +6215,7 @@
     edPlan(false);
     edSay("");
     renderEditor();
-    toggleEditor(true);
-    fullShow("edpane");
+    Kelvin.paneShow("edpane");
     $("ed-name").focus();
   }
   const edDirty = () => !!ED.parts && JSON.stringify(ED.parts) !== ED.base;
@@ -7317,12 +7486,12 @@
     }
     addToConfig(items, sm ? smNames() : null);
   }
-  function recipesFromScripts() {   // in a new chat: Kelvin proposes a recipe per script, and keeps each one you agree to
+  async function recipesFromScripts() {   // in a new chat: Kelvin proposes a recipe per script, and keeps each one you agree to
     const folder = LAB.scripts && LAB.scripts.folder;
     if (!folder) return;
     const several = (LAB.scripts.folders || []).length > 1;   // the lab's scripts folders, read together
     $("lab-dialog").close();
-    newChat();
+    if (!(await newChat())) return;   // the person kept their incognito chat: the request is not put in it
     $("input").value = "Turn the measurement scripts in " + (several ? "my lab's scripts folders" : folder) + " into recipes: " +
       "read them with survey_scripts" + (several ? " (no path: every folder)" : "") + ", " +
       "then propose a recipe for each measurement script, with this lab's instruments, and keep each with " +
@@ -7481,7 +7650,7 @@
     $("toggle-term").setAttribute("aria-pressed", String(TERM.open));
     $("toggle-term").classList.toggle("on", TERM.open);
     store("lh.term", TERM.open ? "1" : "0");
-    fitLayout();   // full screen, and the scrim, follow
+    fitLayout();   // full screen, and the top-bar buttons, follow
     if (!TERM.open) return;
     if (!termOut().childElementCount) termLine("Kelvin terminal. Type to Kelvin, or /help for instrument commands.", "dim");
     termSync();
@@ -8350,7 +8519,9 @@
   // more), fit-compact (720 to 899) or fit-tight. The morning's variants: ?v=1B,2A… in the query string (the hash holds
   // the key), kept as lh.v (?v= alone forgets them), shown as html[data-v1] to [data-v4] and as V[n] to the code
   // (fenced: /* v2B */ … /* /v2B */ and if (V[2] === "B")). Option 1 changes Auto alone: 1B keeps 100 %, 1C shrinks a
-  // 1600 × 900 layout to the window, never under 80 %.
+  // 1600 × 900 layout to the window, never under 80 %, 1D is 1A with 110 % on a window of 2400 × 1200 or more (the big
+  // monitor, a Chrome tab on it too); Settings → Page size keeps its choices under each. Option 2 has a third, 2C
+  // (home.css). ?v= takes only the variants built: 1A to 1D, 2A to 2C, 3A and 3C, 4A.
   const SIZES = [0.8, 0.85, 0.9, 1, 1.1, 1.25, 1.5];
   const FIT = { zoom: 1, tier: "", timer: 0, still: 0, wheel: 0, native: false };
   const V = readVariants();
@@ -8360,8 +8531,7 @@
     try { given = new URLSearchParams(location.search).get("v"); } catch (e) { /* none given */ }
     if (given !== null) store("lh.v", given.trim());
     for (const part of String(store("lh.v") || "").toUpperCase().split(/[\s,]+/)) {
-      const m = /^([1-4])([A-C])$/.exec(part);
-      if (m) v[m[1]] = m[2];
+      if (/^(1[A-D]|2[A-C]|3[AC]|4A)$/.test(part)) v[part[0]] = part[1];   // the variants built, and no others
     }
     for (const n of [1, 2, 3, 4]) document.documentElement.setAttribute("data-v" + n, v[n]);
     return v;
@@ -8372,6 +8542,9 @@
     const w = window.innerWidth, h = window.innerHeight;
     if (w < 1000 || window.matchMedia("(pointer: coarse)").matches || V[1] === "B") return 1;
     if (V[1] === "C") return Math.max(0.8, Math.floor(Math.min(1, w / 1600, h / 900) * 100) / 100);
+    // v1D: the big monitor (2560 × 1440) a size up: the desktop app's window there, or a Chrome tab (about 2560 × 1305,
+    // 1275 with the bookmarks bar); 1200 is above every 1080p window
+    if (V[1] === "D" && w >= 2400 && h >= 1200) return 1.1;
     return w >= 1600 && h >= 900 ? 1 : h < 680 ? 0.85 : 0.9;
   }
   const pageZoom = () => FIT.zoom;   // Kelvin.zoom(): divide pointer and rect lengths by it before writing them to CSS
@@ -8553,27 +8726,27 @@
     t.style.height = Math.min(t.scrollHeight, 220) + "px";
     updateSend();
   }
-  // a chat chosen while the sidebar stands over the page: the chat back, the sidebar hidden as its button would
-  function closeSidebar() { if (sideFloats() && !SIDE.hidden && !FULL.length) toggleSidebar(); }
-  // the page dimmed under the sidebar while it stands over it; a click there hides the sidebar, and nothing else
-  function syncScrim() {
-    $("scrim").hidden = FULL.length > 0 || SIDE.hidden || !sideFloats();
-  }
+  // a chat chosen where the sidebar takes the content area: the chat back, the sidebar hidden for now (its button
+  // keeps the person's choice)
+  function closeSidebar() { if (sideSolo()) { SIDE.hidden = true; fitLayout(); } }
   // The sidebar's button, at the top bar's left at every width, and the only thing that hides or shows the sidebar
   // (the panels never do), as ChatGPT's: where the sidebar stands beside the page it slides away and the page and the
-  // panels take its room; where the page has no room for it beside (.side-floats) it stands over the page, below the
-  // top bar. The page keeps the choice (lh.sideHidden). In full screen, where it is out of sight, the button ends full
-  // screen and shows it.
-  const sideFloats = () => layoutW() < SIDEBAR_W + CHAT_MIN;
+  // panels take its room; where it cannot stand beside the main column (under 784 page px: sideNarrow) it takes
+  // the content area as a pane alone does, below the top bar (.side-solo), and what was there waits out of sight until
+  // a chat, Chat or Home, a pane's button or the button again brings it back. The page keeps the choice
+  // (lh.sideHidden). In full screen, where it is out of sight, the button ends full screen and shows it.
+  const sideNarrow = () => layoutW() < SIDEBAR_W + CHAT_MIN;
+  const sideSolo = () => !SIDE.hidden && !FULL.length && sideNarrow();
   function toggleSidebar() {
     const app = $("app");
     SIDE.hidden = FULL.length ? false : !SIDE.hidden;
     FULL.length = 0;
     store("lh.sideHidden", SIDE.hidden ? "1" : "0");
-    app.classList.toggle("side-above", !SIDE.hidden);   // over the page: above the panels there, until one is asked for
-    app.classList.add("side-slide");   // it slides for this change alone (app.css), never as the panels make room
-    clearTimeout(SIDE.slide);
-    SIDE.slide = setTimeout(() => app.classList.remove("side-slide"), 500);
+    if (!sideNarrow()) {   // beside the page it slides, for this change alone (app.css), never as the panels make room
+      app.classList.add("side-slide");
+      clearTimeout(SIDE.slide);
+      SIDE.slide = setTimeout(() => app.classList.remove("side-slide"), 500);
+    }
     fitLayout();
   }
   // the button's name never changes (Conversations); aria-expanded says whether the sidebar is on the screen. On hover
@@ -8839,7 +9012,8 @@
       $("toggle-analysis").classList.add("on");
       fitLayout();
     }
-    if (seen) ring($("anpane").querySelector(":scope > header")); else fullShow("anpane");   // to the screen, even in full screen
+    if (seen) { look("anpane"); ring($("anpane").querySelector(":scope > header")); }   // asked for: looked at
+    else fullShow("anpane");   // to the screen, even in full screen or under the list
     await loadAnalysisRuns();
     if (runs.length) await anColumns(runs[0]);
     renderAnalysisForm();
@@ -9222,16 +9396,17 @@
   // through kelvin:* events on document (ready, state, mode, seq) and use what it lends them on window.Kelvin
   function emit(name, detail) { document.dispatchEvent(new CustomEvent("kelvin:" + name, { detail })); }
   // the top bar's switch: Home takes the conversation's place; the panels beside them stay as they are. Either side,
-  // even the one chosen, ends full screen: the main column back on the screen
+  // even the one chosen, brings the main column back on the screen (exitFull): full screen ends, and a pane alone or
+  // the sidebar in its place goes
   function setMode(mode, quiet) {
-    const home = mode === "home", was = S.mode, ended = !!was && FULL.length > 0;
+    const home = mode === "home", was = S.mode;
     const change = !was || (was === "home") !== home;
-    if (ended) FULL.length = 0;
     if (change) {
       S.mode = home ? "home" : "chat";
       store("lh.mode", S.mode);
       $("app").classList.toggle("home-on", home);
       $("homeview").hidden = !home;
+      for (const v of ["scroller", "homeview"]) $(v).style.animation = "";   // a real switch: the view comes in (app.css)
       for (const [id, on] of [["mode-chat", !home], ["mode-home", home]]) {
         const b = $(id);
         b.classList.toggle("on", on);
@@ -9239,7 +9414,7 @@
         b.tabIndex = on ? 0 : -1;
       }
     }
-    if (ended) fitLayout();
+    if (was) exitFull();   // not on loading: nothing is laid out yet
     if (change) emit("mode", { mode: S.mode });
     layoutSaid();
     if (!home && !quiet) $("input").focus();
@@ -9306,7 +9481,7 @@
   function initMotion() {
     for (const seg of document.querySelectorAll(".mode-seg, .seg")) thumb(seg);
     // a top-bar button's name eases in under it on hover (app.css), in place of the browser's tip: its title, whenever
-    // one is set (Incognito's says what it will do)
+    // one is set (Incognito's is its name, "Incognito chat", on or off)
     const tip = (p) => { if (p.title) { p.dataset.tip = p.title; p.removeAttribute("title"); } };
     for (const p of document.querySelectorAll(".topbar-right .pill")) {
       tip(p);
@@ -9676,11 +9851,9 @@
     $("open-cards-lab").addEventListener("click", openCards);
     $("lab-why-details").addEventListener("click", toggleWhyDetails);
     $("lab-why-setup").addEventListener("click", openLabSetup);
-    document.querySelector(".lab-chip").addEventListener("click", () => toggleLab(true));
     $("new-chat").addEventListener("click", () => newChat(null, true));
     $("folder-btn").addEventListener("click", (e) => { e.stopPropagation(); folderMenu(); });
     $("toggle-sidebar").addEventListener("click", toggleSidebar);
-    $("scrim").addEventListener("click", closeSidebar);   // the sidebar over the page, and nothing else
     $("toggle-lab").addEventListener("click", () => pillClick("labpanel", toggleLab));
     $("inst-filter").addEventListener("input", (e) => { PANEL.filter = e.target.value; renderInstruments(); });
     const instShown = (v) => {   // All | Active: a view's filter, kept here
@@ -9720,7 +9893,6 @@
         input.value = ""; input.dataset.clear = "1"; input.placeholder = "Removed on Save";
       });
     }
-    window.addEventListener("resize", syncScrim);
     setInterval(() => { if (S.labOpen || TEAM.open || S.live.size || S.answering.size || !$("lab-badge").hidden) pollState(); }, 1500);
     setInterval(pollState, 4000);   // often enough that an alarm shows within seconds
     emit("ready", boot);

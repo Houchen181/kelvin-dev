@@ -64,7 +64,9 @@ def test_full_screen_hides_the_chat_and_the_other_panels_and_never_opens_or_clos
         assert kept not in hidden, kept   # the top bar stays whole (its buttons never move), as do alarms
     assert "#app.full:not(.full-term) { flex-direction: column; }" in rules
     assert "width: auto !important" in rules[rules.index("#app.full .full-on"):]   # never the width it had beside
-    assert "FULL.length > 0 ||" in _js("syncScrim")   # no scrim over it on a narrow window
+    assert "syncScrim" not in JS   # no scrim anywhere: nothing over the page to dim
+    # the panes under it wait there: none is put away to make room while full screen covers them
+    assert "!FULL.length && !ROOM.wait" in _js("fitLayout")
 
 
 def test_one_panel_at_a_time_and_its_button_esc_or_closing_it_ends_it():
@@ -73,14 +75,22 @@ def test_one_panel_at_a_time_and_its_button_esc_or_closing_it_ends_it():
     assert "const FULL = [];   // the panel in full screen: one at most" in JS
     assert "FULL.push(" not in JS and "FULL.splice(" not in JS and "FULL[FULL.length - 1]" not in JS
     assert "if (FULL[0] === id) FULL.length = 0; else FULL[0] = id;" in _js("toggleFull")
-    show = _js("fullShow")
-    assert "if (!FULL.length || !isOpen(id) || FULL[0] === id) return;" in show and "FULL[0] = id;" in show
+    show = _js("fullShow")   # to the screen wherever it waits: in full screen, in place of the one there
+    assert "if (!isOpen(id) || paneVisible(id)) return;" in show and "if (FULL.length) FULL[0] = id;" in show
     assert "FULL.length = 0;" in _js("exitFull")
+    # closed while others wait under it (its x, its top-bar button, paneHide): full screen ends before the layout is
+    # chosen, so the panes under it make room and a pane alone goes solo at once
+    fit = _js("fitLayout")
+    clear = "if (FULL.length && !isOpen(FULL[0])) FULL.length = 0;"
+    assert fit.index(clear) < fit.index("const typing = ") < fit.index("if (open.length > 1 && !FULL.length")
+    assert fit.index(clear) < fit.index("const solo = FULL.length ? null : soloPane();")
 
 
 def test_a_panels_button_is_raised_exactly_when_its_panel_is_on_the_screen():
-    """In full screen only the panel on the screen has a raised button; the others, open out of sight, are flat."""
-    assert "const paneVisible = (id) => !!TOGGLE[id] && isOpen(id) && (!FULL.length || FULL[0] === id);" in JS
+    """In full screen only the panel on the screen has a raised button; the others, open out of sight, are flat. So are
+    the panels under the list where it takes the content area, and the terminal beside a pane alone."""
+    assert ("const paneVisible = (id) => !!TOGGLE[id] && isOpen(id) && (FULL.length ? FULL[0] === id\n"
+            '    : !sideSolo() && !(id === "termpane" && soloPane()));') in JS
     pills = JS[JS.index("const PILLS = {"):JS.index("};", JS.index("const PILLS = {"))]
     for pane, pill in (("termpane", "toggle-term"), ("teampanel", "toggle-team"), ("anpane", "toggle-analysis"),
                        ("runpane", "toggle-runs"), ("labpanel", "toggle-lab")):
@@ -105,7 +115,7 @@ def test_one_click_model_for_every_way_of_opening_a_panel():
     assert "if (paneVisible(id)) toggle(false);\n    else paneShow(id);" in pill
     show = _js("paneShow")
     assert 'if (paneVisible(id) && there) { ring($(id).querySelector(":scope > header")); return true; }' in show
-    assert "TOGGLE[id](true)" in show and "fullShow(id);" in show and "(false)" not in show   # never closes one
+    assert "TOGGLE[id](true)" in show and "fullShow(id);" in show and "(false)" not in show   # never closes it
     assert 'view === "schedule") toggleSeq(true);' in show and 'view === "history") openRunList();' in show
     assert "if (TOGGLE[id] && isOpen(id)) TOGGLE[id](false);" in _js("paneHide")
     ring = _js("ring")
@@ -115,19 +125,24 @@ def test_one_click_model_for_every_way_of_opening_a_panel():
     assert "Object.assign(window.Kelvin, { paneShow, paneHide, paneVisible, ring });" in _js("initPanes")
     opened = _js("openAnalysis")   # Analyze, and Kelvin's analyze: to the screen even in full screen, rung when there
     assert 'const seen = paneVisible("anpane");' in opened
-    assert 'if (seen) ring($("anpane").querySelector(":scope > header")); else fullShow("anpane");' in opened
+    assert 'if (seen) { look("anpane"); ring($("anpane").querySelector(":scope > header")); }' in opened
+    assert 'else fullShow("anpane");' in opened
     assert "ANA.follow = false;" in opened
     assert re.search(r'(fullShow|paneShow)\("edpane"\)', _js("openEditor"))   # Edit on a scan, New scan
     assert "fullShow" not in _js("noticeRun") + _js("openRun") + _js("showQueue")   # a run that starts doesn't take it
 
 
 def test_chat_or_home_ends_full_screen_from_either_side_even_the_one_chosen():
+    """Either side, even the one chosen, brings the main column back (exitFull): full screen ends, and a pane alone or
+    the list in its place goes. Home hears of the change once it shows, so home.js no longer ends full screen itself."""
     mode = _js("setMode")
-    for text in ("ended = !!was && FULL.length > 0", "if (ended) FULL.length = 0;", "if (ended) fitLayout();",
-                 'if (change) emit("mode", { mode: S.mode });', "layoutSaid();"):
+    for text in ("if (was) exitFull();", 'if (change) emit("mode", { mode: S.mode });', "layoutSaid();"):
         assert text in mode, text
     assert "return;" not in mode   # the side already chosen still ends it
-    assert mode.index("if (ended) fitLayout();") < mode.index('emit("mode"')   # Home hears of it once it shows
+    assert mode.index("if (was) exitFull();") < mode.index('emit("mode"')   # Home hears of it once it shows
+    home = (STATIC / "home.js").read_text(encoding="utf-8")
+    on_mode = home[home.index("function onMode("):home.index("\n  }\n", home.index("function onMode("))]
+    assert "exitFull" not in on_mode and "onShow();" in on_mode
 
 
 def test_nothing_a_person_must_answer_is_out_of_sight_in_full_screen():
@@ -146,5 +161,6 @@ def test_esc_ends_full_screen_unless_a_field_a_menu_or_a_dialog_takes_it():
     init = _js("initPanes")
     for text in ('if (e.key !== "Escape" || !FULL.length || e.defaultPrevented) return;',
                  'document.querySelector("dialog[open], .pane-menu:not([hidden])")',
-                 'e.target.closest("input, textarea, select, [contenteditable]")', "exitFull();"):
+                 'e.target.closest("input, textarea, select, [contenteditable]")',
+                 "toggleFull(FULL[0]);"):   # as its own button: the layout under it (a pane alone stays)
         assert text in init, text

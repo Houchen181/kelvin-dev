@@ -72,3 +72,29 @@ def test_the_lab_panel_never_scrolls_and_its_controls_say_their_state():
     lab = css[css.index("/* ===== fit D"):css.index("/* ===== end fit D")]
     assert "grid-auto-rows: minmax(var(--lab-row), auto); align-content: start; overflow: clip;" in lab
     assert "@container lab (min-width: 900px)" in lab and "/* v3A */" in lab and "/* /v3A */" in lab
+
+
+def test_a_waiting_request_rings_the_lab_and_each_switch_sits_in_as_its_icon_does():
+    """A request no conversation shows brings the Lab panel to the screen as every opener that is not its own button
+    does (Kelvin.paneShow): there already, its head rings, and it never closes. Each instrument's switch has its track
+    as far in from the list's right edge as the icon is from its left: with a mouse (a 40 px button) and on touch (44)."""
+    import re
+    import pytest
+    pytest.importorskip("starlette")
+    from labharness.web.app import STATIC
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    css = (STATIC / "app.css").read_text(encoding="utf-8")
+    start = js.index("async function pollState(")
+    poll = js[start:js.index("\n  }\n", start)]
+    assert 'if (fresh) Kelvin.paneShow("labpanel");' in poll and "toggleLab(true)" not in poll and "fullShow(" not in poll
+    bare = lambda s: re.sub(r"/\*.*?\*/", "", s, flags=re.S)
+    section = lambda name: bare(css[css.index("/* ===== fit %s:" % name):css.index("/* ===== end fit %s " % name)])
+    a, d = section("A"), section("D")
+    track = int(re.search(r"\.switch::before \{[^}]*?\bwidth: (\d+)px", a).group(1))
+    mouse = int(re.search(r"(?:^|\n)\.switch \{[^}]*?\bwidth: (\d+)px", a).group(1))
+    touch = int(re.search(r"\.switch \{ width: (\d+)px;", a[a.index("@media (pointer: coarse)"):]).group(1))
+    icon = int(re.search(r"(?:^|\n)\.inst-row \{[^}]*?\bpadding: 0 (\d+)px;", bare(css)).group(1))
+    inset = re.compile(r"#labpanel \.inst-head > \.inst-switch \{ margin-right: (\d+)px; \}")
+    coarse = d.index("@media (pointer: coarse)")
+    by_mouse, by_touch = inset.search(d[:coarse]), inset.search(d[coarse:])
+    assert int(by_mouse.group(1)) + (mouse - track) / 2 == icon == int(by_touch.group(1)) + (touch - track) / 2
