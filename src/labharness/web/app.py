@@ -53,7 +53,7 @@ from .. import workbench
 from ..teamchat import TeamChat, TeamChatError
 from ..homelab import build_lab, builtin_ids, collection_ids, kelvin_ids, lab_registry, open_home_lab
 from .agent import Busy, ChatAgent, runs_in, typed_stop
-from . import labops, review, rules as rulebook
+from . import browse, labops, review, rules as rulebook
 from .chatgpt import SignIn, SignInError
 from . import notices as person_notices
 from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
@@ -2842,6 +2842,17 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         keep_folder(path, project)
         return JSONResponse({"folder": path})
 
+    async def browse_view(request: Request) -> Response:
+        """GET ?path=: the folders in a folder, for choosing one in a browser on this computer (browse.py, the page's
+        folder browser): their names, never a file's contents. This computer's own browser only: a phone is refused
+        whatever its role (an owner's passes the roles' rules, so its being a phone is what counts)."""
+        if (request.scope.get("kelvin") or {}).get("device") is not None:
+            return error(403, "Only a browser on the Kelvin computer can look through its folders.")
+        try:
+            return JSONResponse(await asyncio.to_thread(browse.listing, request.query_params.get("path") or ""))
+        except ValueError as e:
+            return error(400, str(e))
+
     async def data_folder(request: Request) -> Response:
         """GET: where runs, the lab record and reports are kept. POST {path, move}: keep them somewhere else.
         POST {open: true}: show the folder on this computer."""
@@ -4160,6 +4171,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/terminal", terminal, methods=["POST"]),
         Route("/api/data-folder", data_folder, methods=["GET", "POST"]),
         Route("/api/folder", folder_view, methods=["GET", "POST"]),
+        Route("/api/browse", browse_view),
         Route("/api/instruments/{name}/manual", instrument_manual, methods=["POST", "PUT"]),
         Route("/api/instruments/{name}/open", instrument_open, methods=["POST"]),
         Route("/api/instruments/{name}/switch", instrument_switch, methods=["POST"]),
