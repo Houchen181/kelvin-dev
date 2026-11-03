@@ -3197,7 +3197,7 @@
     requestAnimationFrame(toBottom);
   }
   const titleOf = (id) => (S.chats.find((c) => c.id === id) || {}).title || "a chat";
-  function newChat(projectId, ask) {   // ask: the person started it, so the folder picker opens (in the app)
+  function newChat(projectId, ask) {   // ask: the person started it, so they are asked for its folder
     exitFull();
     setMode("chat", true);
     leaveIncognito();
@@ -3236,19 +3236,23 @@
     if (!S.chatId) showFolder(r.folder, r.folder !== r.data);
   }
   function hasPicker() { return !!(window.pywebview && window.pywebview.api && window.pywebview.api.pick_folder); }
-  async function pickFolder(start, question) {   // the computer's own folder picker in the Kelvin app; in a browser, Kelvin's
+  // the computer's own folder picker in the Kelvin app; in a browser, Kelvin's. opts.create: a folder that isn't there
+  // yet may be chosen too, to be made where it is used (a chat's folder, the data folder)
+  async function pickFolder(start, question, opts = {}) {
     if (hasPicker()) {
       try { return (await window.pywebview.api.pick_folder(start || "")) || ""; } catch (e) { return ""; }
     }
-    return browseFolder(start || "", question);
+    return browseFolder(start || "", question, !!opts.create);
   }
   // Kelvin's folder browser, for a browser on the Kelvin computer, which can't give a folder's path itself: the
   // computer's folders as Kelvin lists them (GET /api/browse: names only), gone into with a click or Enter, up with Up
   // or Backspace, to a drive or Home; a path typed or pasted at the top goes there with Enter. The folder chosen, or ""
-  // when cancelled. A path typed that isn't there can still be used (Use it anyway): a chat's folder is made then.
-  function browseFolder(start, question) {
+  // when cancelled. create: a path typed that isn't there can be used all the same (Use it anyway), and is made then.
+  function browseFolder(start, question, create) {
     return new Promise((resolve) => {
-      const B = { at: null, seq: 0, items: [] };   // the listing shown, the latest one asked for, its folders' buttons
+      // the listing shown, the latest one asked for and the one still coming, its folders' buttons, and whether the
+      // path field holds what the person typed since a listing filled it
+      const B = { at: null, seq: 0, asked: null, items: [], edited: false };
       const unquote = (s) => String(s || "").trim().replace(/^"(.*)"$/, "$1").trim();   // Explorer's Copy as path
       const bare = (p) => p.replace(/[\\/]+$/, "") || p;   // without its last separator: C:\ is C:
       const path = h("input", { class: "kfield folder-path", type: "text", spellcheck: "false", autocomplete: "off",
@@ -3256,7 +3260,7 @@
       const places = h("div", { class: "folder-places", role: "group", "aria-label": "Drives" });
       const up = h("button", { class: "btn small", type: "button", title: "Up (Backspace)", disabled: true }, icon("up"), "Up");
       const crumbs = h("nav", { class: "folder-crumbs", "aria-label": "Path" });
-      const list = h("div", { class: "folder-list", role: "group", "aria-label": "Folders", tabindex: "-1" });
+      const list = h("div", { class: "folder-items", role: "group", "aria-label": "Folders", tabindex: "-1" });
       const note = h("p", { class: "hint folder-note", role: "status" });
       const count = h("span", { class: "folder-count" });
       const cancel = h("button", { class: "btn", type: "button" }, "Cancel");
@@ -3268,15 +3272,20 @@
         path, places, h("div", { class: "folder-where" }, up, crumbs), list, note,
         h("footer", { class: "dialog-foot" }, count, cancel, choose));
       const dlg = h("dialog", { class: "dialog folder-dialog", "aria-labelledby": "folder-title" }, form);
-      const done = (v) => { B.seq++; if (dlg.open) dlg.close(); dlg.remove(); resolve(v); };
+      const done = (v) => { B.seq++; if (B.asked) B.asked.stop.abort(); if (dlg.open) dlg.close(); dlg.remove(); resolve(v); };
       function focusItem(i) {   // one folder in the Tab order at a time: the one the keys are on
         B.items.forEach((b, k) => { b.tabIndex = k === i ? 0 : -1; });
         B.items[i].focus();
       }
-      function show(r, from, into) {   // a listing: its path, the drives, the way to it, its folders, its scripts
+      // a listing: its path, the drives, the way to it, its folders, its scripts (how: as go was asked)
+      function show(r, how) {
         B.at = r;
-        path.value = r.missing || r.path;   // a path that isn't there stays in the field, to be fixed
-        path.classList.toggle("bad", !!r.missing);
+        const typing = B.edited && !how.typed && document.activeElement === path;   // what the person types stays
+        if (!typing) {
+          path.value = r.missing || r.path;   // a path that isn't there stays in the field, to be fixed
+          path.classList.toggle("bad", !!r.missing);
+          B.edited = false;
+        }
         places.replaceChildren(...[["Home", r.home]].concat(r.roots.map((p) => [bare(p), p])).map(([label, p]) =>
           h("button", { class: "btn small", type: "button", onclick: () => go(p) }, label)));
         up.disabled = !r.parent;
@@ -3285,29 +3294,42 @@
             : h("button", { type: "button", onclick: () => go(p.path) }, p.name);
           return i ? [h("span", { class: "folder-sep", "aria-hidden": "true" }, "›"), part] : [part];
         }));
+        // a double-click, as in Explorer, goes in once: its second click would land in the folder's own list
         B.items = r.folders.map((f) => h("button", { class: "folder-item", type: "button", tabindex: "-1", "data-path": f.path,
-          onclick: () => go(f.path) }, icon("folder"), h("span", {}, f.name)));
+          onclick: (e) => { if (e.detail < 2) go(f.path); } }, icon("folder"), h("span", {}, f.name)));
         list.replaceChildren(...B.items.concat([B.items.length ? null : h("p", { class: "hint" }, "No folders here."),
-          r.more ? h("p", { class: "hint" }, r.more + " more not shown") : null].filter(Boolean)));
+          r.partial ? h("p", { class: "hint" }, "More not shown (a large or slow folder)")
+            : r.more ? h("p", { class: "hint" }, r.more + " more not shown") : null].filter(Boolean)));
         list.scrollTop = 0;
-        note.replaceChildren(...(r.note ? [r.note] : []), ...(r.missing
+        note.replaceChildren(...(r.note ? [r.note] : []), ...(r.missing && create
           ? [h("button", { class: "btn small", type: "button", onclick: () => done(r.missing) }, "Use it anyway")] : []));
-        count.replaceChildren(...(r.scripts ? [h("span", { class: "chip blue" }, r.scripts + " script" + (r.scripts === 1 ? "" : "s"))] : []));
-        choose.disabled = false;
+        const s = r.scripts;   // of a folder read in part, at least so many
+        count.replaceChildren(...(s ? [h("span", { class: "chip blue" }, s + (r.partial ? "+ scripts" : s === 1 ? " script" : " scripts"))] : []));
+        choose.disabled = !typing && !!r.missing;   // a folder that isn't there: Use it anyway, or another path
+        const into = !how.typed && document.activeElement !== path;
         if (!B.items.length) { if (into) list.focus(); return; }
-        const i = Math.max(0, B.items.findIndex((b) => b.dataset.path === from));   // up: the folder come from
+        const i = Math.max(0, B.items.findIndex((b) => b.dataset.path === how.from));   // up: the folder come from
         B.items[i].tabIndex = 0;
         if (into) focusItem(i);
       }
-      // how.typed: a path from the path field, where the keys stay; how.from: the folder gone up from
-      async function go(where, how = {}) {
-        const seq = ++B.seq;
+      // the listing of where, shown unless something newer was asked for meanwhile: it, or null. how.typed: a path from
+      // the path field, where the keys stay; how.from: the folder gone up from. The folder still coming, asked for
+      // again, is the same answer; one no longer wanted is dropped, its request too
+      function go(where, how = {}) {
+        where = where || "";
+        if (B.asked && B.asked.where === where) return B.asked.answer;
+        if (B.asked) B.asked.stop.abort();
+        const seq = ++B.seq, stop = new AbortController();
+        B.asked = { where, stop, answer: read(where, how, seq, stop.signal) };
+        return B.asked.answer;
+      }
+      async function read(where, how, seq, signal) {
         list.setAttribute("aria-busy", "true");
         const slow = setTimeout(() => { if (seq === B.seq) note.textContent = "Reading…"; }, 300);
         try {
-          const r = await api("/api/browse?path=" + encodeURIComponent(where || ""));
+          const r = await api("/api/browse?path=" + encodeURIComponent(where), { signal });
           if (seq !== B.seq) return null;
-          show(r, how.from, !how.typed && document.activeElement !== path);
+          show(r, how);
           return r;
         } catch (e) {
           if (seq !== B.seq) return null;
@@ -3316,12 +3338,14 @@
           return null;
         } finally {
           clearTimeout(slow);
-          if (seq === B.seq) list.removeAttribute("aria-busy");
+          if (seq === B.seq) { list.removeAttribute("aria-busy"); B.asked = null; }
         }
       }
       const goUp = () => { if (B.at && B.at.parent) go(B.at.parent, { from: B.at.path }); };
-      dlg.addEventListener("keydown", (e) => {   // Backspace goes up, but where a path is typed
-        if (e.key === "Backspace" && e.target !== path) { e.preventDefault(); goUp(); }
+      dlg.addEventListener("keydown", (e) => {   // Backspace goes up, but where a path is typed; a key held down acts once
+        if (e.target === path) return;
+        if (e.repeat && (e.key === "Enter" || e.key === "Backspace")) e.preventDefault();
+        else if (e.key === "Backspace") { e.preventDefault(); goUp(); }
       });
       list.addEventListener("keydown", (e) => {   // ↑ ↓ Home End move, a letter goes to the next folder so named
         const n = B.items.length, at = B.items.indexOf(document.activeElement);
@@ -3340,13 +3364,17 @@
       path.addEventListener("keydown", (e) => {   // Enter goes to the path typed; ↓ to the folders
         if (e.key === "Enter" && !e.isComposing) {
           e.preventDefault();
-          if (unquote(path.value)) go(unquote(path.value), { typed: true });
+          if (!e.repeat && unquote(path.value)) go(unquote(path.value), { typed: true });
         } else if (e.key === "ArrowDown" && B.items.length) {
           e.preventDefault();
           focusItem(Math.max(0, B.items.findIndex((b) => b.tabIndex === 0)));
         }
       });
-      path.addEventListener("input", () => path.classList.remove("bad"));
+      path.addEventListener("input", () => {   // the person's own path: kept while they type, and Choose goes there
+        B.edited = true;
+        path.classList.remove("bad");
+        choose.disabled = !B.at;
+      });
       form.addEventListener("submit", (e) => e.preventDefault());
       up.addEventListener("click", goUp);
       cancel.addEventListener("click", () => done(""));
@@ -3362,8 +3390,9 @@
       document.body.append(dlg);
       dlg.showModal();
       list.focus();   // the keys start in the folders
-      go(start).then((r) => {   // a start that can't be read at all: the home folder, saying why
-        if (r || B.at || !dlg.open) return;
+      const opened = go(start), first = B.seq;
+      opened.then((r) => {   // a start that can't be read at all: the home folder, saying why (unless the person went
+        if (r || B.at || !dlg.open || B.seq !== first || !start) return;   // elsewhere meanwhile)
         const why = note.textContent;
         go("").then((home) => { if (home && !home.note) note.textContent = why; });
       });
@@ -3379,14 +3408,14 @@
     }
   }
   async function changeFolder() {
-    const path = await pickFolder(FOLDER.path, "Choose where this chat saves its runs");
+    const path = await pickFolder(FOLDER.path, "Choose where this chat saves its runs", { create: true });
     if (!path) return;
     try { await useFolder(path); toast("This chat saves its runs in " + FOLDER.path); } catch (e) { toast(e.message); }
   }
   async function askFolder() {   // a chat the person starts: they say where its runs go (Settings can turn it off)
     await loadNewFolder();
-    if (!hasPicker() || (S.settings && S.settings.ask_folder === false)) return;
-    const path = await pickFolder(FOLDER.path);
+    if (S.settings && S.settings.ask_folder === false) return;
+    const path = await pickFolder(FOLDER.path, "Choose where this chat saves its runs", { create: true });
     if (path && !S.chatId) { try { await useFolder(path); } catch (e) { toast(e.message); } }
   }
   async function folderMenu() {   // like a code editor's folder menu: the whole path, recent folders, another one
@@ -6674,7 +6703,7 @@
   // NI MAX and the folder's projects and VIs, read (no VI is run) into the same review as the scripts', and each VI
   // read translated into a scan to keep in the person's library
   async function fromLabview() {
-    const folder = await pickFolder(store("lh.labviewFolder") || "", "The folder with your lab's LabVIEW projects and VIs:");
+    const folder = await pickFolder(store("lh.labviewFolder") || "", "Choose the LabVIEW folder");
     if (!folder) return;
     store("lh.labviewFolder", folder);
     const btn = $("lab-labview");
@@ -6695,7 +6724,7 @@
   // run files runs to import
   async function fromSpecialMeasure(setup) {
     const folder = typeof setup === "string" && LAB.scripts && LAB.scripts.kind === "specialmeasure" ? LAB.scripts.folder
-      : await pickFolder(store("lh.smFolder") || "", "The folder with your Special Measure (its setup scripts, sm, scans and data):");
+      : await pickFolder(store("lh.smFolder") || "", "Choose the Special Measure folder");
     if (!folder) return;
     store("lh.smFolder", folder);
     const btn = $("lab-sm");
@@ -8866,7 +8895,7 @@
       if (p) addSkill(f, p.id, () => loadKnow(p.id, $("project-know"), $("know-count"), $("project-msg")), $("project-msg"));
     });
     $("data-choose").addEventListener("click", async () => {   // the computer's picker in the app, Kelvin's in a browser
-      const path = await pickFolder($("data-path").value.trim(), "Choose the data folder");
+      const path = await pickFolder($("data-path").value.trim(), "Choose the data folder", { create: true });
       if (path) { $("data-path").value = path; dataPathChanged(); }
     });
     $("data-open").addEventListener("click", () => api("/api/data-folder", { body: { open: true } }).catch((e) => showDataFolder(e.message, true)));

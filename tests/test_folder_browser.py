@@ -4,6 +4,7 @@ keeps the computer's own picker. Never for a phone, whatever its role."""
 import json
 import os
 import re
+import threading
 
 import pytest
 
@@ -110,6 +111,60 @@ def test_a_folder_that_cant_be_read_says_so_never_a_stack(tmp_path, monkeypatch)
     assert str(e.value) == "%s can't be read: Access is denied." % locked.anchor
 
 
+def test_a_network_folder_that_is_away_is_said_so_and_never_walked_up(tmp_path, monkeypatch):
+    """Each folder above it on that share is as far away: trying them would cost the OS 20-40 s each."""
+    asked, tried = tmp_path / "share" / "runs", []
+
+    def scandir(path):
+        tried.append(str(path))
+        e = FileNotFoundError(2, "The network path was not found")   # "not found", as Python sees it
+        e.winerror = 53                                              # ERROR_BAD_NETPATH: the server isn't there
+        raise e
+    monkeypatch.setattr(browse.os, "scandir", scandir)
+    with pytest.raises(ValueError) as e:
+        browse.listing(str(asked))
+    assert str(e.value) == "%s can't be reached: The network path was not found." % asked and tried == [str(asked)]
+
+
+def test_a_very_large_or_slow_folder_is_read_for_so_long_and_says_so(tmp_path, monkeypatch):
+    big = tmp_path / "big"
+    for i in range(300):
+        (big / ("run %03d" % i)).mkdir(parents=True)
+    whole = browse.listing(str(big))
+    assert len(whole["folders"]) == 300 and whole["partial"] is False and whole["more"] == 0
+    monkeypatch.setattr(browse, "READ_FOR", -1.0)   # read for long enough already: it stops at the next look
+    part = browse.listing(str(big))
+    assert part["partial"] is True and 0 < len(part["folders"]) < 300 and part["path"] == str(big)
+
+
+def test_a_folder_that_doesnt_answer_is_said_so_without_holding_up_the_server(parts, tmp_path, monkeypatch):
+    """A network folder that is away keeps the OS 20-40 s: the page has its answer after browse.WAIT seconds, the
+    reading going on on a thread of its own, never one of the server's shared ones (the lab's state and a Stop's work
+    wait for those); the same folder asked again meanwhile waits for that reading, never starts another."""
+    gate, threads, real = threading.Event(), [], browse.listing
+
+    def listing(asked=""):
+        threads.append(threading.current_thread().name)
+        gate.wait(10)
+        return real(asked)
+    monkeypatch.setattr(browse, "listing", listing)
+    monkeypatch.setattr(browse, "WAIT", 0.2)
+    client, headers = client_for(parts, {"scripted": Scripted([])})
+    try:
+        with client:
+            for _ in range(2):
+                r = client.get("/api/browse", params={"path": str(tmp_path)}, headers=headers)
+                assert r.status_code == 504
+                assert r.json() == {"error": "%s doesn't answer (a network folder that is away?)" % tmp_path}
+            assert threads == ["kelvin-browse"]   # one reading, on its own thread
+            gate.set()
+            monkeypatch.setattr(browse, "WAIT", 10.0)
+            r = client.get("/api/browse", params={"path": str(tmp_path)}, headers=headers)
+            assert r.status_code == 200 and r.json()["path"] == str(tmp_path)
+    finally:
+        gate.set()
+
+
 def test_a_phone_never_looks_through_the_computers_folders(parts, tmp_path):
     """Phones come in on the network listener, each with its role; an owner's role passes the roles' rules, so the route
     asks whether the request came from a phone at all."""
@@ -134,12 +189,13 @@ def test_a_phone_never_looks_through_the_computers_folders(parts, tmp_path):
 def test_choosing_a_folder_in_a_browser_is_browsing_and_choosing():
     pick = _fn(JS, "pickFolder")
     assert "if (hasPicker())" in pick and "window.pywebview.api.pick_folder(" in pick   # the Kelvin app: its own picker
-    assert 'return browseFolder(start || "", question);' in pick and "prompt(" not in pick
+    assert 'return browseFolder(start || "", question, !!opts.create);' in pick and "prompt(" not in pick
     b = _fn(JS, "browseFolder")
-    assert 'api("/api/browse?path=" + encodeURIComponent(where || ""))' in b
+    assert 'api("/api/browse?path=" + encodeURIComponent(where), { signal })' in b
     assert 'String(question || "Choose a folder").trim().replace(/\\s*:$/, "")' in b   # the question as its title
     for text in ('"Choose this folder"', '"Cancel"', '"Up"', '"Home"', '"Use it anyway"', '"No folders here."',
-                 'r.more + " more not shown"', '" script" + (r.scripts === 1 ? "" : "s")', 'class: "chip blue"',
+                 'r.more + " more not shown"', '"More not shown (a large or slow folder)"', 'class: "chip blue"',
+                 's + (r.partial ? "+ scripts" : s === 1 ? " script" : " scripts")',
                  '"aria-current": "location"', 'class: "kfield folder-path"', 'class: "dialog folder-dialog"'):
         assert text in b, text
     for key in ('"ArrowDown"', '"ArrowUp"', '"Home"', '"End"', '"Backspace"', '"Enter"'):
@@ -147,22 +203,47 @@ def test_choosing_a_folder_in_a_browser_is_browsing_and_choosing():
     assert 'dlg.addEventListener("cancel", (e) => { e.preventDefault(); done(""); });' in b   # Escape: ""
     assert 'cancel.addEventListener("click", () => done(""));' in b and "if (B.at) done(B.at.path);" in b
     assert "dlg.showModal();\n      list.focus();" in b                            # the keys start in the folders
-    assert 'e.key === "Backspace" && e.target !== path' in b                       # a path typed keeps its Backspace
+    assert "if (e.target === path) return;" in b                                   # a path typed keeps its Backspace
     assert "if (seq !== B.seq) return null;" in b                                  # a late answer never shows
     assert "requestAnimationFrame" not in b and "prompt(" not in b
     assert "    up: '<path" in JS                                                   # Up's arrow
 
 
+def test_the_browser_asks_the_computer_once_for_what_the_person_does_once():
+    """A network folder that is away answers in seconds, not milliseconds: what is asked meanwhile mustn't pile up, and
+    what the person does meanwhile stays theirs."""
+    b = _fn(JS, "browseFolder")
+    # the folder still coming, asked for again, is the same answer; one no longer wanted is dropped, its request too
+    assert "if (B.asked && B.asked.where === where) return B.asked.answer;" in b
+    assert "if (B.asked) B.asked.stop.abort();" in b and "const done = (v) => { B.seq++; if (B.asked) B.asked.stop.abort();" in b
+    # a key held down acts once: Backspace goes up a level, Enter opens one folder, not one in each
+    assert 'if (e.repeat && (e.key === "Enter" || e.key === "Backspace")) e.preventDefault();' in b
+    assert "if (!e.repeat && unquote(path.value)) go(" in b
+    # a double-click, as in Explorer, goes in once
+    assert "onclick: (e) => { if (e.detail < 2) go(f.path); }" in b
+    # a late listing leaves the path being typed alone, and Choose then goes there
+    assert "const typing = B.edited && !how.typed && document.activeElement === path;" in b and "B.edited = true;" in b
+    # a folder that isn't there: Choose waits for another path; Use it anyway only where the folder can be made
+    assert "choose.disabled = !typing && !!r.missing;" in b and "...(r.missing && create" in b
+    # the start can't be read: the home folder instead, unless the person went elsewhere meanwhile
+    assert "const opened = go(start), first = B.seq;" in b
+    assert "if (r || B.at || !dlg.open || B.seq !== first || !start) return;" in b
+
+
 def test_every_folder_chosen_goes_through_pick_folder():
-    """Each place a person chooses a folder: in the Kelvin app the computer's picker, in a browser Kelvin's. Only New
-    chat's own question stays the app's (in a browser it asks nothing, as before)."""
+    """Each place a person chooses a folder: in the Kelvin app the computer's picker, in a browser Kelvin's, New chat's
+    question too. A new folder is offered only where Kelvin makes it: a chat's folder and the data folder."""
     assert "window.prompt" not in JS
     for name in ("changeFolder", "askFolder", "fromLabview", "fromSpecialMeasure"):
         assert "await pickFolder(" in _fn(JS, name), name
-    assert "if (!hasPicker() ||" in _fn(JS, "askFolder")
+    for name in ("changeFolder", "askFolder"):
+        assert 'pickFolder(FOLDER.path, "Choose where this chat saves its runs", { create: true })' in _fn(JS, name), name
+    assert "hasPicker" not in _fn(JS, "askFolder")                    # a browser asks as the app does
     assert "data-choose\").hidden" not in JS and re.search(r'<button id="data-choose" class="btn small" type="button">', PAGE)
-    assert 'pickFolder($("data-path").value.trim(), "Choose the data folder")' in JS
-    assert 'pickFolder(FOLDER.path, "Choose where this chat saves its runs")' in _fn(JS, "changeFolder")
+    assert 'pickFolder($("data-path").value.trim(), "Choose the data folder", { create: true })' in JS
+    assert 'pickFolder(store("lh.labviewFolder") || "", "Choose the LabVIEW folder")' in _fn(JS, "fromLabview")
+    assert 'pickFolder(store("lh.smFolder") || "", "Choose the Special Measure folder")' in _fn(JS, "fromSpecialMeasure")
+    assert '<label class="check wrap"><input id="ask-folder" type="checkbox" checked>' in PAGE   # not the app's alone
     assert "pickFolder, hasPicker," in JS[JS.index("window.Kelvin = {"):]   # the welcome page's too (welcome.js)
     for name in ("home.js", "seq.js", "welcome.js"):
         assert "prompt(" not in (STATIC / name).read_text(encoding="utf-8"), name
@@ -176,6 +257,13 @@ def test_the_browser_wears_the_kit_in_light_and_dark():
         assert text in part, text
     motion = CSS[CSS.index("/* motion, as labMaster moves"):]
     assert "dialog[open] { animation: k-pop-in" in motion and "dialog[open]" in motion[motion.index("prefers-reduced-motion"):]
+    # its classes are its own: the Lab dialog's instrument folders are a .folder-list, and keep their look
+    mine = set(re.findall(r"\.(folder-[\w-]+)", re.sub(r"/\*.*?\*/", "", part, flags=re.S)))
+    rest, b = CSS.replace(part, ""), _fn(JS, "browseFolder")
+    assert "folder-items" in mine and "folder-list" not in mine and 'class: "folder-items"' in b
+    for name in mine:
+        word = r"(?<![\w-])%s(?![\w-])" % re.escape(name)
+        assert not re.search(word, rest) and not re.search(word, PAGE) and not re.search(word, JS.replace(b, "")), name
 
 
 def test_kelvin_help_knows_how_a_folder_is_chosen_in_a_browser():

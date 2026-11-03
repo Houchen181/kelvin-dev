@@ -2842,14 +2842,53 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         keep_folder(path, project)
         return JSONResponse({"folder": path})
 
+    # the folder browser's readings, each on a thread of its own that never holds up Kelvin's exit: a network folder
+    # that is away (the OS gives up on it after 20-40 s) keeps only that thread, never one of the server's shared ones,
+    # which the lab's state and a Stop's work wait for; the same path asked again meanwhile waits for the same reading
+    reading: Dict[str, "asyncio.Future[Any]"] = {}
+
+    def read_folder(asked: str) -> "asyncio.Future[Any]":
+        """browse.listing(asked) on a thread of its own, or the reading of it under way: its listing, or its error."""
+        loop = asyncio.get_running_loop()
+        if asked in reading and reading[asked].get_loop() is loop:   # (a server started again has a loop of its own)
+            return reading[asked]
+        done = reading[asked] = loop.create_future()
+
+        def settle(listed: Any, problem: Optional[BaseException]) -> None:
+            if reading.get(asked) is done:
+                del reading[asked]
+            if done.cancelled():
+                return
+            if problem is None:
+                done.set_result(listed)
+            else:
+                done.set_exception(problem)
+                done.exception()   # taken, so a reading nobody waits for any more is never logged as unhandled
+
+        def work() -> None:
+            try:
+                listed, problem = browse.listing(asked), None
+            except BaseException as e:   # said to the request, as asyncio.to_thread says it
+                listed, problem = None, e
+            try:
+                loop.call_soon_threadsafe(settle, listed, problem)
+            except RuntimeError:   # the server stopped meanwhile
+                pass
+        threading.Thread(target=work, name="kelvin-browse", daemon=True).start()
+        return done
+
     async def browse_view(request: Request) -> Response:
         """GET ?path=: the folders in a folder, for choosing one in a browser on this computer (browse.py, the page's
-        folder browser): their names, never a file's contents. This computer's own browser only: a phone is refused
-        whatever its role (an owner's passes the roles' rules, so its being a phone is what counts)."""
+        folder browser): their names, never a file's contents, within browse.WAIT seconds (504 after). This computer's
+        own browser only: a phone is refused whatever its role (an owner's passes the roles' rules, so its being a
+        phone is what counts)."""
         if (request.scope.get("kelvin") or {}).get("device") is not None:
             return error(403, "Only a browser on the Kelvin computer can look through its folders.")
+        asked = request.query_params.get("path") or ""
         try:
-            return JSONResponse(await asyncio.to_thread(browse.listing, request.query_params.get("path") or ""))
+            return JSONResponse(await asyncio.wait_for(asyncio.shield(read_folder(asked)), browse.WAIT))
+        except asyncio.TimeoutError:
+            return error(504, browse.slow(asked))
         except ValueError as e:
             return error(400, str(e))
 

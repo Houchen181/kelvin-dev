@@ -2,13 +2,15 @@
 can't give a folder's path itself; the Kelvin app opens the computer's own folder picker instead). Names only, never a
 file's contents: a folder's folders with their full paths, its parent and the path to it, the computer's drives and the
 home folder, and how many scripts it holds, so the person sees they are in the right one. Hidden and system folders are
-left out. A folder that isn't there, or can't be read, answers with the nearest folder above it that can."""
+left out. A folder that isn't there, or can't be read, answers with the nearest folder above it that can; a network
+folder that is away is said so."""
 from __future__ import annotations
 
 import os
 import re
 import stat
 import string
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -16,6 +18,11 @@ MOST = 500                    # folders listed at once; how many more there are 
 SCRIPTS = (".py", ".ipynb")   # a script, as the lab's scripts folder holds them (directly in it)
 SYSTEM = {"$recycle.bin", "system volume information"}   # Windows' own, on every drive (a USB stick carries them)
 HIDDEN = getattr(stat, "FILE_ATTRIBUTE_HIDDEN", 2) | getattr(stat, "FILE_ATTRIBUTE_SYSTEM", 4)
+WAIT = 5.0       # seconds a listing is waited for (app.py); the OS gives up on a network folder that is away in 20-40 s
+READ_FOR = 3.0   # seconds a listing reads for, at most: of a very large or slow folder, the part read (partial)
+# Windows' errors for a network folder it can't reach (the server, the share or the network away): the folders above
+# it on that share can't be reached either
+AWAY = {51, 53, 55, 59, 64, 67, 121, 1222, 1231, 1232, 2250}
 
 
 def start() -> Path:
@@ -61,11 +68,14 @@ def _hidden(entry: "os.DirEntry[str]") -> bool:
     return os.name == "nt" and bool(entry.stat(follow_symlinks=False).st_file_attributes & HIDDEN)
 
 
-def _read(folder: Path) -> Tuple[List[str], int]:
-    """The names of a folder's folders, as listed, and how many scripts it holds. OSError when it can't be listed."""
+def _read(folder: Path, until: float) -> Tuple[List[str], int, bool]:
+    """The names of a folder's folders, as listed, how many scripts it holds, and whether reading stopped at until
+    (time.monotonic()) with more to read. OSError when it can't be listed."""
     names, scripts = [], 0
     with os.scandir(folder) as found:
-        for entry in found:
+        for n, entry in enumerate(found, 1):
+            if n % 256 == 0 and time.monotonic() > until:   # read for long enough: the rest isn't
+                return names, scripts, True
             try:
                 if _hidden(entry):
                     continue
@@ -76,28 +86,39 @@ def _read(folder: Path) -> Tuple[List[str], int]:
                     scripts += 1
             except (OSError, UnicodeError):   # gone meanwhile, or not to be looked at: left out
                 continue
-    return names, scripts
+    return names, scripts, False
 
 
 def _why(e: OSError) -> str:
     return (e.strerror or str(e) or type(e).__name__).rstrip(".")
 
 
+def slow(asked: str) -> str:
+    """What is said of a folder whose listing didn't come within WAIT seconds (asked: its path as given)."""
+    return "%s doesn't answer (a network folder that is away?)" % (str(asked or "").strip().strip('"').strip()
+                                                                    or "Your home folder")
+
+
 def listing(asked: str = "") -> Dict[str, Any]:
     """The folders in a folder (asked: its path, "" the home folder): each with its full path, sorted by name whatever
-    the case, at most MOST of them (more: how many were left out); the folder's parent (None at a drive's top) and the
-    folders on the way to it (parts, for the page's path); how many scripts it holds (.py and .ipynb directly in it);
-    the computer's drives (roots) and the home folder. For a folder that isn't there, a file, or a folder that can't be
-    read: the nearest folder above it that can, with a note saying so (missing: the path asked, when nothing is
-    there). ValueError for a path that isn't a full one, or when no folder on its way can be read."""
+    the case, at most MOST of them (more: how many more were read); the folder's parent (None at a drive's top) and
+    the folders on the way to it (parts, for the page's path); how many scripts it holds (.py and .ipynb directly in
+    it); the computer's drives (roots) and the home folder. Reading stops after READ_FOR seconds (partial: there may be
+    more folders and scripts than said). For a folder that isn't there, a file, or a folder that can't be read: the
+    nearest folder above it that can, with a note saying so (missing: the path asked, when nothing is there).
+    ValueError for a path that isn't a full one, a network folder that can't be reached, or when no folder on its way
+    can be read."""
+    until = time.monotonic() + READ_FOR
     home = start()
     target = whole(asked) if str(asked or "").strip() else home
     where, note, missing = target, None, None
     while True:
         try:
-            names, scripts = _read(where)
+            names, scripts, partial = _read(where, until)
             break
         except OSError as e:
+            if getattr(e, "winerror", None) in AWAY:   # "not found" to Python, but the share is away: never walked up
+                raise ValueError("%s can't be reached: %s." % (target, _why(e)))
             if where == target:
                 if isinstance(e, FileNotFoundError):
                     note, missing = "No folder at %s." % target, str(target)
@@ -113,4 +134,5 @@ def listing(asked: str = "") -> Dict[str, Any]:
             "parts": [{"name": p.name or p.anchor.rstrip("\\/") or p.anchor, "path": str(p)}
                       for p in [*reversed(where.parents), where]],
             "folders": [{"name": n, "path": str(where / n)} for n in names[:MOST]], "more": max(0, len(names) - MOST),
-            "scripts": scripts, "roots": roots(), "home": str(home), "note": note, "missing": missing}
+            "scripts": scripts, "partial": partial, "roots": roots(), "home": str(home), "note": note,
+            "missing": missing}
