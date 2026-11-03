@@ -243,7 +243,7 @@ def test_every_folder_chosen_goes_through_pick_folder():
     assert 'pickFolder($("data-path").value.trim(), "Choose the data folder", { create: true })' in JS
     assert 'pickFolder(store("lh.labviewFolder") || "", "Choose the LabVIEW folder")' in _fn(JS, "fromLabview")
     assert 'pickFolder(store("lh.smFolder") || "", "Choose the Special Measure folder")' in _fn(JS, "fromSpecialMeasure")
-    assert '<label class="check wrap"><input id="ask-folder" type="checkbox" checked>' in PAGE   # not the app's alone
+    assert '<label class="check wrap"><input id="ask-folder" name="ask_folder" type="checkbox" checked>' in PAGE   # not the app's alone
     assert "pickFolder, hasPicker," in JS[JS.index("window.Kelvin = {"):]   # the welcome page's too (welcome.js)
     for name in ("home.js", "seq.js", "welcome.js"):
         assert "prompt(" not in (STATIC / name).read_text(encoding="utf-8"), name
