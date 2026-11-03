@@ -1390,18 +1390,20 @@
   }
 
   // The side panels each open and close on their own, and each keeps the width it was left at (drag its left edge).
-  // Beside the conversation, which keeps at least CHAT_MIN pixels, they stand side by side: Runs, the scan editor and
-  // Analysis, then Lab and Team chat. When they need more room than there is, they shrink alike; then the sidebar steps
-  // aside (the menu button brings it back over the page); then each group shares a column, one above the other; and if
-  // even that doesn't fit, the Lab column floats over. Below 1100 px they float over the conversation in one column
-  // (app.css), below 820 px the sidebar too.
+  // Beside the conversation, which keeps at least CHAT_MIN pixels, they stand side by side in the order of the top
+  // bar's buttons: Team chat, Analysis, Runs with the scan editor beside it, then Lab. When they need more room than
+  // there is, they shrink alike; then the sidebar steps aside (the menu button brings it back over the page); then
+  // Team chat, Analysis, Runs and the scan editor share a column, one above the other, beside Lab's; and if even that
+  // doesn't fit, the Lab column floats over. Below 1100 px they float over the conversation in one column, in the same
+  // order from the top, each open one an equal share of its height (app.css), below 820 px the sidebar too. The
+  // sidebar counts only while it stands beside the page: its button may have hidden it there (SIDE.hidden).
   const CHAT_MIN = 520, SIDEBAR_W = 264;
-  const PANES = {   // id: [open?, its column, its least width, where its width is kept]
+  const PANES = {   // id: [open?, its column, its least width, where its width is kept], in the page's order
+    teampanel: [() => TEAM.open, "workcol", 280, "lh.teamWidth"],
+    anpane: [() => ANA.open, "workcol", 340, "lh.anWidth"],
     runpane: [() => RUNS.open, "workcol", 340, "lh.runsWidth"],
     edpane: [() => ED.open, "workcol", 360, "lh.edWidth"],
-    anpane: [() => ANA.open, "workcol", 340, "lh.anWidth"],
     labpanel: [() => S.labOpen, "sidecol", 300, "lh.labWidth"],
-    teampanel: [() => TEAM.open, "sidecol", 280, "lh.teamWidth"],
   };
   const PANE_W = {};   // each pane's width as the person left it
   let DRAG = null;     // while an edge moves: the panes' widths when it began
@@ -1421,34 +1423,39 @@
     out[out.length - 1] += Math.max(0, room - sum(out));
     return out;
   }
-  // the width the panes may take beside the conversation
+  // the width the panes may take beside the conversation: the window's, less the sidebar's while it stands beside them
   function paneRoom() {
     const w = window.innerWidth;
-    return w - (w <= 820 || $("app").classList.contains("compact") ? 0 : SIDEBAR_W) - CHAT_MIN;
+    return w - (w <= 820 || SIDE.hidden || $("app").classList.contains("compact") ? 0 : SIDEBAR_W) - CHAT_MIN;
   }
   function fitLayout() {
     const app = $("app"), w = window.innerWidth, open = openPanes();
     for (const col of ["workcol", "sidecol"]) $(col).hidden = !colPanes(col).length;
     const floating = w <= 1100, both = !$("workcol").hidden && !$("sidecol").hidden;
-    const side = w > 820 ? SIDEBAR_W : 0;   // the sidebar, while it stands beside the page
+    const side = w > 820 && !SIDE.hidden ? SIDEBAR_W : 0;   // the sidebar beside the page: not over it, nor hidden
     const rowLeast = sum(open.map((id) => PANES[id][2])), stackLeast = colLeast("workcol") + colLeast("sidecol");
     const stacked = !floating && CHAT_MIN + rowLeast > w;
     const compact = !floating && side > 0 && open.length > 0 && side + CHAT_MIN + (stacked ? stackLeast : rowLeast) > w;
     const floatLab = stacked && both && CHAT_MIN + stackLeast > w;
+    app.classList.toggle("side-hidden", SIDE.hidden);
     app.classList.toggle("compact", compact);
     app.classList.toggle("stacked", stacked);
     app.classList.toggle("float-lab", floatLab);
     app.classList.toggle("float-two", floating && both);
     if (!compact && w > 820) app.classList.remove("side-open");
-    if (floating) {   // they float below the top bar, so its buttons still open and close each one (app.css)
+    if (floating || compact) {   // the panels or the list float below the top bar, so its buttons still open and close
+                                 // each one (app.css)
       document.documentElement.style.setProperty("--topbar-h", document.querySelector(".topbar").offsetHeight + "px");
+    }
+    if (floating) {   // one column, the first above the second, each open panel an equal share of its height (app.css)
+      if (both) app.style.setProperty("--float-top", colPanes("workcol").length / open.length);
     } else {
       const room = paneRoom();
-      if (stacked) {   // a column for each pair, as wide as its wider pane
+      if (stacked) {   // a column for each group, as wide as its widest pane
         const cols = ["workcol", "sidecol"].filter((c) => !$(c).hidden && !(floatLab && c === "sidecol"));
         const got = share(cols.map(colWant), cols.map(colLeast), room);
         cols.forEach((c, i) => { $(c).style.width = got[i] + "px"; });
-        if (floatLab) {   // over the Runs column, never over the conversation
+        if (floatLab) {   // over the column beside it, never over the conversation
           $("sidecol").style.width = Math.max(colLeast("sidecol"), Math.min(colWant("sidecol"), w - CHAT_MIN)) + "px";
         }
       } else {
@@ -1459,10 +1466,11 @@
     }
     syncFull();
     syncScrim();
+    syncSide();
   }
   // a pane's left edge, dragged or moved with the arrow keys: its width, or in a shared column the column's. Only the
   // conversation gives or takes the room; the other panes keep the widths they show, so the edge follows the pointer
-  // and what is seen when it is let go stays. In a shared column the other pane is as wide at most.
+  // and what is seen when it is let go stays. In a shared column the others are as wide at most.
   function sizePane(id, want) {
     const app = $("app"), col = PANES[id][1], floatLab = app.classList.contains("float-lab");
     const stacked = app.classList.contains("stacked");
@@ -2620,7 +2628,9 @@
   }
 
   // ------------------------------------------------------------------ chats sidebar: projects, then unfiled chats
-  const SIDE = { collapsed: new Set(), creating: false, moveAfterCreate: null, renaming: null, newProject: null, editor: null };
+  // hidden: its button hid it where it stands beside the page (kept for next time); slide: the timer its slide ends on
+  const SIDE = { collapsed: new Set(), creating: false, moveAfterCreate: null, renaming: null, newProject: null, editor: null,
+                 hidden: store("lh.sideHidden") === "1", slide: 0 };
   try { for (const id of JSON.parse(store("lh.collapsed") || "[]")) SIDE.collapsed.add(id); } catch (e) { /* fresh start */ }
   const projectName = (id) => (S.projects.find((p) => p.id === id) || {}).name;
 
@@ -7830,10 +7840,40 @@
     t.style.height = Math.min(t.scrollHeight, 220) + "px";
     updateSend();
   }
-  function closeSidebar() { $("app").classList.remove("side-open"); syncScrim(); }
+  function closeSidebar() { $("app").classList.remove("side-open"); syncScrim(); syncSide(); }
   function syncScrim() {
     const narrow = window.matchMedia("(max-width: 1100px)").matches;
     $("scrim").hidden = FULL.length > 0 || !($("app").classList.contains("side-open") || ((S.labOpen || RUNS.open || TEAM.open || ANA.open || ED.open) && narrow));
+  }
+  // The sidebar's button, at the top bar's left at every width. Where the sidebar stands beside the page, the button
+  // hides it and shows it again, as ChatGPT's does: it slides away and the page and the panels take its room, and the
+  // page keeps the choice (lh.sideHidden). Where it floats (below 820 px, or while the panels need its room) the button
+  // opens and closes it over the page, below the top bar (app.css); shown again while the panels need its room, it
+  // opens over the page.
+  const sideFloats = () => window.innerWidth <= 820 || $("app").classList.contains("compact");
+  function toggleSidebar() {
+    const app = $("app");
+    if (sideFloats()) app.classList.toggle("side-open");
+    else {
+      SIDE.hidden = !SIDE.hidden;
+      store("lh.sideHidden", SIDE.hidden ? "1" : "0");
+      app.classList.add("side-slide");   // it slides for this change alone (app.css), never as the panels make room
+      clearTimeout(SIDE.slide);
+      SIDE.slide = setTimeout(() => app.classList.remove("side-slide"), 500);
+      fitLayout();
+      if (!SIDE.hidden && sideFloats()) app.classList.add("side-open");
+    }
+    syncScrim();
+    syncSide();
+  }
+  // the button says what it will do, and on hover its words ease in under it as the top bar's other buttons' names do
+  // (app.css), never in the browser's tip
+  function syncSide() {
+    const shown = sideFloats() ? $("app").classList.contains("side-open") : !SIDE.hidden;
+    const b = $("toggle-sidebar"), say = shown ? "Hide conversations" : "Show conversations";
+    b.setAttribute("aria-expanded", String(shown));
+    b.setAttribute("aria-label", say);
+    b.dataset.tip = say;
   }
 
 
@@ -8865,7 +8905,7 @@
     document.querySelector(".lab-chip").addEventListener("click", () => toggleLab(true));
     $("new-chat").addEventListener("click", () => newChat(null, true));
     $("folder-btn").addEventListener("click", (e) => { e.stopPropagation(); folderMenu(); });
-    $("toggle-sidebar").addEventListener("click", () => { $("app").classList.toggle("side-open"); syncScrim(); });
+    $("toggle-sidebar").addEventListener("click", toggleSidebar);
     $("scrim").addEventListener("click", () => {
       closeSidebar();
       if (S.labOpen) toggleLab(false);

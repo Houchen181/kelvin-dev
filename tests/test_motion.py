@@ -40,11 +40,16 @@ def test_the_top_bar_buttons_never_move_and_say_their_names():
     assert 'querySelectorAll(".topbar-right .pill")' in init and "p.dataset.tip = p.title;" in init
     assert 'removeAttribute("title")' in init and 'attributeFilter: ["title"]' in init   # Incognito's changes
     motion = CSS[CSS.index("/* motion, as labMaster moves"):]
-    tip = motion[motion.index(".topbar-right .pill[data-tip]::after {"):]
+    tip = motion[motion.index(".topbar-right .pill[data-tip]::after, #toggle-sidebar[data-tip]::after {"):]
     assert "content: attr(data-tip); position: absolute;" in tip and "pointer-events: none" in tip
     assert "transition-delay: .12s" in motion
     assert (".topbar .topbar-right .pill { transition: background-color .25s ease, color .25s ease, border-color .25s ease, "
             "box-shadow .25s ease; }") in motion   # their colours fade; nothing that moves them
+    # the menu button's words (Hide / Show conversations) too, in the same tip, from its left at the window's edge
+    assert "b.dataset.tip = say;" in _fn(JS, "syncSide")
+    assert "#toggle-sidebar { position: relative; }" in motion
+    assert "#toggle-sidebar[data-tip]::after { left: 0; transform: translate(0, -4px); }" in motion
+    assert "#toggle-sidebar[data-tip]:is(:hover, :focus-visible)::after { opacity: 1; transform: none;" in motion
 
 
 def test_what_comes_in_and_what_moves():
@@ -68,7 +73,8 @@ def test_what_comes_in_and_what_moves():
 def test_none_of_it_when_the_person_asks_for_less_motion():
     motion = CSS[CSS.index("/* motion, as labMaster moves"):]
     calm = motion[motion.index("@media (prefers-reduced-motion: reduce)"):]
-    assert ".seg-thumb, .topbar-right .pill[data-tip]::after" in calm and "transition: none" in calm
+    assert ".seg-thumb, .topbar-right .pill[data-tip]::after, #toggle-sidebar[data-tip]::after" in calm
+    assert "transition: none" in calm
     assert "dialog[open]" in calm and "animation: none" in calm and ".seq-card" in calm
     assert 'matchMedia("(prefers-reduced-motion: reduce)")' in SEQ
     for src, names in ((JS, ("thumb", "easeIn", "initMotion")), (SEQ, ("flipFrom", "flipTo", "rise", "stepKinds"))):
