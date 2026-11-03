@@ -1,4 +1,4 @@
-"""Settings keep Save and Cancel (the morning's 4B), checked in the page's own files. One function says what Save sends
+"""Settings keep Save and Cancel, checked in the page's own files. One function says what Save sends
 (settingsBody), and the same function says what waits for Save: what it would send now that differs from what it sent
 as the dialog opened. Save is offered only then; the button beside it reads Close while nothing waits and Cancel once
 something does, and a dot on a section's name says where the change is. What acts at once stands in a card of its own

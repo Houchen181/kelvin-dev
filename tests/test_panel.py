@@ -48,9 +48,9 @@ def test_unresponsive_instrument_shows_as_error(tmp_path):
 
 def test_the_lab_panel_never_scrolls_and_its_controls_say_their_state():
     """The page's Lab panel (fit D): it never scrolls as a whole, each part shown scrolls inside (a region): one at a
-    time on its strip of tabs (3A, the default: test_lab_tabs), or with ?v=3C the folds, kept by their part's id; Add…
-    and Settings (n) are disclosures; the one switch; Mine | Everyone a radio group; the panel only says Locked (the one
-    Unlock… is in the notice row); Team chat's messages are its region."""
+    time on its strip of tabs (test_lab_tabs), every part in its column when the Lab is wide; Add… and Settings (n) are
+    disclosures; the one switch; Mine | Everyone a radio group; the panel only says Locked (the one Unlock… is in the
+    notice row); Team chat's messages are its region."""
     import pytest
     pytest.importorskip("starlette")
     from labharness.web.app import STATIC
@@ -58,21 +58,23 @@ def test_the_lab_panel_never_scrolls_and_its_controls_say_their_state():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     css = (STATIC / "app.css").read_text(encoding="utf-8")
     for part in ("instruments", "watches", "memory", "activity"):
-        assert 'data-part="%s"' % part in page and 'id="lab-part-%s" class="lab-part-body" data-region="lab-part"' % part in page
+        assert 'data-part="%s"' % part in page
+    assert page.count('<div class="lab-part-body" data-region="lab-part">') == 4 and 'id="lab-part-' not in page
     assert '<div id="lab-pending" data-region="lab-part">' in page and 'data-region="team"' in page
     assert 'id="hands-done-panel"' not in page and "<span>Locked</span>" in page
     assert 'id="watch-add-toggle" class="btn small disclose" type="button" aria-expanded="false" aria-controls="watch-form"' in page
     assert 'id="labmem-add" class="btn small disclose" type="button" aria-expanded="false" aria-controls="labmem-form"' in page
     assert 'id="activity-who" class="seg" role="radiogroup"' in page and 'id="inst-seg" class="seg" role="radiogroup"' in page
-    start = js.index("function initLabFolds(")
-    folds = js[start:js.index("\n  }\n", start)]
-    assert '"lh.labFold." + id' in folds and 'store("lh.fold." + name)' in folds and "body.inert = folded" in folds
+    start = js.index("function initLabTabs(")
+    tabs = js[start:js.index("\n  }\n", start)]
+    assert 'role: "tab"' in tabs and 'store("lh.labPart")' in tabs and "initLabFolds" not in js
+    assert '<div id="lab-strip" class="seg lab-strip" role="tablist"' in page
     assert 'class: "switch inst-switch"' in js and '"aria-busy"' in js and '"Not switched: "' in js
     assert '"Settings (" + inst.settings.length + ")"' in js and '"Show settings"' not in js
     assert 'b.setAttribute("aria-checked", String(on))' in js and 'store("lh.labEveryone"' in js
     lab = css[css.index("/* ===== fit D"):css.index("/* ===== end fit D")]
     assert "grid-auto-rows: minmax(var(--lab-row), auto); align-content: start; overflow: clip;" in lab
-    assert "@container lab (min-width: 900px)" in lab and "/* v3A */" in lab and "/* /v3A */" in lab
+    assert "@container lab (min-width: 900px)" in lab and "#labpanel .lab-strip { display: none; }" in lab
 
 
 def test_a_waiting_request_rings_the_lab_and_each_switch_sits_in_as_its_icon_does():

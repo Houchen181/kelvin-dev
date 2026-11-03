@@ -537,9 +537,8 @@
     </header>
     <!-- the panel never scrolls as a whole: what waits for an answer, the sample and its safety, then the parts. One
          part at a time, chosen on the strip of tabs (#lab-strip, built by initLabTabs), the chosen part scrolling
-         inside with all the height left (?v=3C: each part folds under its heading instead; "fit D" in app.css). Wide
-         (full screen), every part shows, in two columns: the sample and Instruments, then Watches, Memory and
-         Activity. Each tab is named as its part's heading -->
+         inside with all the height left ("fit D" in app.css). Wide (full screen), every part shows, in two columns:
+         the sample and Instruments, then Watches, Memory and Activity. Each tab is named as its part's heading -->
     <div class="lab-scroll">
       <div class="lab-pend"><div id="lab-pending" data-region="lab-part"></div></div>
       <div class="lab-top">
@@ -571,13 +570,13 @@
           <button id="lab-safe" class="btn small hands-btn" type="button" title="Every instrument to the safe values its card declares: what runs stops, outputs go off, levels and the field to safe, heaters off. Positions and ramp rates stay.">Bring to safe</button>
         </div>
       </div>
-      <div id="lab-strip" class="seg lab-strip" role="tablist" aria-label="Lab parts" hidden></div>
+      <div id="lab-strip" class="seg lab-strip" role="tablist" aria-label="Lab parts"></div>
       <div class="lab-col lab-col-1">
       <section class="lab-part" data-part="instruments" aria-labelledby="lab-h-instruments">
         <div class="inst-head-row lab-part-head"><h3 id="lab-h-instruments">Instruments</h3><span id="inst-summary" class="inst-summary"></span>
           <button id="open-lab-setup" class="btn small" type="button">Set up…</button>
           <button id="open-cards-lab" class="btn small" type="button" title="Your instrument cards: review a draft, edit one, or make one from a manual">Cards…</button></div>
-        <div id="lab-part-instruments" class="lab-part-body" data-region="lab-part">
+        <div class="lab-part-body" data-region="lab-part">
           <div class="inst-tools">
             <input id="inst-filter" type="search" placeholder="Filter" aria-label="Filter instruments" spellcheck="false" autocomplete="off">
             <div id="inst-seg" class="seg" role="radiogroup" aria-label="Which instruments to show">
@@ -592,7 +591,7 @@
       <section class="lab-part" data-part="watches" aria-labelledby="lab-h-watches">
         <div class="inst-head-row lab-part-head"><h3 id="lab-h-watches">Watches</h3><span id="watch-summary" class="inst-summary"></span>
           <button id="watch-add-toggle" class="btn small disclose" type="button" aria-expanded="false" aria-controls="watch-form" title="Watch a reading: an alarm when it goes out of range">Add…<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button></div>
-        <div id="lab-part-watches" class="lab-part-body" data-region="lab-part">
+        <div class="lab-part-body" data-region="lab-part">
           <form id="watch-form" class="watch-form" hidden>
             <select id="watch-key" aria-label="Reading to watch"></select>
             <input id="watch-above" type="number" step="any" placeholder="above" title="Alarm when the reading goes above this" aria-label="Alarm above">
@@ -608,7 +607,7 @@
       <section class="lab-part" data-part="memory" aria-labelledby="lab-h-memory">
         <div class="inst-head-row lab-part-head"><h3 id="lab-h-memory">Memory</h3><span id="labmem-summary" class="inst-summary"></span>
           <button id="labmem-add" class="btn small disclose" type="button" aria-expanded="false" aria-controls="labmem-form" title="Keep a note about this lab: for every chat and everyone here">Add…<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button></div>
-        <div id="lab-part-memory" class="lab-part-body" data-region="lab-part">
+        <div class="lab-part-body" data-region="lab-part">
           <form id="labmem-form" class="labmem-form" hidden>
             <select id="labmem-kind" aria-label="What kind of note">
               <option value="lesson">Lesson</option><option value="wiring">Wiring</option><option value="reference">Reference</option>
@@ -624,7 +623,7 @@
       <section class="lab-part" data-part="activity" aria-labelledby="lab-h-activity">
         <div class="inst-head-row lab-part-head"><h3 id="lab-h-activity">Activity</h3><span id="activity-summary" class="inst-summary"></span>
           <div id="activity-who" class="seg" role="radiogroup" aria-label="Whose activity" hidden><button type="button" role="radio" aria-checked="true" data-v="mine">Mine</button><button type="button" role="radio" aria-checked="false" data-v="all">Everyone</button></div></div>
-        <div id="lab-part-activity" class="lab-part-body" data-region="lab-part">
+        <div class="lab-part-body" data-region="lab-part">
           <ol id="lab-events" class="lab-events"></ol>
         </div>
       </section>

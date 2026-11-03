@@ -4843,9 +4843,9 @@
       }));
       const newest = lines.length && String(lines[0].text).match(/^(\d\d:\d\d)/);   // newest first: its time on the head
       $("activity-summary").textContent = newest ? newest[1] : "";
-      LAB_TABS.top = lines.length ? String(lines[0].text) : "";   // v3A: Activity's newest line, for its tab's dot
+      LAB_TABS.top = lines.length ? String(lines[0].text) : "";   // Activity's newest line, for its tab's dot
     }
-    labTabSeen();   // v3A: seen if its part is on the screen now, else a dot on its tab
+    labTabSeen();   // seen if its part is on the screen now, else a dot on its tab
     wakeState(s);
     termState(s);   // the terminal first: an approval its own command needs is asked there
     // requests not already shown in a conversation (e.g. after a page reload)
@@ -4980,8 +4980,8 @@
     const on = (alarms || []).filter((a) => a && !a.cleared).length, paused = watches.filter((w) => w.paused).length;
     $("watch-summary").textContent = [on ? on + (on === 1 ? " alarm" : " alarms") : "",
       watches.length ? watches.length - paused + " watched" : "", paused ? paused + " paused" : ""].filter(Boolean).join(" · ");
-    $("watch-summary").classList.toggle("bad", on > 0);   // seen on the head while the part is folded
-    labTabMark("watches", on);   // v3A: and on its tab
+    $("watch-summary").classList.toggle("bad", on > 0);   // said on the part's head
+    labTabMark("watches", on);   // and counted on its tab, seen whichever part is chosen
     const sig = JSON.stringify(watches);
     if (sig !== PANEL.watchesShown) {   // redrawn only when it changed, so a focused × keeps its focus
       PANEL.watchesShown = sig;
@@ -5024,13 +5024,13 @@
       pollState();
     } catch (err) { toast(err.message); }
   }
-  // Watches' and Lab memory's Add…: a disclosure for the form at the top of the part (a folded part opens to show it)
+  // Watches' and Memory's Add…: a disclosure for the form at the top of the part (its tab chosen to show it)
   function partForm(id, open) {
     const form = $(id), btn = document.querySelector('#labpanel [aria-controls="' + id + '"]');
     form.hidden = !open;
     if (btn) btn.setAttribute("aria-expanded", String(open));
     if (!open) return;
-    labPartOpen(form.closest(".lab-part"));
+    chooseLabPart(form.closest(".lab-part").dataset.part);
     form.closest(".lab-part-body").scrollTop = 0;   // the form is at its top (no scrollIntoView: the panel itself never scrolls)
   }
 
@@ -8535,7 +8535,7 @@
     } catch (e) { $("cc-status").textContent = e.message; }
   }
 
-  // Settings keep Save and Cancel (the morning's 4B). What acts at once is kept already: a switch (each in a card of its
+  // Settings keep Save and Cancel. What acts at once is kept already: a switch (each in a card of its
   // own at the top of its page, .set-now, or in its row, as a skill's), Page size, and every button. Everything else
   // waits for Save, and what waits is what Save would send now (settingsBody) that differs from what it would have sent
   // as the dialog opened (SETS.start). Save is offered only then, the other button reads Cancel (else Close), and each
@@ -8685,38 +8685,15 @@
   // more), on a touch screen and under 1000 px wide; 85 % under 680 px tall; 90 % otherwise (the person's own "90 % on
   // a laptop"). A choice in Settings → Page size (80 to 150 %) overrides it on this browser (lh.pageSize). fitTiers also
   // sets the density tier on <html> by the layout's height, the window's divided by the page size: fit-roomy (900 or
-  // more), fit-compact (720 to 899) or fit-tight. The variants kept for the morning's comparison: ?v=1B,2A… in the
-  // query string (the hash holds the key), kept as lh.v (?v= alone forgets them), shown as html[data-v1] to [data-v3]
-  // and as V[n] to the code (fenced: /* v2B */ … /* /v2B */ and if (V[2] === "B")). Option 1 changes Auto alone: 1B
-  // keeps 100 %, 1C shrinks a 1600 × 900 layout to the window, never under 80 %, 1D is 1A with 110 % on a window of
-  // 2400 × 1200 or more (the big monitor, a Chrome tab on it too); Settings → Page size keeps its choices under each.
-  // Option 2 is Home on a big screen (home.css): 2D draws it as it was before 3 Nov where Home is big and fitted below
-  // that, 2A fitted at every size, 2B and 2C with the large tiles where Home is tall. Option 3 is the Lab's parts: 3A one
-  // at a time under a strip, 3C the folds. Settings was decided (4B, Save and Cancel kept), so there is no option 4: an
-  // lh.v naming 4A or 4B is passed over, as is anything not built. ?v= takes only 1A to 1D, 2A to 2D, 3A and 3C.
+  // more), fit-compact (720 to 899) or fit-tight.
   const SIZES = [0.8, 0.85, 0.9, 1, 1.1, 1.25, 1.5];
   const FIT = { zoom: 1, tier: "", timer: 0, still: 0, wheel: 0, native: false };
-  const V = readVariants();
-  function readVariants() {
-    const v = { 1: "A", 2: "D", 3: "A" };   // what shows without a choice: 1A Steps, 2D, 3A the Lab's strip
-    let given = null;
-    try { given = new URLSearchParams(location.search).get("v"); } catch (e) { /* none given */ }
-    if (given !== null) store("lh.v", given.trim());
-    for (const part of String(store("lh.v") || "").toUpperCase().split(/[\s,]+/)) {
-      if (/^(1[A-D]|2[A-D]|3[AC])$/.test(part)) v[part[0]] = part[1];   // the variants built, and no others
-    }
-    for (const n of [1, 2, 3]) document.documentElement.setAttribute("data-v" + n, v[n]);
-    return v;
-  }
+  try { localStorage.removeItem("lh.v"); } catch (e) { /* kept nowhere */ }   // a layout choice an earlier version kept
   const inApp = () => !!(window.pywebview && window.pywebview.api && window.pywebview.api.set_zoom);
   function pageChoice() { const z = Number(store("lh.pageSize")); return SIZES.includes(z) ? z : 0; }   // 0: Auto
   function autoZoom() {
     const w = window.innerWidth, h = window.innerHeight;
-    if (w < 1000 || window.matchMedia("(pointer: coarse)").matches || V[1] === "B") return 1;
-    if (V[1] === "C") return Math.max(0.8, Math.floor(Math.min(1, w / 1600, h / 900) * 100) / 100);
-    // v1D: the big monitor (2560 × 1440) a size up: the desktop app's window there, or a Chrome tab (about 2560 × 1305,
-    // 1275 with the bookmarks bar); 1200 is above every 1080p window
-    if (V[1] === "D" && w >= 2400 && h >= 1200) return 1.1;
+    if (w < 1000 || window.matchMedia("(pointer: coarse)").matches) return 1;
     return w >= 1600 && h >= 900 ? 1 : h < 680 ? 0.85 : 0.9;
   }
   const pageZoom = () => FIT.zoom;   // Kelvin.zoom(): divide pointer and rect lengths by it before writing them to CSS
@@ -9661,71 +9638,23 @@
     }
   }
   // the Lab panel's parts (Instruments, Watches, Memory, Activity), under what never gives way to them: the requests
-  // waiting, the sample, Hands on the sample and Bring to safe. 3A, the default: one part at a time, chosen on a strip
-  // of tabs (initLabTabs, below). ?v=3C keeps the folds, their code fenced v3C (here and in "fit D") to go in one pass
-  // v3C
-  // 3C: each part folds under its heading, remembered by its part's id (lh.labFold.<data-part>, not by its heading's
-  // words; Instruments starts open, the others folded), and the open ones share the panel's height, each scrolling
-  // inside. A fold opens by height (its rows go from 0fr to 1fr), at once when the keyboard pressed it; folded, its part
-  // is inert
-  const LAB_FOLDS = new Map();   // data-part -> (folded) => its fold drawn so
-  // /v3C
-  function initLabFolds() {
-    if (labTabs()) { initLabTabs(); return; }   // 3A: one part at a time, on a strip
-    // v3C
-    for (const part of document.querySelectorAll("#labpanel .lab-part")) {
-      const id = part.dataset.part, h3 = part.querySelector(".lab-part-head h3"), body = part.querySelector(".lab-part-body");
-      if (!h3 || !body || LAB_FOLDS.has(id)) continue;
-      const name = h3.textContent.trim(), key = "lh.labFold." + id;
-      if (store(key) === null && store("lh.fold." + name) !== null) store(key, store("lh.fold." + name));   // kept by its heading before
-      const btn = h("button", { class: "fold-btn", type: "button", "aria-controls": body.id }, icon("chev"), name);
-      h3.replaceChildren(btn);
-      const apply = (folded) => {
-        part.classList.toggle("open", !folded);
-        btn.setAttribute("aria-expanded", String(!folded));
-        body.inert = folded;
-      };
-      LAB_FOLDS.set(id, apply);
-      apply(store(key) === null ? id !== "instruments" : store(key) === "1");
-      btn.addEventListener("click", (e) => {
-        const folded = part.classList.contains("open");
-        part.classList.toggle("still", !e.detail);   // Enter or Space: no easing
-        store(key, folded ? "1" : "0");
-        apply(folded);
-      });
-    }
-    // /v3C
-  }
-  // a part brought into sight to show what was asked for in it (its Add…, a note's pencil): 3A chooses its tab, 3C
-  // opens its fold. Every way into a part comes here
-  function labPartOpen(part) {
-    if (!part) return;
-    if (labTabs()) { chooseLabPart(part.dataset.part); return; }
-    // v3C
-    if (part.classList.contains("open") || !LAB_FOLDS.has(part.dataset.part)) return;
-    part.classList.remove("still");
-    store("lh.labFold." + part.dataset.part, "0");
-    LAB_FOLDS.get(part.dataset.part)(false);
-    // /v3C
-  }
-  // v3A, the default: one part at a time, chosen on a strip of tabs above them, the chosen part with all the height
-  // below and kept on this browser (lh.labPart; a part that shows nothing is never chosen again). Each tab says what is
-  // new in its part, to the eye and to a screen reader: the alarms on Watches, a dot on Activity for lines not seen
-  // there yet. A tab list as the APG's: the arrow keys, Home and End choose along it at once, and the chosen tab is its
-  // one tab stop. Each tab is named as its part's heading. Wide (the Lab 900 px or more: full screen, or dragged wide),
-  // every part stands in its column under its heading and the strip steps aside ("fit D" in app.css); there the part
-  // used last (pressed, or holding the focus) is the chosen one, so that when the Lab narrows again (Esc, ⤢, a
-  // narrower window) that part, and the focus in it, stay on the screen
+  // waiting, the sample, Hands on the sample and Bring to safe. One part at a time, chosen on a strip of tabs above
+  // them, the chosen part with all the height below and kept on this browser (lh.labPart; a part that shows nothing is
+  // never chosen again). Each tab says what is new in its part, to the eye and to a screen reader: the alarms on
+  // Watches, a dot on Activity for lines not seen there yet. A tab list as the APG's: the arrow keys, Home and End
+  // choose along it at once, and the chosen tab is its one tab stop. Each tab is named as its part's heading. Wide (the
+  // Lab 900 px or more: full screen, or dragged wide), every part stands in its column under its heading and the strip
+  // steps aside ("fit D" in app.css); there the part used last (pressed, or holding the focus) is the chosen one, so
+  // that when the Lab narrows again (Esc, ⤢, a narrower window) that part, and the focus in it, stay on the screen.
+  // Every way into a part (its Add…, a note's pencil) chooses its tab
   const LAB_TABS = { tabs: new Map(), chosen: "", wide: null, top: null, seen: null };   // top: Activity's newest line
-  const labTabs = () => V[3] === "A";
   const labTabShown = (id) => LAB_TABS.tabs.has(id) && !$("lab-sec-" + id).hidden;
   function initLabTabs() {
     const strip = $("lab-strip"), panel = $("labpanel");
-    panel.classList.add("lab-tabs");
+    forgetLabFolds();
     for (const part of document.querySelectorAll("#labpanel .lab-part")) {
       const id = part.dataset.part, h3 = part.querySelector(".lab-part-head h3");
       part.id = "lab-sec-" + id;
-      part.classList.add("open");
       const tab = h("button", { type: "button", role: "tab", id: "lab-tab-" + id, "aria-controls": part.id },
         h("span", { class: "lab-tab-name" }, h3.textContent.trim()),
         h("span", { class: "lab-tab-mark", "aria-hidden": "true", hidden: true }), h("span", { class: "sr-only" }));
@@ -9740,7 +9669,6 @@
     };
     panel.addEventListener("focusin", used);
     panel.addEventListener("pointerdown", used);
-    strip.hidden = false;
     strip.addEventListener("keydown", labTabKeys);
     if (window.ResizeObserver) new ResizeObserver(labTabRoles).observe($("labpanel"));
     labTabRoles();
@@ -9810,7 +9738,14 @@
     }
     labTabMark("activity", LAB_TABS.top !== LAB_TABS.seen);
   }
-  // /v3A
+  // what the Lab's folds once kept on this browser, by part (lh.labFold.<part>) or by heading (lh.fold.<heading>): let
+  // go at the start, quietly, as nothing reads it. Settings' folds keep theirs (lh.fold.set.<id>)
+  function forgetLabFolds() {
+    try {   // the keys gathered first: a removal may reorder what is left (WebKit)
+      const old = Object.keys(localStorage).filter((k) => /^lh\.(labFold|fold)\.(?!set\.)/.test(k));
+      for (const k of old) localStorage.removeItem(k);
+    } catch (e) { /* no storage */ }
+  }
   // Settings: an item with more than two fields folds under its title, folded until the title is clicked. An item is a
   // title (a label, or the row a .field-label heads) and what follows it in its .field up to the next title: a whole
   // .field (Email, Heartbeat) or a part of one (Webhook, after the Notifications row). Its fields: the boxes, lists and
@@ -9847,7 +9782,7 @@
     toggleSeq, toggleRuns, toggleLab, toggleAnalysis, openRun, openRunList, fitLayout, exitFull, thumb,
     openEditor, openVersions, openLabSetup, openSettings, settingsPage, openCards,
     pickFolder, hasPicker, hasFilePicker, isVI, importVI, folderLabels, popMenu, closeMenu, lineChart, getRun, runCharts,
-    zoom: pageZoom, askYes, askText, V, fitTiers,   // the fit's contract (page size, the in-page question, the variants)
+    zoom: pageZoom, askYes, askText, fitTiers,   // the fit's contract (the page size, the in-page question)
   };
 
   async function init() {
@@ -9904,7 +9839,7 @@
     applyModels(boot.models.groups, boot.default_model, boot.auto_model, boot.models.hub);
     initPanes();
     initMode();
-    initLabFolds();
+    initLabTabs();
     initSettingFolds();
     initMotion();
     initRunsPane();

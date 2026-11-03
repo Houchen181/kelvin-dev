@@ -4,15 +4,12 @@
    (brief 1.1): the page never scrolls. Drawn with the kit at the end of app.css (its tokens, .kcard, .chip) and the fit
    tokens of the density tier (the value after each comma is the roomy tier's, for a page without them); light and dark
    come from the tokens alone. That is Home on a laptop, a 1080p screen, a tablet, beside panes and on a phone. Where
-   Home is big (1040 px wide and 1200 tall: the 1440p monitor), variant 2D, the one shown without a choice
-   (html[data-v2="D"]), draws it as it was before 3 Nov: the greeting on a line of its own, the 2 + 1 large tiles and
-   three columns of blocks in a column of 1040 px.
-   The others, for the morning's comparison: 2A the fitted Home at every size, 2B the 2 + 1 large tiles where Home is
-   tall, 2C the same in a column of 1180 px (four columns of blocks) instead of 1440. */
+   Home is big (1040 px wide and 1200 tall: the 1440p monitor), the rule at the end draws the big monitor's Home: the
+   greeting on a line of its own, the 2 + 1 large tiles and three columns of blocks in a column of 1040 px. */
 
 /* the conversation's place (as .scroller: from a zero basis, so the top bar keeps its own height when it wraps), and the
    container Home's parts are sized by: its width (one-line tiles under 700 px) and its height (one-line tiles when it
-   is short, 2B's large tiles when it is tall). It scrolls only if even that cannot fit: it never clips */
+   is short, the large tiles when it is big). It scrolls only if even that cannot fit: it never clips */
 .homeview { flex: 1 1 0%; min-height: 0; overflow-y: auto; background: var(--page); container: home / size;
   --home-shadow: 0 1px 2px rgba(20, 32, 44, 0.04), 0 12px 28px -18px rgba(20, 32, 44, 0.24); }   /* softer than a card's */
 @media (prefers-color-scheme: dark) {
@@ -186,67 +183,37 @@ html:is(.fit-compact, .fit-tight) .hk-text { -webkit-line-clamp: 2; }
   .home-blocks { gap: var(--sp-3, 12px); }
 }
 
-/* v2B */
-/* 2B: where Home is tall (a layout of 1000 px or more, less the top bar), the 2 + 1 large tiles approved before: the
-   greeting on a line of its own, the Lab tile on a row of its own, today's title and number sizes */
-@container home (min-width: 700px) and (min-height: 940px) {
-  html[data-v2="B"] .home-greet { flex-basis: 100%; }
-  html[data-v2="B"] .home-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  html[data-v2="B"] .home-tile-lab { grid-column: 1 / -1; }
-  html[data-v2="B"] .home-tile { max-height: none; gap: 10px; padding: 24px 26px 20px; }
-  html[data-v2="B"] .home-tile-go { font-size: 20px; line-height: 26px; }
-  html[data-v2="B"] .home-kpi-n { font-size: 44px; }
-  html[data-v2="B"] .home-watches { width: min(100%, 560px); }   /* a reading's value near its name, not a window away */
-}
-/* /v2B */
-/* v2C */
-/* 2C: 2B's large 2 + 1 tiles where Home is tall, in the narrower column the big monitor had before: 1180 px, four
-   columns of blocks */
-html[data-v2="C"] .home-col { max-width: calc(1180px + 2 * var(--pad-page, 24px)); }
-@container home (min-width: 700px) and (min-height: 940px) {
-  html[data-v2="C"] .home-greet { flex-basis: 100%; }
-  html[data-v2="C"] .home-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  html[data-v2="C"] .home-tile-lab { grid-column: 1 / -1; }
-  html[data-v2="C"] .home-tile { max-height: none; gap: 10px; padding: 24px 26px 20px; }
-  html[data-v2="C"] .home-tile-go { font-size: 20px; line-height: 26px; }
-  html[data-v2="C"] .home-kpi-n { font-size: 44px; }
-  html[data-v2="C"] .home-watches { width: min(100%, 560px); }
-}
-/* /v2C */
-/* v2D */
-/* 2D, the one shown without a choice: where Home is big, Home as the big monitor had it before 3 Nov. Big is as wide
-   as its column (so the blocks always stand three to a row) and tall enough for three rows of them whole under the
-   large tiles, even full ones (three runs, three readings and the line: 1193 px), so always the roomy tier: the 1440p
-   monitor, in the app or a Chrome tab. A column of 1040 px with 32 px sides, the greeting on a line of its own over
-   what goes on, the 2 + 1 large tiles (the Lab's on a row of its own), three columns of blocks, all at their sizes
-   then. What the night cut stays cut: the "Overview" line, the middle dot, the tiles' footers, a lift under the
-   pointer. The blocks keep their region: when there are more than fit they scroll in it, never the page. Below the
-   rule (a laptop, a 1080p screen, a tablet, panes beside Home, a phone) Home is 2A's */
+/* ---------- Home on a big screen: where Home's own box is as wide as the column below (so the blocks always stand
+   three to a row) and tall enough for three rows of them whole under the large tiles, even full ones (three runs,
+   three readings and the line: 1193 px), so always the roomy tier: the 1440p monitor, in the app or a Chrome tab. A
+   column of 1040 px with 32 px sides, the greeting on a line of its own over what goes on, the 2 + 1 large tiles (the
+   Lab's on a row of its own), three columns of blocks. The blocks keep their region: when there are more than fit
+   they scroll in it, never the page. Below the rule (a laptop, a 1080p screen, a tablet, panes beside Home, a phone)
+   Home is the fitted one above. Its selectors are the fitted Home's, so it stays last and wins where it holds ---------- */
 @container home (min-width: 1040px) and (min-height: 1200px) {
-  html[data-v2="D"] .home-col { max-width: 1040px; padding: 34px 32px 32px; gap: 26px; }
-  html[data-v2="D"] .home-hello { align-items: center; gap: 6px 10px; }
-  html[data-v2="D"] .home-greet { flex-basis: 100%; font-size: 34px; }
-  html[data-v2="D"] .home-state { align-items: center; gap: 4px 10px; min-height: 30px; font-size: 16px; }
-  html[data-v2="D"] .home-labname { font-size: 16px; }
-  html[data-v2="D"] .home-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
-  html[data-v2="D"] .home-tile-lab { grid-column: 1 / -1; }
-  html[data-v2="D"] .home-tile { gap: 14px; min-height: 210px; max-height: none; padding: 24px 26px 18px; }
-  html[data-v2="D"] .home-tile-head { gap: 10px; }
-  html[data-v2="D"] .home-tile-go { font-size: 20px; line-height: 28px; }   /* the title's button 28 px, the card its target */
+  .home-col { max-width: 1040px; padding: 34px 32px 32px; gap: 26px; }
+  .home-hello { align-items: center; gap: 6px 10px; }
+  .home-greet { flex-basis: 100%; font-size: 34px; }
+  .home-state { align-items: center; gap: 4px 10px; min-height: 30px; font-size: 16px; }
+  .home-labname { font-size: 16px; }
+  .home-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  .home-tile-lab { grid-column: 1 / -1; }
+  .home-tile { gap: 14px; min-height: 210px; max-height: none; padding: 24px 26px 18px; }
+  .home-tile-head { gap: 10px; }
+  .home-tile-go { font-size: 20px; line-height: 28px; }   /* the title's button 28 px, the card its target */
   /* the number's line holds its figures (1.14 em of the display face, so nothing spills at 110 or 125 %); the row's
-     margin gives back what that adds, so the tile is as tall as it was */
-  html[data-v2="D"] .home-kpi { gap: 2px 10px; margin: -2px 0; }
-  html[data-v2="D"] .home-kpi-n { font-size: 44px; line-height: 1.15; }
-  html[data-v2="D"] .home-tile-body { gap: 10px; }
-  html[data-v2="D"] :is(.home-kpi-unit, .home-none, .home-run) { font-size: 14px; }
-  html[data-v2="D"] .home-run-time { font-size: 13px; }
-  html[data-v2="D"] .home-watch { gap: 10px; padding: 2px 0; font-size: 15px; }
-  html[data-v2="D"] .home-watch-key { flex: 0 1 auto; }   /* a reading's value beside its name, not a window away */
-  html[data-v2="D"] .home-spark-row { padding: 2px 0 6px; }
-  html[data-v2="D"] .home-blocks { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
-  html[data-v2="D"] .kcard.home-block { gap: 10px; padding: 18px 18px 14px; border-radius: 15px; }
-  html[data-v2="D"] .hk-value { font-size: 26px; }
-  html[data-v2="D"] .hk-text { font-size: 14px; line-height: 1.55; }
-  html[data-v2="D"] .hk-check label { font-size: 14px; }
+     margin gives back what that adds */
+  .home-kpi { gap: 2px 10px; margin: -2px 0; }
+  .home-kpi-n { font-size: 44px; line-height: 1.15; }
+  .home-tile-body { gap: 10px; }
+  :is(.home-kpi-unit, .home-none, .home-run) { font-size: 14px; }
+  .home-run-time { font-size: 13px; }
+  .home-watch { gap: 10px; padding: 2px 0; font-size: 15px; }
+  .home-watch-key { flex: 0 1 auto; }   /* a reading's value beside its name, not a window away */
+  .home-spark-row { padding: 2px 0 6px; }
+  .home-blocks { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .kcard.home-block { gap: 10px; padding: 18px 18px 14px; border-radius: 15px; }
+  .hk-value { font-size: 26px; }
+  .hk-text { font-size: 14px; line-height: 1.55; }
+  .hk-check label { font-size: 14px; }
 }
-/* /v2D */

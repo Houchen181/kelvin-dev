@@ -62,13 +62,11 @@ def test_what_comes_in_and_what_moves():
     ease = _fn(JS, "easeIn")
     assert 'el.classList.add("k-in")' in ease and 'el.classList.remove("k-in")' in ease and "e.target !== el" in ease
     assert "if (!folded) easeIn(part);" in JS   # Settings' folds
-    # the Lab's parts open by height: their rows go from 0fr to 1fr (.2 s; shut in .12 s), at once from the keyboard
-    folds = _fn(JS, "initLabFolds")
-    assert 'part.classList.toggle("open", !folded)' in folds and "body.inert = folded" in folds
-    assert 'part.classList.toggle("still", !e.detail)' in folds
+    # the Lab's parts never move: the one chosen on the strip shows at once, under the strip's thumb, which slides as
+    # every .seg's does; nothing in the Lab opens by height
     lab = CSS[CSS.index("/* ===== fit D"):CSS.index("/* ===== end fit D")]
-    assert "#labpanel .lab-part.open { grid-template-rows: auto 1fr; transition-duration: .2s; }" in lab
-    assert "transition: grid-template-rows .12s var(--ease-in)" in lab and ".lab-part.still" in lab
+    assert "#labpanel .lab-part:not(.chosen) { display: none; }" in lab and "grid-template-rows ." not in lab
+    assert 'id="lab-strip" class="seg lab-strip"' in (STATIC / "index.html").read_text(encoding="utf-8")
     flip_from, flip_to = _fn(SEQ, "flipFrom"), _fn(SEQ, "flipTo")
     assert "if (!SEQ.drawn || calm()) return null;" in flip_from and "getBoundingClientRect().top" in flip_from
     assert "c.el.animate(" in flip_to and "rise(c.el)" in flip_to and "id === skip" in flip_to
