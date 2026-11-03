@@ -1681,6 +1681,38 @@ select.kfield { padding-right: 26px; }
 /* the display face: greetings and page titles (Home, the first start) */
 .display { font-family: var(--display); font-weight: 600; letter-spacing: -0.01em; }
 
+/* Kelvin's folder browser (app.js browseFolder): choosing a folder in a browser on the Kelvin computer, as the Kelvin
+   app does with the computer's own picker. The path to type at the top, the drives, Up and the way to the folder, its
+   folders (the keys move along them), and the scripts it holds. Its classes are its own: .folder-list is the Lab
+   dialog's instrument folders */
+.folder-dialog { width: min(600px, calc(100vw - 32px)); }
+.folder-dialog form { gap: 10px; }
+.folder-path { width: 100%; }
+.folder-places, .folder-where { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.folder-crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; flex: 1; min-width: 0; }
+.folder-crumbs button, .folder-crumbs [aria-current] { border: 0; background: none; padding: 3px 6px; border-radius: 6px;
+  font-size: 14px; color: var(--text-2); text-align: left; overflow-wrap: anywhere; }
+.folder-crumbs button { cursor: pointer; }
+.folder-crumbs button:hover { background: var(--hover); color: var(--text); }
+.folder-crumbs [aria-current] { color: var(--text); font-weight: 600; }
+.folder-sep { color: var(--muted); }
+.folder-items { display: flex; flex-direction: column; height: min(46vh, 360px); overflow: auto; border: 1px solid var(--card-line);
+  border-radius: var(--radius-s); background: var(--card); }
+.folder-items:focus { outline: none; }
+.folder-items:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.folder-item { display: flex; flex: none; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0;
+  border-top: 1px solid var(--line); background: none; color: var(--text); font-size: 14px; text-align: left; cursor: pointer; }
+.folder-item:first-child { border-top: 0; }
+.folder-item svg { color: var(--muted); }
+.folder-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-item:hover { background: var(--hover); }
+.folder-item:focus { outline: none; }
+.folder-item:focus-visible { background: var(--accent-soft); color: var(--accent); }
+.folder-item:focus-visible svg { color: var(--accent); }
+.folder-items > .hint { margin: 0; padding: 8px 10px; }
+.folder-note { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0; overflow-wrap: anywhere; }
+.folder-note:empty { display: none; }
+
 /* motion, as labMaster moves: what switches on --ease-switch (quick out, a long settle: 0.42 s), what appears on
    --ease-in (a short rise: 0.2–0.26 s); nothing moves when the person asks for less motion */
 :root { --ease-switch: cubic-bezier(.2, .75, .2, 1); --ease-in: cubic-bezier(.2, 0, 0, 1); }

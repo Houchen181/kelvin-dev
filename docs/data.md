@@ -287,7 +287,7 @@ Next to the run folders sit `events.jsonl`, your record of every command, readin
 
 **Choosing the data folder:** these live in your own folder, `~/Kelvin/users/<you>/data` (for the first account, `~/Kelvin/virtual-lab`, where they were before accounts), until you choose another folder under **Settings → Data folder**. A lab server or a synced drive works:
 - **Without accounts** (`--no-accounts`), each lab keeps its own folder, `~/Kelvin/labs/<the lab's name>`. Switching labs switches folders, and nothing moves: the other folder's runs are still found by their ids, and its reports by their names. A lab that measured into `virtual-lab` with an older Kelvin keeps using it. `~/Kelvin/lab-folders.json` records each lab's folder, by its config file, so a renamed lab keeps its own. To move one by hand: close Kelvin, move the folder, and change its line in `lab-folders.json` (or choose the new place under Settings → Data folder, with **Move what is saved now**).
-- **Use this folder** switches at once. Kelvin checks first that it can write there. In the Kelvin app, **Choose…** opens the computer's folder picker.
+- **Use this folder** switches at once. Kelvin checks first that it can write there. **Choose…** opens the computer's folder picker in the Kelvin app, and Kelvin's folder browser in a browser ([Choosing a folder](portal.md#in-the-portal)).
 - **Move what is saved now** takes the existing runs, reports and record along (runs in chats' own folders stay there, and Kelvin keeps finding them). Nothing there is overwritten: a run whose name is taken stays where it was, and Kelvin says so.
 - **If the folder can't be written to when you sign in** (a network drive that is offline, say), Kelvin saves to your own folder meanwhile and tells you in Settings.
 - **What stays in `~/Kelvin`:** chats, settings, API keys and instrument folders.
@@ -332,7 +332,7 @@ Data that Kelvin didn't measure can become runs, so Kelvin's tools work on them:
 
 Each chat saves its runs in a folder you choose, so you always know where its data are.
 - **Where it shows:** the folder button under the message box, at the left, as in code editors: it reads **Data folder**, or the name of the folder you chose. Click it for the whole path, **Recent folders**, **Choose folder…**, **Open folder** and **Use the data folder**.
-- **Choosing:** in the Kelvin app, **New chat** opens the computer's folder picker; **Choose folder…** opens it for a chat you are in, and a recent folder is one click. In a browser, you type the folder's full path. Kelvin checks that it can write there, and makes the folder if it is new. A folder change applies from the next message.
+- **Choosing:** **New chat** asks for the folder first, and **Choose folder…** changes it for a chat you are in: with the computer's folder picker in the Kelvin app, with Kelvin's folder browser in a browser, where you go to the folder or type its path ([Choosing a folder](portal.md#in-the-portal)); a new folder's path is taken with **Use it anyway**. A recent folder is one click. Kelvin checks that it can write there, and makes the folder if it is new. A folder change applies from the next message.
 - **A new chat** starts in the folder you last chose (in a project, the one its chats last chose). Settings → **Data & reports** → **Ask for a folder when I start a new chat** turns the picker off for new chats.
 - **Without a folder of its own** (and from other AI apps through MCP), a chat's runs go to the data folder's `runs/`.
 - **Queued runs** go to the folder of the chat that queued them.

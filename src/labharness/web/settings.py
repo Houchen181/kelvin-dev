@@ -386,7 +386,7 @@ class Settings:
                 value = "hidden" if value.lower() in ("hidden", "hide", "off", "false", "0", "no") else ""
             if name == "sequence_react":  # a chat answers a stop or failure of its sequence at once: off unless on
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
-            if name == "ask_folder":  # the folder picker opens for each new chat (desktop app): on unless off
+            if name == "ask_folder":  # a folder is asked for each new chat (app or browser): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
