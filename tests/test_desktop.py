@@ -20,8 +20,8 @@ def test_self_test_starts_the_portal_and_cleans_up(tmp_path):
 
 
 def test_import_a_script_opens_the_computers_own_file_picker(tmp_path, monkeypatch):
-    """pick_file, for the Runs pane's Import a script…: an Open dialog for Python scripts and notebooks, at the folder
-    given (or the folder of a file given); the path chosen, or "" when the person closes it."""
+    """pick_file, for the Runs pane's Import a script or VI…: an Open dialog for Python scripts, notebooks and LabVIEW
+    VIs, at the folder given (or the folder of a file given); the path chosen, or "" when the person closes it."""
     asked, exposed = [], {}
 
     class Closing:
@@ -51,9 +51,11 @@ def test_import_a_script_opens_the_computers_own_file_picker(tmp_path, monkeypat
     window.answer = (str(script),)
     assert pick(str(tmp_path)) == str(script)
     kind, folder, types_ = asked[-1]
-    assert kind == 10 and folder == str(tmp_path) and types_ == ("Python scripts and notebooks (*.py;*.ipynb)",)
-    # the form pywebview accepts for a filter (webview.util.parse_file_type)
-    assert re.match(r"^([\w ]+)\((\*(?:\.(?:\w+|\*))*(?:;\*(?:\.(?:\w+|\*))*)*)\)$", types_[0])
+    assert kind == 10 and folder == str(tmp_path)
+    assert types_ == ("Python scripts and LabVIEW VIs (*.py;*.ipynb;*.vi)",   # a VI: translated into an experiment
+                      "Python scripts and notebooks (*.py;*.ipynb)", "LabVIEW VIs (*.vi)")
+    for t in types_:   # the form pywebview accepts for a filter (webview.util.parse_file_type)
+        assert re.match(r"^([\w ]+)\((\*(?:\.(?:\w+|\*))*(?:;\*(?:\.(?:\w+|\*))*)*)\)$", t), t
     assert pick(str(script)) == str(script) and asked[-1][1] == str(tmp_path)    # a file: its folder
     window.answer = None
     assert pick(str(tmp_path / "no" / "such.py")) == "" and asked[-1][1] == ""   # closed; no such folder: none

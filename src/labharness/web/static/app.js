@@ -5015,19 +5015,33 @@
     return b;
   }
   function expDialog(title) {
+    EXP.shown = (EXP.shown || 0) + 1;   // what the dialog shows now: an answer for what it showed before isn't put in it
     $("exp-title").textContent = title;
     $("exp-msg").textContent = "";
     $("exp-keep").hidden = $("exp-approve").hidden = $("exp-name-row").hidden = true;
     if (!$("exp-dialog").open) $("exp-dialog").showModal();
     return $("exp-body");
   }
+  // a VI translated (minutes): its draft shown to read and keep, or, when the person closed the dialog meanwhile or
+  // opened another thing in it, said beside the scans in Schedule, where the draft waits in Lab experiments. Whether it was translated.
   async function openTranslate(v) {
-    const body = expDialog("Translate " + v.name);
+    const body = expDialog("Translate " + v.name), mine = EXP.shown;
     body.replaceChildren(h("div", { class: "review pending" }, h("span", { class: "spinner" }),
-      "Translating " + v.name + ": the AI writes it, and Kelvin checks each attempt on the simulated lab (a few minutes)…"));
+      "Translating " + v.name + ": the AI writes it, and Kelvin checks each attempt on the simulated lab (a few minutes). " +
+      "You can close this: the translation goes on, and its draft waits in Runs → Schedule → Lab experiments."));
     EXP.open = null;
-    try { showDraft(await api("/api/labview/translate", { body: { path: v.path } })); }
-    catch (e) { body.replaceChildren(h("p", { class: "bad" }, e.message)); }
+    const here = () => EXP.shown === mine && $("exp-dialog").open;
+    let d;
+    try { d = await api("/api/labview/translate", { body: { path: v.path } }); }
+    catch (e) {
+      if (here()) body.replaceChildren(h("p", { class: "bad" }, e.message));
+      else scansSay(v.name + " wasn't translated: " + e.message, true);
+      return false;
+    }
+    if (RUNS.view === "schedule") loadExperiments();   // its draft is listed there, kept or not
+    if (here()) showDraft(d);
+    else scansSay(v.name + " is translated: Review it in Lab experiments.");
+    return true;
   }
   async function openReview(id) {
     const body = expDialog("Review a translation");
@@ -5423,7 +5437,9 @@
       if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }   // its run gets its tab
     });
   }
-  // Import a script…: the computer's own file picker in the Kelvin app; in a browser, its path typed
+  // Import a script or VI…: the computer's own file picker in the Kelvin app; in a browser, its path typed. A script
+  // goes into the person's library; a LabVIEW VI is translated at once into one of the lab's experiments, a draft to
+  // read and keep (openTranslate), as Set up's Translate does
   function hasFilePicker() { return !!(window.pywebview && window.pywebview.api && window.pywebview.api.pick_file); }
   async function importScript() {
     if (!hasFilePicker()) {
@@ -5435,7 +5451,18 @@
     try { path = (await window.pywebview.api.pick_file(store("lh.scriptFolder") || LAB.scriptsFolder || "")) || ""; } catch (e) { return; }
     if (path) importPath(path);
   }
+  const unquoted = (path) => String(path).trim().replace(/^"(.*)"$/, "$1").trim();   // as Windows' Copy as path gives it
+  function isVI(path) { return /\.vi$/i.test(unquoted(path)); }
+  async function importVI(path) {
+    const vi = unquoted(path);
+    scansSay("");
+    if (!(await openTranslate({ name: vi.replace(/^.*[\\/]/, ""), path: vi }))) return;   // a typed path stays to fix
+    store("lh.scriptFolder", vi.replace(/[\\/][^\\/]*$/, ""));
+    $("scans-path").hidden = true;
+    $("scans-path-input").value = "";
+  }
   async function importPath(path) {
+    if (isVI(path)) return importVI(path);
     scansSay("");
     const r = await scansOp({ op: "import", path });
     if (!r) return;
@@ -6599,7 +6626,7 @@
     try {
       const k = await api("/api/instruments/specialmeasure/scans", { body: { folder: r.folder, setup: r.setup, scans, instruments } });
       if (k.library) SCANS.data = k.library;
-      $("lab-msg").textContent = [k.kept.length ? "Kept " + andList(k.kept.map((x) => x.name)) + " in Runs → Scans." : "",
+      $("lab-msg").textContent = [k.kept.length ? "Kept " + andList(k.kept.map((x) => x.name)) + " in Runs → Schedule." : "",
         ...k.not.map((x) => x.scan + ": " + x.gaps.join("; "))].filter(Boolean).join(" ");
     } catch (e) { $("lab-msg").textContent = e.message; }
     finally { btn.disabled = false; }

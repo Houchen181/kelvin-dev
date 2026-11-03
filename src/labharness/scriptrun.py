@@ -151,6 +151,9 @@ def _runnable(path: Path) -> Path:
     if path.suffix.lower() == ".m":
         raise ScriptError("%s is a MATLAB script: Kelvin runs Python scripts and notebooks. survey_scripts reads it, "
                           "and its measurement can become a recipe" % path.name)
+    if path.suffix.lower() == ".vi":
+        raise ScriptError("%s is a LabVIEW VI: Kelvin doesn't run it, it translates it into one of the lab's "
+                          "experiments (Import a script or VI… in Runs → Schedule, or translate_vi in a chat)" % path.name)
     if path.suffix.lower() not in RUNNABLE:
         raise ScriptError("%s is not a Python script or notebook (.py, .ipynb)" % path.name)
     return path

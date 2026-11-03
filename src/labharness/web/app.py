@@ -463,7 +463,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 return agent.model_key(reviewer)
             if chat is not None and chat.get("model"):
                 return str(chat["model"])
-            return await card_model()
+            try:
+                return await card_model()
+            except ValueError:   # card_model says it in a card's words
+                raise ValueError("no model to translate the VI with: add an API key in Settings → Models") from None
         key = asyncio.run_coroutine_threadsafe(pick(), loop).result(timeout=60)
         if chat is not None:
             why = agent.not_here(chat, key)
@@ -3692,9 +3695,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             body = None
         if not isinstance(body, dict) or not str(body.get("path") or "").strip():
             return error(400, "send {path}: the VI to translate")
+        path = str(body["path"]).strip()
         try:
             out = await asyncio.wrap_future(runtime.labview_reads.submit(
-                as_person, runtime.translate_vi_data, str(body["path"]).strip(), str(body.get("name") or "")))
+                as_person, runtime.translate_vi_data, path, str(body.get("name") or ""),
+                doing=runtime.translating(path)))
         except Underway as e:
             return error(409, str(e))
         except (OSError, ValueError) as e:

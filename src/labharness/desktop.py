@@ -181,13 +181,16 @@ def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dic
         return str(chosen[0]) if chosen else ""
 
     def pick_file(start: str = "") -> str:
-        """The computer's own file picker, for the portal's Import a script…: the Python script or notebook the person
-        chose, or "" if they closed it. start: the folder to open at (or a file in it)."""
+        """The computer's own file picker, for the portal's Import a script or VI…: the Python script, notebook or
+        LabVIEW VI (which the portal translates) the person chose, or "" if they closed it. start: the folder to open at
+        (or a file in it)."""
         kind = getattr(getattr(webview, "FileDialog", None), "OPEN", None) or webview.OPEN_DIALOG
         folder = start if os.path.isdir(start or "") else os.path.dirname(start or "")
         try:
             chosen = window.create_file_dialog(kind, directory=folder if os.path.isdir(folder) else "",
-                                               file_types=("Python scripts and notebooks (*.py;*.ipynb)",))
+                                               file_types=("Python scripts and LabVIEW VIs (*.py;*.ipynb;*.vi)",
+                                                           "Python scripts and notebooks (*.py;*.ipynb)",
+                                                           "LabVIEW VIs (*.vi)"))
         except Exception:
             return ""
         return str(chosen[0]) if chosen else ""
