@@ -101,7 +101,7 @@ class AutoSetup:
     def use_scripts(self, folder: Any) -> Dict[str, Any]:
         """The lab's own scripts, which a person pointed Kelvin to (folder: a folder, or the lab's scripts folders, a
         list read as one): read now (never run; files only, so not waiting for the instruments) for the first lab
-        config, if it isn't written yet. now: they shape it; otherwise Set up's From your scripts adds what they show.
+        config, if it isn't written yet. now: they shape it; otherwise Set up's Scripts… adds what they show.
         Raises OSError for a folder that isn't there."""
         from .scripts import survey
         found = survey(folder, self.runtime.script_cards())

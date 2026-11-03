@@ -1585,6 +1585,7 @@ button.link { border: 1px solid var(--line-strong); background: var(--panel); bo
 button.link:hover { background: var(--hover); color: var(--text); border-color: var(--line-strong); }
 button.link.danger { color: var(--danger); }
 button.link.danger:hover { background: var(--danger-soft); }
+button.link:disabled { opacity: .5; cursor: default; }   /* waiting, as a .btn does */
 /* the Lab panel: a heading per part, larger, a line between parts, each part folds under its heading */
 #labpanel .lab-scroll h3 { font-size: 15px; font-weight: 650; color: var(--text); margin: 0; }
 #labpanel .inst-head-row { align-items: center; margin: 16px 0 10px; }

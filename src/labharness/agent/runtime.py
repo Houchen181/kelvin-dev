@@ -4181,22 +4181,17 @@ class LabRuntime:
 
     def library_files(self) -> Dict[str, Any]:
         """The scripts a person may add as functions: every .py and .ipynb in the lab's scripts folders (Settings) and
-        their sub-folders, environments, caches and hidden folders left out, at most scanlibrary.MAX_FILES in all,
-        folder by folder, each by its path in its folder: {folders, files: [{path, rel, name, kind, folder}], more,
-        folder: the first of them, None when none is set}. Read only."""
-        from ..scanlibrary import MAX_FILES, runnable_files
+        their sub-folders, environments, caches, hidden folders and links left out (scanlibrary.runnable_files), at
+        most scanlibrary.MAX_FILES in all, each folder its share (a big one hides none of the others), each by its
+        path in its folder: {folders, files: [{path, rel, name, kind, folder}], more, folder: the first of them, None
+        when none is set}. Read only."""
+        from ..scanlibrary import MAX_FILES, runnable_files, shares
         roots = [Path(f).expanduser() for f in self.scripts_folders()]
-        files: List[Dict[str, str]] = []
-        more = False
-        for root in roots:
-            if len(files) >= MAX_FILES:
-                more = True
-                break
-            found, cut = runnable_files(root, MAX_FILES - len(files))
-            files += [dict(f, folder=str(root)) for f in found]
-            more = more or cut
+        lists = [runnable_files(root, MAX_FILES) for root in roots]
+        room = shares([len(found) for found, _ in lists], MAX_FILES)
+        files = [dict(f, folder=str(root)) for root, (found, _), n in zip(roots, lists, room) for f in found[:n]]
         return {"folder": str(roots[0]) if roots else None, "folders": [str(r) for r in roots], "files": files,
-                "more": more}
+                "more": any(cut or len(found) > n for (found, cut), n in zip(lists, room))}
 
     def library_inspect(self, path: Any) -> Dict[str, Any]:
         """What a script offers as a function, read and never run or imported: {name (the file's), path, settable

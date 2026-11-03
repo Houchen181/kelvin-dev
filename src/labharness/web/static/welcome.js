@@ -114,6 +114,10 @@
     footer();
     if (button) { button.disabled = true; button.before(spinner()); }
   }
+  function hold(key) {   // and the other buttons of its block wait too, until the block is drawn again
+    const el = W.els.group && W.els.group.querySelector('[data-row="' + key + '"]');
+    if (el) el.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+  }
   function end() { W.busy = Math.max(0, W.busy - 1); footer(); }
 
   // ------------------------------------------------------------------ step 1: Workspace
@@ -124,7 +128,10 @@
     const useBtn = btn(verb || "Use", "small", (b) => use(input.value, b), { f: key + "-use" });
     input.addEventListener("input", () => { st.typed = input.value; input.classList.remove("bad"); });
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); e.stopPropagation(); safe(use, input.value, useBtn); }
+      if (e.key === "Enter" && !e.isComposing) {   // as its button: not again while it waits
+        e.preventDefault(); e.stopPropagation();
+        if (!useBtn.disabled) safe(use, input.value, useBtn);
+      }
       else if (e.key === "Escape" && st.editing) {   // the folder as it was, and Change… again
         e.preventDefault(); e.stopPropagation();
         Object.assign(st, { editing: false, typed: "", msg: "", full: "" });
@@ -151,11 +158,13 @@
       : pathField(st, "scripts", useScripts, "Scripts", "Add");
     return block("scripts", row("Scripts", val, ctl, picker ? "" : "wide"), ...st.folders.map(folderRow));
   }
-  function folderRow(path, i) {   // one of them: its name, its whole path, Remove
+  function folderRow(path, i) {   // one of them: its name, its whole path, Remove (drawn as Settings draws it)
     const name = String(path).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+    const remove = K.h("button", { class: "link danger", type: "button", "data-f": "scripts-remove-" + i,
+                                   "aria-label": "Remove " + path }, "Remove");
+    remove.addEventListener("click", () => safe(removeScripts, path, remove));
     return K.h("div", { class: "wl-row wl-item off", title: path }, K.h("span", { class: "wl-label" }, name),
-      K.h("span", { class: "wl-sub" }, path),
-      btn("Remove", "small ghost", (b) => removeScripts(path, b), { f: "scripts-remove-" + i }));
+      K.h("span", { class: "wl-sub" }, path), remove);
   }
   async function chooseScripts(button) {
     const folders = W.scripts.folders;
@@ -169,6 +178,7 @@
     if (!folder) { markBad("scripts"); return false; }
     let ok = false;
     begin(button);
+    hold("scripts");
     try {
       const r = await K.api("/api/instruments/scripts-folder", { body: { folder } });
       Object.assign(st, { folders: r.folders || [], counts: { scripts: r.scripts || 0, instruments: r.instruments || 0 },
@@ -190,6 +200,7 @@
     const st = W.scripts;
     let ok = false;
     begin(button);
+    hold("scripts");
     try {
       const r = await K.api("/api/instruments/scripts-folder", { body: { remove: path } });
       Object.assign(st, { folders: r.folders || [], counts: null, msg: "", full: "", note: "" });

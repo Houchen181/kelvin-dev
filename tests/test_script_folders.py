@@ -4,8 +4,10 @@ once the folders change; added and taken off one at a time, the same folder twic
 left out. run_script runs a script inside any of them and nothing outside them all, nor through a link out of one;
 the survey, the New function picker and write_file's refusal cover every folder; the page has a row per folder with
 Remove, and Add folder…."""
+import inspect
 import json
 import os
+import threading
 
 import pytest
 
@@ -80,6 +82,8 @@ def test_the_same_folder_twice_and_one_inside_another_are_folded(tmp_path):
     folder_link(other, tmp_path / "to-other")                             # a link to a folder is that folder
     assert fold_folders([str(other), str(tmp_path / "to-other")]) == ([str(other)], [
         "%s is listed already" % (tmp_path / "to-other")])
+    from labharness.agent import server
+    assert "fold_folders(args.scripts)" in inspect.getsource(server.main)  # kelvin-mcp's --scripts alike
 
 
 # ------------------------------------------------------------------ over HTTP: Settings, the first start, Set up
@@ -93,6 +97,8 @@ def test_folders_are_added_and_taken_off_one_at_a_time(parts, tmp_path):
     write(b, "laser.py", LASER)
     client, headers = client_for(parts, {"scripted": Scripted([])})
     with client:
+        client.app.app.state.setup.first = True                                   # Kelvin setting up a new lab
+        assert client.get("/api/state", headers=headers).json()["ask_scripts"] is True   # nobody asked yet
         r = client.post(URL, json={"folder": str(a)}, headers=headers).json()     # as an older client sends one
         assert r["ok"] and r["folders"] == [str(a)] and r["scripts"] == 1 and r["folded"] == []
         r = client.post(URL, json={"folder": '"%s"' % b}, headers=headers).json()   # quoted, as Copy as path gives it
@@ -133,6 +139,80 @@ def test_folders_are_added_and_taken_off_one_at_a_time(parts, tmp_path):
         assert {i["address"] for i in view["instruments"]} == {"GPIB0::24::INSTR", "serial://COM7"}   # read with all
         assert settings.lab_scripts == [str(a), str(b)]
         assert client.post(URL, json={"folder": ""}, headers=headers).json()["folders"] == []   # "": there are none
+
+
+def test_settings_adds_a_folder_and_reads_nothing(parts, tmp_path, monkeypatch):
+    """Settings shows nothing a read of the scripts finds, so its Add folder… ({add}) keeps the folder at once; the
+    first start's add ({folder}) reads them all, for its counts."""
+    runtime, settings, _ = parts
+    a, b = tmp_path / "a", tmp_path / "b"
+    (a / "sub").mkdir(parents=True)
+    b.mkdir()
+    client, headers = client_for(parts, {"scripted": Scripted([])})
+    read = []
+    with client:
+        monkeypatch.setattr(client.app.app.state.setup, "use_scripts", read.append)
+        assert client.post(URL, json={"add": str(a)}, headers=headers).json() == {"ok": True, "folders": [str(a)],
+                                                                                 "folded": []}
+        assert client.post(URL, json={"add": '"%s"' % b}, headers=headers).json()["folders"] == [str(a), str(b)]
+        r = client.post(URL, json={"add": str(a / "sub")}, headers=headers).json()
+        assert r["folders"] == [str(a), str(b)] and r["folded"] == ["%s covers %s" % (a, a / "sub")]
+        for bad, why in (("", "full path"), (None, "full path"), (str(tmp_path / "nope"), "does not exist")):
+            r = client.post(URL, json={"add": bad}, headers=headers)
+            assert r.status_code == 400 and why in r.json()["error"], (bad, r.json())
+    assert settings.lab_scripts == [str(a), str(b)] == runtime.scripts_folders() and read == []
+
+
+def test_a_folder_taken_off_while_one_is_added_stays_off(parts, tmp_path, monkeypatch):
+    """An add reads every folder before it keeps the new one, and a Remove may come meanwhile: it stays done (its
+    folder deleted from disk too), and the add keeps its folder among the folders as they are then. It put the removed
+    folder back, or answered 500 when that one was gone from disk."""
+    runtime, settings, _ = parts
+    a, b, c, d = (tmp_path / n for n in "abcd")
+    for f in (a, b, c, d):
+        f.mkdir()
+    write(c, "iv.py", IV)
+    client, headers = client_for(parts, {"scripted": Scripted([])})
+
+    def add_while(route, folder, owner, name, meanwhile):   # POST {folder}, and meanwhile() while it reads the folders
+        reading, go, answer = threading.Event(), threading.Event(), {}
+        real = getattr(owner, name)
+
+        def held(folders):
+            reading.set()
+            assert go.wait(10)
+            return real(folders)
+
+        def add():
+            try:
+                answer["r"] = client.post(route, json={"folder": str(folder)}, headers=headers)
+            except Exception as e:   # the app's own error, which the test client raises: a 500
+                answer["error"] = e
+        monkeypatch.setattr(owner, name, held)
+        adding = threading.Thread(target=add)
+        adding.start()
+        assert reading.wait(10)
+        meanwhile()
+        go.set()
+        adding.join(10)
+        assert "error" not in answer, answer["error"]
+        return answer["r"]
+
+    def remove_b():
+        assert client.post(URL, json={"remove": str(b)}, headers=headers).json()["folders"] == [str(a)]
+        b.rmdir()
+
+    with client:
+        r = client.post(URL, json={"folders": [str(a), str(b)]}, headers=headers)
+        assert r.json()["folders"] == [str(a), str(b)]
+        r = add_while(URL, c, client.app.app.state.setup, "use_scripts", remove_b)
+        assert r.status_code == 200, r.text
+        assert r.json()["folders"] == [str(a), str(c)] and r.json()["scripts"] == 1
+        assert settings.lab_scripts == [str(a), str(c)]
+        r = add_while("/api/instruments/scripts", d, runtime, "scripts_found",   # Set up's Scripts… alike
+                      lambda: client.post(URL, json={"remove": str(c)}, headers=headers))
+        assert r.status_code == 200, r.text
+        assert settings.lab_scripts == [str(a), str(d)] and runtime.scripts_folders() == [str(a), str(d)]
 
 
 # ------------------------------------------------------------------ the boundary: any folder, nothing outside them
@@ -187,6 +267,15 @@ def test_a_link_out_of_a_folder_leads_nowhere(tmp_path):
     # a link into another of the folders leads to that folder's script: found once, not "several"
     assert scriptrun.locate("evil.py", [str(lab), str(outside)]) == evil.resolve()
 
+    # nor is a script out of the folder listed through a link, to pick (New function) or import (the first start,
+    # which ticks every script listed): each is listed once, where it is
+    write(lab, "own.py", "x = 1\n")
+    assert [f["rel"] for f in scanlibrary.runnable_files(lab)[0]] == ["own.py"]
+    rt = script_runtime(tmp_path, lab, ScriptedApprover([]))
+    rt.scripts_folders = lambda: [str(lab), str(outside)]
+    assert [(f["folder"], f["rel"]) for f in rt.library_files()["files"]] == [(str(lab), "own.py"),
+                                                                              (str(outside), "sub/evil.py")]
+
 
 # ------------------------------------------------------------------ what reads or lists the lab's scripts
 
@@ -234,6 +323,13 @@ def test_the_new_function_picker_lists_every_folder(tmp_path, scripts, monkeypat
     monkeypatch.setattr(scanlibrary, "MAX_FILES", 1)                      # at most MAX_FILES in all
     capped = rt.library_files()
     assert [f["rel"] for f in capped["files"]] == ["sweep.py"] and capped["more"] is True
+    write(scripts, "a.py", READS)
+    write(scripts, "b.py", READS)
+    monkeypatch.setattr(scanlibrary, "MAX_FILES", 2)                      # each folder its share: a big first one
+    capped = rt.library_files()                                           # hides none of the others
+    assert [(f["folder"], f["rel"]) for f in capped["files"]] == [(str(scripts), "a.py"), (str(other), "sub/probe.py")]
+    assert capped["more"] is True
+    assert scanlibrary.shares([5, 1, 0], 4) == [3, 1, 0] and scanlibrary.shares([2, 2], 9) == [2, 2]
 
 
 def test_write_file_never_saves_in_any_of_the_folders(tmp_path, scripts):
@@ -265,13 +361,19 @@ def test_the_page_has_a_row_per_folder_with_remove_and_add_folder():
     assert '<ul id="scripts-folders" class="env-list"></ul>' in field and 'id="scripts-msg"' in field
     assert 'id="scripts-folder"' not in page and '$("scripts-folder")' not in js   # the one folder's line is gone
     rows = _fn(js, "renderScriptFolders")
-    assert '"Remove"' in rows and "changeScriptFolders({ remove: f }, remove)" in rows and '"No folders yet."' in rows
+    assert '"Remove"' in rows and "changeScriptFolders({ remove: f })" in rows and '"No folders yet."' in rows
     change = _fn(js, "changeScriptFolders")
     assert 'api("/api/instruments/scripts-folder", { body })' in change
     assert "S.settings.lab_scripts = r.folders" in change                 # Settings shows them as they are now
     assert "showScriptsMsg(e.message, true)" in change and 'classList.toggle("bad", !!bad)' in _fn(js, "showScriptsMsg")
+    # while one change is under way, Add folder… and every Remove wait (the rows are drawn again after it)
+    assert 'const wait = [$("scripts-add"), ...$("scripts-folders").querySelectorAll("button")];' in change
+    assert "wait.forEach((b) => { b.disabled = true; });" in change
+    assert "finally { wait.forEach((b) => { b.disabled = false; }); }" in change
     add = _fn(js, "addScriptFolder")
-    assert "await pickFolder(" in add and "changeScriptFolders({ folder }" in add   # the picker, or a path typed
+    assert "await pickFolder(" in add and "changeScriptFolders({ add: folder })" in add   # kept at once, nothing read
+    css = (STATIC / "app.css").read_text(encoding="utf-8")
+    assert "button.link:disabled { opacity: .5; cursor: default; }" in css   # a waiting Remove looks it
     assert '$("scripts-add").addEventListener("click", addScriptFolder);' in js
     assert "loadScriptFolders();" in _fn(js, "openSettings")
     assert "folderLabels," in js[js.index("window.Kelvin = {"):]          # one way to name them, on every page part
@@ -280,8 +382,16 @@ def test_the_page_has_a_row_per_folder_with_remove_and_add_folder():
     block = _fn(welcome, "scriptsBlock")                                  # the first start: the same, as rows
     assert 'btn("Add folder…", "small", chooseScripts, { f: "scripts-pick" })' in block
     assert 'pathField(st, "scripts", useScripts, "Scripts", "Add")' in block and "...st.folders.map(folderRow)" in block
-    assert 'btn("Remove", "small ghost", (b) => removeScripts(path, b)' in _fn(welcome, "folderRow")
+    row = _fn(welcome, "folderRow")                                       # Remove drawn as Settings draws it
+    assert 'K.h("button", { class: "link danger", type: "button", "data-f": "scripts-remove-" + i,' in row
+    assert '"aria-label": "Remove " + path }, "Remove")' in row and "safe(removeScripts, path, remove)" in row
+    assert ".wl-item .chip, .wl-item .link, .wl-item .spinner { flex: none; }" in (
+        STATIC / "welcome.css").read_text(encoding="utf-8")
     assert "{ body: { remove: path } }" in _fn(welcome, "removeScripts")
+    for fn in ("useScripts", "removeScripts"):                            # the block's other buttons wait meanwhile
+        assert 'begin(button);\n    hold("scripts");' in _fn(welcome, fn)
+    assert 'el.querySelectorAll("button").forEach((b) => { b.disabled = true; });' in _fn(welcome, "hold")
+    assert "if (!useBtn.disabled) safe(use, input.value, useBtn);" in _fn(welcome, "pathField")   # Enter as its button
     assert "W.scripts.folders = [].concat(set.lab_scripts || []);" in welcome   # an older Kelvin's text too
     assert "f.labels.get(x.folder)" in _fn(welcome, "fileItem")
     assert "W.state.ask_scripts && !W.scripts.folders.length" in _fn(welcome, "finish")
@@ -290,3 +400,8 @@ def test_the_page_has_a_row_per_folder_with_remove_and_add_folder():
     assert 'role: "group", "aria-label": d' in pick and '"seq-folder-head"' in pick
     assert "st.labels = st.folders.length > 1 ? K.folderLabels(st.folders) : null;" in pick
     assert ".seq-folder-head {" in seq_css
+    # at most 300 shown, each folder its share, and how many more (the filter finds them)
+    assert "const room = shares(groups.map(([, xs]) => xs.length), 300);" in pick and "xs.slice(0, room[i])" in pick
+    assert 'moreFiles.textContent = left + " more";' in pick and "moreFiles.hidden = left <= 0;" in pick
+    assert "if (left > 0 && r < sizes[i]) { room[i] += 1; left -= 1; }" in _fn(seq, "shares")   # as scanlibrary's
+    assert ".seq-files-more {" in seq_css

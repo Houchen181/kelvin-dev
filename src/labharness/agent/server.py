@@ -534,9 +534,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
                    drives: Optional[Dict[str, Any]] = None, action: str = "", dry_run: bool = False,
                    background: bool = False) -> str:
         """Run one of the lab's own measurement scripts (Python or a notebook) as it is, in the lab's own Python:
-        script is its file name or path in one of the lab's scripts folders (those the person named in Settings or
-        Set up; a name in several of them is given by its path), or one the person imported in the Runs panel;
-        Kelvin runs nothing from elsewhere. Every command it sends to a lab instrument (pyvisa, pyserial, a socket)
+        script is its path in one of the lab's scripts folders (those the person named in Settings or Set up: a file
+        name is the file at the top of a folder, else the only one in their sub-folders; when two folders have it at
+        the top, or two sub-folders, give its full path), or one the person imported in the Runs panel; Kelvin runs
+        nothing from elsewhere. Every command it sends to a lab instrument (pyvisa, pyserial, a socket)
         goes through the safety gate on Kelvin's own connection: readings and settings run, drives are checked against
         the limits, ramped and watched. A person approves the run once; Kelvin reads the script first for the drive
         ranges it uses. params: values for its settings for this run, without editing the file ({"VMAX": 2});
@@ -1278,7 +1279,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     except (OSError, ValueError, AttributeError):
         off = False
     collection = None if off else Collection(home)
-    from ..web.settings import Settings
+    from ..web.settings import Settings, fold_folders
     lab, _, info = open_home_lab(home, Settings(home / "settings.json").switched_off, collection)
     envelope = load_envelope(args.envelope, lab.config, lab.registry) if args.envelope else None
     approver = WebApprover(timeout=args.approval_timeout)
@@ -1292,7 +1293,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     from .. import expstore
     runtime.experiments = expstore.Store(home / "experiments")   # the lab's experiments, the app's too
     runtime.labview_map = home / "labview-map.yaml"
-    runtime.scripts_folders = lambda: list(args.scripts)
+    folders, folded = fold_folders(args.scripts)   # as Settings: one twice kept once, one in another left out
+    for note in folded:
+        print("Kelvin: --scripts %s" % note, file=sys.stderr, flush=True)
+    runtime.scripts_folders = lambda: list(folders)
     runtime.scripts_python = lambda: args.scripts_python
     from .. import envs
     envs.cleanup()

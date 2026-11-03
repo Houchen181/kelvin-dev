@@ -771,6 +771,14 @@ class Settings:
         self._save()
         return kept, said
 
+    def add_lab_scripts(self, folder: Any) -> Tuple[List[str], List[str]]:
+        """One folder added to the lab's scripts folders as they are now, and kept (set_lab_scripts): an add that read
+        the folders first keeps one taken off meanwhile off. ValueError: it can't be one (folder_problem)."""
+        text = _folder_text(folder)
+        if not text:
+            raise ValueError(folder_problem(text))
+        return self.set_lab_scripts((self.lab_scripts or []) + [text])
+
     def remove_lab_scripts(self, folder: str) -> List[str]:
         """One of the lab's scripts folders taken off (the last one off: there are none). KeyError: it isn't one."""
         key = _folder_key(_folder_text(folder))

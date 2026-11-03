@@ -1,10 +1,10 @@
 """A lab's own scripts, run as they are, with every instrument command through Kelvin's safety gate.
 
 Many labs run their instruments from their own Python scripts and notebooks. Kelvin runs one from the lab's scripts
-folder (the one a person named in Set up) in the lab's own Python, with its stand-in for the lab's instruments loaded
-first (data/scriptshim/kelvin_shim.py): pyvisa, pyserial or a socket to a lab instrument reaches Kelvin instead of the
-instrument, and Kelvin passes each command through the safety gate on its own connection, as if the agent had sent
-it. So a script gets what a plan gets:
+folders (those a person named in Settings, Set up or the first start) in the lab's own Python, with its stand-in for
+the lab's instruments loaded first (data/scriptshim/kelvin_shim.py): pyvisa, pyserial or a socket to a lab
+instrument reaches Kelvin instead of the instrument, and Kelvin passes each command through the safety gate on its
+own connection, as if the agent had sent it. So a script gets what a plan gets:
 
     before   the script is read, never run (scripts.py): the lab instruments it opens and the drive values it uses
              become one approval by a person, like a plan's; what Kelvin can't check is said there (an instrument not

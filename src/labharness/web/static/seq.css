@@ -216,6 +216,7 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
 .seq-folder-head { padding: 6px 10px 3px; border-bottom: 1px solid var(--line); font-size: 12px; font-weight: 600; color: var(--muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .seq-folder + .seq-folder > .seq-folder-head { border-top: 1px solid var(--line); }
+.seq-files-more { font-size: 12px; font-weight: 400; color: var(--muted); }   /* how many more: the filter finds them */
 .seq-found { display: flex; flex-wrap: wrap; gap: 6px; }
 .seq-found:empty { display: none; }
 .seq-bad { font-size: 13px; color: var(--danger); overflow-wrap: anywhere; }

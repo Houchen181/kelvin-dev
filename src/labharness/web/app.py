@@ -3005,10 +3005,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 return error(400, str(e))
         try:
             found = await asyncio.to_thread(runtime.scripts_found, folders or folder)
+            if folders:   # a person's choice, among the folders as they are now (one taken off meanwhile stays off):
+                settings.add_lab_scripts(folder)   # run_script runs the scripts in them from now on
         except (OSError, ValueError) as e:
             return error(400, str(e))
-        if folders:
-            settings.set_lab_scripts(folders)   # a person's choice: run_script runs the scripts in them from now on
         return JSONResponse(found)
 
     async def labview_view(request: Request) -> Response:
@@ -3417,11 +3417,13 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def scripts_folder(request: Request) -> Response:
         """The folders of the scripts the lab runs its instruments with (Settings → Your lab's scripts, the first
-        setup's question, the first start): POST {folder} adds one; the setup reads the lab's scripts folders (never
-        runs them) for the names, settings and values the lab uses, and for instruments the scan can't tell
-        ({scripts, instruments, now} in all). {folder: ""}: there are none (not asked again). {remove: folder} takes
-        one off; {folders: [...]} names them all. Each answers {ok, folders, folded}: the same folder twice is kept
-        once and one inside another is left out (folded: what was, in words). GET: {folders}."""
+        setup's question, the first start): POST {folder} adds one, and the setup reads the lab's scripts folders
+        (never runs them) for the names, settings and values the lab uses, and for instruments the scan can't tell
+        ({scripts, instruments, now} in all); {add: folder} only adds one (Settings, which shows none of that). An
+        add keeps its folder among the folders as they are then: one taken off while it read stays off. {folder:
+        ""}: there are none (not asked again). {remove: folder} takes one off; {folders: [...]} names them all. Each
+        answers {ok, folders, folded}: the same folder twice is kept once and one inside another is left out
+        (folded: what was, in words). GET: {folders}."""
         if request.method == "GET":
             return JSONResponse({"folders": settings.lab_scripts or []})
         try:
@@ -3429,13 +3431,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         except ValueError:
             body = None
         if not isinstance(body, dict):
-            return error(400, "send {folder}, {remove} or {folders}")
+            return error(400, "send {folder}, {add}, {remove} or {folders}")
         if "remove" in body:
             try:
                 return JSONResponse({"ok": True, "folders": settings.remove_lab_scripts(str(body["remove"] or "")),
                                      "folded": []})
             except KeyError as e:
                 return error(400, e.args[0])
+        if "add" in body:
+            try:
+                folders, said = settings.add_lab_scripts(body["add"])
+            except ValueError as e:
+                return error(400, str(e))
+            return JSONResponse({"ok": True, "folders": folders, "folded": said})
         if "folders" in body:
             if not isinstance(body["folders"], list):
                 return error(400, "folders is a list of folders")
@@ -3449,11 +3457,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             settings.set_lab_scripts([])
             return JSONResponse({"ok": True, "now": False, "folders": [], "folded": []})
         try:
-            folders, said = settings.lab_scripts_with((settings.lab_scripts or []) + [folder])
+            folders, _ = settings.lab_scripts_with((settings.lab_scripts or []) + [folder])   # refused before a read
             answer = await asyncio.to_thread(setup.use_scripts, folders)
+            folders, said = settings.add_lab_scripts(folder)
         except (OSError, ValueError) as e:
             return error(400, str(e))
-        settings.set_lab_scripts(folders)
         return JSONResponse(dict(answer, ok=True, folder=folder, folders=folders, folded=said))
 
     async def approval_mode(request: Request) -> Response:

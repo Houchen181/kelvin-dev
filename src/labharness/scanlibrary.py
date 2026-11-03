@@ -27,6 +27,7 @@ import json
 import math
 import os
 import re
+import stat
 import threading
 import time
 from pathlib import Path
@@ -144,10 +145,20 @@ def plain_note(note: Any) -> str:
     return text
 
 
+def _link(path: Any) -> bool:
+    """A link, or a junction (Windows' link to a folder): either may lead out of the folder it is in."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return True
+    return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) == 0xA0000003   # IO_REPARSE_TAG_MOUNT_POINT
+
+
 def runnable_files(root: Path, most: int = MAX_FILES) -> Tuple[List[Dict[str, str]], bool]:
-    """The scripts Kelvin can run in a folder and its sub-folders (.py, .ipynb), SKIP_DIRS and hidden folders left out:
-    ([{path, rel (with /), name, kind: py | ipynb}], at most `most`, by their path in it; whether there were more).
-    Read only: no file is opened."""
+    """The scripts Kelvin can run in a folder and its sub-folders (.py, .ipynb), SKIP_DIRS, hidden folders, links and
+    junctions left out (what one leads to is listed where it is, if that is a folder Kelvin runs from: scriptrun.locate
+    runs nothing reached out of them): ([{path, rel (with /), name, kind: py | ipynb}], at most `most`, by their path
+    in it; whether there were more). Read only: no file is opened."""
     found: List[Dict[str, str]] = []
     more, looked = False, 0
     try:
@@ -155,13 +166,16 @@ def runnable_files(root: Path, most: int = MAX_FILES) -> Tuple[List[Dict[str, st
         if not root.is_dir():
             return [], False
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith("."))
+            dirnames[:] = sorted(d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")
+                                 and not _link(os.path.join(dirpath, d)))
             looked += len(dirnames) + len(filenames)
             for name in sorted(filenames):
                 kind = os.path.splitext(name)[1].lower().lstrip(".")
                 if kind not in ("py", "ipynb") or name.startswith("."):
                     continue
                 path = Path(dirpath) / name
+                if _link(path):
+                    continue
                 found.append({"path": str(path), "rel": path.relative_to(root).as_posix(), "name": name,
                               "kind": kind})
             if len(found) > most or looked > MAX_LOOKED:
@@ -173,6 +187,18 @@ def runnable_files(root: Path, most: int = MAX_FILES) -> Tuple[List[Dict[str, st
     if len(found) > most:
         found, more = found[:most], True
     return found, more
+
+
+def shares(sizes: List[int], most: int) -> List[int]:
+    """How many of each of several lists to keep, at most `most` in all: one of each in turn while there is room, so a
+    long list leaves the others room, and a short one gives them what it doesn't use (the first ones first)."""
+    room = [0] * len(sizes)
+    while most > 0 and any(r < s for r, s in zip(room, sizes)):
+        for i, s in enumerate(sizes):
+            if most > 0 and room[i] < s:
+                room[i] += 1
+                most -= 1
+    return room
 
 
 class Library:

@@ -48,7 +48,7 @@
 .wl-check { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: inherit; }
 .wl-label { flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wl-sub { flex: 1 1 0; min-width: 0; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wl-item .chip, .wl-item .btn, .wl-item .spinner { flex: none; }
+.wl-item .chip, .wl-item .link, .wl-item .spinner { flex: none; }
 .wl-more { width: 100%; min-height: 44px; border: 0; background: none; cursor: pointer; text-align: left;
   font-size: 13px; font-weight: 600; color: var(--accent); }
 .wl-more:hover { background: var(--hover); }

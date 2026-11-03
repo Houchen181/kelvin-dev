@@ -7494,7 +7494,7 @@
   function renderScriptFolders(folders, said) {
     $("scripts-folders").replaceChildren(...(folders.length ? folders.map((f) => {
       const remove = h("button", { class: "link danger", type: "button", "aria-label": "Remove " + f }, "Remove");
-      remove.addEventListener("click", () => changeScriptFolders({ remove: f }, remove));
+      remove.addEventListener("click", () => changeScriptFolders({ remove: f }));
       return h("li", {}, h("span", { class: "env-what", title: f }, f), remove);
     }) : [h("li", { class: "muted small" }, "No folders yet.")]));
     showScriptsMsg(said || "");
@@ -7507,19 +7507,20 @@
   async function loadScriptFolders() {
     try { renderScriptFolders((await api("/api/instruments/scripts-folder")).folders); } catch (e) { /* as it was drawn */ }
   }
-  async function changeScriptFolders(body, btn) {   // {folder} adds one (folded with the others), {remove} takes one off
-    btn.disabled = true;
+  async function changeScriptFolders(body) {   // {add} adds one (folded with the others, nothing read), {remove} takes one off
+    const wait = [$("scripts-add"), ...$("scripts-folders").querySelectorAll("button")];   // until the rows are drawn again
+    wait.forEach((b) => { b.disabled = true; });
     try {
       const r = await api("/api/instruments/scripts-folder", { body });
       if (S.settings) S.settings.lab_scripts = r.folders;
       renderScriptFolders(r.folders, (r.folded || []).join("; "));
     } catch (e) { showScriptsMsg(e.message, true); }
-    finally { btn.disabled = false; }
+    finally { wait.forEach((b) => { b.disabled = false; }); }
   }
   async function addScriptFolder() {
     const now = (S.settings && S.settings.lab_scripts) || [];
     const folder = await pickFolder(now[now.length - 1] || LAB.scriptsFolder || "", "The folder with your lab's scripts (Python, notebooks, MATLAB):");
-    if (folder) await changeScriptFolders({ folder }, $("scripts-add"));
+    if (folder) await changeScriptFolders({ add: folder });
   }
 
   // a select's option for a stored value, added when the value is one the list doesn't offer

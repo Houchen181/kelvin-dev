@@ -1,4 +1,4 @@
-"""Setting a lab up from its own scripts in the portal (Set up → From your scripts…), Kelvin reading them in a chat,
+"""Setting a lab up from its own scripts in the portal (Set up → Scripts…), Kelvin reading them in a chat,
 and a person's limits for one instrument (Limits… on its row): changed in the lab config and in force at once."""
 import pytest
 
