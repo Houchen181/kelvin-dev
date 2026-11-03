@@ -1129,6 +1129,13 @@ class ChatAgent:
         provider = self.providers.get(str(model_key).partition(":")[0])
         return "%s %s" % (provider.label, model_key.partition(":")[2]) if provider else model_key
 
+    def failure(self, model_key: str, e: BaseException) -> str:
+        """Why a model's request outside a turn failed (a second opinion, a card's draft, a project's opening): in
+        plain words on one line, its service's own, never a key (describe_error)."""
+        from .modelerrors import describe
+        provider = self.providers.get(self.model_key(model_key).partition(":")[0])
+        return describe_error(provider, e) if provider is not None else describe("The model", "", e)
+
     def claim(self, chat_id: str, model_key: str) -> Provider:
         self._may_start(chat_id)
         model_key = self.model_key(model_key)   # the caller passes the same key to run_turn: model_key() it first

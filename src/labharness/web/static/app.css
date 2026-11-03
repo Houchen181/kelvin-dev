@@ -918,7 +918,8 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .know-body { margin: 6px 0 0; padding: 8px 10px; max-height: 260px; overflow: auto; border-radius: 8px; background: var(--hover);
   font-size: 12.5px; white-space: pre-wrap; }
 .know-body[hidden] { display: none; }
-.memory-body > .link { justify-self: start; padding: 2px 0; }
+/* a row's buttons (a skill's Show and Download): small buttons on one line under what it is, with room around them */
+.memory-body > .field-actions { margin-top: 6px; }
 .memory-note:first-child { border-top: 0; }
 .memory-note.off .memory-body { opacity: .55; }
 .memory-kind { flex: none; margin-top: 2px; font-size: 12px; padding: 0 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
@@ -1192,7 +1193,6 @@ body.resizing .plot-svg { pointer-events: none; }
 .step-go .icon-btn { padding: 4px; }
 .step-go .icon-btn svg { width: 15px; height: 15px; }
 .step-foot { display: flex; align-items: baseline; gap: 10px; margin-top: -4px; }
-.step-foot .link { padding: 0 2px; }
 .step-foot .hint { overflow-wrap: anywhere; }
 .q-paste { display: grid; gap: 6px; }
 .q-paste textarea { width: 100%; min-height: 110px; max-height: 40vh; resize: vertical; border: 1px solid var(--line-strong);
@@ -1331,8 +1331,8 @@ body.resizing .plot-svg { pointer-events: none; }
 .help-passage { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; background: var(--panel); }
 .help-passage .md { font-size: 13.5px; }
 .help-topics { display: grid; gap: 8px; }
-.help-doc { display: grid; gap: 2px; font-size: 13px; }
-.help-links { display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.help-doc { display: grid; gap: 6px; font-size: 13px; }
+.help-links { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }   /* its topics: buttons, room between */
 .cal-state { font-size: 12px; color: var(--muted); }
 .cal-state.soon { color: var(--warn); }
 .cal-state.overdue { color: var(--danger); font-weight: 600; }
@@ -1499,7 +1499,6 @@ body.resizing .plot-svg { pointer-events: none; }
 .ed-sec { display: grid; gap: 6px; min-width: 0; }
 .ed-sec-head { display: flex; align-items: baseline; gap: 8px; }
 .ed-sec-head h3 { margin: 0; font-size: 13px; font-weight: 650; color: var(--text-2); }
-.ed-sec-head .link { padding: 0 2px; }
 .ed-loops { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .ed-loop { display: grid; gap: 6px; min-width: 0; padding: 8px 10px 9px; border: 1px solid var(--card-line); border-radius: 10px; background: var(--card);
   box-shadow: var(--card-shadow); }
