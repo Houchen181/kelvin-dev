@@ -14,8 +14,8 @@
   const W = {
     boot: null, state: null, gated: false, open: false, step: 0, busy: 0, moving: false, els: {}, setupKey: "",
     changed: false,   // a key, the local model or ChatGPT is new: the page's list of models is redone at the end
-    scripts: { folders: [], counts: null, typed: "", msg: "", full: "", note: "" },
-    data: { path: null, typed: "", editing: false, msg: "", full: "" },
+    scripts: { folders: [], counts: null, msg: "", full: "", note: "" },
+    data: { path: null, msg: "", full: "" },
     files: { list: null, all: false, ticked: new Set(), have: new Set(), failed: new Map(), done: 0, todo: 0, running: false,
              labels: null },   // labels: each folder's name in the list, when its scripts come from several
     keys: {}, typed: {}, keyMsg: {},
@@ -101,10 +101,6 @@
     if (el && !el.disabled) el.focus({ preventScroll: true });
   }
   function field(key) { return W.els.group && W.els.group.querySelector('[data-f="' + key + '-field"]'); }
-  function focusField(key) {
-    const el = field(key);
-    if (el) { el.focus(); if (el.select) el.select(); }
-  }
   function markBad(key) {
     const el = field(key);
     if (el) { el.classList.add("bad"); el.focus(); }
@@ -121,30 +117,10 @@
   function end() { W.busy = Math.max(0, W.busy - 1); footer(); }
 
   // ------------------------------------------------------------------ step 1: Workspace
-  function pathField(st, key, use, label, verb) {   // in a browser (no folder picker): the path typed, then Use (or Add)
-    const input = K.h("input", { class: "kfield", type: "text", spellcheck: "false", autocomplete: "off",
-                                 placeholder: "Folder path", "aria-label": label + " folder", "data-f": key + "-field" });
-    input.value = st.typed;
-    const useBtn = btn(verb || "Use", "small", (b) => use(input.value, b), { f: key + "-use" });
-    input.addEventListener("input", () => { st.typed = input.value; input.classList.remove("bad"); });
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) {   // as its button: not again while it waits
-        e.preventDefault(); e.stopPropagation();
-        if (!useBtn.disabled) safe(use, input.value, useBtn);
-      }
-      else if (e.key === "Escape" && st.editing) {   // the folder as it was, and Change… again
-        e.preventDefault(); e.stopPropagation();
-        Object.assign(st, { editing: false, typed: "", msg: "", full: "" });
-        redraw(key);
-        const change = W.els.group.querySelector('[data-f="' + key + '-change"]');
-        if (change) change.focus();
-      }
-    });
-    return [input, useBtn];
-  }
-  // the lab's scripts folders: Add folder… (in a browser, the path typed, then Add), then a row for each with Remove
+  // the lab's scripts folders: Add folder… (the computer's folder picker in the Kelvin app, Kelvin's folder browser in
+  // a browser), then a row for each with Remove
   function scriptsBlock() {
-    const st = W.scripts, picker = K.hasPicker();
+    const st = W.scripts;
     let val;
     if (st.msg) val = value(st.msg, "bad", st.full);
     else if (st.note) val = value(st.note, "", st.note, true);   // what was folded: a folder there already, or in another
@@ -154,9 +130,8 @@
       if (st.counts && st.counts.instruments) parts.push(plural(st.counts.instruments, "instrument"));
       val = parts.length ? value(parts.join(" · ")) : null;
     } else val = value("—");
-    const ctl = picker ? [btn("Add folder…", "small", chooseScripts, { f: "scripts-pick" })]
-      : pathField(st, "scripts", useScripts, "Scripts", "Add");
-    return block("scripts", row("Scripts", val, ctl, picker ? "" : "wide"), ...st.folders.map(folderRow));
+    const ctl = [btn("Add folder…", "small", chooseScripts, { f: "scripts-pick" })];
+    return block("scripts", row("Scripts", val, ctl, ""), ...st.folders.map(folderRow));
   }
   function folderRow(path, i) {   // one of them: its name, its whole path, Remove (drawn as Settings draws it)
     const name = String(path).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
@@ -168,30 +143,30 @@
   }
   async function chooseScripts(button) {
     const folders = W.scripts.folders;
-    const path = await K.pickFolder(folders[folders.length - 1] || "");
+    const path = await K.pickFolder(folders[folders.length - 1] || "", "Choose a folder of the lab's scripts");
     if (path) await useScripts(path, button);
   }
   // a folder of the lab's scripts added: Kelvin reads them all (never runs them) for its instruments; then the
   // runnable ones to import
   async function useScripts(typed, button) {
     const st = W.scripts, folder = unquote(typed);
-    if (!folder) { markBad("scripts"); return false; }
+    if (!folder) return false;
     let ok = false;
     begin(button);
     hold("scripts");
     try {
       const r = await K.api("/api/instruments/scripts-folder", { body: { folder } });
       Object.assign(st, { folders: r.folders || [], counts: { scripts: r.scripts || 0, instruments: r.instruments || 0 },
-                          typed: "", msg: "", full: "", note: (r.folded || []).join("; ") });
+                          msg: "", full: "", note: (r.folded || []).join("; ") });
       Object.assign(W.files, { list: null, all: false });
       W.files.failed.clear();
       ok = true;
     } catch (e) {
-      Object.assign(st, { msg: short(e), full: e.message, typed: folder, note: "" });
+      Object.assign(st, { msg: short(e), full: e.message, note: "" });
     } finally {
       end();
       redraw("scripts");
-      refocus(ok ? "" : K.hasPicker() ? "scripts-pick" : "scripts-field");
+      refocus(ok ? "" : "scripts-pick");
     }
     if (ok) await loadFiles();
     return ok;
@@ -210,27 +185,17 @@
     } finally {
       end();
       redraw("scripts");
-      refocus(K.hasPicker() ? "scripts-pick" : "scripts-field");
+      refocus("scripts-pick");
     }
     if (ok) await loadFiles();
     return ok;
   }
   function dataBlock() {
-    const st = W.data, picker = K.hasPicker();
+    const st = W.data;
     const val = st.msg ? value(st.msg, "bad", st.full)
       : value(st.path === null ? "…" : st.path || "—", "", st.path || null, true);
-    let ctl = [], wide = false;
-    if (st.path === null) ctl = [];
-    else if (picker) ctl = [btn("Change…", "small", chooseData, { f: "data-pick" })];
-    else if (st.editing) { ctl = pathField(st, "data", useData, "Data"); wide = true; }
-    else {
-      ctl = [btn("Change…", "small", () => {
-        Object.assign(st, { editing: true, typed: st.path || "", msg: "", full: "" });
-        redraw("data");
-        focusField("data");
-      }, { f: "data-change" })];
-    }
-    return block("data", row("Data", val, ctl, wide ? "wide" : ""));
+    const ctl = st.path === null ? [] : [btn("Change…", "small", chooseData, { f: "data-pick" })];
+    return block("data", row("Data", val, ctl, ""));
   }
   async function loadData() {
     const st = W.data;
@@ -242,25 +207,25 @@
     redraw("data");
   }
   async function chooseData(button) {
-    const path = await K.pickFolder(W.data.path || "");
+    const path = await K.pickFolder(W.data.path || "", "Choose the data folder");
     if (path) await useData(path, button);
   }
   async function useData(typed, button) {
     const st = W.data, path = unquote(typed);
-    if (!path) { markBad("data"); return false; }
-    if (norm(path) === norm(st.path)) { Object.assign(st, { editing: false, typed: "", msg: "", full: "" }); redraw("data"); return true; }
+    if (!path) return false;
+    if (norm(path) === norm(st.path)) { Object.assign(st, { msg: "", full: "" }); redraw("data"); return true; }
     let ok = false;
     begin(button);
     try {
       const r = await K.api("/api/data-folder", { body: { path, move: false } });
-      Object.assign(st, { path: r.path || path, typed: "", editing: false, msg: "", full: "" });
+      Object.assign(st, { path: r.path || path, msg: "", full: "" });
       ok = true;
     } catch (e) {
-      Object.assign(st, { msg: short(e), full: e.message, typed: path });
+      Object.assign(st, { msg: short(e), full: e.message });
     } finally {
       end();
       redraw("data");
-      refocus(ok ? "" : K.hasPicker() ? "data-pick" : "data-field");
+      refocus(ok ? "" : "data-pick");
     }
     return ok;
   }
@@ -629,15 +594,7 @@
   // instruments added. false: stay (something to see first, or a refusal on its row)
   async function leave(forward) {
     const id = STEPS[W.step][0];
-    if (id === "workspace") {
-      const sc = W.scripts, dt = W.data;
-      if (!K.hasPicker() && unquote(sc.typed) && !sc.folders.some((f) => norm(f) === norm(unquote(sc.typed)))) {
-        const used = await useScripts(sc.typed, null);
-        return used && !(W.files.list && W.files.list.length);   // its scripts show first; Next again imports them
-      }
-      if (dt.editing && unquote(dt.typed) && !(await useData(dt.typed, null))) return false;
-      return forward ? importTicked() : true;
-    }
+    if (id === "workspace") return forward ? importTicked() : true;   // its folders were kept as they were chosen
     if (id === "model") {
       let ok = true;
       for (const [name] of KEYS) if (!W.keys[name]) ok = (await saveKey(name, null, true)) && ok;

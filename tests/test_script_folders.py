@@ -381,7 +381,9 @@ def test_the_page_has_a_row_per_folder_with_remove_and_add_folder():
 
     block = _fn(welcome, "scriptsBlock")                                  # the first start: the same, as rows
     assert 'btn("Add folder…", "small", chooseScripts, { f: "scripts-pick" })' in block
-    assert 'pathField(st, "scripts", useScripts, "Scripts", "Add")' in block and "...st.folders.map(folderRow)" in block
+    assert "...st.folders.map(folderRow)" in block and "pathField" not in welcome   # chosen, never typed: pickFolder
+    assert """K.pickFolder(folders[folders.length - 1] || "", "Choose a folder of the lab's scripts")""" in _fn(
+        welcome, "chooseScripts")   # Kelvin's folder browser in a browser
     row = _fn(welcome, "folderRow")                                       # Remove drawn as Settings draws it
     assert 'K.h("button", { class: "link danger", type: "button", "data-f": "scripts-remove-" + i,' in row
     assert '"aria-label": "Remove " + path }, "Remove")' in row and "safe(removeScripts, path, remove)" in row
@@ -391,7 +393,6 @@ def test_the_page_has_a_row_per_folder_with_remove_and_add_folder():
     for fn in ("useScripts", "removeScripts"):                            # the block's other buttons wait meanwhile
         assert 'begin(button);\n    hold("scripts");' in _fn(welcome, fn)
     assert 'el.querySelectorAll("button").forEach((b) => { b.disabled = true; });' in _fn(welcome, "hold")
-    assert "if (!useBtn.disabled) safe(use, input.value, useBtn);" in _fn(welcome, "pathField")   # Enter as its button
     assert "W.scripts.folders = [].concat(set.lab_scripts || []);" in welcome   # an older Kelvin's text too
     assert "f.labels.get(x.folder)" in _fn(welcome, "fileItem")
     assert "W.state.ask_scripts && !W.scripts.folders.length" in _fn(welcome, "finish")
