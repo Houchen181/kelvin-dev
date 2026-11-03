@@ -141,7 +141,7 @@ def test_scans_are_selected_and_added_to_the_queue_in_order():
     the order they were picked (each as its Queue does), Edit (Enter) edits a scan or shows a script's settings. The
     rows' own buttons stay; the bar that did this above the list is gone."""
     top = PAGE[PAGE.index('<div class="scans-top">'):PAGE.index('<form id="scans-path"')]
-    for text in ('id="scans-new"', ">New scan<", 'id="scans-import"', ">Import a script…<", 'id="scans-filter"',
+    for text in ('id="scans-new"', ">New scan<", 'id="scans-import"', ">Import a script or VI…<", 'id="scans-filter"',
                  'id="scans-edit"', ">Edit<"):
         assert text in top, text
     assert "scans-pick" not in PAGE + JS + CSS and PAGE.count('role="grid" aria-multiselectable="true"') == 2

@@ -518,3 +518,51 @@ def test_the_queues_dry_run_rehearsal_stops_with_the_lab(rt_kept, monkeypatch):
     rt.queue_add("script: iv-scan\n")
     rt.queue_start(dry_run=True)
     assert seen and seen[0] is rt.gate
+
+
+# ------------------------------------------------------------------ a VI imported from the portal: given by its path
+
+def test_a_vi_is_given_by_its_full_path_and_refused_in_words_before_any_model_is_asked(rt_keysight, tmp_path):
+    rt = rt_keysight
+    asked = []
+    rt.vi_model = lambda purpose, attribution: asked.append(purpose)
+    script = tmp_path / "sweep.py"
+    script.write_text("V = 1\n", encoding="utf-8")
+    for path, words in (("SMU_IV single.vi", "full path"), (str(tmp_path / "gone.vi"), "does not exist"),
+                        (str(tmp_path), "is a folder"), (str(script), "isn't a LabVIEW VI"), ("", "the VI's path")):
+        said = rt.translate_vi(path)
+        assert said.startswith("not translated") and words in said, (path, said)
+    assert asked == []   # no model was even chosen: nothing of the VI went anywhere
+
+
+def test_a_vi_path_copied_with_its_quotes_is_translated(rt_keysight):
+    said = rt_keysight.translate_vi('"%s"' % VI)   # Windows' Copy as path
+    assert re.search(r"draft d[0-9]{8}-", said), said
+
+
+def test_a_translation_while_another_runs_is_refused_in_words_that_name_it(rt_keysight):
+    rt = rt_keysight
+    release = threading.Event()
+    busy = rt.labview_reads.submit(release.wait, 30, doing=rt.translating(str(VI)))
+    try:
+        said = rt.translate_vi(str(VI))   # the chat's, while the portal's goes on
+    finally:
+        release.set()
+        busy.result(30)
+    assert said.startswith("not translated") and "translating SMU_IV single.vi already" in said, said
+
+
+def test_a_vi_is_never_run_as_a_script(tmp_path):
+    vi = tmp_path / "IV scan.vi"
+    vi.write_bytes(VI.read_bytes())
+    with pytest.raises(scriptrun.ScriptError, match="LabVIEW VI.*translat"):
+        scriptrun._runnable(vi)
+
+
+def test_a_vis_name_becomes_a_readable_experiment_name():
+    from labharness.agent.runtime import LabRuntime
+    name = LabRuntime._name_for
+    assert name({"name": "GateSweepScan2400.vi"}) == "gate-sweep-scan2400"
+    assert name({"name": "SMU_IV single.vi"}) == "smu_iv-single"
+    assert name({"name": "IV curve avg.vi"}) == "iv-curve-avg"
+    assert name({"name": "K2400 IV.vi"}) == "k2400-iv" and name({}) == "experiment"

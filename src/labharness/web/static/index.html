@@ -386,12 +386,12 @@
           <section id="scans-view" class="scans-view sched-col" aria-label="Scans">
             <div class="scans-top">
               <button id="scans-new" class="btn small" type="button">New scan</button>
-              <button id="scans-import" class="btn small" type="button">Import a script…</button>
+              <button id="scans-import" class="btn small" type="button" title="A Python script or notebook, kept in your scripts; or a LabVIEW VI, which the AI translates into Python, one of the lab's experiments, for you to read and keep">Import a script or VI…</button>
               <input id="scans-filter" class="pane-filter" type="search" placeholder="Filter" aria-label="Filter scans and scripts" spellcheck="false" autocomplete="off">
               <button id="scans-edit" class="btn small" type="button" title="Edit (Enter)" disabled>Edit</button>
             </div>
             <form id="scans-path" class="scans-path" hidden>
-              <input id="scans-path-input" placeholder="The script's full path (.py or .ipynb)" aria-label="The script's full path" spellcheck="false" autocomplete="off">
+              <input id="scans-path-input" placeholder="The full path of a script (.py or .ipynb) or a LabVIEW VI (.vi)" aria-label="The full path of a script or VI" spellcheck="false" autocomplete="off">
               <button class="btn small" type="submit">Import</button>
             </form>
             <div id="scans-check" class="callout small calm scans-check" role="status" hidden></div>
@@ -400,7 +400,7 @@
               <section id="scans-experiments" aria-labelledby="scans-experiments-h" hidden><h3 id="scans-experiments-h">Lab experiments</h3><ul class="q-list exp-list" aria-labelledby="scans-experiments-h"></ul></section>
               <section id="scans-scripts" aria-labelledby="scans-scripts-h" hidden><h3 id="scans-scripts-h">Your scripts</h3><ul class="q-list" role="grid" aria-multiselectable="true" aria-labelledby="scans-scripts-h"></ul></section>
               <section id="scans-plans" aria-labelledby="scans-plans-h" hidden><h3 id="scans-plans-h">Scans</h3><ul class="q-list" role="grid" aria-multiselectable="true" aria-labelledby="scans-plans-h"></ul></section>
-              <p id="scans-empty" class="pane-empty" hidden>Each scan Kelvin runs, and each script you import, is kept here to run again.</p>
+              <p id="scans-empty" class="pane-empty" hidden>Each scan Kelvin runs, and each script you import, is kept here to run again. A LabVIEW VI you import is translated into Python, one of the lab's experiments.</p>
             </div>
           </section>
           <div class="sched-mid">

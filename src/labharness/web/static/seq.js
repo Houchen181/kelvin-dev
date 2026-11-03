@@ -1477,8 +1477,12 @@
       found.replaceChildren();
       add.disabled = !st.path;
       if (!st.path) return;
-      if (!st.touched) name.value = base(st.path).replace(/\.(py|ipynb)$/i, "");
+      if (!st.touched) name.value = base(st.path).replace(/\.(py|ipynb|vi)$/i, "");
       const ask = ++st.seq;
+      if (K.isVI(st.path)) {   // a LabVIEW VI: Add translates it into one of the lab's experiments, a draft to read and keep
+        found.replaceChildren(h("span", {}, "A LabVIEW VI: Add translates it into Python, one of the lab's experiments (a few minutes)."));
+        return;
+      }
       let r = null;
       try { r = await K.api("/api/library", { body: { op: "inspect", path: st.path } }); }
       catch (e) { if (ask === st.seq) found.replaceChildren(h("span", { class: "seq-bad" }, e.message)); return; }
@@ -1508,6 +1512,7 @@
       if (st.busy) return;
       if (path.value.trim() !== st.path) await choosePath(path.value);
       if (!st.path || add.disabled) return;
+      if (K.isVI(st.path)) { if (dlg) dlg.close(); K.importVI(st.path); return; }
       st.busy = true;
       add.disabled = true;
       try {
