@@ -8,17 +8,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import openai
 
-from .base import (DOCUMENTS_NOTE, PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url, safe_id, text_of,
-                   user_text)
+from .base import (DOCUMENTS_NOTE, PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url, opencode_session,
+                   safe_id, text_of, user_text)
 
 _SKIP = ("audio", "realtime", "tts", "transcribe", "image", "search", "embedding", "instruct", "moderation",
          "dall-e", "whisper", "davinci", "babbage")
+# OpenCode's services, which route by conversation and send x-opencode-session (base.opencode_session): by their
+# preset (services.py), or by their address for one added as another service
+OPENCODE = ("opencode", "opencode-go")
+OPENCODE_HOST = "opencode.ai"
 REFUSALS = (400, 404, 415, 422)   # how services say a model takes no pictures (OpenRouter: 404, no such endpoint)
 # what such a refusal says (DeepSeek: unknown variant `image_url`; vLLM: not a multimodal model), unlike a request
 # that was only too long: a model is remembered as seeing no pictures only for these
@@ -98,11 +104,13 @@ def to_messages(system: str, history: List[Dict[str, Any]]) -> List[Dict[str, An
 MAX_LISTED = 60   # a gateway can list hundreds; the newest that fit are shown, and any can be named in Settings
 
 
-def _fetch_json(url: str, api_key: Optional[str]) -> Any:
+def _fetch_json(url: str, api_key: Optional[str], extra: Optional[Dict[str, str]] = None) -> Any:
+    """GET a service's JSON (its list of models). extra: headers it wants beyond the key (OpenCode's session)."""
     from ..._version import __version__
     headers = {"User-Agent": "Kelvin/%s" % __version__, "Accept": "application/json"}   # some refuse Python's own
     if api_key:
         headers["Authorization"] = "Bearer %s" % api_key
+    headers.update(extra or {})
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
@@ -119,11 +127,12 @@ class OpenAIProvider(Provider):
     def __init__(self, name: str, label: str, api_key: Optional[str], base_url: Optional[str] = None,
                  models: Optional[List[str]] = None, models_url: Optional[str] = None, exclude: Iterable[str] = (),
                  tools_only: bool = False, headers: Optional[Dict[str, str]] = None,
-                 fetch: Callable[[str, Optional[str]], Any] = _fetch_json, preset: str = "", pictures: str = "",
-                 vision: Any = None, api: str = ""):
+                 fetch: Callable[[str, Optional[str], Dict[str, str]], Any] = _fetch_json, preset: str = "",
+                 pictures: str = "", vision: Any = None, api: str = ""):
         """preset: the service Kelvin knows it as (services.py; for the hub's list of models that see pictures).
         pictures: the person's switch for the service, "on" or "off" ("": model by model). vision: vision.Vision.
-        api: "openai" for OpenAI's own API at another address (through the Kelvin hub: hubmodels.py)."""
+        api: "openai" for OpenAI's own API at another address (through the Kelvin hub: hubmodels.py).
+        fetch(url, key, headers): reads the list of models at models_url."""
         self.name, self.label = name, label
         self._static = [m for m in (models or []) if m]
         self.models_url = models_url
@@ -144,10 +153,15 @@ class OpenAIProvider(Provider):
         self.pictures = pictures if pictures in ("on", "off") else ""
         self.vision = vision
         self._inputs: Dict[str, bool] = {}   # what the service's own list says: does the model take pictures?
+        host = (urllib.parse.urlparse(base_url or "").hostname or "").lower()
+        # an OpenCode service's session for its requests outside any chat (each chat has its own: extra_headers)
+        self._outside = secrets.token_hex(12) if self.preset in OPENCODE or host == OPENCODE_HOST \
+            or host.endswith("." + OPENCODE_HOST) else ""
 
     def extra_headers(self) -> Dict[str, str]:
-        """Headers a service wants with each request beyond its key (OpenCode's session: providers/hub.py)."""
-        return {}
+        """Headers a service wants with each request beyond its key: an OpenCode service's session, one per chat as
+        the hub's OpenCode connections send (providers/hub.py), and this connection's own outside any chat."""
+        return opencode_session(self._outside) if self._outside else {}
 
     def model_sees_images(self, model: str) -> bool:
         """Whether Kelvin sends this model pictures (vision.py): unknown ones get them, and fall back if they refuse."""
@@ -177,18 +191,30 @@ class OpenAIProvider(Provider):
     def available(self) -> bool:
         return self.client is not None
 
+    async def _listed(self) -> List[Any]:
+        """The service's own list of models: each with its id, and what else the service says of it."""
+        extra = self.extra_headers()
+        if self.models_url:   # some services list their models somewhere else than <base>/models
+            data = await asyncio.to_thread(self._fetch, self.models_url, self._key, extra)
+            return [type("M", (), m) for m in (data.get("data") if isinstance(data, dict) else data) or []
+                    if isinstance(m, dict) and m.get("id")]
+        return [m async for m in self.client.models.list(**({"extra_headers": extra} if extra else {}))]
+
+    async def not_offered(self) -> List[Dict[str, str]]:
+        """The model names typed for this service (Settings) that its own list lacks, each with the nearest it has
+        (services.not_offered); none when no name was typed or the list is empty. Raises when the list can't be read."""
+        from ..services import not_offered
+        if not self._static:
+            return []
+        offered = [m.id for m in await self._listed()]
+        return not_offered(self._static, offered) if offered else []
+
     async def models(self) -> List[ModelInfo]:
         if self._static:
             return [ModelInfo(m, m, self.name) for m in self._static]
         if self._cache is None:
-            if self.models_url:   # some services list their models somewhere else than <base>/models
-                data = await asyncio.to_thread(self._fetch, self.models_url, self._key)
-                listed = [type("M", (), m) for m in (data.get("data") if isinstance(data, dict) else data) or []
-                          if isinstance(m, dict) and m.get("id")]
-            else:
-                listed = [m async for m in self.client.models.list()]
             found = []
-            for m in listed:
+            for m in await self._listed():
                 mid = m.id
                 if self.own and (not mid.startswith(("gpt-", "o1", "o3", "o4", "o5", "chatgpt"))
                                               or any(s in mid for s in _SKIP)):

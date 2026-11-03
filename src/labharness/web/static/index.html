@@ -725,8 +725,8 @@
         <section class="set-page" data-page="instruments" hidden>
           <div class="field">
             <div class="field-row"><span class="field-label">Lab owner's PIN</span>
-              <button id="owner-pin-set" class="btn small" type="button">Set a PIN…</button>
-              <button id="owner-pin-remove" class="link soft danger" type="button" hidden>Remove</button></div>
+              <span class="field-actions"><button id="owner-pin-set" class="btn small" type="button">Set a PIN…</button>
+              <button id="owner-pin-remove" class="link soft danger" type="button" hidden>Remove</button></span></div>
             <span id="owner-pin-state" class="hint"></span>
           </div>
           <div id="roles-box" class="field" hidden>
@@ -741,8 +741,8 @@
           </div>
           <div class="field">
             <div class="field-row"><span class="field-label">Safety changes go to the owner</span>
-              <button id="owner-notify-mine" class="btn small" type="button">Where my notifications go</button>
-              <button id="owner-notify-off" class="link soft" type="button" hidden>Stop</button></div>
+              <span class="field-actions"><button id="owner-notify-mine" class="btn small" type="button">Where my notifications go</button>
+              <button id="owner-notify-off" class="link soft" type="button" hidden>Stop</button></span></div>
             <span id="owner-notify-state" class="hint"></span>
             <span class="hint">The owner hears of every widened limit, removed interlock, auto mode and unlock. A copy of the owner's webhook and email settings stays here, readable by anyone on this computer. <button id="history-open" class="link" type="button">Lab config history…</button></span>
           </div>
@@ -1248,7 +1248,7 @@
     <div class="field">
       <div class="field-row"><label class="field-label" for="project-summary">Master report</label><span id="master-files" class="hint"></span></div>
       <textarea id="project-summary" rows="4" maxlength="6000" spellcheck="true" placeholder="Its opening (empty: Kelvin's summary from the data)"></textarea>
-      <div class="add-row"><button id="master-open" class="btn small" type="button">Open</button><button id="summary-write" class="btn small ghost" type="button" title="Write the opening with Kelvin">Write with Kelvin</button><button id="master-update" class="link soft" type="button">Update now</button></div>
+      <div class="field-actions"><button id="master-open" class="btn small" type="button">Open</button><button id="summary-write" class="btn small ghost" type="button" title="Write the opening with Kelvin">Write with Kelvin</button><button id="master-update" class="link soft" type="button">Update now</button></div>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Reading list</span><span id="papers-count" class="hint"></span></div>

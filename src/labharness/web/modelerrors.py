@@ -2,8 +2,8 @@
 
 A key that is missing, wrong or revoked, or expired; no credit left on the account; a rate or plan limit; the service
 overloaded, down or out of reach; a model it doesn't offer: each is said as what it is, with what to do about it and
-the service's own words where they add something. A key is never repeated, not even the masked part some services
-echo back."""
+the service's own words where they add something. Anything else is the service's own words after its name, on one
+line. A key is never repeated, not even the masked part some services echo back."""
 from __future__ import annotations
 
 import re
@@ -44,6 +44,8 @@ def _body_error(e: BaseException) -> Dict[str, Any]:
         if isinstance(err, dict):
             return err
         return {"message": err} if isinstance(err, str) else body
+    if isinstance(body, str) and body.strip() and not body.lstrip().startswith("<"):
+        return {"message": body.strip()}   # words alone ({"error": "Model is unavailable"} as OpenAI's SDK keeps it)
     return {}
 
 
@@ -144,7 +146,7 @@ def describe(label: str, service: str, e: BaseException) -> str:
     if status is not None and status >= 500:
         return "%s had a problem on its side (error %d); nothing is wrong with your key. Try again shortly." % (
             label, status)
-    return "%s error: %s" % (label, said)
+    return "%s: %s" % (label, said)   # anything else in the service's own words ("OpenCode Go: Model is unavailable")
 
 
 def unavailable(key: str, providers: Dict[str, Any]) -> str:

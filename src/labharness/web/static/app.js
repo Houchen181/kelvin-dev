@@ -3863,7 +3863,9 @@
       refreshModels(r);
       const added = r.services[r.services.length - 1];
       const group = r.models.groups.find((g) => g.provider === added.id);
+      // r.names: the models named for it that it doesn't offer, with the nearest it does (added all the same)
       $("svc-hint").textContent = group && group.error ? "Added, but " + group.error
+        : r.names ? "Added, but " + r.names
         : "Added " + added.name + (group ? " with " + group.models.length + " models." : ".");
     } catch (e) { $("svc-hint").textContent = e.message; }
   }
@@ -7571,7 +7573,7 @@
     }
     list.replaceChildren(...items.map((it) => {
       const body = h("pre", { class: "know-body", hidden: true }, it.body);
-      const show = h("button", { class: "link soft", type: "button" }, "Show");
+      const show = h("button", { class: "btn small", type: "button" }, "Show");
       show.addEventListener("click", () => { body.hidden = !body.hidden; show.textContent = body.hidden ? "Show" : "Hide"; });
       const when = (it.saved ? "kept " + new Date(it.saved * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" }) : "comes with Kelvin") +
         (it.files && it.files.length ? " · " + it.files.length + (it.files.length === 1 ? " file" : " files") : "");
@@ -7581,15 +7583,15 @@
         try { await api("/api/know/" + it.kind + "/" + it.scope + "/" + encodeURIComponent(it.name), { body: { enabled: on.checked } }); it.enabled = on.checked; }
         catch (e) { on.checked = !on.checked; msg.textContent = e.message; }
       });
-      const extra = [];
+      const acts = h("div", { class: "field-actions" }, show);   // its buttons on one line under what it is
       if (it.kind === "skill") {
-        const get = h("button", { class: "link soft", type: "button", title: "As a .zip for Claude or another Kelvin" }, "Download");
+        const get = h("button", { class: "btn small", type: "button", title: "As a .zip for Claude or another Kelvin" }, "Download");
         get.addEventListener("click", () => downloadSkill(it));
-        extra.push(get);
+        acts.append(get);
       }
       const row = h("li", { class: "memory-note" + (it.enabled === false ? " off" : "") }, h("span", { class: "memory-kind" }, it.kind),
         h("div", { class: "memory-body" }, h("span", {}, h("b", {}, it.name), it.description ? " — " + it.description : ""),
-          h("span", { class: "memory-meta" }, when), show, ...extra, body),
+          h("span", { class: "memory-meta" }, when), acts, body),
         h("label", { class: "know-on", title: "Kelvin sees it (off: kept, but not offered)" }, on, "On"));
       if (it.scope !== "kelvin") {
         row.append(rowButton("trash", "Delete this " + it.kind, async () => {
