@@ -325,14 +325,78 @@ def test_the_page_has_one_form():
 def test_auto_page_size_steps_by_the_window():
     """Auto, the page size without a choice: 100 % on a big window (1600 x 900 or more), on a touch screen and under
     1000 px wide; 85 % under 680 px tall; 90 % otherwise. It reads the real window, which the zoom does not change, so
-    it never feeds back on itself. A choice in Settings -> Page size (80 to 150 %) overrides it on this browser."""
+    it never feeds back on itself. A choice in Settings -> Page size (85 to 150 %) overrides it on this browser."""
     js = _read("app.js")
     auto = _function(js, "autoZoom")
     assert "const w = window.innerWidth, h = window.innerHeight;" in auto
     assert 'if (w < 1000 || window.matchMedia("(pointer: coarse)").matches) return 1;' in auto
     assert re.findall(r"return ([^;]+);", auto) == ["1", "w >= 1600 && h >= 900 ? 1 : h < 680 ? 0.85 : 0.9"]
-    assert "pageChoice() || autoZoom()" in _function(js, "fitTiers")
-    assert "const SIZES = [0.8, 0.85, 0.9, 1, 1.1, 1.25, 1.5];" in js
+    size = _function(js, "pageSize")
+    assert "const chosen = pageChoice(), want = chosen || autoZoom();" in size
+    # a touch screen's Auto stays as it is (its 40 px targets); with a mouse Auto is held as a choice is (below)
+    assert 'if (!chosen && window.matchMedia("(pointer: coarse)").matches) return want;' in size
+    assert "z = pageSize();" in _function(js, "fitTiers")
+
+
+def test_page_size_keeps_the_floors_from_85_percent():
+    """The smallest page size is 85 %, where 12 px text renders at 10.2 px and 28 px targets at 23.8 px. A stored size
+    under 85 % reads as 85 %, never as Auto."""
+    js = _read("app.js")
+    sizes = re.search(r"const SIZES = \[([^\]]*)\];", js).group(1)
+    assert [float(s) for s in sizes.split(",")] == [0.85, 0.9, 1, 1.1, 1.25, 1.5]
+    choice = _function(js, "pageChoice")
+    assert 'const z = Number(store("lh.pageSize"));' in choice
+    assert "return z > 0 && z < SIZES[0] ? SIZES[0] : SIZES.includes(z) ? z : 0;" in choice
+    show = _function(js, "showPage")   # − greyed at the smallest step, its tip saying so
+    assert '$("zoom-out").disabled = z <= SIZES[0];' in show
+    assert 'const least = z <= SIZES[0] ? pct(SIZES[0]) + " is the smallest" : "";' in show
+    assert 'if ($("zoom-out").title !== least) $("zoom-out").title = least;' in show
+    # the desktop app's old window zoom becomes the nearest of these sizes, so 80 % there becomes 85 % too
+    assert "SIZES.reduce((a, b) => (Math.abs(b - t) < Math.abs(a - t) ? b : a))" in _function(js, "appZoomOff")
+
+
+def test_page_size_never_leaves_the_layout_under_its_least_height():
+    """The frame's least height is 560 page px (.app's min-height): below it the page scrolls. Page size's + is greyed
+    whenever the next size would leave the layout under it on this window, its tip saying why, weighed again at every
+    resize; Ctrl + and the wheel in the app go no further. A choice too big for the window is applied as the largest
+    size that fits and kept, so a taller window gets it back, the line under the buttons saying which was chosen. Auto
+    with a mouse is held the same way."""
+    js, css = _read("app.js"), _uncommented_css("app.css")
+    least = int(re.search(r"const PAGE_LEAST = (\d+);", js).group(1))
+    app = [d for s, d in _rules(css) if s == ".app"]
+    assert len(app) == 1 and "min-height: %dpx;" % least in app[0]
+    assert "const sizeFits = (z) => window.innerHeight / z >= PAGE_LEAST;" in js
+    size = _function(js, "pageSize")
+    assert "return SIZES.filter((s) => s <= want && sizeFits(s)).pop() || SIZES[0];" in size
+    fit = _function(js, "fitTiers")   # weighed at every resize, also when neither the size nor the tier changes
+    assert "if (!zoomed && tier === FIT.tier) { showPage(); return; }" in fit
+    show = _function(js, "showPage")
+    assert "const next = SIZES.find((s) => s > z + 0.001), cramped = !!next && !sizeFits(next);" in show
+    assert '$("zoom-in").disabled = !next || cramped;' in show
+    assert '"At " + pct(next) + " the page would be under its least height of " + PAGE_LEAST + " px on this window"' in show
+    assert 'const why = !next ? pct(z) + " is the largest"' in show   # + at the largest step says so too
+    assert 'if ($("zoom-in").title !== why) $("zoom-in").title = why;' in show
+    # the choice held smaller is said where everyone sees it (not in a tip), and kept
+    assert 'pct(chosen) + " chosen: a taller window shows it"' in show
+    assert '$("zoom-held").textContent = held;' in show and '$("zoom-held").hidden = !held;' in show
+    assert '$("zoom-now").title' not in show
+    page = _read("index.html")
+    assert '<span id="zoom-held" class="hint" role="status" hidden></span>' in page
+    assert page.index('id="zoom-in"') < page.index('id="zoom-held"') < page.index('id="zoom-hint"')
+    step = _function(js, "stepPage")
+    assert "if (!z || (dir > 0 && !sizeFits(z))) return;" in step
+    for key in ('$("zoom-in").addEventListener("click", () => stepPage(1));', "stepPage(dir);",
+                "stepPage(FIT.wheel < 0 ? 1 : -1);"):
+        assert key in _function(js, "pageKeys"), key
+    # the page size is applied in one place (fitTiers, through pageSize) and the choice read in one (pageChoice): no
+    # other place sets it, so none skips the hold
+    assert fit.count('setProperty("--zoom"') == 1 and js.count('setProperty("--zoom"') == 1
+    assert re.findall(r"\bz = (\w+\(\))", fit) == ["pageSize()"]
+    reads = [m.start() for m in re.finditer(r'store\("lh\.pageSize"\)', js)]   # read by pageChoice; appZoomOff asks
+    assert len(reads) == 2 and _function(js, "pageChoice").count('store("lh.pageSize")') == 1   # only if one is kept
+    assert 'store("lh.pageSize") === null' in _function(js, "appZoomOff")
+    for name in SCRIPTS[1:]:
+        assert "lh.pageSize" not in _read(name) and 'setProperty("--zoom"' not in _read(name)
 
 
 def test_home_fitted_holds_five_columns_of_blocks():
