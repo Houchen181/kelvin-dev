@@ -188,13 +188,13 @@ def test_a_run_with_no_total_counts_its_points():
 # ------------------------------------------------------------------ the Analysis pane follows the newest run
 
 def test_the_analysis_pane_follows_the_newest_run_until_the_person_makes_it_theirs():
-    follows = _js("anFollows")
-    for part in ("ANA.follow", "a.x && a.y && a.group", "s.runs.length <= 1", "!s.where", "!s.steps.length",
-                 "!s.fit"):
-        assert part in follows, part
-    assert "if (!ANA.spec.runs.length || anFollows()) return startAnalysis();" in _js("refreshAnalysisRuns")
-    assert "if (!ANA.spec.runs.length || anFollows()) startAnalysis();" in _js("toggleAnalysis")
+    # since 2026-11-03 the person makes it theirs by picking a dataset (the subagent decides the rest), and a run the
+    # pane follows while it is still measuring is analyzed once it ends
+    assert "if (!ANA.run || ANA.follow) return startAnalysis();" in _js("refreshAnalysisRuns")
+    assert "if (!ANA.run || ANA.follow) startAnalysis();" in _js("toggleAnalysis")
     assert "ANA.follow = true;" in _js("startAnalysis")
     assert "ANA.follow = false;" in _js("openAnalysis")   # what Kelvin's analyze, or a run's Analyze, asked for
     picked = JS[JS.index('$("an-run").addEventListener("change"'):]
     assert "ANA.follow = false;" in picked[:picked.index("});")]   # the person's pick
+    run = _js("analyzeRun")
+    assert 'if (!again && ANA.follow && r && r.status === "running")' in run and "once it ends" in run

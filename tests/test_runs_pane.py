@@ -505,7 +505,7 @@ def test_a_closed_run_tab_hands_the_keyboard_on_and_key_results_wait_for_a_width
     assert 'document.addEventListener("kelvin:layout", () => keysOnce(RUNS.tabs.get(RUNS.active)));' in JS
     assert "background: none;" in re.search(r"\n\.run-tab \{([^}]*)\}", CSS).group(1)
     assert "const anWhen = (r) => startedText(r);" in JS
-    for bid in ("open-report", "an-ask", "an-csv", "ed-revert"):   # buttons look like buttons: outlined, not ghosts
+    for bid in ("open-report", "ed-revert"):   # buttons look like buttons: outlined, not ghosts
         assert re.search(r'<button id="%s" class="btn small" ' % bid, PAGE), bid
 
 

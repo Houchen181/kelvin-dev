@@ -33,7 +33,7 @@ from ..gate import ApprovalRequest
 from ..protection import summary as protection_summary
 from .hubmodels import through_hub
 from .providers.base import SESSION, Emit, ModelInfo, Provider, sees_images, text_of
-from . import brevity, compaction, memory, review, rules as rulebook
+from . import analyst, brevity, compaction, memory, review, rules as rulebook
 from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, READ_SKILL_FILE, SAVE_RECIPE, SAVE_SKILL, USE_SKILL, Know
 from .wakeups import WAKE_ME, Waker
 from .notices import Notices
@@ -578,6 +578,9 @@ class ChatAgent:
         self.waker = Waker(self)   # chats continued later (wake_me), when the time or the lab says
         self.notices = Notices(self)   # what the person did to the sequence or Home, for the chats it concerns
         self.know = Know(store)    # skills and recipes (skills.py)
+        self._analysts: Dict[str, Any] = {}   # the Analysis pane's subagent at work: a task by chat ("": none yet)
+        # its complete analyses, by (run, model, chat): (the run as it was then, what the pane was told), latest last
+        self._analyzed: Dict[Tuple[str, str, str], Tuple[Any, List[Dict[str, Any]]]] = {}
 
     # ------------------------------------------------------------------ the chats answering now
     # Each chat's turn runs in its own task; _TURN holds that chat's turn there (and in the tasks it starts), so the
@@ -784,8 +787,125 @@ class ChatAgent:
             result = await workbench.off_thread(contextvars.copy_context().run, workbench.compute, self.runtime, spec)
         except Exception as e:   # AnalysisError says what is wrong; nothing leaves the chat without its result
             return "not worked out: %s" % (str(e) or e.__class__.__name__), True
-        await emit({"type": "analysis", "spec": spec, "result": result})
-        return workbench.describe(result) + "\n(The Analysis panel shows it; the person can change it there.)", False
+        await emit({"type": "analysis", "spec": spec, "result": result, "steps": analyst.steps(spec, result)})
+        return workbench.describe(result) + "\n(The Analysis panel shows it, with its steps.)", False
+
+    # ------------------------------------------------------------------ the Analysis pane's subagent (analyst.py)
+
+    def analyst_for(self, chat_id: str, model_key: str) -> Tuple[Optional[Dict[str, Any]], str]:
+        """The chat an analysis in the pane goes with (None: no chat yet, which sees shared runs only) and the model
+        that analyzes: the one asked for (the message box's), "" for none. KeyError: no such chat; ValueError: a
+        model the chat's rules don't allow."""
+        chat = self.store.load(chat_id) if chat_id else None
+        key = self.model_key(model_key) if str(model_key or "").strip() else ""
+        if chat is not None and key:
+            self.check_model(chat, key, "Pick one of the allowed models.")
+        return chat, key
+
+    async def analyze_dataset(self, chat: Optional[Dict[str, Any]], run_id: str, model_key: str, emit: Emit,
+                              again: bool = False) -> None:
+        """The Analysis pane's subagent on one dataset (analyst.py), told to the pane as it works: a step at each
+        lookup, each figure as it is drawn, then done {figures: the numbers kept, best first; summary}. Its model
+        reads the run as that model may see it from the chat, and nothing but this run; with no model to ask, or one
+        that fails before it draws anything, the run as measured. Another analysis for the same chat stops this one
+        (the pane picked another dataset). A complete analysis is told again as it was, while the run is as it was
+        then (a page opened again, another window), unless asked again: its model isn't asked twice."""
+        slot = chat["id"] if chat else ""
+        said: List[Dict[str, Any]] = []
+        heard = emit
+
+        async def emit(event: Dict[str, Any]) -> None:   # what the pane is told, kept to tell again
+            said.append(event)
+            await heard(event)
+        before = self._analysts.get(slot)
+        if before is not None and not before.done():
+            before.cancel()
+        me = asyncio.current_task()
+        self._analysts[slot] = me
+        viewer = self.viewer_for(chat, model_key or None) if chat else Viewer()
+        incognito = bool(chat and chat.get("incognito"))
+        session = SESSION.set(slot or "analysis")   # the conversation its model requests belong to
+        figures: List[Dict[str, Any]] = []
+
+        async def draw(spec: Dict[str, Any]) -> Dict[str, Any]:   # on the pane's threads, as the viewer may see
+            with self.runtime.viewing(viewer):
+                return await workbench.off_thread(contextvars.copy_context().run, workbench.compute, self.runtime,
+                                                  dict(spec, runs=[run_id]))
+
+        async def lookup(name: str, args: Dict[str, Any]) -> Tuple[str, bool]:
+            try:
+                r = await self._tool(name, args, viewer)
+            except Exception as e:
+                return "tool failed: %s" % e, True
+            content = "\n".join(c.text for c in r.content if getattr(c, "type", "") == "text")
+            return (without_lab_notes(content) if incognito else content), bool(r.is_error)
+        try:
+            await emit({"type": "start", "run": run_id})
+            await emit({"type": "step", "text": analyst.doing("describe_run", {})})
+            with self.runtime.viewing(viewer):   # no such run, or one this chat doesn't see: said (AnalysisError),
+                cols = await workbench.off_thread(contextvars.copy_context().run, workbench.columns, self.runtime,
+                                                  run_id)   # before any model is asked
+            memo, now = (cols.get("run") or run_id, model_key, slot), (cols.get("status"), cols.get("points"))
+            found = self._analyzed.get(memo)
+            if found and found[0] == now and model_key and not again:   # as it was found: told again, as it was
+                for event in found[1][len(said):]:
+                    await heard(event)
+                return
+            about, missing = await lookup("describe_run", {"run_id": run_id})
+            if missing:
+                await emit({"type": "error", "message": about})
+                return
+            why, out, provider = "", None, None
+            try:
+                provider, model_id = self.provider_for(model_key) if model_key else (None, "")
+            except ValueError as e:
+                why = str(e)
+            if provider is None:
+                why = why or ("No model to analyze with: add one in Settings → Models. Here is the dataset as "
+                              "measured.")
+            else:
+                tools = [t for t in self.tools if t["name"] in analyst.READS and t["name"] in self.read_only]
+                try:
+                    out = await asyncio.wait_for(analyst.analyze(
+                        provider, model_id, run_id, about, tools + [analyst.show_tool(ANALYZE)], lookup, draw,
+                        workbench.describe, emit, figures), analyst.ANALYST_S)
+                except asyncio.TimeoutError:
+                    why = "The analysis took more than %d minutes and was stopped." % (analyst.ANALYST_S // 60)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:   # its service said no: in its own words, never a key
+                    why = "The model could not analyze it: %s" % describe_error(provider, e)
+            # complete: the model answered with what it keeps (the pane keeps that for the dataset); an analysis cut
+            # short, or the dataset as measured, is shown but asked again the next time the dataset is picked
+            if figures:   # what it drew: those it kept, or all of them when it stopped before saying
+                kept = out["figures"] if out and out["figures"] else [f["n"] for f in figures][-analyst.MAX_FIGURES:]
+                if why:
+                    await emit({"type": "note", "text": why})
+                await emit({"type": "done", "figures": kept, "summary": out["summary"] if out else "",
+                            "complete": out is not None and not why})
+                if out is not None and not why:   # kept to tell again while the run stays as it is
+                    self._analyzed.pop(memo, None)
+                    self._analyzed[memo] = (now, list(said))
+                    while len(self._analyzed) > analyst.KEPT:
+                        self._analyzed.pop(next(iter(self._analyzed)))
+                return
+            await emit({"type": "note",
+                        "text": why or "Kelvin's analyst drew nothing: here is the dataset as measured."})
+            spec = analyst.as_measured(cols)
+            result = await draw(spec)
+            fig = {"n": 1, "title": "As measured", "spec": spec, "result": result, "steps": analyst.steps(spec, result)}
+            await emit(dict(fig, type="figure"))
+            await emit({"type": "done", "figures": [1], "summary": out["summary"] if out else "", "complete": False})
+        except asyncio.CancelledError:
+            raise
+        except workbench.AnalysisError as e:
+            await emit({"type": "error", "message": str(e)})
+        except Exception as e:   # said in words, never a bare failure
+            await emit({"type": "error", "message": "the analysis failed: %s" % (str(e) or e.__class__.__name__)})
+        finally:
+            SESSION.reset(session)
+            if self._analysts.get(slot) is me:
+                del self._analysts[slot]
 
     # ------------------------------------------------------------------ what the person writes while Kelvin works
 

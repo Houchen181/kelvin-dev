@@ -126,13 +126,13 @@ def test_one_click_model_for_every_way_of_opening_a_panel():
     # the person's Analyze: to the screen even in full screen or under the list, rung when there; Kelvin's analyze
     # opens the pane where it stands and, under full screen or the list, waits there as a run that starts does
     opened = _js("openAnalysis")
-    assert "function openAnalysis(spec, result, auto, asked) {" in opened
+    assert "function openAnalysis(ev) {" in opened
     assert 'const seen = paneVisible("anpane");' in opened
     assert 'if (seen) { look("anpane"); ring($("anpane").querySelector(":scope > header")); }' in opened
-    assert 'else if (asked) fullShow("anpane");' in opened and 'else fullShow("anpane");' not in opened
+    assert 'else if (ev.asked) fullShow("anpane");' in opened and 'else fullShow("anpane");' not in opened
     assert "ANA.follow = false;" in opened
-    assert "openAnalysis({ runs: [runId] }, null, { x: true, y: true, group: true }, true));" in JS   # a run's Analyze
-    assert 'case "analysis": if (here) openAnalysis(ev.spec, ev.result); break;' in JS   # Kelvin's: not asked
+    assert "openAnalysis({ run: runId, asked: true }));" in JS   # a run's Analyze
+    assert 'case "analysis": if (here) openAnalysis(ev); break;' in JS   # Kelvin's: not asked
     assert re.search(r'(fullShow|paneShow)\("edpane"\)', _js("openEditor"))   # Edit on a scan, New scan
     assert "fullShow" not in _js("noticeRun") + _js("openRun") + _js("showQueue")   # a run that starts doesn't take it
 
@@ -174,14 +174,16 @@ def test_chat_or_home_ends_full_screen_from_either_side_even_the_one_chosen():
 
 def test_nothing_a_person_must_answer_is_out_of_sight_in_full_screen():
     """An approval in the chat on the screen declines itself unless someone answers: full screen ends for it. One the
-    Lab panel or the terminal asks brings that panel to the screen. Ask Kelvin, another chat and a new one need the chat."""
+    Lab panel or the terminal asks brings that panel to the screen. Another chat and a new one need the chat (the
+    Analysis pane's Ask Kelvin went with its fields, 2026-11-03)."""
     handle = _js("handle")
     case = handle[handle.index('case "approval":'):]
     assert "if (here && !ev.auto) exitFull();" in case[:case.index("break;")]
     assert re.search(r'(fullShow|paneShow)\("labpanel"\);', _js("pollState"))
     assert 'if (!TERM.open) toggleTerm(true);\n    fullShow("termpane");' in _js("termAsk")
-    for name in ("openChat", "newChat", "askAboutAnalysis", "toggleIncognito"):
+    for name in ("openChat", "newChat", "toggleIncognito"):
         assert "exitFull();" in _js(name), name
+    assert "function askAboutAnalysis(" not in JS
 
 
 def test_esc_ends_full_screen_unless_a_field_a_menu_or_a_dialog_takes_it():

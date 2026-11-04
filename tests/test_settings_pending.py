@@ -2,10 +2,11 @@
 (settingsBody), and the same function says what waits for Save: what it would send now that differs from what it sent
 as the dialog opened. Save is offered only then; the button beside it reads Close while nothing waits and Cancel once
 something does, and a dot on a section's name says where the change is. What acts at once stands in a card of its own
-at the top of its page (.set-now): the phone through the hub on Account, Phone access, Page size. On the Settings pages a
-switch acts at once and a tick box waits for Save (or for the button of its own row); in a row, a skill's switch and a
-service's Pictures (a choice of three) act at once, and no list does. The head's × and Esc ask first while something
-waits, and do nothing while a Save is on its way; Enter in a box never closes the dialog."""
+at the top of its page (.set-now): the phone through the hub on Account, Compare models on Models, Phone access, Page
+size. On the Settings pages a switch acts at once and a tick box waits for Save (or for the button of its own row); in
+a row, a skill's switch and a service's Pictures (a choice of three) act at once, and no list does. The head's × and
+Esc ask first while something waits, and do nothing while a Save is on its way; Enter in a box never closes the
+dialog."""
 import re
 from pathlib import Path
 
@@ -93,14 +94,16 @@ def test_one_function_says_what_save_sends_and_what_waits():
 
 
 def test_what_acts_at_once_stands_in_a_card_at_the_top_of_its_page():
-    for page, control in (("account", 'id="relay-on"'), ("phone", 'id="phone-on"'), ("display", 'class="zoom-row"')):
+    # Compare models on Models since 2026-11-03: Compare under the message box, off unless switched on
+    for page, control in (("account", 'id="relay-on"'), ("models", 'id="compare-on"'), ("phone", 'id="phone-on"'),
+                          ("display", 'class="zoom-row"')):
         section = _page(page)
         after = re.sub(r"<!--.*?-->", "", section[section.index("</h3>") + 5:], flags=re.S).lstrip()
         assert after.startswith("<div") and "set-now" in after[:after.index(">")], page   # first, under the title
         cards = _cards(section)
         assert len(cards) == 1 and control in cards[0], page
         assert 'type="checkbox"' not in cards[0], page
-    assert "set-now" not in "".join(_page(p) for p in ("models", "instruments", "data", "memory", "literature",
+    assert "set-now" not in "".join(_page(p) for p in ("instruments", "data", "memory", "literature",
                                                          "notifications", "updates"))
     # drawn as the kit's cards are, from its tokens alone (light and dark)
     css = re.sub(r"/\*.*?\*/", "", _read("app.css"), flags=re.S)
@@ -118,8 +121,8 @@ def test_a_switch_acts_at_once_and_a_tick_box_waits_for_save():
     js, dlg = _read("app.js"), _dialog()
     # every switch on the pages stands in a card of what acts at once, and turns at a press (swFlip)
     switches = re.findall(r'<button\b[^>]*\bclass="switch"[^>]*>', dlg)
-    assert len(switches) == 2
-    cards = "".join(c for p in ("account", "phone", "display") for c in _cards(_page(p)))
+    assert len(switches) == 3
+    cards = "".join(c for p in ("account", "models", "phone", "display") for c in _cards(_page(p)))
     for sw in switches:
         assert sw in cards, sw
         assert 'swFlip($("%s"), ' % re.search(r'\bid="([\w-]+)"', sw).group(1) in js
