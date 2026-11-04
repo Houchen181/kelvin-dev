@@ -10,6 +10,11 @@
     live: new Map(), answering: new Set(), unread: new Set(), asking: new Set() };
   Object.defineProperty(S, "streaming", { get: () => !!S.chatId && S.live.has(S.chatId) });   // this chat is answering
   const liveHere = () => S.live.get(S.chatId);
+  // the focus ring is the keyboard's: a press of the mouse or a finger marks <html> (k-pointer) until the next key, so
+  // what it pressed, and what the page gives the focus after it, draws no ring (app.css); a key brings the rings back
+  // before the focus moves
+  document.addEventListener("pointerdown", () => document.documentElement.classList.add("k-pointer"), true);
+  document.addEventListener("keydown", () => document.documentElement.classList.remove("k-pointer"), true);
 
   // ------------------------------------------------------------------ helpers
   function h(tag, attrs, ...kids) {
@@ -617,10 +622,28 @@
     if (!t) { t = h("div", { class: "toast", role: "status" }); document.body.append(t); }
     t.textContent = text;
     t.classList.toggle("link", !!onClick);
+    try { placeToast(t); } catch (e) { t.removeAttribute("style"); }   // else where app.css puts it: the window's foot
     t.onclick = onClick ? () => { t.classList.remove("show"); onClick(); } : null;
     t.classList.add("show");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove("show"), onClick ? 8000 : 4000);
+  }
+  // where a toast stands: just above the message box (the wake bar, when it shows over it), centred on the main column;
+  // on Home, or with a pane alone on the screen, above the bottom of what shows there. Never over a control of the
+  // composer. Rects are the screen's pixels, so each length is divided by the page size before it is written
+  function placeToast(t) {
+    const z = pageZoom(), box = (el) => {
+      const r = el && el.getClientRects().length ? el.getBoundingClientRect() : null;
+      return r && r.width > 0 && r.height > 0 ? r : null;
+    };
+    const main = box(document.querySelector("#app .main")), app = box($("app"));
+    const area = main && main.height > 80 ? main : app;
+    if (!area) { t.removeAttribute("style"); return; }
+    const over = main ? box($("wake-bar")) || box($("composer")) : null;
+    const bottom = over ? window.innerHeight - over.top + 10 : window.innerHeight - area.bottom + 24;
+    t.style.left = (area.left + area.width / 2) / z + "px";
+    t.style.bottom = bottom / z + "px";
+    t.style.maxWidth = Math.max(160, area.width / z - 32) + "px";
   }
 
   // ------------------------------------------------------------------ markdown (safe subset)
@@ -1632,13 +1655,14 @@
   // when it is on the screen, else brings it there (pillClick). Anything else that asks for a panel (a Home tile,
   // Analyze, Edit on a scan, a waiting request) only ever shows it (paneShow): closed, it opens; in full screen it takes
   // the screen; already on the screen it stays, and its head rings. view: Runs on its Scan ("scan") or its Sequence
-  // ("schedule")
+  // ("schedule"); the Lab on one of its parts ("watches"), or on the part chosen last on this browser ("kept")
   function pillClick(id, toggle) {
     if (paneVisible(id)) toggle(false);
     else paneShow(id);
   }
   function paneShow(id, view) {
     if (!TOGGLE[id]) return false;
+    if (id === "labpanel" && view) chooseLabPart(view === "kept" ? store("lh.labPart") : view, false);
     const there = id !== "runpane" || !view ? true : RUNS.view === view;
     if (isOpen(id)) look(id);   // asked for: looked at (one that opens is looked at as it opens)
     if (paneVisible(id) && there) { ring($(id).querySelector(":scope > header")); return true; }
@@ -5009,18 +5033,33 @@
       + (a.cleared ? " · cleared " + hhmm(a.cleared) + (a.cleared_text ? ": " + a.cleared_text : "") : "");
   }
   function renderAlerts(alarms, incident) {
-    // every alarm until a person says Got it: one that cleared while nobody looked (overnight) stays, marked cleared
-    const open = (alarms || []).filter((a) => !a.acknowledged);
+    // every alarm until a person says Got it: one that cleared while nobody looked (overnight) stays, marked cleared.
+    // The notice row holds the newest with its Got it, and counts the rest on one row that opens Lab → Watches, where
+    // Alarm history lists them all: however many come, it never pushes a control out of the window
+    const open = (alarms || []).filter((a) => !a.acknowledged);   // newest first (runtime.alarms_view)
     const box = $("alerts");
     box.hidden = !open.length && !incident;
-    box.replaceChildren(...(incident ? [incidentCard(incident)] : []), ...open.map((a) => {
+    const rows = open.slice(0, 1).map((a) => {
       const ok = h("button", { class: "btn small", type: "button" }, "Got it");
       ok.addEventListener("click", async () => { try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ } pollState(); });
       return h("div", { class: "alert" + (a.cleared ? " cleared" : "") }, icon("warn"), h("div", { class: "alert-body" }, h("b", {}, a.text),
         a.actions.length ? h("span", {}, "Kelvin " + a.actions.join("; ")) : null, h("span", { class: "alert-when" }, alarmWhen(a))), ok);
-    }));
+    });
+    const more = open.length - 1;
+    if (more > 0) {
+      const b = h("button", { class: "alert alert-more", type: "button", title: "Lab → Watches lists every alarm" }, icon("warn"),
+        h("span", { class: "alert-body" }, h("b", {}, more + (more === 1 ? " more alarm" : " more alarms"))), icon("chev"));
+      b.addEventListener("click", showAlarms);
+      rows.push(b);
+    }
+    box.replaceChildren(...(incident ? [incidentCard(incident)] : []), ...rows);
     document.title = (open.length || incident ? "(!) " : "") + document.title.replace(/^\(!\) /, "");
     renderAlarmHistory(alarms || []);
+  }
+  function showAlarms() {   // the notice row's "n more": the Lab on Watches, its Alarm history open
+    paneShow("labpanel", "watches");
+    const box = $("alarm-history");
+    if (!box.hidden && !box.classList.contains("open")) foldOpen(box, $("alarm-history-btn"), $("alarm-history-fold"), true);
   }
   function renderAlarmHistory(alarms) {   // the Lab panel: each alarm with when it went up, cleared, and who said Got it
     $("alarm-history").hidden = !alarms.length;
@@ -9704,10 +9743,12 @@
     const kept = store("lh.labPart");
     chooseLabPart(labTabShown(kept) ? kept : [...LAB_TABS.tabs.keys()].find(labTabShown));
   }
-  function chooseLabPart(id) {
+  // keep: false for a link to a part (Home's Lab tile while an alarm is on, the notice row's "n more"), which shows it
+  // without taking the place of the part the person chose
+  function chooseLabPart(id, keep = true) {
     if (!labTabShown(id)) return;
     LAB_TABS.chosen = id;
-    store("lh.labPart", id);
+    if (keep) store("lh.labPart", id);
     for (const [k, tab] of LAB_TABS.tabs) {
       const on = k === id;
       tab.hidden = $("lab-sec-" + k).hidden;   // a part that shows nothing has no tab

@@ -1,11 +1,15 @@
 /* the first start (welcome.js): a page over the app in AlphainZ's wizard form, drawn with the kit (app.css, at its
    end): a column on the page, one card of rows (a title, its value under it, the control at the right), the way on
-   under it. It fits the window: the column is the window's height, and a list in the card (data-region) takes the
-   room left and scrolls there; the way on stays under the card. Tokens only, so light and dark follow the computer's. */
-.welcome { position: fixed; inset: 0; z-index: 45; overflow-y: auto; overscroll-behavior: contain;
-  background: var(--page); color: var(--text); }
-.wl-col { width: min(640px, calc(100% - 32px)); height: 100%; min-height: 420px; margin: 0 auto;
-  padding-top: clamp(12px, 4 * var(--vh), 48px); display: flex; flex-direction: column; }
+   under it. It fits the window: the column is at most the window's height, and a list in the card (data-region) takes
+   the room left and scrolls there; the way on stays under the card. Tokens only, so light and dark follow the
+   computer's. */
+.welcome { position: fixed; inset: 0; z-index: 45; display: flex; flex-direction: column; overflow-y: auto;
+  overscroll-behavior: contain; background: var(--page); color: var(--text); }
+/* the column has one height on every step (--wl-h: what the tallest step needs, the scripts' with 15 of them), so the
+   head, the dots and Skip stand in one place from step to step. A window taller than that centres it (the auto
+   margins); a shorter one makes it the window's height, from the top, and never scrolls the page */
+.wl-col { --wl-h: 760px; flex: none; width: min(640px, calc(100% - 32px)); height: min(100%, var(--wl-h)); min-height: 420px;
+  margin: auto; padding-top: clamp(12px, 4 * var(--vh), 48px); display: flex; flex-direction: column; }
 .wl-col > * { flex: none; }
 
 /* the head: the mark in its tile, the name, the version; Skip, quiet, at the right */

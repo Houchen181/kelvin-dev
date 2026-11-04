@@ -193,3 +193,17 @@ def test_esc_ends_full_screen_unless_a_field_a_menu_or_a_dialog_takes_it():
                  'e.target.closest("input, textarea, select, [contenteditable]")',
                  "toggleFull(FULL[0]);"):   # as its own button: the layout under it (a pane alone stays)
         assert text in init, text
+
+
+def test_a_panel_in_full_screen_keeps_its_content_in_homes_column():
+    """On a wide window what a panel holds stands in a column as wide as Home's (1440 px and its padding), centred;
+    its head stays across the window, a band at its foot keeps its line across and centres what it holds, and the
+    terminal keeps its long lines."""
+    css = re.sub(r"/\*.*?\*/", "", CSS, flags=re.S)
+    assert ("#app.full:not(.full-term) .full-on > :not(header) {\n"
+            "  margin-inline: max(0px, calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2)); }") in css
+    foot = css[css.index("#app.full:not(.full-term) .full-on > :is(.ed-foot, .team-form, .team-name-form)"):]
+    assert "margin-inline: 0;" in foot[:foot.index("}")]
+    assert "padding-inline: max(var(--side), calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2 + var(--side)));" in foot
+    home = (STATIC / "home.css").read_text(encoding="utf-8")
+    assert "max-width: calc(1440px + 2 * var(--pad-page, 24px))" in home   # the same column as Home's

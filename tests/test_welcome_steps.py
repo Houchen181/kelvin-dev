@@ -91,3 +91,18 @@ def test_the_step_dots_are_targets_of_their_own():
     assert re.search(r"\.wl-skip[^{]*\{ min-height: 40px; \}", touch)
     # welcome.css comes last, so a dot's size in app.css would never apply: it lives here alone
     assert ".wl-dot" not in re.sub(r"/\*.*?\*/", "", _read("app.css"), flags=re.S)
+
+
+def test_the_card_is_centred_on_a_tall_window_and_nothing_moves_from_step_to_step():
+    """One height for the column on every step (the tallest step's), centred by its auto margins when the window has
+    room, and the window's height from the top when it has not: the head, the dots and Skip stay in one place, and the
+    page never scrolls (only the list in the card does)."""
+    css = re.sub(r"/\*.*?\*/", "", _read("welcome.css"), flags=re.S)
+    page = re.search(r"\.welcome \{([^}]*)\}", css).group(1)
+    assert "display: flex;" in page and "flex-direction: column;" in page and "inset: 0;" in page
+    col = re.search(r"\.wl-col \{([^}]*)\}", css).group(1)
+    assert re.search(r"--wl-h: (\d+)px;", col) and int(re.search(r"--wl-h: (\d+)px;", col).group(1)) >= 744
+    assert "height: min(100%, var(--wl-h));" in col and "margin: auto;" in col and "flex: none;" in col
+    assert "min-height: 420px;" in col   # below its floor the welcome scrolls as a whole rather than clipping
+    # nothing in the steps sets the column's height, so no step moves it
+    assert "wl-col" not in _code(_function(JS, "render")) and ".style.height" not in _code(JS)
