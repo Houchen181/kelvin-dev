@@ -1204,7 +1204,7 @@
       if (!fields.length) return null;
       const typed = SEQ.typed.get(fn.key) || {};
       return h("div", { class: "seq-fn-inputs", role: "group", "aria-label": fn.name + ": its settings" }, ...fields.map((x) => {
-        const was = shown(x.value);
+        const was = typeof x.value === "string" ? x.value : JSON.stringify(x.value);   // exactly, never rounded
         const keep = (v) => {
           const t = SEQ.typed.get(fn.key) || {};
           if (v === was || v === x.value) delete t[x.name]; else t[x.name] = v;
@@ -1252,11 +1252,11 @@
   // what ▶ and ＋ send with a script: nothing while no setting was typed (it runs as it last ran); else the values
   // typed, or as it last ran, that differ from its file as it is now
   function fnParams(fn) {
-    const e = fn.entry, typed = SEQ.typed.get(fn.key) || {};
-    if (!Object.keys(typed).length) return null;
+    const e = fn.entry, typed = SEQ.typed.get(fn.key) || {}, fields = scriptFields(e);
+    if (!fields.some((x) => x.name in typed)) return null;   // typed only for a setting it no longer has
     const file = e.exists === false || e.problem ? {} : e.settable || {};
     const out = {};
-    for (const x of scriptFields(e)) {
+    for (const x of fields) {
       const v = x.name in typed ? paramValue(x.value, typed[x.name]) : (e.params || {})[x.name];
       if (v !== undefined && !(x.name in file && JSON.stringify(v) === JSON.stringify(file[x.name]))) out[x.name] = v;
     }

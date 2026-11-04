@@ -508,6 +508,29 @@ def test_a_run_that_starts_while_the_sequence_is_shown_waits_in_the_scan():
     notice = _js("noticeRun")
     assert "if (!scheduling()) openRun(runId, plan);" in notice and 'setTabStatus(tab, "running")' in notice
     assert 'return RUNS.open && RUNS.view === "schedule";' in _js("scheduling")
+    # the Scan has it all the same (shown when Scan is opened), and a run that ended before it goes once it is over
+    assert "RUNS.active = runId;" in notice
+    assert '[...RUNS.tabs.values()].find((t) => t.status === "running") || null;' in _js("showView")
+    assert 'find((t) => t.status === "running" || t.status === "finishing")' in _js("closeRunTab")   # never an old one
+    assert "if (ended && RUNS.active !== tab.runId && RUNS.tabs.has(RUNS.active)) closeRunTab(tab.runId);" in _js("loadFinal")
     dots = _js("liveDots")
     assert '$("runs-dot").hidden = !live;' in dots and '$("open-scan").classList.toggle("live", live);' in dots
     assert "#open-scan.live::after" in CSS and "#open-scan.live.on::after { display: none; }" in CSS
+
+
+def test_a_scripts_settings_in_the_scan_go_as_typed():
+    """A script's settings show exactly as its file (or its last run) has them, never rounded; ▶ and ＋ send the
+    values typed for the settings it still has (and those it last ran with), none when nothing was typed for one."""
+    seqjs = (STATIC / "seq.js").read_text(encoding="utf-8")
+    inputs = seqjs[seqjs.index("function fnInputs("):seqjs.index("function scriptFields(")]
+    assert 'typeof x.value === "string" ? x.value : JSON.stringify(x.value)' in inputs and "shown(x.value)" not in inputs
+    params = seqjs[seqjs.index("function fnParams("):seqjs.index("function yq(")]
+    assert "if (!fields.some((x) => x.name in typed)) return null;" in params
+
+
+def test_the_lab_panels_rename_takes_one_click():
+    """Rename and Cancel keep the focus in the name's box (nothing is redrawn under the pointer between press and
+    release); the panel draws again at its next poll once the box lets go."""
+    tools = _js("instTools")
+    assert 'b.addEventListener("mousedown", (e) => e.preventDefault())' in tools and '"blur"' not in tools
+    assert 'PANEL.drawLater = !!had && had.startsWith("rename-field ")' in _js("renderInstruments")

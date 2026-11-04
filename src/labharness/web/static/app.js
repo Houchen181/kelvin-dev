@@ -1028,8 +1028,9 @@
     RUNS.dismissed.add(runId);  // closing a running run's view must not bring it back
     tab.body.remove();
     RUNS.tabs.delete(runId);
-    if (RUNS.active === runId) {
-      RUNS.active = [...RUNS.tabs.keys()].pop() || null;
+    if (RUNS.active === runId) {   // the one still running, never an older run that ended (it went when this came)
+      const live = [...RUNS.tabs.values()].find((t) => t.status === "running" || t.status === "finishing");
+      RUNS.active = live ? live.runId : null;
       if (RUNS.view === "scan") showView("scan");
     }
     liveDots();
@@ -1047,7 +1048,11 @@
       $(seg).tabIndex = on ? 0 : -1;
       $(panel).hidden = !on;
     }
-    const active = RUNS.tabs.get(RUNS.active);
+    let active = RUNS.tabs.get(RUNS.active);
+    if (!active) {   // none asked for: the run that runs
+      active = [...RUNS.tabs.values()].find((t) => t.status === "running") || null;
+      RUNS.active = active ? active.runId : null;
+    }
     for (const t of RUNS.tabs.values()) t.body.hidden = t !== active;
     $("scan-idle").hidden = !!active;
     if (view === "schedule") loadQueue();
@@ -1100,12 +1105,13 @@
     toggleRuns(true);
   }
 
-  // a run started (seen in the chat stream or in the lab state): give it a tab, show it, follow it; while the pane
-  // shows the Sequence it only gets its tab (History's dot says so), and the Sequence stays
+  // a run started (seen in the chat stream or in the lab state): its view, the Scan's from now on, shown and followed;
+  // while the pane shows the Sequence the Sequence stays, and Scan's dot says a run is on
   function noticeRun(runId, plan) {
     if (RUNS.tabs.has(runId) || RUNS.dismissed.has(runId)) return;
     const tab = runTab(runId, plan);
     setTabStatus(tab, "running");
+    RUNS.active = runId;
     if (!scheduling()) openRun(runId, plan);
     pollLive();
   }
@@ -1148,6 +1154,7 @@
     tab.plan = data.plan || tab.plan;
     setTabStatus(tab, (data.meta && data.meta.status) || "unfinished");
     renderRunView(tab);
+    if (ended && RUNS.active !== tab.runId && RUNS.tabs.has(RUNS.active)) closeRunTab(tab.runId);   // a newer one shows
     if (ended) refreshAnalysisRuns();   // the Analysis pane's list has it now
   }
 
@@ -4690,11 +4697,11 @@
       if (e.key === "Enter") { e.preventDefault(); renameInstrument(inst.name); }
       else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); PANEL.rename = null; renderInstruments(); }
     });
-    input.addEventListener("blur", () => setTimeout(() => { if (PANEL.drawLater) renderInstruments(); }, 0));
-    const ok = h("button", { class: "btn small primary", type: "button", disabled: r.busy }, "Rename");
+    const ok = h("button", { class: "btn small primary", type: "button", disabled: r.busy, "data-k": "rename-ok " + inst.name }, "Rename");
     ok.addEventListener("click", () => renameInstrument(inst.name));
-    const no = h("button", { class: "btn small ghost", type: "button", disabled: r.busy }, "Cancel");
+    const no = h("button", { class: "btn small ghost", type: "button", disabled: r.busy, "data-k": "rename-no " + inst.name }, "Cancel");
     no.addEventListener("click", () => { PANEL.rename = null; renderInstruments(); });
+    for (const b of [ok, no]) b.addEventListener("mousedown", (e) => e.preventDefault());   // the box keeps the focus
     return h("div", { class: "inst-tools renaming" }, h("div", { class: "inst-rename-row" }, input, ok, no),
       r.msg ? h("p", { class: "hint" + (r.bad ? " bad" : ""), role: "status" }, r.msg) : null);
   }
@@ -6278,11 +6285,15 @@
   async function edRenamed(from, to) {
     if (!ED.parts) return;
     const token = new RegExp("(?<![\\w.:/\\\\-])" + from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\.(?=[A-Za-z_])", "g");
-    const dirty = edDirty();
+    const dirty = edDirty(), was = Array.isArray(ED.parts.loops) ? ED.parts.loops : [];
     ED.parts = JSON.parse(JSON.stringify(ED.parts).replace(token, to + "."));
+    (ED.parts.loops || []).forEach((loop, i) => { if (ED.vars.has(was[i])) ED.vars.add(loop); });   // still a variable
     ED.base = dirty ? ED.base.replace(token, to + ".") : JSON.stringify(ED.parts);
-    try { edInstruments((await api("/api/library", { body: { op: "parts", id: null } })).lab || {}); } catch (e) { /* the menus as they were */ }
-    renderEditor();
+    edRedraw();   // at once: what is typed from now on goes into the scan as it is now
+    try {
+      edInstruments((await api("/api/library", { body: { op: "parts", id: null } })).lab || {});
+      edRedraw();
+    } catch (e) { /* the menus as they were */ }
     edCheck();
   }
   // the scan open with changes, before it goes (×, or another scan opened): Save, Discard or Keep editing (Discard or
@@ -6485,7 +6496,10 @@
   function renderLoops() {
     const p = ED.parts, loops = Array.isArray(p.loops) ? p.loops : null, time = p.time && !(p.fixed || []).includes("time");
     $("ed-stepper").hidden = !loops;
-    if (!loops) { $("ed-loops").replaceChildren(h("li", { class: "hint" }, "As written below.")); return; }
+    if (!loops) {   // the loops as written; a time series, when it has one, still its own card
+      $("ed-loops").replaceChildren(h("li", { class: "hint" }, "As written below."), ...(time ? [edTimeCard(p.time, 0, 1)] : []));
+      return;
+    }
     const cards = loops.map((loop, i) => ({ loop, i })).reverse();
     if (time) cards.unshift({ time: p.time });
     const n = cards.length;
@@ -6688,7 +6702,7 @@
   // menu (an instrument, a variable) makes it a loop stepping that, in its place
   function edTimeCard(time, k, n) {
     const p = ED.parts, name = "Loop " + (k + 1), byPoints = time.points != null && time.for == null;
-    const pick = edPick("", "set", (key, how) => {
+    const pick = !Array.isArray(p.loops) ? h("code", { class: "ed-key-ro" }, "time") : edPick("", "set", (key, how) => {
       if (how === "time") return;
       p.time = null;
       const loop = Object.assign(blankLoop(), { key });
@@ -6808,7 +6822,7 @@
     const mine = new Map(), rest = [];
     for (const problem of c.problems || []) {
       const at = loopOf(problem, loops);
-      const card = at >= 0 ? String(at) : /^time[:.]/.test(problem) ? "time" : null;
+      const card = at >= 0 ? String(at) : /^time[:.]/.test(problem) && $("ed-loops").querySelector('[data-i="time"]') ? "time" : null;
       if (card === null) { rest.push(problem); continue; }
       if (!mine.has(card)) mine.set(card, []);
       mine.get(card).push(problem.replace(/^loop \d+: choose what it steps \(instrument\.parameter\)$/, "Choose what it changes.")
