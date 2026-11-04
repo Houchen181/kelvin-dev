@@ -219,7 +219,7 @@ def test_there_is_one_switch():
 def test_only_a_named_region_scrolls():
     elements = _elements()
     names = {m for m in re.findall(r'data-region(?:="|": ")([\w-]+)"', "".join(_read(n) for n in SCRIPTS + ("index.html",)))}
-    assert {"chat", "home-blocks", "seq-blocks", "seq-fns", "history", "run", "lab-part", "team", "dialog",
+    assert {"chat", "home-blocks", "seq-blocks", "seq-fns", "run", "lab-part", "team", "dialog",
             "settings-page", "welcome-list", "editor"} <= names
     assert re.search(r"\[data-region\] \{ overflow: auto; min-height: 0;", _read("app.css"))
     unknown = []

@@ -623,6 +623,54 @@ class ChatStore:
             self._write_index(index)
             return device
 
+    def instrument_renamed(self, old: str, new: str) -> List[str]:
+        """One of the lab's instruments renamed: what this person's folder keeps of it takes the new name: their
+        devices' protection (limits and gates by instrument.parameter, which a rename must never lift), their recipes,
+        and the chats waiting for one of its readings (_wakes.json). Lines saying what followed."""
+        from ..discovery import renamed_keys, renamed_plan_text
+        said: List[str] = []
+        with self._lock:
+            try:
+                index = self._read_index() if self._index_path.exists() else None
+            except OSError:
+                index = None
+            devices = []
+            for ws in ([index.get("general") or {}] + list(index.get("projects") or [])) if index else []:
+                for d in ws.get("devices") or []:
+                    if isinstance(d, dict) and d.get("protection"):
+                        guarded = renamed_keys(d["protection"], old, new)
+                        if guarded != d["protection"]:
+                            d["protection"] = guarded
+                            devices.append(str(d.get("name") or d.get("id")))
+            if devices:
+                self._write_index(index)
+                said.append("the protection of %s" % ", ".join(devices))
+        kept = self.root / "_wakes.json"
+        try:
+            wakes = json.loads(kept.read_text(encoding="utf-8"))
+            moved = renamed_keys(wakes, old, new)
+            if moved != wakes:
+                tmp = kept.with_suffix(".tmp")
+                tmp.write_text(json.dumps(moved), encoding="utf-8")
+                os.replace(tmp, kept)
+        except (OSError, ValueError):
+            pass
+        recipes = []
+        for path in sorted((self.root / "recipes").glob("*/*.yaml")):
+            try:
+                text = path.read_text(encoding="utf-8")
+                moved_text = renamed_plan_text(text, old, new)
+                if moved_text != text:
+                    tmp = path.with_suffix(path.suffix + ".tmp")
+                    tmp.write_text(moved_text, encoding="utf-8")
+                    os.replace(tmp, path)
+                    recipes.append(path.stem)
+            except OSError:
+                continue
+        if recipes:
+            said.append("the recipe%s %s" % ("s" if len(recipes) > 1 else "", ", ".join(recipes)))
+        return said
+
     def summary_of(self, project_id: Optional[str]) -> str:
         return self._workspace(self._read_index(), project_id).get("summary") or ""
 

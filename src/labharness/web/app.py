@@ -2991,6 +2991,93 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         settings.set_switched_off(runtime.lab.config.name, runtime.lab.switched_off)
         return JSONResponse({"ok": True, "instruments": runtime.instruments()})
 
+    async def instrument_rename(request: Request) -> Response:
+        """POST {to}: a person renames one of the lab's instruments (Lab panel), as two of one model are told apart
+        (lockin_Vxx, lockin_Vxy). Its entry, and every instrument.parameter of it, in the lab config (comments kept:
+        discovery.rename_in_config), kept as a version in its history; the lab opens again with it, its connection
+        moving over unclosed as an unchanged instrument's does (runtime.switch_lab renamed); what Kelvin keeps of it
+        follows (runtime.instrument_renamed). Not while Kelvin answers, a plan or the queue runs; not a trainee's.
+        Past runs keep the name they were measured with. {ok, name, notes, instruments, versions}."""
+        from ..discovery import rename_in_config
+        old = request.path_params["name"]
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        new = str((body or {}).get("to") or "").strip() if isinstance(body, dict) else ""
+        refused = needs_owner(body, "Renaming an instrument", owner=False)
+        if refused:
+            return refused
+        if old not in runtime.lab.instruments:
+            return error(404, "no instrument %r in the lab" % old)
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,39}$", new):   # as the instrument's folder takes it (profiles.py)
+            return error(400, "A name is letters, digits and _, starting with a letter (lockin_Vxx).")
+        if new == old:
+            return JSONResponse({"ok": True, "name": new, "notes": [], "instruments": runtime.instruments(),
+                                 "versions": []})
+        if new in runtime.lab.instruments:
+            return error(409, "The lab has a %s already; choose another name." % new)
+        problem = busy_problem() or ("The sequence is running; rename it once the sequence is paused."
+                                     if runtime.queue.state in ("running", "pausing") else None)
+        if problem:
+            return error(409, problem)
+        if runtime.lab_info.get("kind") != "file" or not lab_file.exists():
+            return error(409, "Instruments are named in your lab config: there is none yet (Lab, Set up…).")
+        by = "human (portal)"
+        registry = lab_registry(lab_file.parent, runtime.collection)
+        try:
+            text = lab_file.read_text(encoding="utf-8")
+            new_text = rename_in_config(text, old, new)
+            cfg = load_lab_config(new_text, registry)
+        except KeyError as e:
+            return error(404, e.args[0])
+        except ConfigError as e:
+            return error(400, "The lab config has problems: " + "; ".join(e.errors[:4]))
+        was, now = runtime.lab.config.instruments[old], cfg.instruments.get(new)
+        same_place = now is not None and (now.address == was.address or   # a simulated one with no address of its own
+                                          (was.address, now.address) == ("sim://" + old, "sim://" + new))
+        if now is None or old in cfg.instruments or now.card != was.card or not same_place:
+            return error(409, "The lab config changed meanwhile; open it in Lab setup, then rename %s again." % old)
+        lab_name = runtime.lab.config.name
+        off = settings.switched_off(lab_name)
+        if old in off:   # switched off it stays, under its new name
+            settings.set_switched_off(lab_name, [new if n == old else n for n in off])
+        try:
+            lab = await asyncio.to_thread(build_lab, new_text, None, 0, registry, settings.switched_off, True, True)
+        except (AdapterError, OSError, ValueError, ConfigError) as e:
+            settings.set_switched_off(lab_name, off)
+            return error(400, "Kelvin could not open the lab with the new name: %s" % (str(e).splitlines()[0] if str(e) else e))
+        tmp = lab_file.with_suffix(".tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        tmp.replace(lab_file)
+        info = {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
+        try:
+            await asyncio.to_thread(runtime.switch_lab, lab, None, info, by, None, {new: old})
+        except RuntimeError as e:   # a run started meanwhile: the lab config as it was, the lab as it is
+            lab.close()
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(lab_file)
+            settings.set_switched_off(lab_name, off)
+            return error(409, str(e))
+        made = await asyncio.to_thread(runtime.config_changed, by, "renamed %s to %s" % (old, new), "renamed")
+        notes = await asyncio.to_thread(runtime.instrument_renamed, old, new, by)
+        # each person's folder on this computer: their devices' protection, recipes and chats waiting for a reading
+        people = accounts.list() if accounts is not None else []
+        roots = [Path(agent.store.root)] + [Path(accounts.chats_dir(a)) for a in people] + [home / "lab" / "chats"]             + ([Path(accounts.home) / "lab" / "chats"] if accounts is not None else [])   # nobody signed in's
+        guarded: List[str] = []
+        for root in dict.fromkeys(r.resolve() for r in roots if r.is_dir()):
+            folder = agent.store if root == Path(agent.store.root).resolve() else ChatStore(root, create=False)
+            try:
+                guarded += await asyncio.to_thread(folder.instrument_renamed, old, new)
+            except OSError:
+                continue
+        if guarded:
+            notes.append("It follows in %s too." % "; ".join(dict.fromkeys(guarded)))
+        agent.waker.renamed(old, new)
+        settings.set_switched_off(runtime.lab.config.name, runtime.lab.switched_off)
+        return JSONResponse({"ok": True, "name": new, "notes": notes, "instruments": runtime.instruments(),
+                             "versions": [v["n"] for v in made]})
+
     async def instrument_open(request: Request) -> Response:
         """Open an instrument's folder, or its manual, on this computer."""
         name = request.path_params["name"]
@@ -4340,6 +4427,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/instruments/{name}/manual", instrument_manual, methods=["POST", "PUT"]),
         Route("/api/instruments/{name}/open", instrument_open, methods=["POST"]),
         Route("/api/instruments/{name}/switch", instrument_switch, methods=["POST"]),
+        Route("/api/instruments/{name}/rename", instrument_rename, methods=["POST"]),
         Route("/api/instruments/draft", draft_view, methods=["POST"]),
         Route("/api/instruments/card", card_for_found, methods=["POST"]),
         Route("/api/settings", settings_view, methods=["GET", "POST"]),

@@ -958,13 +958,14 @@
   }
 
   // ------------------------------------------------------------------ runs pane (beside the chat, like a terminal pane)
-  // Two views: the Sequence (seq.js: the queue as blocks, with the functions that go into it; the "schedule" view, as
-  // 0.3.39 named the queue's) and the History (one tab per open run, else the recent runs). What showed the queue opens
-  // the pane on the Sequence (showQueue). 0.3.39's Schedule (the scans beside the queue) stays on the page, never
-  // shown. A running run is polled from /api/live (so runs started by any agent show up); a finished run shows its
-  // assessment, key results, plots with fits, table, and Run again.
+  // Two views: the Scan (the measurement now, above the scans, scripts and experiments to run or put in the sequence,
+  // with New scan and Import: seq.js draws those) and the Sequence (seq.js: the queue as blocks; the "schedule" view,
+  // as 0.3.39 named the queue's). What showed the queue opens the pane on the Sequence (showQueue); what starts a run,
+  // on the Scan (showScan). Earlier runs are the Analysis pane's (openRun). 0.3.39's Schedule (the scans beside the
+  // queue) stays on the page, never shown. A running run is polled from /api/live (so runs started by any agent show
+  // up); once it ended the Scan shows its assessment, key results, plots with fits, table and Run again, till the next.
   const RUNS = { open: false, tabs: new Map(), active: null, polling: false, cache: new Map(), dismissed: new Set(),
-                 view: "schedule", list: null, seqOpen: false };
+                 view: "scan", seqOpen: false, scanOpen: false };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const etaText = (s) => (s ? " · about " + (s < 90 ? Math.max(1, Math.round(s)) + " s" : Math.round(s / 60) + " min") + " left" : "");
   const durText = (s) => (s < 90 ? Math.round(s) + " s" : s < 5400 ? (s / 60).toFixed(1) + " min" : (s / 3600).toFixed(1) + " h");
@@ -988,68 +989,55 @@
     el.replaceChildren(statusIcon(status));
   }
 
+  // a run in the Scan: its view (buildRunView), shown while it runs and, once it ended, until the next one comes
   function runTab(runId, plan) {
     let tab = RUNS.tabs.get(runId);
     if (tab) return tab;
-    // the tab (a button) and its × beside it, not inside it; Delete on the tab closes it too
-    const state = h("span", { class: "state" });
-    const btn = h("button", { class: "run-tab-btn", type: "button", role: "tab", title: runId, "aria-selected": "false" },
-      state, h("span", { class: "run-tab-label" }, plan || runId));
-    const close = h("button", { class: "run-tab-x", type: "button", tabindex: "-1", title: "Close", "aria-label": "Close " + (plan || runId) }, icon("x"));
-    const el = h("div", { class: "run-tab", role: "presentation" }, btn, close);
-    const body = h("div", { class: "run-view", role: "tabpanel", hidden: true, "data-region": "run" });
-    tab = { runId, plan: plan || runId, status: null, el, btn, state, body, rows: [], axes: [], measures: [], trace: null,
+    const body = h("div", { class: "run-view", hidden: true, "data-region": "run" });
+    tab = { runId, plan: plan || runId, status: null, body, rows: [], axes: [], measures: [], trace: null,
             done: 0, total: 0, eta: null, final: null, view: null, timer: 0 };
-    btn.addEventListener("click", () => selectRun(runId));
-    btn.addEventListener("keydown", (e) => { if (e.key === "Delete") { e.preventDefault(); closeRunTab(runId); } });
-    close.addEventListener("click", () => closeRunTab(runId));
     RUNS.tabs.set(runId, tab);
-    $("run-tabs").append(el);
-    tabsRow();
-    $("history-view").append(body);
-    if (RUNS.tabs.size > 8) {  // keep the strip short: drop the oldest finished tab
-      const old = [...RUNS.tabs.values()].find((t) => t.status !== "running" && t !== tab);
-      if (old) closeRunTab(old.runId);
+    $("scan-live").append(body);
+    for (const old of [...RUNS.tabs.values()]) {   // one run at a time: the ones that ended before it go
+      if (old !== tab && old.status !== "running") closeRunTab(old.runId);
     }
     return tab;
   }
   function setTabStatus(tab, status) {
     tab.status = status;
-    setState(tab.state, status);
     liveDots();
   }
-  function liveDots() {   // a run running: a dot on the Runs button, and on History while the Sequence is shown
+  function liveDots() {   // a run running: a dot on the Runs button, and on Scan while the Sequence is shown
     const live = [...RUNS.tabs.values()].some((t) => t.status === "running");
     $("runs-dot").hidden = !live;
-    $("open-history").classList.toggle("live", live);
+    $("open-scan").classList.toggle("live", live);
   }
-  function tabsRow() { $("run-tabs").hidden = RUNS.view !== "history" || !RUNS.tabs.size; }
   function selectRun(runId) {
     const tab = RUNS.tabs.get(runId);
     if (!tab) return;
     RUNS.active = runId;
-    showView("history");
-    tab.btn.scrollIntoView({ block: "nearest", inline: "nearest" });
+    showView("scan");
     if (tab.status !== "running" && tab.status !== "finishing" && !tab.final) loadFinal(tab);
     else renderRunView(tab);
   }
+  // a run's view put away (its ×, or the next run coming): the Scan shows the one still running, else none
   function closeRunTab(runId) {
     const tab = RUNS.tabs.get(runId);
     if (!tab) return;
     clearTimeout(tab.timer);
-    RUNS.dismissed.add(runId);  // closing a running run's tab must not bring it back
-    tab.el.remove(); tab.body.remove();
+    RUNS.dismissed.add(runId);  // closing a running run's view must not bring it back
+    tab.body.remove();
     RUNS.tabs.delete(runId);
-    tabsRow();
     if (RUNS.active === runId) {
       RUNS.active = [...RUNS.tabs.keys()].pop() || null;
-      if (RUNS.view === "history") { if (RUNS.active) selectRun(RUNS.active); else showView("history"); }
+      if (RUNS.view === "scan") showView("scan");
     }
     liveDots();
   }
-  // the pane's view: "schedule" (the Sequence) or "history" (the active run, or with none the recent runs)
-  const VIEWS = { schedule: ["open-schedule", "seq-view"], history: ["open-history", "history-view"] };
+  // the pane's view: "scan" (the measurement now, and what to run) or "schedule" (the Sequence)
+  const VIEWS = { scan: ["open-scan", "scan-view"], schedule: ["open-schedule", "seq-view"] };
   function showView(view) {
+    if (!VIEWS[view]) view = "scan";
     RUNS.view = view;
     store("lh.runsView", view);   // kept per browser: the pane opens on it again
     for (const [v, [seg, panel]] of Object.entries(VIEWS)) {
@@ -1059,48 +1047,23 @@
       $(seg).tabIndex = on ? 0 : -1;
       $(panel).hidden = !on;
     }
-    tabsRow();
-    $("open-report").hidden = view !== "history";   // a report of runs: the History's
-    const active = view === "history" && RUNS.tabs.get(RUNS.active);
-    for (const t of RUNS.tabs.values()) {
-      const on = t === active;
-      t.el.classList.toggle("on", on);
-      t.btn.setAttribute("aria-selected", String(on));
-      t.body.hidden = !on;
-    }
-    $("runs-list").hidden = !!active;
-    const all = allRunsTab();   // the tab bar's first tab: the list of every run
-    all.classList.toggle("on", !active);
-    all.setAttribute("aria-selected", String(!active));
-    if (view === "history" && !active) loadRunList();
+    const active = RUNS.tabs.get(RUNS.active);
+    for (const t of RUNS.tabs.values()) t.body.hidden = t !== active;
+    $("scan-idle").hidden = !!active;
     if (view === "schedule") loadQueue();
     seqSight();
   }
-  // the Sequence told whether it is in sight (the pane open on it), and what to say there (message)
+  // seq.js told what of it is in sight (the pane open on the Sequence, or on the Scan and its functions), and what to
+  // say there (message)
   function seqSight(message) {
-    const open = RUNS.open && RUNS.view === "schedule";
-    if (open === RUNS.seqOpen && !message) return;
-    emit("seq", { open, opened: open && !RUNS.seqOpen, message: message || "" });
+    const open = RUNS.open && RUNS.view === "schedule", scan = RUNS.open && RUNS.view === "scan";
+    if (open === RUNS.seqOpen && scan === RUNS.scanOpen && !message) return;
+    emit("seq", { open, opened: open && !RUNS.seqOpen, scan, message: message || "" });
     RUNS.seqOpen = open;
+    RUNS.scanOpen = scan;
   }
-  function showRunList() {   // All runs: the open tabs stay open
-    RUNS.active = null;
-    showView("history");
-  }
-  function openRunList() {   // the pane, on All runs (Home's Runs)
-    RUNS.active = null;
-    RUNS.view = "history";
-    if (RUNS.open) showView("history"); else toggleRuns(true);
-  }
-  function allRunsTab() {   // made once, kept first in the run tabs
-    let b = $("runs-all");
-    if (!b) {
-      b = h("button", { id: "runs-all", class: "run-tab all-runs", type: "button", role: "tab", title: "Every run" },
-        svgIcon("M4 6h16M4 12h16M4 18h10"), h("span", {}, "All runs"));
-      b.addEventListener("click", showRunList);
-      $("run-tabs").prepend(b);
-    }
-    return b;
+  function openRunList() {   // Home's Runs: every run is the Analysis pane's
+    openAnalysis({});
   }
   // the segmented control is a tab list: the arrow keys, Home and End move along it (the Lab's choices have segKeys)
   function runsSegKeys(e) {
@@ -1113,57 +1076,12 @@
     $(VIEWS[view][0]).focus();
   }
 
-  // the recent runs, while no run is open: status, name, points and when it started (this computer's time)
-  function startedText(r) {   // 14:22 today, else 30 Oct 14:22
-    const t = r.started_at ? new Date(r.started_at * 1000) : null;
-    if (!t) return r.run_id.slice(9, 11) + ":" + r.run_id.slice(11, 13) + " · " + r.run_id.slice(4, 6) + "/" + r.run_id.slice(6, 8);
-    const day = dayText(t);
-    return (day === "today" ? "" : day + " ") + t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
+
   function dayText(t) {   // today, or the day: 30 Oct; another year's: 30 Oct 2025
     const now = new Date();
     if (t.toDateString() === now.toDateString()) return "today";
     return t.toLocaleDateString(undefined, t.getFullYear() === now.getFullYear()
       ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" });
-  }
-  async function loadRunList() {
-    if (!RUNS.list) $("runs-items").replaceChildren(h("li", { class: "pane-empty" }, "Loading…"));
-    try { RUNS.list = (await api("/api/runs?limit=50")).runs; } catch (e) { if (!RUNS.list) RUNS.list = []; }
-    renderRunList();
-  }
-  function renderRunList() {
-    const runs = RUNS.list || [];
-    const q = $("runs-filter").value.trim().toLowerCase();
-    const shown = q ? runs.filter((r) => r.run_id.toLowerCase().includes(q)) : runs;
-    $("runs-filter").hidden = !runs.length;
-    // drawn again only when what it shows changed (it is asked for each time the History shows): a row the pointer or
-    // the keyboard is on is never swapped under it
-    const sig = JSON.stringify([q, runs.length, shown.map((r) => [r.run_id, r.plan, r.status, r.points, r.planned_points])]);
-    if (sig === RUNS.listSig && $("runs-items").children.length) return;
-    RUNS.listSig = sig;
-    // each run a compact card on one line: its state, its name, its points and when it started; with none, a dashed
-    // copy of the place with what to do in it
-    const empty = () => {
-      const go = runs.length ? h("button", { class: "btn small", type: "button" }, "Clear")
-        : h("button", { class: "btn small", type: "button" }, "Sequence");
-      go.addEventListener("click", () => {
-        if (runs.length) { $("runs-filter").value = ""; renderRunList(); $("runs-filter").focus(); } else showView("schedule");
-      });
-      return h("li", { class: "runs-empty" }, h("span", {}, runs.length ? "Nothing matches" : "No runs yet"), go);
-    };
-    $("runs-items").replaceChildren(...(shown.length ? shown.map((r) => {
-      const st = h("span", { class: "state", role: "img", "aria-label": r.status, title: r.status + (r.reason ? ": " + r.reason : "") });
-      setState(st, r.status);
-      const pts = r.points != null ? r.points + (r.planned_points && r.planned_points !== r.points ? "/" + r.planned_points : "") + " pts · " : "";
-      const b = h("button", { class: "pane-menu-item run-row", type: "button", title: r.run_id }, st,
-        h("span", { class: "pm-plan" }, r.plan), h("span", { class: "pm-meta" }, pts + startedText(r)));
-      b.addEventListener("click", () => {
-        if (r.status !== "running") { openRun(r.run_id, r.plan); return; }
-        RUNS.dismissed.delete(r.run_id);   // a running run whose tab was closed opens again when asked for
-        if (RUNS.tabs.has(r.run_id)) openRun(r.run_id, r.plan); else noticeRun(r.run_id, r.plan);
-      });
-      return h("li", {}, b);
-    }) : [empty()]));
   }
   function toggleRuns(open) {
     const was = RUNS.open;
@@ -1175,8 +1093,9 @@
     fitLayout();
     seqSight();
   }
+  // a run asked for: the one the Scan shows (running, or the last to end) there; any other in the Analysis pane
   function openRun(runId, plan) {
-    runTab(runId, plan);
+    if (!RUNS.tabs.has(runId)) { openAnalysis({ run: runId }); return; }
     selectRun(runId);
     toggleRuns(true);
   }
@@ -1260,14 +1179,15 @@
     // its files and downloads: one row of buttons, what does not fit in its ⋯; a script's text read under the row
     v.files = h("div", { class: "report-files rv-files run-downloads", hidden: true });
     v.fileView = h("div", { class: "rv-file-view", hidden: true });
-    const back = h("button", { class: "link soft rv-back", type: "button" }, "← All runs");
-    back.addEventListener("click", showRunList);
+    v.close = h("button", { class: "icon-btn rv-close", type: "button", hidden: true, title: "Close", "aria-label": "Close: " + tab.plan }, icon("x"));
+    v.close.addEventListener("click", () => closeRunTab(tab.runId));
     // the plots fill the height left (at least 160 px); the analysis and the row of what is a press away above them, or
     // beside them from 900 px (app.css)
     v.side = h("div", { class: "rv-side", "data-region": "run" }, v.analysis,
       h("div", { class: "rv-folds" }, v.keys, v.plan, v.again, v.tbl), v.results, v.planBox, v.againBox, v.table);
-    tab.body.replaceChildren(back,
-      h("div", { class: "rv-head" }, v.state, h("code", { class: "rv-plan-name", title: tab.runId }, tab.plan), h("div", { class: "spacer" }), v.stop),
+    tab.body.replaceChildren(
+      h("div", { class: "rv-head" }, v.state, h("code", { class: "rv-plan-name", title: tab.runId }, tab.plan), h("div", { class: "spacer" }),
+        v.stop, v.close),
       h("div", { class: "rv-progress" }, v.count, h("span", { class: "rv-id k-minor" }, tab.runId)), v.inputs, v.barBox, v.files,
       v.fileView, h("div", { class: "rv-main" }, v.charts, v.side));
     tab.view = v;
@@ -1359,7 +1279,7 @@
         queueFromState(r.queue);
         renderQueue();
         msg.textContent = r.message || "";
-        if (!queue) { showQueue((r.message || "").split("\n")[0]); pollState(); }   // its run gets its tab
+        if (!queue) { showScan((r.message || "").split("\n")[0]); pollState(); }   // the Scan shows it as it runs
       } catch (e) { msg.classList.add("bad"); msg.textContent = e.message; }
     });
     const key = "again:" + encodeURIComponent(tab.runId);
@@ -1423,6 +1343,7 @@
     setState(v.state, tab.status);
     const running = tab.status === "running";
     v.stop.hidden = !running;
+    v.close.hidden = running || tab.status === "finishing";
     const m = tab.final ? tab.final.meta || {} : {};
     const total = tab.final ? m.planned_points || tab.final.rows.length : tab.total;
     const done = tab.final ? (m.points != null ? m.points : tab.final.rows.length) : tab.done;
@@ -1690,23 +1611,22 @@
   // One click model for every way of opening a panel. Its own top-bar button (and Ctrl+` the terminal's) puts it away
   // when it is on the screen, else brings it there (pillClick). Anything else that asks for a panel (a Home tile,
   // Analyze, Edit on a scan, a waiting request) only ever shows it (paneShow): closed, it opens; in full screen it takes
-  // the screen; already on the screen it stays, and its head rings. view: Runs on its Sequence ("schedule") or on
-  // History's list of all runs ("history")
+  // the screen; already on the screen it stays, and its head rings. view: Runs on its Scan ("scan") or its Sequence
+  // ("schedule")
   function pillClick(id, toggle) {
     if (paneVisible(id)) toggle(false);
     else paneShow(id);
   }
   function paneShow(id, view) {
     if (!TOGGLE[id]) return false;
-    const there = id !== "runpane" || !view ? true
-      : view === "history" ? RUNS.view === "history" && !RUNS.active : RUNS.view === view;
+    const there = id !== "runpane" || !view ? true : RUNS.view === view;
     if (isOpen(id)) look(id);   // asked for: looked at (one that opens is looked at as it opens)
     if (paneVisible(id) && there) { ring($(id).querySelector(":scope > header")); return true; }
     const was = ROOM.asked;
     ROOM.asked = true;   // asked for: it may take the room of the pane being typed in (fitLayout)
     try {
       if (id === "runpane" && view === "schedule") toggleSeq(true);
-      else if (id === "runpane" && view === "history") openRunList();
+      else if (id === "runpane" && view === "scan") showScan();
       else if (!isOpen(id) && (id !== "edpane" || ED.parts)) TOGGLE[id](true);   // the editor only with a scan in it
       fullShow(id);
     } finally { ROOM.asked = was; }
@@ -1727,7 +1647,7 @@
     RINGS.set(el, setTimeout(() => el.classList.remove("k-ring"), 650));
   }
   // The layout as this browser leaves it (per browser, never in the link, whose hash holds the key): the panels open,
-  // in the order they were looked at, full screen and Sequence | History, beside what each part keeps itself (the
+  // in the order they were looked at, full screen and Scan | Sequence, beside what each part keeps itself (the
   // widths above, the sidebar, the terminal and its height; never Chat | Home, as Kelvin opens on the chat). After
   // every change the parts kept apart hear of it (kelvin:layout: the panels on the screen, the one in full screen,
   // Chat | Home, the sidebar shown).
@@ -1756,7 +1676,7 @@
     try { kept = JSON.parse(store("lh.panes") || "[]"); } catch (e) { /* none kept */ }
     if (!Array.isArray(kept)) kept = [];
     const view = store("lh.runsView");
-    if (view === "schedule" || view === "history") RUNS.view = view;
+    if (view === "schedule" || view === "scan") RUNS.view = view;
     let room = paneRoom() - sum(openPanes().map(least));   // a pane open already (a waiting request) keeps its place
     const back = [];
     for (const id of [...kept].reverse()) {
@@ -1812,17 +1732,16 @@
       toggleFull(FULL[0]);   // as its own button: the layout under it back
     });
     Object.assign(window.Kelvin, { paneShow, paneHide, paneVisible, ring });   // the click model, lent to home.js, seq.js
-    document.addEventListener("kelvin:seq", layoutSaid);   // Sequence | History, kept as the person leaves it
+    document.addEventListener("kelvin:seq", layoutSaid);   // Scan | Sequence, kept as the person leaves it
     document.addEventListener("kelvin:ready", restoreLayout, { once: true });
   }
   function initRunsPane() {
-    if (store("lh.runsView") === "history") RUNS.view = "history";   // Sequence | History as this browser left it
+    if (store("lh.runsView") === "schedule") RUNS.view = "schedule";   // Scan | Sequence as this browser left it
     $("toggle-runs").addEventListener("click", () => pillClick("runpane", toggleRuns));
     $("close-runs").addEventListener("click", () => toggleRuns(false));
+    $("open-scan").addEventListener("click", () => showView("scan"));
     $("open-schedule").addEventListener("click", () => showView("schedule"));
-    $("open-history").addEventListener("click", () => showView("history"));
     $("runs-seg").addEventListener("keydown", runsSegKeys);
-    $("runs-filter").addEventListener("input", renderRunList);
     $("scans-filter").addEventListener("input", renderScans);
     $("scans-import").addEventListener("click", importScript);
     $("scans-new").addEventListener("click", () => openEditor(null));
@@ -1847,7 +1766,7 @@
     const card = { el, runId: null, plan };
     open.addEventListener("click", () => {
       if (!card.runId) return;
-      if (RUNS.tabs.has(card.runId)) { selectRun(card.runId); toggleRuns(true); } else openRun(card.runId, card.plan);
+      openRun(card.runId, card.plan);
     });
     card.progress = (ev) => {
       card.runId = ev.run_id; card.plan = ev.plan;
@@ -2030,8 +1949,8 @@
     const sel = $("report-scope");
     const chat = S.chats.find((c) => c.id === S.chatId);
     const opts = [];
-    const active = RUNS.view === "history" && RUNS.active && RUNS.tabs.get(RUNS.active);   // the run shown
-    if (active && active.status !== "running") opts.push(["run", "This run: " + (active.plan || RUNS.active)]);
+    const shown = ANA.runs.find((r) => r.run_id === ANA.run);   // the dataset the Analysis pane shows
+    if (shown && shown.status !== "running") opts.push(["run", "This run: " + (shown.plan || shown.run_id)]);
     if (chat && chat.project) opts.push(["project", "Runs in project " + (projectName(chat.project) || "")]);
     if (S.chatId && !S.incognito) opts.push(["chat", "Runs in this chat"]);
     opts.push(["today", "Today's runs"], ["last", "The last 5 runs"]);
@@ -2339,7 +2258,7 @@
   }
   async function makeReport() {
     const fmt = (document.querySelector('input[name="report-format"]:checked') || {}).value || "pdf";
-    const body = { scope: $("report-scope").value, chat_id: S.chatId, run: RUNS.active, last: 5,
+    const body = { scope: $("report-scope").value, chat_id: S.chatId, run: ANA.run || null, last: 5,
       title: $("report-title").value.trim(), summary: $("report-summary").value.trim(), format: fmt };
     $("make-report").disabled = true;
     $("report-msg").textContent = "Writing…";
@@ -4640,10 +4559,12 @@
 
   // ------------------------------------------------------------------ lab panel
   // switching: an instrument's switch on its way to the server (name -> the state asked for), drawn busy in that state;
-  // refused: why, shown under its row until it is switched again. everyone: Activity's Mine | Everyone (lh.labEveryone)
+  // refused: why, shown under its row until it is switched again. everyone: Activity's Mine | Everyone (lh.labEveryone).
+  // rename: the instrument whose name is being changed ({name, value typed, msg, bad, busy})
   const OPEN = new Set(), SHOW_SETTINGS = new Set();
   const PANEL = { filter: "", activeOnly: store("lh.activeOnly") === "1", instruments: [], loose: new Map(),
-                  everyone: store("lh.labEveryone") === "1", switching: new Map(), refused: new Map(), eventsShown: "" };
+                  everyone: store("lh.labEveryone") === "1", switching: new Map(), refused: new Map(), eventsShown: "",
+                  rename: null };
   const instId = (name) => "inst-" + String(name).replace(/[^\w-]/g, "_");
   // a choice of two as a radio group (.seg): the chosen side raised, checked and the one tab stop
   function segMark(seg, v) {
@@ -4741,8 +4662,68 @@
       body.append(h("div", { class: "group settings" }, toggle,
         h("div", { class: "inst-settings", id: id + "-settings", hidden: !shown }, ...(shown ? inst.settings.map((x) => kv(x)) : []))));
     }
+    body.append(instTools(inst));
     card.append(body);
     return card;
+  }
+  // an opened instrument's address (two of one model told apart by it) and Rename…: a name of the person's own, which
+  // the lab config, the scans, the sequence and the watches take (POST /api/instruments/{name}/rename); its past runs
+  // keep the name they were measured with
+  function instTools(inst) {
+    const r = PANEL.rename && PANEL.rename.name === inst.name ? PANEL.rename : null;
+    const where = h("code", { class: "inst-where", title: "Its address" }, inst.address || "");
+    if (!r) {
+      const b = h("button", { class: "link soft", type: "button", "data-k": "rename " + inst.name,
+        title: "A name of your own: the lab config, your scans, the sequence and the watches take it" }, "Rename…");
+      b.addEventListener("click", () => {
+        PANEL.rename = { name: inst.name, value: inst.name, msg: "", bad: false, busy: false };
+        renderInstruments();
+        const f = $("lab-status").querySelector(".inst-rename");
+        if (f) { f.focus(); f.select(); }
+      });
+      return h("div", { class: "inst-tools" }, where, b);
+    }
+    const input = h("input", { class: "kfield inst-rename", value: r.value, maxlength: "40", spellcheck: "false", autocomplete: "off",
+      "aria-label": "New name for " + inst.name, "data-k": "rename-field " + inst.name, disabled: r.busy });
+    input.addEventListener("input", () => { r.value = input.value; });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); renameInstrument(inst.name); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); PANEL.rename = null; renderInstruments(); }
+    });
+    input.addEventListener("blur", () => setTimeout(() => { if (PANEL.drawLater) renderInstruments(); }, 0));
+    const ok = h("button", { class: "btn small primary", type: "button", disabled: r.busy }, "Rename");
+    ok.addEventListener("click", () => renameInstrument(inst.name));
+    const no = h("button", { class: "btn small ghost", type: "button", disabled: r.busy }, "Cancel");
+    no.addEventListener("click", () => { PANEL.rename = null; renderInstruments(); });
+    return h("div", { class: "inst-tools renaming" }, h("div", { class: "inst-rename-row" }, input, ok, no),
+      r.msg ? h("p", { class: "hint" + (r.bad ? " bad" : ""), role: "status" }, r.msg) : null);
+  }
+  async function renameInstrument(name) {
+    const r = PANEL.rename;
+    if (!r || r.busy) return;
+    const to = r.value.trim();
+    if (!to || to === name) { PANEL.rename = null; renderInstruments(); return; }
+    r.busy = true;
+    r.msg = "";
+    renderInstruments();
+    let d;
+    try { d = await api("/api/instruments/" + encodeURIComponent(name) + "/rename", { body: { to } }); }
+    catch (e) {
+      Object.assign(r, { busy: false, msg: e.message, bad: true });
+      renderInstruments();
+      const f = $("lab-status").querySelector(".inst-rename");
+      if (f) f.focus();
+      return;
+    }
+    PANEL.rename = null;
+    if (OPEN.delete(name)) OPEN.add(d.name);
+    if (SHOW_SETTINGS.delete(name)) SHOW_SETTINGS.add(d.name);
+    if (Array.isArray(d.instruments)) PANEL.instruments = d.instruments;
+    renderInstruments();
+    toast((d.notes || []).join(" ") || name + " is " + d.name + " now.");
+    edRenamed(name, d.name);
+    emit("renamed", { from: name, to: d.name });   // the Scan's list, as the library has it now
+    pollState();
   }
   async function switchInstrument(name, on, sw, still) {
     if (PANEL.switching.has(name)) return;
@@ -4776,8 +4757,11 @@
       + (unconnected ? " · " + unconnected + " not connected" : "") + (off ? " · " + off + " off" : "");
     $("seg-active").textContent = "Active" + (active + errors ? " (" + (active + errors) + ")" : "");
     segMark($("inst-seg"), PANEL.activeOnly ? "active" : "all");
-    // redrawn at every poll (the readings move): the row, switch or Settings that had the focus keeps it
+    // redrawn at every poll (the readings move): the row, switch or Settings that had the focus keeps it; never under
+    // a new name being typed (drawn once the box lets go)
     const list = $("lab-status"), had = list.contains(document.activeElement) ? document.activeElement.dataset.k : null;
+    PANEL.drawLater = !!had && had.startsWith("rename-field ") && !!PANEL.rename && !PANEL.rename.busy;
+    if (PANEL.drawLater) return;
     list.replaceChildren(...(shown.length ? shown.map(instrumentRow)
       : [h("div", { class: "inst-empty" }, !all.length ? "None yet." : PANEL.activeOnly && !q ? "Nothing is active." : "No instrument matches.")]));
     const back = had && [...list.querySelectorAll("[data-k]")].find((el) => el.dataset.k === had);
@@ -5304,6 +5288,11 @@
     if (RUNS.open) showView("schedule"); else toggleRuns(true);
     seqSight(message);
   }
+  function showScan(message) {   // the Scan: what was just started shows there as it runs
+    RUNS.view = "scan";
+    if (RUNS.open) showView("scan"); else toggleRuns(true);
+    seqSight(message);
+  }
   function toggleSeq(open, message) {   // the Sequence shown (true), the pane closed if it shows it (false), or either
     const shown = RUNS.open && RUNS.view === "schedule";
     if (open === undefined ? !shown : open) showQueue(message);
@@ -5744,7 +5733,7 @@
       queueFromState(r.queue);
       renderQueue();
       scansSay(r.message || "");
-      if (!queue) { showQueue((r.message || "").split("\n")[0]); pollState(); }
+      if (!queue) { showScan((r.message || "").split("\n")[0]); pollState(); }
     });
   }
   function translateButton(v) {
@@ -6172,7 +6161,7 @@
       queueFromState(r.queue);
       renderQueue();
       scansSay(r.message || "");
-      if (!queue) { showQueue((r.message || "").split("\n")[0]); pollState(); }   // its run gets its tab
+      if (!queue) { showScan((r.message || "").split("\n")[0]); pollState(); }   // the Scan shows it as it runs
     });
   }
   // Import a script or VI…: the computer's own file picker in the Kelvin app; in a browser, its path typed. A script
@@ -6232,9 +6221,11 @@
   // again; Save as scan keeps it in the library instead (lib: the entry its runs are noted under, edited from).
   const ED = { open: false, id: null, item: null, lib: null, from: "", parts: null, base: "", units: new Map(),
                setKeys: new Set(), readKeys: new Set(), check: null, timer: 0, gen: 0, busy: false, asking: null,
-               more: new WeakSet(),   // the loops whose details are open: they stay open when the loops are drawn again
+               insts: new Map(), unitOf: new Map(),   // the lab's instruments for the menus; each key's unit
+               vars: new WeakSet(),   // the loops stepping a variable (a name of their own), named or not yet
+               focus: null,           // what gets the focus once the editor is drawn again (its data-f)
                key: Math.random().toString(36).slice(2) };   // this editor, to Kelvin: of its checks, only the newest runs
-  const ED_MODES = [["range", "Range"], ["values", "Values"], ["ramp", "Ramp"]];
+  const ED_MODES = [["range", "Range"], ["values", "List"], ["ramp", "Ramp"]];
 
   function toggleEditor(open) {
     ED.open = open === undefined ? !ED.open : open;
@@ -6266,20 +6257,34 @@
     ED.parts = d.parts;
     ED.base = JSON.stringify(d.parts);
     ED.check = d.check;
-    const lab = d.lab || { set: [], read: [] };
-    // a key's unit, and the lab's own name for it (names:, a Special Measure channel's): "V · Vbg"
-    ED.units = new Map(lab.set.concat(lab.read).map((p) => [p.key, [p.unit, p.name].filter(Boolean).join(" · ")]));
-    ED.setKeys = new Set(lab.set.map((p) => p.key));
-    ED.readKeys = new Set(lab.read.map((p) => p.key));
-    $("ed-set-keys").replaceChildren(...lab.set.map((p) => h("option", { value: p.key }, [p.name, p.unit || (p.action ? "action" : "")].filter(Boolean).join(" · "))));
-    $("ed-read-keys").replaceChildren(...lab.read.map((p) => h("option", { value: p.key }, [p.name, p.unit].filter(Boolean).join(" · "))));
+    edInstruments(d.lab || { set: [], read: [], instruments: [] });
+    ED.vars = new WeakSet();
+    ED.focus = null;
+    const fresh = !ED.id && !ED.item && Array.isArray(d.parts.loops) && !d.parts.loops.length && !d.parts.time;
+    if (fresh) {   // a new scan starts with its first loop, to choose what it changes
+      ED.parts.loops.push(blankLoop());
+      ED.base = JSON.stringify(ED.parts);
+    }
     edPlan(false);
     edSay("");
     renderEditor();
     Kelvin.paneShow("edpane");
     $("ed-name").focus();
+    if (fresh) edCheck();
   }
   const edDirty = () => !!ED.parts && JSON.stringify(ED.parts) !== ED.base;
+  // an instrument renamed in the Lab panel: the scan open here says it by its new name (and that is no change of the
+  // person's), its menus as the lab is now
+  async function edRenamed(from, to) {
+    if (!ED.parts) return;
+    const token = new RegExp("(?<![\\w.:/\\\\-])" + from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\.(?=[A-Za-z_])", "g");
+    const dirty = edDirty();
+    ED.parts = JSON.parse(JSON.stringify(ED.parts).replace(token, to + "."));
+    ED.base = dirty ? ED.base.replace(token, to + ".") : JSON.stringify(ED.parts);
+    try { edInstruments((await api("/api/library", { body: { op: "parts", id: null } })).lab || {}); } catch (e) { /* the menus as they were */ }
+    renderEditor();
+    edCheck();
+  }
   // the scan open with changes, before it goes (×, or another scan opened): Save, Discard or Keep editing (Discard or
   // Keep editing when Save can't keep it now). true: it may go (saved, or its changes dropped)
   async function edLeave() {
@@ -6395,16 +6400,8 @@
     field("ed-desc", p.description, p.description === null || fixed.has("description"));
     field("ed-repeat", p.repeat, fixed.has("repeat"));
     field("ed-settle", p.settle, fixed.has("settle"));
-    const time = p.time || {}, byPoints = time.points != null && time.for == null;
-    field("ed-every", time.every, fixed.has("time"));
-    field("ed-for", byPoints ? time.points : time.for, fixed.has("time"));
-    $("ed-for").dataset.key = byPoints ? "points" : "for";
-    $("ed-for-label").textContent = byPoints ? "points" : "for";
-    $("ed-for-unit").hidden = byPoints;
-    const loops = Array.isArray(p.loops) ? p.loops : null;
-    $("ed-add-loop").hidden = !loops;
-    $("ed-loops").replaceChildren(...(loops ? loops.map(edLoop) : [h("li", { class: "hint" }, "As written below.")]));
-    renderEdMeasure();
+    $("ed-settle-f").hidden = p.settle == null && !fixed.has("settle");   // each loop has its own wait
+    renderLoops();
     edRows("sets");
     edRows("setup");
     edRows("after");
@@ -6412,195 +6409,325 @@
     $("ed-kept-sec").hidden = !p.kept;
     renderEdCheck();
   }
-  // a loop on one line: its number, what it steps and its unit, how it steps and its values, its points and its details'
-  // button (a narrow pane puts its values on a line of their own under the rest, app.css); the details (and back,
-  // settle, first; the channels moving with it; what it records once per value; Outer, Inner, Remove) open under it
-  function edLoop(loop, i) {
-    const p = ED.parts, n = p.loops.length, name = "Loop " + (i + 1);
-    const acts = h("div", { class: "ed-line ed-acts" });   // the loop's tools, the last line of its details
+  // ------------------------------------------------------------------ the loops, as Special Measure's scan editor
+  // Each loop is a card, the innermost first: Loop 1 steps fastest (ED.parts.loops is outer first, as the plan writes
+  // them; a time series, time:, is the innermost loop when the scan has one). A card says what its loop changes, an
+  // instrument and then one of its parameters (more than one move in step: with:), from, to and its step, its waits,
+  // and what it records: the innermost loop's at each point (measure:), an outer loop's once per value of it.
+  const ED_VAR = "\u0001var", ED_TIME = "\u0001time";
+  // the lab's instruments for the menus, by name (lab.instruments); two of one model are told apart by address
+  function edInstruments(lab) {
+    const list = lab.instruments || [], models = new Map();
+    for (const i of list) models.set(i.model, (models.get(i.model) || 0) + 1);
+    ED.insts = new Map(list.map((i) => [i.name, Object.assign({}, i, { twin: models.get(i.model) > 1 })]));
+    ED.unitOf = new Map((lab.set || []).concat(lab.read || []).map((p) => [p.key, p.unit || ""]));
+  }
+  const edSplit = (key) => { const k = String(key || ""), dot = k.indexOf("."); return dot < 0 ? [null, k] : [k.slice(0, dot), k.slice(dot + 1)]; };
+  const edInstText = (i) => [i.name, i.model, i.twin ? i.address : ""].filter(Boolean).join(" · ") + (i.off ? " (off)" : "");
+  const edParamText = (p) => p.label + (p.unit ? " (" + p.unit + ")" : "") + (p.name ? " · " + p.name : "") + (p.action ? " · action" : "");
+  function edParams(name, what) {   // what of an instrument a row may take: "read", "setup" (actions too) or "set"
+    const i = ED.insts.get(name);
+    return !i ? [] : what === "read" ? i.read : what === "setup" ? i.set : i.set.filter((p) => !p.action);
+  }
+  // what a row changes or records: an instrument, then one of its parameters. opts: f (what the row is: data-f, for the
+  // focus), vars (a variable may be chosen instead, a name of your own that Computed works settings out from), time
+  // (or a time series), mode ("var" or "time": the row is one). Another instrument keeps the parameter of the same
+  // name (two of one model), else takes its headline reading or its first output; pick(key, how, typing) on a choice
+  function edPick(key, what, pick, label, opts) {
+    opts = opts || {};
+    const [iname, pname] = edSplit(key);
+    const mode = opts.mode || (iname !== null ? "inst" : key ? "var" : "none");
+    const opt = (value, text) => h("option", { value }, text);
+    const insts = [...ED.insts.values()].filter((i) => edParams(i.name, what).length || i.name === iname);
+    const inst = h("select", { class: "ed-in ed-inst", "aria-label": label + ": instrument", "data-f": opts.f + "-i" },
+      ...(mode === "none" ? [opt("", "Instrument…")] : []),
+      ...insts.map((i) => opt(i.name, edInstText(i))),
+      ...(mode === "inst" && !ED.insts.has(iname) ? [opt(iname, iname + " (not in this lab)")] : []),
+      ...(opts.time ? [opt(ED_TIME, "Time")] : []),
+      ...(opts.vars ? [opt(ED_VAR, "Variable…")] : []));
+    inst.value = mode === "var" ? ED_VAR : mode === "time" ? ED_TIME : mode === "inst" ? iname : "";
+    if (mode === "inst" && ED.insts.has(iname)) {   // chosen, it says its name; its model and address in the menu, and here
+      inst.selectedOptions[0].label = iname;
+      inst.title = edInstText(ED.insts.get(iname));
+    }
+    inst.addEventListener("change", () => {
+      const v = inst.value;
+      if (v === ED_VAR) return pick(mode === "var" ? key : "", "var");
+      if (v === ED_TIME) return pick("", "time");
+      const list = edParams(v, what), i = ED.insts.get(v) || {};
+      const p = list.find((q) => q.param === pname) || list.find((q) => (what === "read" ? q.param === i.headline : q.drive)) || list[0];
+      pick(p ? v + "." + p.param : "", "inst");
+    });
+    const out = [inst];
+    if (mode === "inst") {
+      const list = edParams(iname, what);
+      const par = h("select", { class: "ed-in ed-par", "aria-label": label + ": parameter", "data-f": opts.f + "-p" },
+        ...list.map((p) => opt(p.param, edParamText(p))),
+        ...(list.some((p) => p.param === pname) ? [] : [opt(pname, pname + (ED.insts.has(iname) ? (what === "read" ? " (not a reading)" : " (can't be set)") : ""))]));
+      par.value = pname;
+      par.addEventListener("change", () => pick(iname + "." + par.value, "param"));
+      out.push(par);
+    } else if (mode === "var") {
+      const name = h("input", { class: "ed-in ed-var", value: key, placeholder: "a name: n", spellcheck: "false", autocomplete: "off",
+        "aria-label": label + ": variable", "data-f": opts.f + "-v", title: "A name of your own, which Computed works settings out from" });
+      name.addEventListener("input", () => pick(name.value.trim(), "var", true));
+      out.push(name);
+    }
+    return h("span", { class: "ed-pick" + (mode === "none" ? " unpicked" : "") }, ...out);
+  }
+  // a row's choice made: the editor drawn again, the focus where the person goes next (its parameter, once its
+  // instrument is chosen; a variable's name)
+  function edPicked(f, how) {
+    ED.focus = f + (how === "inst" || how === "param" ? "-p" : how === "var" ? "-v" : "-i");
+    edChanged(true);
+  }
+  // the loops' cards, the innermost first, and how many there are; none: the scan measures once
+  function renderLoops() {
+    const p = ED.parts, loops = Array.isArray(p.loops) ? p.loops : null, time = p.time && !(p.fixed || []).includes("time");
+    $("ed-stepper").hidden = !loops;
+    if (!loops) { $("ed-loops").replaceChildren(h("li", { class: "hint" }, "As written below.")); return; }
+    const cards = loops.map((loop, i) => ({ loop, i })).reverse();
+    if (time) cards.unshift({ time: p.time });
+    const n = cards.length;
+    $("ed-n").textContent = String(n);
+    $("ed-fewer").disabled = !n;
+    $("ed-loops").replaceChildren(...(n ? cards.map((c, k) => (c.time ? edTimeCard(c.time, k, n) : edLoop(c.loop, c.i, k, n))) : [edPointCard()]));
+  }
+  // a loop's card: Loop n (inner, outer), its points, ↑ Inner, ↓ Outer, ✕ Remove; what it changes, its waits, and
+  // what it records. A loop the editor can't show as fields is kept as written
+  function edLoop(loop, i, k, n) {
+    const p = ED.parts, name = "Loop " + (k + 1), f = "l" + i;
+    const acts = h("span", { class: "ed-acts" });
     const act = (text, title, fn) => {
-      const b = h("button", { class: "link soft", type: "button", title, "aria-label": title + ": " + name }, text + " " + title);
+      const b = h("button", { class: "icon-btn", type: "button", title, "aria-label": title + ": " + name, "data-f": f + "-" + title }, text);
       b.addEventListener("click", fn);
       acts.append(b);
     };
-    if (i > 0) act("↑", "Outer", () => edMoveLoop(i, i - 1));
-    if (i < n - 1) act("↓", "Inner", () => edMoveLoop(i, i + 1));
-    act("✕", "Remove", () => { p.loops.splice(i, 1); edChanged(true); const at = $("ed-loops").children[Math.min(i, p.loops.length - 1)]; (at ? at.querySelector("input, button") : $("ed-add-loop")).focus(); });
-    const count = h("span", { class: "ed-count" }, loopCount(loop));
-    const head = [h("span", { class: "ed-n" }, String(i + 1))];
-    let vals = [], body = [], more = [];
+    if (i < p.loops.length - 1) act("↑", "Inner", () => edMoveLoop(i, i + 1));
+    if (i > 0) act("↓", "Outer", () => edMoveLoop(i, i - 1));
+    act("✕", "Remove", () => { p.loops.splice(i, 1); ED.focus = "ed-add-loop"; edChanged(true); });
+    const where = n > 1 ? (k === 0 ? "inner" : k === n - 1 ? "outer" : "") : "";
+    const head = h("div", { class: "ed-loop-head" }, h("h4", {}, name), where ? h("span", { class: "ed-where" }, where) : null,
+      h("span", { class: "ed-count" }, loopCount(loop)), acts);
+    const parts = [];
     if (loop.mode === "kept") {
-      head.push(h("code", { class: "ed-key-ro" }, loop.key), h("span", { class: "tag", title: "Kept as written: the editor doesn't show this loop as fields" }, "as written"));
-      body = [h("pre", { class: "ed-kept" }, loop.text || "")];
+      parts.push(h("div", { class: "ed-line" }, h("code", { class: "ed-key-ro" }, loop.key),
+        h("span", { class: "tag", title: "Kept as written: the editor doesn't show this loop as fields" }, "as written")),
+        h("pre", { class: "ed-kept" }, loop.text || ""));
     } else {
-      const key = h("input", { class: "ed-in ed-key", list: "ed-set-keys", value: loop.key, spellcheck: "false", autocomplete: "off",
-        placeholder: "instrument.parameter", "aria-label": name + ": what it steps",
-        title: "A setting, or a name of your own (a variable) that Computed works settings out from" });
-      const unit = h("span", { class: "ed-unit" }, ED.units.get(loop.key) || "");
-      key.addEventListener("input", () => { loop.key = key.value.trim(); unit.textContent = ED.units.get(loop.key) || ""; edChanged(); });
-      const mode = h("select", { class: "ed-mode", "aria-label": name + ": how it steps" }, ...ED_MODES.map(([v, t]) => h("option", { value: v }, t)));
-      mode.value = loop.mode;
-      mode.addEventListener("change", () => {
-        edMode(loop, mode.value);
-        edChanged(true);
-        const li = $("ed-loops").children[i];
-        if (li) li.querySelector(".ed-mode").focus();
-      });
-      head.push(key, unit, mode);   // what it steps, how
-      const f = edModeFields(loop, name, () => { count.textContent = loopCount(loop); });
-      vals = f.vals;
-      body = f.body;
-      more = f.more;
-      if (loop.kept) body.push(h("pre", { class: "ed-kept", title: "Kept as written" }, loop.kept));
+      parts.push(edChange(loop, i, k, name));
+      if (loop.mode !== "ramp") parts.push(edWaits(loop, name, f));
+      if (loop.kept) parts.push(h("pre", { class: "ed-kept", title: "Kept as written" }, loop.kept));
     }
-    const [toggle, part] = edMore(loop, i, more.concat(acts), name);
-    return h("li", { class: "ed-loop" + (loop.mode === "kept" ? " kept" : ""), "data-key": loop.key },
-      h("div", { class: "ed-loop-head" }, ...head, vals.length ? h("div", { class: "ed-line ed-vals" }, ...vals) : null, count, toggle),
-      body.length ? h("div", { class: "ed-loop-body" }, ...body) : null, part, h("ul", { class: "ed-problems ed-loop-problems" }));
+    if (k === 0) parts.push(edInnerRecord(loop, name));
+    else if (loop.mode !== "kept") parts.push(edRecord([[loop.measure || (loop.measure = []), f + "r"]], name, true));
+    return h("li", { class: "ed-loop" + (loop.mode === "kept" ? " kept" : ""), "data-i": String(i), "data-key": loop.key },
+      head, ...parts, h("ul", { class: "ed-problems ed-loop-problems" }));
   }
-  // the button of a loop's details (a dot on it: something is set there) and the part it opens; none without details
-  function edMore(loop, i, more, name) {
-    if (!more.length) return [null, null];
-    const id = "ed-more-" + i, part = h("div", { class: "ed-more", id }, h("div", { class: "ed-more-in" }, ...more));
-    const set = loop.back || loop.log || loop.settle != null || loop.first_settle != null || (loop.with || []).length || (loop.measure || []).length;
-    const b = h("button", { class: "icon-btn ed-more-btn" + (set ? " has" : ""), type: "button", "aria-expanded": "false",
-      "aria-controls": id, "aria-label": "Details: " + name, title: "Details" }, icon("chev"));
-    const show = (open, ease) => { b.setAttribute("aria-expanded", String(open)); part.hidden = !open; if (open && ease) edEase(part); };
-    show(ED.more.has(loop));
-    b.addEventListener("click", () => { const open = !ED.more.has(loop); if (open) ED.more.add(loop); else ED.more.delete(loop); show(open, true); });
-    return [b, part];
+  // what a loop changes: its own setting (a variable, or the time) and how it steps, its values, and the settings that
+  // move in step with it (with:), each from → to over its points
+  function edChange(loop, i, k, name) {
+    const f = "l" + i, also = loop.with || (loop.with = []);
+    const main = edPick(loop.key, "set", (key, how, typing) => edLoopKey(loop, i, key, how, typing), name + ": what it changes",
+      { f, vars: true, time: k === 0 && !(ED.parts.fixed || []).includes("time"), mode: ED.vars.has(loop) ? "var" : undefined });
+    const mode = h("select", { class: "ed-in ed-mode", "aria-label": name + ": how it steps", "data-f": f + "-m" },
+      ...ED_MODES.map(([v, t]) => h("option", { value: v }, t)));
+    mode.value = loop.mode;
+    mode.addEventListener("change", () => { edMode(loop, mode.value); ED.focus = f + "-m"; edChanged(true); });
+    const rows = [h("div", { class: "ed-chan" }, main, mode), ...edModeFields(loop, name, f)];
+    if (loop.mode !== "ramp") {
+      also.forEach((row, j) => rows.push(...edWithRow(loop, row, j, name, f)));
+      const add = h("button", { class: "link soft", type: "button", "data-f": f + "-add",
+        title: "Another setting that moves in step with this one, from → to over the same points" }, "+ Change another");
+      add.addEventListener("click", () => {
+        also.push({ key: "", from: null, to: null, values: [], form: "range", order: [] });
+        ED.focus = f + "w" + (also.length - 1) + "-i";
+        edChanged(true);
+      });
+      rows.push(h("div", { class: "ed-line" }, add));
+    }
+    return h("div", { class: "ed-part" }, h("span", { class: "ed-part-h" }, "Change"), ...rows);
   }
-  // a part opening in place grows to its height as it fades in (app.css: .ed-opening), once; closing is at once
-  function edEase(el) {
-    el.classList.remove("ed-opening");
-    void el.offsetWidth;
-    el.classList.add("ed-opening");
-    const done = (e) => { if (e.target === el) { el.classList.remove("ed-opening"); el.removeEventListener("animationend", done); } };
-    el.addEventListener("animationend", done);
-  }
-  // the settings that move with a loop's own (Special Measure's channels of one loop), each from → to in step with it
-  // (or its own values), and what the loop reads once per value
-  function edLoopExtras(loop, name) {
-    const out = [];
-    const rows = loop.with || (loop.with = []);
-    rows.forEach((row, j) => {
-      const label = name + ", with " + (j + 1);
-      const key = h("input", { class: "ed-in ed-key", list: "ed-set-keys", value: row.key, spellcheck: "false", autocomplete: "off",
-        placeholder: "instrument.parameter", "aria-label": label + ": what moves" });
-      const unit = h("span", { class: "ed-unit" }, ED.units.get(row.key) || "");
-      key.addEventListener("input", () => { row.key = key.value.trim(); unit.textContent = ED.units.get(row.key) || ""; edChanged(); });
-      const x = h("button", { class: "icon-btn", type: "button", "aria-label": label + ": remove", title: "Remove" }, icon("x"));
-      x.addEventListener("click", () => { rows.splice(j, 1); edChanged(true); });
-      const own = row.form === "list" || row.form === "values"
-        ? [(() => { const b = edBox("", (row.values || []).map(edShow).join(", "), (v) => v, "", { class: "ed-in ed-values", inputmode: "text", "aria-label": label + ": values" });
-          b.input.addEventListener("input", () => { row.values = edList(b.input.value); edChanged(); }); return b; })()]
-        : [edBox("from", row.from, (v) => { row.from = v; edChanged(); }, "", { class: "ed-in ed-short", "aria-label": label + ": from" }),
-           edBox("to", row.to, (v) => { row.to = v; edChanged(); }, "", { class: "ed-in ed-short", "aria-label": label + ": to" })];
-      out.push(h("div", { class: "ed-line ed-with" }, h("span", { class: "ed-eq", title: "Moves with " + (loop.key || "the loop") }, "with"), key, ...own, unit, x));
-    });
-    const add = h("button", { class: "link soft", type: "button", title: "A setting that moves with this one, from → to in step with it" }, "+ Channel");
-    add.addEventListener("click", () => {
-      rows.push({ key: "", from: null, to: null, values: [], form: "range", order: [] });
+  // a loop's own setting chosen: an instrument's parameter, a variable, or the time (the innermost loop becomes a time
+  // series, and what it read once per value it reads at each point)
+  function edLoopKey(loop, i, key, how, typing) {
+    const p = ED.parts;
+    if (how === "time") {
+      p.loops.splice(i, 1);
+      if (Array.isArray(p.measure)) for (const m of loop.measure || []) if (m && !p.measure.includes(m)) p.measure.push(m);
+      p.time = { every: null, for: null, points: null, order: [] };
+      ED.focus = "t-every";
       edChanged(true);
-      const li = $("ed-loops").children[ED.parts.loops.indexOf(loop)];
-      const keys = li ? li.querySelectorAll(".ed-with .ed-key") : [];
-      if (keys.length) keys[keys.length - 1].focus();
-    });
-    const reads = loop.measure || (loop.measure = []);
-    const chips = reads.map((m, j) => {
-      const x = h("button", { class: "icon-btn", type: "button", "aria-label": name + ": don't record " + m, title: "Remove" }, icon("x"));
-      x.addEventListener("click", () => { reads.splice(j, 1); edChanged(true); });
-      return h("span", { class: "an-chip ed-chip", title: m + ": read once per value of this loop" }, h("span", {}, m), x);
-    });
-    const read = h("input", { class: "ed-in ed-add", list: "ed-read-keys", placeholder: "Record once per value", spellcheck: "false",
-      autocomplete: "off", "aria-label": name + ": a reading to record once per value" });
-    const take = () => { const k = read.value.trim(); if (!k) return; if (!reads.includes(k)) reads.push(k); edChanged(true); };
-    read.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); take(); } });
-    read.addEventListener("change", () => { if (ED.readKeys.has(read.value.trim())) take(); });
-    out.push(h("div", { class: "ed-line" }, add), h("div", { class: "ed-chips ed-loop-reads" }, h("span", { class: "ed-chip-list" }, ...chips), read));
-    return out;
+      return;
+    }
+    if (how === "var") ED.vars.add(loop); else ED.vars.delete(loop);
+    loop.key = key;
+    if (typing) edChanged();
+    else edPicked("l" + i, how);
   }
-  // a loop's boxes by how it steps: vals on its line, body under it (a ramp's legs), more in its details
-  function edModeFields(loop, name, recount) {
-    const fixed = new Set(loop.fixed || []);
-    const unit = ED.units.get(loop.key) || "";
-    const changed = () => { recount(); edChanged(); };
-    const settle = edBox("settle", loop.settle, (v) => { loop.settle = v; changed(); }, "s",
-      { class: "ed-in ed-short", "aria-label": name + ": settle (s)", disabled: fixed.has("settle"), title: fixed.has("settle") ? "A hold per value, as written below" : "After setting each value" });
-    const first = edBox("first", loop.first_settle, (v) => { loop.first_settle = v; changed(); }, "s",
-      { class: "ed-in ed-short", "aria-label": name + ": settle after its first value (s)", title: "After its first value, each time the loop starts again (in place of settle)" });
+  // a setting moving in step with its loop's own: from → to over the loop's points (its step shown), or its own values
+  function edWithRow(loop, row, j, name, f) {
+    const label = name + ", also " + (j + 1), g = f + "w" + j;
+    const x = h("button", { class: "icon-btn", type: "button", "aria-label": label + ": remove", title: "Remove", "data-f": g + "-x" }, icon("x"));
+    x.addEventListener("click", () => { loop.with.splice(j, 1); ED.focus = f + "-add"; edChanged(true); });
+    const pick = edPick(row.key, "set", (key, how) => { row.key = key; edPicked(g, how); }, label, { f: g });
+    let vals;
+    if (row.form === "list" || row.form === "values") {
+      const b = edBox("", (row.values || []).map(edShow).join(", "), (v) => v, "",
+        { class: "ed-in ed-values", inputmode: "text", "aria-label": label + ": values", "data-f": g + "-vals" });
+      b.input.addEventListener("input", () => { row.values = edList(b.input.value); edChanged(); });
+      vals = [b];
+    } else {
+      const step = h("span", { class: "ed-wstep", "data-j": String(j) }, withStep(loop, row));
+      const box = (key) => edBox(key, row[key], (v) => { row[key] = v; step.textContent = withStep(loop, row); edChanged(); }, "",
+        { class: "ed-in ed-short", "aria-label": label + ": " + key, "data-f": g + "-" + key });
+      vals = [box("from"), box("to"), step];
+    }
+    return [h("div", { class: "ed-chan ed-with" }, pick, x), h("div", { class: "ed-line ed-vals" }, ...vals)];
+  }
+  function withStep(loop, row) {   // a setting's step, moving from → to over its loop's points
+    const n = loop.mode === "values" ? (loop.values || []).length : loop.by === "points" ? loop.points : rangeCount(loop.from, loop.to, loop.step);
+    if (!row || !edNum(row.from) || !edNum(row.to) || !Number.isInteger(n) || n < 2) return "";
+    return "step " + Number((Math.abs(row.to - row.from) / (n - 1)).toPrecision(4));
+  }
+  // a loop's points and its settings' steps, as its values are typed (no redraw: the box keeps its caret)
+  function edLoopShown(loop) {
+    const li = $("ed-loops").querySelector('[data-i="' + ED.parts.loops.indexOf(loop) + '"]');
+    if (!li) return;
+    li.querySelector(".ed-count").textContent = loopCount(loop);
+    li.querySelectorAll(".ed-wstep").forEach((s) => { s.textContent = withStep(loop, (loop.with || [])[+s.dataset.j]); });
+  }
+  // a loop's values by how it steps: a range's from, to, step and points (each following the other: the one typed is
+  // the one kept), a list of values, or a ramp's legs and how often it measures on the way
+  function edModeFields(loop, name, f) {
+    const fixed = new Set(loop.fixed || []), unit = ED.unitOf.get(loop.key) || "";
+    const changed = () => { edLoopShown(loop); edChanged(); };
     if (loop.mode === "values") {
       const vals = edBox("", (loop.values || []).map(edShow).join(", "), (v) => v, "",
-        { class: "ed-in ed-values", inputmode: "text", "aria-label": name + ": values", placeholder: "0, 0.5, 1" });
+        { class: "ed-in ed-values", inputmode: "text", "aria-label": name + ": values", placeholder: "0, 0.5, 1", "data-f": f + "-vals" });
       vals.input.addEventListener("input", () => { loop.values = edList(vals.input.value); changed(); });
-      const back = edCheckBox("and back", loop.back, (on) => { loop.back = on; changed(); }, { "aria-label": name + ": there and back" });
-      return { vals: [vals], body: [], more: [h("div", { class: "ed-line" }, back, settle, first), ...edLoopExtras(loop, name)] };
+      return [h("div", { class: "ed-line ed-vals" }, vals)];
     }
     if (loop.mode === "ramp") {
       const legs = (loop.legs || []).map((leg, j) => {
-        const x = h("button", { class: "icon-btn", type: "button", "aria-label": name + ": remove leg " + (j + 1), title: "Remove" }, icon("x"));
-        x.addEventListener("click", () => { loop.legs.splice(j, 1); edChanged(true); });
+        const x = h("button", { class: "icon-btn", type: "button", "aria-label": name + ": remove leg " + (j + 1), title: "Remove", "data-f": f + "g" + j + "-x" }, icon("x"));
+        x.addEventListener("click", () => { loop.legs.splice(j, 1); ED.focus = f + "-leg"; edChanged(true); });
         return h("div", { class: "ed-line ed-leg" },
-          edBox("to", leg.to, (v) => { leg.to = v; changed(); }, unit, { class: "ed-in ed-short", "aria-label": name + ": leg " + (j + 1) + " to" }),
-          edBox("rate", leg.rate, (v) => { leg.rate = v; changed(); }, "", { class: "ed-in ed-short", "aria-label": name + ": leg " + (j + 1) + " rate", title: "In its rate setting's unit; empty: as the instrument is set" }),
-          edBox("hold", leg.hold, (v) => { leg.hold = v; changed(); }, "s", { class: "ed-in ed-short", "aria-label": name + ": leg " + (j + 1) + " hold (s)", title: "Measuring on once it is there" }),
+          edBox("to", leg.to, (v) => { leg.to = v; changed(); }, unit, { class: "ed-in ed-short", "aria-label": name + ": leg " + (j + 1) + " to", "data-f": f + "g" + j + "-to" }),
+          edBox("rate", leg.rate, (v) => { leg.rate = v; changed(); }, "", { class: "ed-in ed-short", "aria-label": name + ": leg " + (j + 1) + " rate", "data-f": f + "g" + j + "-rate", title: "In its rate setting's unit; empty: as the instrument is set" }),
+          edBox("hold", leg.hold, (v) => { leg.hold = v; changed(); }, "s", { class: "ed-in ed-short", "aria-label": name + ": leg " + (j + 1) + " hold (s)", "data-f": f + "g" + j + "-hold", title: "Measuring on once it is there" }),
           x);
       });
-      const add = h("button", { class: "link soft", type: "button" }, "+ Leg");
-      add.addEventListener("click", () => { loop.legs.push({ to: null, rate: null, hold: null, bare: false, order: [] }); loop.one = false; edChanged(true); });
-      const every = edBox("measure every", loop.every, (v) => { loop.every = v; changed(); }, "s", { class: "ed-in ed-short", "aria-label": name + ": measure every (s)" });
-      return { vals: [], body: legs.concat([h("div", { class: "ed-line" }, add, every)]), more: [] };
+      const add = h("button", { class: "link soft", type: "button", "data-f": f + "-leg" }, "+ Leg");
+      add.addEventListener("click", () => { loop.legs.push({ to: null, rate: null, hold: null, bare: false, order: [] }); loop.one = false; ED.focus = f + "g" + (loop.legs.length - 1) + "-to"; edChanged(true); });
+      const every = edBox("measure every", loop.every, (v) => { loop.every = v; changed(); }, "s", { class: "ed-in ed-short", "aria-label": name + ": measure every (s)", "data-f": f + "-every" });
+      return legs.concat([h("div", { class: "ed-line" }, add, every)]);
     }
-    // a range: from, to, and step or points, each following the other (the one typed is the one kept)
-    const from = edBox("from", loop.from, (v) => { loop.from = v; follow(); }, "", { class: "ed-in ed-short", "aria-label": name + ": from" });
-    const to = edBox("to", loop.to, (v) => { loop.to = v; follow(); }, "", { class: "ed-in ed-short", "aria-label": name + ": to" });
+    const from = edBox("from", loop.from, (v) => { loop.from = v; follow(); }, "", { class: "ed-in ed-short", "aria-label": name + ": from", "data-f": f + "-from" });
+    const to = edBox("to", loop.to, (v) => { loop.to = v; follow(); }, "", { class: "ed-in ed-short", "aria-label": name + ": to", "data-f": f + "-to" });
     const step = edBox("step", loop.by === "points" ? rangeStep(loop) : loop.step, (v) => { loop.step = v; loop.by = "step"; follow(); }, "",
-      { class: "ed-in ed-short", "aria-label": name + ": step", disabled: fixed.has("step") || !!loop.log, title: loop.log ? "A log sweep is given by its points" : null });
+      { class: "ed-in ed-short", "aria-label": name + ": step", "data-f": f + "-step", disabled: fixed.has("step") || !!loop.log, title: loop.log ? "A log sweep is given by its points" : null });
     const pts = edBox("points", loop.by === "points" ? loop.points : rangeCount(loop.from, loop.to, loop.step), (v) => { loop.points = v; loop.by = "points"; follow(); }, "",
-      { class: "ed-in ed-short", inputmode: "numeric", "aria-label": name + ": points" });
+      { class: "ed-in ed-short", inputmode: "numeric", "aria-label": name + ": points", "data-f": f + "-pts" });
     function follow() {
       if (document.activeElement !== step.input) step.input.value = edShow(loop.by === "points" ? rangeStep(loop) : loop.step);
       if (document.activeElement !== pts.input) pts.input.value = edShow(loop.by === "points" ? loop.points : rangeCount(loop.from, loop.to, loop.step));
       changed();
     }
-    const log = edCheckBox("log", loop.log, (on) => {
+    return [h("div", { class: "ed-line ed-vals" }, from, to, step, pts)];
+  }
+  // a loop's waits: after each step (settle), and after its first value each time the loop starts again (first_settle,
+  // Special Measure's start wait); there and back; a range's log spacing
+  function edWaits(loop, name, f) {
+    const fixed = new Set(loop.fixed || []);
+    const wait = edBox("Wait", loop.settle, (v) => { loop.settle = v; edChanged(); }, "s",
+      { class: "ed-in ed-short", "aria-label": name + ": wait after each step (s)", "data-f": f + "-wait", disabled: fixed.has("settle"),
+        title: fixed.has("settle") ? "A hold per value, as written below" : "After each step, before it records" });
+    const start = edBox("Start wait", loop.first_settle, (v) => { loop.first_settle = v; edChanged(); }, "s",
+      { class: "ed-in ed-short", "aria-label": name + ": wait after its first value (s)", "data-f": f + "-first",
+        title: "After its first value, each time the loop starts again (in place of Wait)" });
+    const back = edCheckBox("and back", loop.back, (on) => { loop.back = on; edLoopShown(loop); edChanged(); },
+      { "aria-label": name + ": there and back", "data-f": f + "-back" });
+    const log = loop.mode !== "range" ? null : edCheckBox("log", loop.log, (on) => {
       loop.log = on;
       if (on && loop.by !== "points") Object.assign(loop, { points: rangeCount(loop.from, loop.to, loop.step) || 2, by: "points" });
-      step.input.disabled = on || fixed.has("step");
-      follow();
-    }, { "aria-label": name + ": log spaced" });
-    const back = edCheckBox("and back", loop.back, (on) => { loop.back = on; changed(); }, { "aria-label": name + ": there and back" });
-    return { vals: [from, to, step, pts], body: [],
-             more: [h("div", { class: "ed-line" }, log, back, settle, first), ...edLoopExtras(loop, name)] };
+      ED.focus = f + "-log";
+      edChanged(true);
+    }, { "aria-label": name + ": log spaced", "data-f": f + "-log" });
+    return h("div", { class: "ed-line ed-waits" }, wait, start, back, log);
+  }
+  // what a card records, a reading a row (lists: [list, what its rows are], new ones going into the first); outer:
+  // once per value of its loop, else at each point
+  function edRecord(lists, name, outer, note) {
+    const rows = [];
+    let n = 0;
+    for (const [list, g] of lists) {
+      list.forEach((m, j) => {
+        const label = name + ": record " + (++n), f = g + j;
+        const x = h("button", { class: "icon-btn", type: "button", "aria-label": label + ": remove", title: "Remove", "data-f": f + "-x" }, icon("x"));
+        x.addEventListener("click", () => { list.splice(j, 1); ED.focus = lists[0][1] + "-add"; edChanged(true); });
+        rows.push(h("div", { class: "ed-chan" }, edPick(m, "read", (key, how) => { list[j] = key; edPicked(f, how); }, label, { f }), x));
+      });
+    }
+    const add = lists.length ? h("button", { class: "link soft", type: "button", "data-f": lists[0][1] + "-add",
+      title: outer ? "A reading taken once per value of this loop" : "A reading taken at each point" }, "+ Record") : null;
+    if (add) add.addEventListener("click", () => { const [list, g] = lists[0]; list.push(""); ED.focus = g + (list.length - 1) + "-i"; edChanged(true); });
+    return h("div", { class: "ed-part" }, h("span", { class: "ed-part-h", title: outer ? "Once per value of this loop" : "At each point" }, "Record"),
+      ...rows, note ? h("p", { class: "hint" }, note) : null, add ? h("div", { class: "ed-line" }, add) : null);
+  }
+  // the innermost card's readings: the plan's, at each point, where new ones go, and any its loop has of its own (the
+  // same for the innermost loop); the plan's kept as written: they are below, and new ones go to the loop
+  function edInnerRecord(loop, name) {
+    const p = ED.parts, lists = [], i = loop ? p.loops.indexOf(loop) : -1;
+    const own = loop && loop.mode !== "kept" && loop.mode !== "ramp";
+    if (Array.isArray(p.measure)) lists.push([p.measure, "pm"]);
+    if (own && ((loop.measure || []).length || !lists.length)) lists.push([loop.measure || (loop.measure = []), "l" + i + "r"]);
+    return edRecord(lists, name, false, p.measure === null ? "And as written below." : "");
+  }
+  // a time series, the innermost loop: a point every so often, for so long (or so many points). Another choice in its
+  // menu (an instrument, a variable) makes it a loop stepping that, in its place
+  function edTimeCard(time, k, n) {
+    const p = ED.parts, name = "Loop " + (k + 1), byPoints = time.points != null && time.for == null;
+    const pick = edPick("", "set", (key, how) => {
+      if (how === "time") return;
+      p.time = null;
+      const loop = Object.assign(blankLoop(), { key });
+      if (how === "var") ED.vars.add(loop);
+      p.loops.push(loop);
+      edPicked("l" + (p.loops.length - 1), how);
+    }, name + ": what it changes", { f: "t", vars: true, time: true, mode: "time" });
+    const count = h("span", { class: "ed-count" }, timeCount(time));
+    const box = (key, label, unit) => edBox(label, time[key], (v) => { time[key] = v; count.textContent = timeCount(time); edChanged(); }, unit,
+      { class: "ed-in ed-short", "aria-label": "Time series: " + label + (unit ? " (" + unit + ")" : ""), "data-f": "t-" + key });
+    const x = h("button", { class: "icon-btn", type: "button", title: "Remove", "aria-label": "Remove: " + name, "data-f": "t-Remove" }, "✕");
+    x.addEventListener("click", () => { p.time = null; ED.focus = "ed-add-loop"; edChanged(true); });
+    const head = h("div", { class: "ed-loop-head" }, h("h4", {}, name), n > 1 ? h("span", { class: "ed-where" }, "inner") : null,
+      count, h("span", { class: "ed-acts" }, x));
+    return h("li", { class: "ed-loop ed-time", "data-i": "time" }, head,
+      h("div", { class: "ed-part" }, h("span", { class: "ed-part-h" }, "Change"), h("div", { class: "ed-chan" }, pick),
+        h("div", { class: "ed-line ed-vals" }, box("every", "every", "s"), byPoints ? box("points", "points", "") : box("for", "for", "s"))),
+      edInnerRecord(null, name), h("ul", { class: "ed-problems ed-loop-problems" }));
+  }
+  function timeCount(t) {   // a time series' points, as plans.py counts them
+    const n = Number.isInteger(t.points) ? t.points : edNum(t.for) && edNum(t.every) && t.every > 0 ? Math.floor(t.for / t.every + 1e-9) + 1 : null;
+    return n == null ? "" : n + (n === 1 ? " point" : " points");
+  }
+  // no loops: the scan measures once, what it records
+  function edPointCard() {
+    return h("li", { class: "ed-loop ed-point", "data-i": "none" },
+      h("div", { class: "ed-loop-head" }, h("h4", {}, "No loops"), h("span", { class: "ed-count" }, "1 point")), edInnerRecord(null, "The point"));
   }
   function edMoveLoop(i, j) {
     const loops = ED.parts.loops;
     loops.splice(j, 0, loops.splice(i, 1)[0]);
+    ED.focus = "l" + j + "-" + (j > i ? "Inner" : "Outer");
     edChanged(true);
-    const li = $("ed-loops").children[j];
-    const b = li && li.querySelector('.ed-acts button[title="' + (j < i ? "Outer" : "Inner") + '"]');
-    (b || (li && li.querySelector(".ed-acts button")) || $("ed-add-loop")).focus();
+    if (document.activeElement === document.body) {   // at the end it moved to, it has no such button: its others
+      const b = $("ed-loops").querySelector('[data-i="' + j + '"] .ed-acts button');
+      if (b) b.focus();
+    }
   }
-  function renderEdMeasure() {
-    const p = ED.parts, kept = p.measure === null;
-    $("ed-read").disabled = kept;
-    $("ed-read").placeholder = kept ? "as written below" : "Add a reading";
-    $("ed-measure").replaceChildren(...(kept ? [] : p.measure.map((m, i) => {
-      const x = h("button", { class: "icon-btn", type: "button", "aria-label": "Don't record " + m, title: "Remove" }, icon("x"));
-      x.addEventListener("click", () => { p.measure.splice(i, 1); renderEdMeasure(); edChanged(); $("ed-read").focus(); });
-      const unit = ED.units.get(m);
-      return h("span", { class: "an-chip ed-chip", title: unit ? m + " (" + unit + ")" : m }, h("span", {}, m), x);
-    })));
-  }
-  function addReading() {
-    const key = $("ed-read").value.trim(), p = ED.parts;
-    if (!key || !Array.isArray(p.measure)) return;
-    if (!p.measure.includes(key)) p.measure.push(key);
-    $("ed-read").value = "";
-    renderEdMeasure();
-    edChanged();
-  }
-  function edRows(which) {   // setup, after or sets (Computed): instrument.parameter = a value, or an expression
+  function edRows(which) {   // setup, after or sets (Computed): an instrument's setting = a value, or an expression
     const rows = ED.parts[which] === undefined ? (ED.parts[which] = []) : ED.parts[which], box = $("ed-" + which);
     $("ed-add-" + which).hidden = !Array.isArray(rows);
     const empty = Array.isArray(rows) && !rows.length;   // an empty part is only its button, in the row under the parts
@@ -6610,33 +6737,51 @@
     if (!Array.isArray(rows)) { box.replaceChildren(h("p", { class: "hint" }, "As written below.")); return; }
     const what = which === "setup" ? "Setup" : which === "sets" ? "Computed" : "At the end", expr = which === "sets";
     box.replaceChildren(...rows.map((row, i) => {
-      const key = h("input", { class: "ed-in ed-key", list: "ed-set-keys", value: row.key, spellcheck: "false", autocomplete: "off",
-        placeholder: "instrument.parameter", "aria-label": what + " " + (i + 1) + ": what it sets" });
-      const unit = h("span", { class: "ed-unit" }, ED.units.get(row.key) || "");
-      key.addEventListener("input", () => { row.key = key.value.trim(); unit.textContent = ED.units.get(row.key) || ""; edChanged(); });
-      const value = h("input", { class: "ed-in " + (expr ? "ed-expr" : "ed-short"), value: edShow(row.value), spellcheck: "false",
-        autocomplete: "off", "aria-label": what + " " + (i + 1) + (expr ? ": its expression" : ": its value"),
-        placeholder: expr ? "1.2*n - 8*E" : "", inputmode: expr ? "text" : "decimal" });
-      value.addEventListener("input", () => { row.value = expr ? value.value.trim() : edParse(value.value); edChanged(); });
-      const x = h("button", { class: "icon-btn", type: "button", "aria-label": what + " " + (i + 1) + ": remove", title: "Remove" }, icon("x"));
+      const f = which + i, label = what + " " + (i + 1), unit = ED.unitOf.get(row.key) || "";
+      const pick = edPick(row.key, expr ? "set" : "setup", (key, how) => { row.key = key; edPicked(f, how); }, label, { f });
+      const [iname, pname] = edSplit(row.key);
+      const spec = edParams(iname, "setup").find((q) => q.param === pname) || {};
+      let value;
+      if (!expr && spec.choices) {   // a switch or a list setting: its words (a plan's on: or true, its first)
+        const shown = row.value === true ? spec.choices[0] : row.value === false ? spec.choices[1] : edShow(row.value);
+        value = h("select", { class: "ed-in ed-choice", "aria-label": label + ": its value", "data-f": f + "-val" },
+          ...(spec.choices.includes(shown) ? [] : [h("option", { value: shown }, shown || "…")]),
+          ...spec.choices.map((c) => h("option", { value: c }, c)));
+        value.value = shown;
+        value.addEventListener("change", () => { row.value = value.value; edChanged(); });
+      } else {
+        value = h("input", { class: "ed-in " + (expr ? "ed-expr" : "ed-short"), value: edShow(row.value), spellcheck: "false",
+          autocomplete: "off", "aria-label": label + (expr ? ": its expression" : ": its value"), "data-f": f + "-val",
+          placeholder: expr ? "1.2*n - 8*E" : "", inputmode: expr ? "text" : "decimal" });
+        value.addEventListener("input", () => { row.value = expr ? value.value.trim() : edParse(value.value); edChanged(); });
+      }
+      const x = h("button", { class: "icon-btn", type: "button", "aria-label": label + ": remove", title: "Remove", "data-f": f + "-x" }, icon("x"));
       x.addEventListener("click", () => {
         rows.splice(i, 1);
-        edRows(which);
-        edChanged();
-        const left = box.querySelectorAll(".ed-key")[Math.min(i, rows.length - 1)];
-        (left || $("ed-add-" + which)).focus();
+        ED.focus = rows.length ? which + Math.min(i, rows.length - 1) + "-i" : "ed-new-" + which;
+        edChanged(true);
       });
-      return h("div", { class: "ed-line ed-set" }, key, h("span", { class: "ed-eq" }, "="), value, unit, x);
+      return h("div", { class: "ed-line ed-set" }, pick, h("span", { class: "ed-eq" }, "="), value, h("span", { class: "ed-unit" }, unit), x);
     }));
   }
   // a change: the buttons now, the check a moment after typing stops (each newer one replaces the one before: the one
   // asked before it is dropped, here and by Kelvin)
   function edChanged(redraw) {
-    if (redraw) renderEditor();
+    if (redraw) edRedraw();
     edSay("");   // what the last Save or Run said is about the scan as it was
     edButtons();
     clearTimeout(ED.timer);
     ED.timer = setTimeout(edCheck, 350);
+  }
+  // the editor drawn again: what had the focus keeps it (data-f says what a box is, not where), or what ED.focus
+  // names takes it (the parameter once its instrument is chosen, a new row's instrument)
+  function edRedraw() {
+    const had = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.f : null;
+    const want = ED.focus || had;
+    ED.focus = null;
+    renderEditor();
+    const el = want && ($("ed-body").querySelector('[data-f="' + want + '"]') || document.getElementById(want));
+    if (el && !el.disabled) el.focus();
   }
   async function edCheck() {
     const gen = ++ED.gen;
@@ -6660,19 +6805,23 @@
     const bits = (c.loads && c.points != null ? [(c.estimate ? "~" : "") + c.points + (c.points === 1 ? " point" : " points")] : [])
       .concat(c.loads && c.time ? [c.time] : []);
     $("ed-status").textContent = bits.join(" · ");
-    const mine = loops.map(() => []), rest = [];
+    const mine = new Map(), rest = [];
     for (const problem of c.problems || []) {
       const at = loopOf(problem, loops);
-      (at >= 0 ? mine[at] : rest).push(problem);
+      const card = at >= 0 ? String(at) : /^time[:.]/.test(problem) ? "time" : null;
+      if (card === null) { rest.push(problem); continue; }
+      if (!mine.has(card)) mine.set(card, []);
+      mine.get(card).push(problem.replace(/^loop \d+: choose what it steps \(instrument\.parameter\)$/, "Choose what it changes.")
+        .replace(/^loop \d+: /, ""));
     }
-    const lines = (list) => list.map((t) => h("li", {}, t));
+    const lines = (list) => list.map((t) => h("li", t === "Choose what it changes." ? { class: "ed-todo" } : {}, t));
     $("ed-problems").replaceChildren(...lines(rest));
-    [...$("ed-loops").children].forEach((li, i) => {
+    for (const li of $("ed-loops").children) {   // each card's own, and its points (a ramp's: the check's estimate)
       const list = li.querySelector(".ed-loop-problems");
-      if (list) list.replaceChildren(...lines(mine[i] || []));
-      const count = li.querySelector(".ed-count");
-      if (count && loops[i]) count.textContent = loopCount(loops[i]);
-    });
+      if (list) list.replaceChildren(...lines(mine.get(li.dataset.i) || []));
+      const count = li.querySelector(".ed-count"), loop = loops[li.dataset.i];
+      if (count && loop && li.dataset.i !== "time") count.textContent = loopCount(loop);
+    }
     $("ed-plan-text").textContent = c.text || "";
     edButtons();
   }
@@ -6738,7 +6887,7 @@
       queueFromState(r.queue);
       renderQueue();
       edSay((r.message || "").split("\n")[0]);
-      if (!queue) { showQueue((r.message || "").split("\n")[0]); pollState(); }   // its run gets its tab
+      if (!queue) { showScan((r.message || "").split("\n")[0]); pollState(); }   // the Scan shows it as it runs
     });
   }
   function edRevert() {
@@ -6757,32 +6906,27 @@
     $("ed-name").addEventListener("input", () => { ED.parts.name = $("ed-name").value; edChanged(); });
     $("ed-desc").addEventListener("input", () => { ED.parts.description = $("ed-desc").value; edChanged(); });
     for (const key of ["repeat", "settle"]) $("ed-" + key).addEventListener("input", () => { ED.parts[key] = edParse($("ed-" + key).value); edChanged(); });
-    for (const id of ["ed-every", "ed-for"]) {
-      $(id).addEventListener("input", () => {   // a time series: every, and for (s) or points as the plan gives them
-        const t = ED.parts.time || (ED.parts.time = { every: null, for: null, points: null, order: [] });
-        t[id === "ed-every" ? "every" : $("ed-for").dataset.key] = edParse($(id).value);
-        if (t.every == null && t.for == null && t.points == null && !JSON.parse(ED.base).time) ED.parts.time = null;
-        edChanged();
-      });
-    }
+    // how many loops: + one more, outside the others; − the outermost goes (each card has its own ✕ too)
     $("ed-add-loop").addEventListener("click", () => {
-      ED.parts.loops.push(blankLoop());
+      ED.parts.loops.unshift(blankLoop());
+      ED.focus = "l0-i";
       edChanged(true);
-      $("ed-loops").lastChild.querySelector(".ed-key").focus();
+    });
+    $("ed-fewer").addEventListener("click", () => {
+      const p = ED.parts;
+      if (p.loops.length) p.loops.shift(); else p.time = null;
+      ED.focus = "ed-fewer";
+      edChanged(true);
     });
     for (const which of ["sets", "setup", "after"]) {
       const add = () => {   // its + Add, or its button in the row under the parts while it is empty
         ED.parts[which].push({ key: "", value: null });
-        edRows(which);
-        edChanged();
-        const keys = $("ed-" + which).querySelectorAll(".ed-key");
-        keys[keys.length - 1].focus();
+        ED.focus = which + (ED.parts[which].length - 1) + "-i";
+        edChanged(true);
       };
       $("ed-add-" + which).addEventListener("click", add);
       $("ed-new-" + which).addEventListener("click", add);
     }
-    $("ed-read").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addReading(); } });
-    $("ed-read").addEventListener("change", () => { if (ED.readKeys.has($("ed-read").value.trim())) addReading(); });   // picked from the list
     $("ed-text").addEventListener("click", () => edPlan($("ed-plan").hidden));
     $("ed-copy").addEventListener("click", () => copyText($("ed-plan-text").textContent, $("ed-copy")));
     $("ed-save").addEventListener("click", () => edSave(false));
@@ -9521,7 +9665,7 @@
   window.Kelvin = {
     $, h, api, icon, md, toast, fmt, store, S, MARK,
     setMode, ask, sendMessage, newChat, openChat, pollState,
-    toggleSeq, toggleRuns, toggleLab, toggleAnalysis, openRun, openRunList, fitLayout, exitFull, thumb,
+    toggleSeq, toggleRuns, toggleLab, toggleAnalysis, openRun, openRunList, showView, showScan, fitLayout, exitFull, thumb,
     openEditor, openVersions, openLabSetup, openSettings, settingsPage, openCards,
     pickFolder, hasPicker, hasFilePicker, isVI, importVI, folderLabels, popMenu, closeMenu, lineChart, getRun, runCharts,
     zoom: pageZoom, askYes, askText, fitTiers,   // the fit's contract (the page size, the in-page question)

@@ -150,6 +150,18 @@ class Waker:
     def _root(self) -> str:
         return str(getattr(self.agent.store, "root", ""))
 
+    def renamed(self, old: str, new: str) -> None:
+        """An instrument renamed: the wake-ups waiting for one of its readings wait for it under its new name."""
+        from ..discovery import renamed_keys
+        for w in self.pending.values():
+            if w.condition is None:
+                continue
+            text = renamed_keys(w.condition.text, old, new)
+            if text != w.condition.text:
+                w.condition = parse_condition(text)
+                w.text = renamed_keys(w.text, old, new)
+        self._keep()
+
     # -------------------------------------------------------------- kept over restarts
 
     def _file(self) -> Path:

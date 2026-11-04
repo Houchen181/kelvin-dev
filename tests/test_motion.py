@@ -55,7 +55,7 @@ def test_the_top_bar_buttons_never_move_and_say_their_names():
 def test_what_comes_in_and_what_moves():
     motion = CSS[CSS.index("/* motion, as labMaster moves"):]
     for text in (":is(#runpane, #edpane, #anpane, #termpane, #labpanel, #teampanel) { animation: k-pane-in",
-                 ":is(#seq-view, #history-view, .run-view, #homeview, #scroller, .seq-fns) { animation: k-view-in",
+                 ":is(#seq-view, #scan-view, .run-view, #homeview, #scroller, .seq-fns) { animation: k-view-in",
                  "dialog[open] { animation: k-pop-in", ".k-in, .seq-ed.seq-ed-in { animation: k-reveal",
                  ".seq-card.seq-in { animation: k-card-in"):
         assert text in motion, text

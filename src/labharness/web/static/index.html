@@ -274,6 +274,7 @@
     <header class="pane-head">
       <h2 class="pane-title">Analysis</h2>
       <div class="spacer"></div>
+      <button id="open-report" class="btn small ghost" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
       <button id="an-again" class="icon-btn" type="button" aria-label="Analyze again" title="Analyze again" disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/></svg>
       </button>
@@ -298,10 +299,9 @@
   <section id="runpane" class="runpane" aria-label="Runs" hidden>
     <div id="runpane-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the runs pane" tabindex="0"></div>
     <header class="pane-head">
-      <div id="runs-seg" class="seg runs-seg" role="tablist" aria-label="Sequence and history">
-        <button id="open-schedule" class="on" type="button" role="tab" aria-selected="true" aria-controls="seq-view">Sequence<span id="queue-count" class="badge q-badge" hidden></span></button><button id="open-history" type="button" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1">History</button>
+      <div id="runs-seg" class="seg runs-seg" role="tablist" aria-label="Scan and sequence">
+        <button id="open-scan" class="on" type="button" role="tab" aria-selected="true" aria-controls="scan-view">Scan</button><button id="open-schedule" type="button" role="tab" aria-selected="false" aria-controls="seq-view" tabindex="-1">Sequence<span id="queue-count" class="badge q-badge" hidden></span></button>
       </div>
-      <button id="open-report" class="btn small ghost" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
       <button class="icon-btn full-btn" type="button" data-pane="runpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
       </button>
@@ -309,10 +309,17 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <div id="run-tabs" class="run-tabs" role="tablist" aria-label="Open runs" hidden></div>
     <div id="run-body" class="pane-body">
-      <!-- the Sequence (seq.js): the blocks, Start, the functions; a step typed, or any item as written -->
-      <div id="seq-view" class="seq-view" role="tabpanel" aria-labelledby="open-schedule">
+      <!-- the Scan: the measurement now (the run in progress, or the last one as it ended), over the scans, scripts and
+           experiments to run now or put in the sequence, with New scan and Import (seq.js draws those in scan-fns) -->
+      <div id="scan-view" class="scan-view" role="tabpanel" aria-labelledby="open-scan">
+        <section id="scan-live" class="scan-live" aria-label="The measurement now">
+          <p id="scan-idle" class="scan-idle">Nothing running</p>
+        </section>
+        <div id="scan-fns" class="scan-fns"></div>
+      </div>
+      <!-- the Sequence (seq.js): the blocks and Start; a step typed, or any item as written -->
+      <div id="seq-view" class="seq-view" role="tabpanel" aria-labelledby="open-schedule" hidden>
         <div id="seq-body" class="seq-body"></div>
         <div id="seq-step" class="seq-step">
           <!-- a step, typed (Special Measure's command box): Set, Wait, Wait until settled, written as the queue's step
@@ -406,12 +413,6 @@
           </section>
         </div>
       </div>
-      <div id="history-view" role="tabpanel" aria-labelledby="open-history" hidden>
-        <div id="runs-list" class="runs-list" data-region="history">
-          <input id="runs-filter" class="pane-filter" type="search" placeholder="Filter runs" aria-label="Filter runs" spellcheck="false" autocomplete="off">
-          <ul id="runs-items" class="runs-items" aria-label="Recent runs"></ul>
-        </div>
-      </div>
     </div>
   </section>
 
@@ -439,15 +440,19 @@
         <label class="ed-f ed-name"><span>Name</span><input id="ed-name" class="ed-in" maxlength="80" spellcheck="false" autocomplete="off"></label>
         <label class="ed-f ed-desc"><span>Description</span><input id="ed-desc" class="ed-in" autocomplete="off"></label>
       </div>
+      <!-- the loops, Special Measure style: how many, then a card for each, Loop 1 (the innermost) first -->
       <section class="ed-sec" aria-labelledby="ed-loops-h">
-        <div class="ed-sec-head"><h3 id="ed-loops-h">Loops</h3><span class="hint">outer first</span><div class="spacer"></div>
-          <button id="ed-add-loop" class="link soft" type="button">+ Loop</button></div>
+        <div class="ed-sec-head"><h3 id="ed-loops-h">Loops</h3>
+          <span id="ed-stepper" class="ed-stepper" role="group" aria-label="How many loops">
+            <button id="ed-fewer" class="icon-btn" type="button" title="One loop fewer: the outermost goes" aria-label="One loop fewer">−</button>
+            <output id="ed-n" aria-live="polite">1</output>
+            <button id="ed-add-loop" class="icon-btn" type="button" title="One loop more, outside the others" aria-label="One loop more">+</button>
+          </span>
+          <span class="hint">Loop 1 steps fastest</span></div>
         <ol id="ed-loops" class="ed-loops"></ol>
-        <div class="ed-line">
-          <label class="ed-f"><span>Repeat</span><input id="ed-repeat" class="ed-in ed-short" inputmode="numeric" placeholder="1" autocomplete="off"><i>×</i></label>
-          <label class="ed-f"><span>Settle</span><input id="ed-settle" class="ed-in ed-short" inputmode="decimal" placeholder="0" autocomplete="off" title="After setting each value, unless its loop says"><i>s</i></label>
-          <label class="ed-f" title="A time series, the innermost loop: a point this often"><span>Every</span><input id="ed-every" class="ed-in ed-short" inputmode="decimal" autocomplete="off" aria-label="Time series: every (s)"><i>s</i></label>
-          <label class="ed-f"><span id="ed-for-label">for</span><input id="ed-for" class="ed-in ed-short" inputmode="decimal" autocomplete="off"><i id="ed-for-unit">s</i></label>
+        <div class="ed-line ed-opts">
+          <label class="ed-f" title="The whole scan, this many times"><span>Repeat</span><input id="ed-repeat" class="ed-in ed-short" inputmode="numeric" placeholder="1" autocomplete="off"><i>×</i></label>
+          <label id="ed-settle-f" class="ed-f" title="After setting each value, unless its loop says" hidden><span>Wait</span><input id="ed-settle" class="ed-in ed-short" inputmode="decimal" placeholder="0" autocomplete="off" aria-label="Wait after setting each value (s)"><i>s</i></label>
         </div>
       </section>
       <!-- the parts after the loops: the title at the left of its rows; an empty one is only its button in the row of
@@ -456,11 +461,6 @@
         <div class="ed-sec-head"><h3 id="ed-sets-h" title="Settings worked out at each point from the loops' variables and values, as Special Measure's function channels">Computed</h3><span class="hint" hidden>from the loops</span><div class="spacer"></div>
           <button id="ed-add-sets" class="link soft" type="button">+ Add</button></div>
         <div id="ed-sets" class="ed-rows"></div>
-      </section>
-      <section class="ed-sec ed-side" aria-labelledby="ed-measure-h">
-        <div class="ed-sec-head"><h3 id="ed-measure-h">Record</h3><span class="hint" hidden>at each point</span></div>
-        <div class="ed-chips"><span id="ed-measure" class="ed-chip-list"></span>
-          <input id="ed-read" class="ed-in ed-add" list="ed-read-keys" placeholder="Add a reading" aria-label="Add a reading to record" spellcheck="false" autocomplete="off"></div>
       </section>
       <section id="ed-setup-sec" class="ed-sec ed-side" aria-labelledby="ed-setup-h">
         <div class="ed-sec-head"><h3 id="ed-setup-h">Setup</h3><span class="hint" hidden>set first</span><div class="spacer"></div>
@@ -481,8 +481,6 @@
         <div class="ed-sec-head"><h3 id="ed-kept-h">As written</h3><span class="hint" hidden>kept as it is</span></div>
         <pre id="ed-kept" class="ed-kept"></pre>
       </section>
-      <datalist id="ed-set-keys"></datalist>
-      <datalist id="ed-read-keys"></datalist>
     </div>
     <footer class="ed-foot">
       <ul id="ed-problems" class="ed-problems"></ul>

@@ -1,7 +1,7 @@
-/* The Sequence (seq.js), the Runs pane's first view. It fills the pane's body and never scrolls as a whole: the bar on
-   top, then the blocks and the functions, each a region that scrolls on its own (data-region seq-blocks, seq-fns).
-   Under 600 px of pane the functions come with ＋ Add, in a lower split under the blocks; from 600 px they are a
-   column of their own beside them, and their rows stand in two columns when the pane is very wide (full screen).
+/* The Sequence (seq.js), the Runs pane's second view. It fills the pane's body and never scrolls as a whole: the bar
+   on top, then the blocks, a region that scrolls on its own (data-region seq-blocks), ＋ Add (to the Scan), the step and
+   Paste a plan. Its functions (the scans, scripts and experiments) are the Scan's (#scan-fns), a region of their own
+   (seq-fns) under the measurement now, their rows in as many columns as the pane holds.
    Drawn with the kit at the end of app.css: cards on --page, a kind's colour on the left edge, chips for states.
    Light and dark through its tokens only. */
 
@@ -38,19 +38,15 @@ svg.seq-solid { fill: currentColor; stroke: none; }
   animation: seq-turn .8s linear infinite; }
 @keyframes seq-turn { to { transform: rotate(360deg); } }
 
-/* ---------- the blocks, and the functions: under them while ＋ Add is on (a lower split), or a column beside them */
+/* ---------- the blocks, then ＋ Add, the step and Paste a plan under them; the functions, the Scan's */
 .seq-cols { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.seq-main { order: 1; flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.seq-view.seq-adding:not(.seq-wide) .seq-main { flex: 0 1 auto; max-height: 65%; }
-.seq-fns { order: 2; flex: 1 1 0; min-width: 0; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr);
-  gap: 6px; align-content: start; padding: 0 var(--sp-3, 12px) var(--sp-3, 12px); border-top: 1px solid var(--line); }
+.seq-main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.seq-list > *, .seq-add, .seq-extra { max-width: 920px; }
+.seq-extra { flex: none; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 0 var(--sp-3, 12px) var(--sp-3, 12px); }
+.seq-extra > .q-paste[hidden] { display: none; }
+.seq-fns { flex: 1 1 0; min-width: 0; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr);
+  gap: 6px; align-content: start; padding: 0 var(--sp-3, 12px) var(--sp-3, 12px); }
 .seq-fns[hidden] { display: none; }
-.seq-view.seq-wide .seq-cols { display: grid; grid-template-columns: clamp(240px, 38%, 300px) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr); }
-.seq-view.seq-wide.seq-roomy .seq-cols { grid-template-columns: clamp(300px, 34%, 540px) minmax(0, 1fr); }
-.seq-view.seq-wide .seq-fns { order: 0; border-top: 0; border-right: 1px solid var(--line); }
-.seq-view.seq-wide .seq-main { order: 0; }
-.seq-view.seq-wide .seq-list > *, .seq-view.seq-wide .seq-add { max-width: 920px; }
 
 /* ---------- the blocks: a region of their own, ＋ Add under it (it stays in sight however long the sequence is) */
 .seq-list { flex: 0 1 auto; min-height: 0; overflow-y: auto; list-style: none; margin: 0; padding: 8px var(--sp-3, 12px);
@@ -143,7 +139,6 @@ svg.seq-solid { fill: currentColor; stroke: none; }
 .seq-add.on { border-style: solid; }
 .seq-add:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .seq-add.empty { min-height: 72px; margin-top: var(--sp-2, 8px); font-size: 15px; }
-.seq-view.seq-wide .seq-add:not(.empty) { display: none; }
 
 /* ---------- dragging: the block under the pointer, and where it lands */
 .seq-card.dragging { opacity: .35; }
@@ -156,11 +151,15 @@ svg.seq-solid { fill: currentColor; stroke: none; }
 body.seq-dragging, body.seq-dragging * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
 body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !important; }
 
-/* ---------- the functions: what goes into the sequence, one line each (the name, then where it is when there is room;
-   the whole of it in its tip); the search stays on top of their region */
-.seq-find { position: sticky; top: 0; z-index: 1; margin: 0 calc(-1 * var(--sp-3, 12px)); padding: var(--sp-2, 8px) var(--sp-3, 12px) 2px;
-  background: var(--page); }
-.seq-search { width: 100%; }
+/* ---------- the functions: what runs now or goes into the sequence, one line each (the name, then where it is when
+   there is room, the whole of it in its tip; ▶ ＋ ⋯); New scan, Import and the search stay on top of their region */
+.seq-find { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 0 calc(-1 * var(--sp-3, 12px)); padding: var(--sp-2, 8px) var(--sp-3, 12px) 2px; background: var(--page); }
+.seq-find > .btn { flex: none; }
+.seq-search { flex: 1 1 140px; width: auto; min-width: 0; }
+.seq-scan-msg { margin: 0; font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
+.seq-scan-msg:empty { display: none; }
+.seq-scan-msg.bad { color: var(--danger); }
 .seq-groups { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
 .seq-grp { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)); gap: 4px 6px; }
 .seq-gh { grid-column: 1 / -1; margin: 6px 2px 0; font-size: 12px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
@@ -170,7 +169,21 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
 .seq-fn:hover { border-top-color: var(--line-strong); border-right-color: var(--line-strong); border-bottom-color: var(--line-strong); }
 .seq-fn-name { flex: 0 1 auto; min-width: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .seq-fn-sub { flex: 1 1 0; min-width: 0; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.seq-fn > .seq-fn-more, .seq-fn > .ask { flex: none; margin-left: auto; }
+.seq-fn > .seq-fn-more, .seq-fn > .ask { flex: none; }
+.seq-fn > .seq-fn-run { margin-left: auto; }
+.seq-fn-go { flex: none; width: 28px; height: 28px; padding: 0; color: var(--text-2); }
+.seq-fn-go svg { width: 14px; height: 14px; }
+.seq-fn-go:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
+.seq-fn-go:disabled { opacity: .4; }
+.seq-fn.open { border-top-color: var(--line-strong); border-right-color: var(--line-strong); border-bottom-color: var(--line-strong); }
+/* a script's settings (an experiment's action) under it while it is open: a name and its box, as many to a row as fit */
+.seq-fn-wrap { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.seq-fn-inputs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(160px, 100%), 1fr)); gap: 4px 10px; padding: 2px 6px 6px 14px; }
+.seq-in-row { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; color: var(--text-2); }
+.seq-in-row > span { flex: 0 1 auto; min-width: 0; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, Consolas, monospace; }
+.seq-in { flex: 1 1 0; min-width: 0; padding: 3px 7px; font-size: 13px; }
+.seq-in-row input[type="checkbox"] { margin: 0; accent-color: var(--accent); }
 .seq-fn > .ask { height: 28px; }
 .seq-fn-more { width: 28px; height: 28px; padding: 0; opacity: .35; transition: opacity .12s; }
 .seq-fn-more svg { width: 16px; height: 16px; }
@@ -200,8 +213,7 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
 .seq-stepcard #step-msg { font-size: 12.5px; }
 .seq-stepcard #step-msg:empty { display: none; }
 .seq-stepcard #step-msg.bad { color: var(--danger); }
-.seq-fns > .q-paste { margin-top: 4px; }
-.seq-fns > .q-paste[hidden] { display: none; }
+
 
 /* the colour swatches, and the pop-over they come in */
 .seq-pop { position: fixed; z-index: 70; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius);
@@ -263,7 +275,8 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
   .seq-act { width: 40px; height: 40px; }
   .seq-grip { width: 28px; height: 40px; margin: -9px -7px; }   /* on touch only the grip drags */
   .seq-fn { height: 44px; }
-  .seq-fn-more { width: 40px; height: 40px; }
+  .seq-fn-more, .seq-fn-go { width: 40px; height: 40px; }
+  .seq-in { min-height: 40px; }
   .seq-fn > .ask { height: 40px; }
   .seq-add { min-height: 44px; }
   .seq-name, .seq-bar .btn { min-height: 40px; }
