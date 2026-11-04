@@ -7159,6 +7159,14 @@
     edSay("");
     edChanged(true);
   }
+  // a part opening in place grows to its height as it fades in (app.css: .ed-opening), once; closing is at once
+  function edEase(el) {
+    el.classList.remove("ed-opening");
+    void el.offsetWidth;
+    el.classList.add("ed-opening");
+    const done = (e) => { if (e.target === el) { el.classList.remove("ed-opening"); el.removeEventListener("animationend", done); } };
+    el.addEventListener("animationend", done);
+  }
   // Plan text: the plan the editor makes, as YAML, opened and closed in place by its button, whose label stays
   function edPlan(show) {
     $("ed-plan").hidden = !show;
@@ -9544,7 +9552,7 @@
   // a run still measuring waits for its end. Kelvin's analyze tool in the chat shows its own analysis here the same way.
   // (The routes that work out a spec by hand, /api/analysis with its columns, Keep and CSV, stay for the phones.)
   const ANA = { open: false, run: "", runs: [], follow: false, done: new Map(), job: null, ctl: null };
-  const anWhen = (r) => startedText(r);   // a run's time in the History's words (this computer's time and day)
+  const anWhen = (r) => r.run_id.slice(9, 11) + ":" + r.run_id.slice(11, 13) + " " + r.run_id.slice(4, 6) + "/" + r.run_id.slice(6, 8);
   const anRunLabel = (r) => r.plan + " · " + anWhen(r) + (r.status && r.status !== "done" ? " · " + r.status : "")
     + (r.unshared ? " · unshared" : "");
 

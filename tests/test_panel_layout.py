@@ -157,9 +157,9 @@ def test_least_widths_are_what_the_heads_hold_at():
     # the Analysis pane's dataset picker and the terminal's input are 40 px on touch, as every target
     assert "#anpane .an-body select { min-height: 40px; }" in b2
     assert ".term-in { padding-block: 0 2px; }" in b2 and ".term-in input { min-height: 40px; }" in b2
-    # with a mouse the terminal's input is 28 px, the floor for a target; its row 34 px
-    assert ".term-in { padding-block: 1px 5px; }\n.term-in input { min-height: 28px; }\n" in b2
-    assert b2.index(".term-in input { min-height: 28px; }") < b2.index("@media (pointer: coarse)")   # touch wins
+    # with a mouse the terminal's input is a target's floor (--target, 28 page px or more); its row 34 px or more
+    assert ".term-in { padding-block: 1px 5px; }\n.term-in input { min-height: var(--target); }\n" in b2
+    assert b2.index(".term-in input { min-height: var(--target); }") < b2.index("@media (pointer: coarse)")   # touch wins
 
 
 def test_the_pane_being_typed_in_is_not_put_away_for_a_pane_that_came_by_itself():

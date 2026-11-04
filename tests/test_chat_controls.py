@@ -198,8 +198,8 @@ def test_the_chat_column_fits_and_its_targets_are_big_enough():
     assert re.search(r"\.suggestion \{[^}]*min-height: 48px", mine)
     assert ".sidebar .row-btn { min-width: 30px; min-height: 30px; }" in mine   # 24 px or more at 85 %
     assert ".composer textarea { min-height: 30px; padding-block: 4px; }" in mine   # the message box, a target too (was 26.5)
-    assert ".sidebar button.link { min-height: 28px; }" in mine and ".composer-row :is(select, .compare-btn) { min-height: 30px; }" in mine
-    assert ".attach-x { display: inline-grid; place-items: center; min-width: 28px; min-height: 28px;" in mine   # an attachment's ×
+    assert ".sidebar button.link { min-height: var(--target); }" in mine and ".composer-row :is(select, .compare-btn) { min-height: 30px; }" in mine
+    assert ".attach-x { display: inline-grid; place-items: center; min-width: var(--target); min-height: var(--target);" in mine   # an attachment's ×
     touch = mine[mine.index("@media (pointer: coarse)"):]
     touch = touch[:touch.index("\n}\n")]
     for rule in (".sidebar .row-btn { min-width: 40px; min-height: 40px; }", ".menu-item { min-height: 44px; }",

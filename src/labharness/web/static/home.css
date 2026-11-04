@@ -119,7 +119,7 @@ html.fit-compact .home-spark { height: 36px; }
 .hk-ago[hidden] { display: none; }   /* alone on a line of its own it gives way (home.js fitAgo) */
 .hk-tools { flex: none; display: flex; gap: 2px; margin: -2px -2px -2px 0; }
 /* a block's tools: faint (35 %) until the pointer or the focus is on the block, so they are there to find, touch too */
-.hk-btn { display: grid; place-items: center; min-width: 28px; height: 28px; padding: 0 6px; border: 0; border-radius: var(--radius-s);
+.hk-btn { display: grid; place-items: center; min-width: var(--target); height: var(--target); padding: 0 6px; border: 0; border-radius: var(--radius-s);
   background: none; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; opacity: .35;
   transition: opacity .12s; }
 .hk-btn svg { width: 16px; height: 16px; }

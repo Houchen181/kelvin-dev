@@ -542,9 +542,10 @@ def test_the_lab_panels_rename_takes_one_click():
 
 
 
-def test_key_results_wait_for_a_width_and_the_picker_reads_as_history():
+def test_key_results_wait_for_a_width_and_nothing_calls_a_function_that_is_gone():
     """A run that finished out of sight has its key results judged when its view first has a width; the Analysis
-    picker gives a run's time in the History's words; the report and Revert are outlined buttons."""
+    picker keeps main's words for a run's time, and Plan text opens with edEase; the report and Revert are outlined
+    buttons."""
     keys = _js("keysOnce")
     assert keys.index("if (!w) return;") < keys.index("v.keysPending = false;")
     assert "getBoundingClientRect().width / layoutZoom()" in keys   # the width in the page's pixels
@@ -555,7 +556,8 @@ def test_key_results_wait_for_a_width_and_the_picker_reads_as_history():
     assert 'document.addEventListener("kelvin:seq", () => queueMicrotask(keysNow));' in JS
     toggle = _js("toggleRuns")
     assert toggle.index("showView(RUNS.view)") < toggle.index("fitLayout();")
-    assert "const anWhen = (r) => startedText(r);" in JS
+    assert "startedText" not in JS or "function startedText" in JS   # no call to a function that is gone
+    assert "function edEase(el) {" in JS   # Plan text's opening, which edPlan calls
     for bid in ("open-report", "ed-revert"):   # buttons look like buttons: outlined, not ghosts
         assert re.search(r'<button id="%s" class="btn small" ' % bid, PAGE), bid
 

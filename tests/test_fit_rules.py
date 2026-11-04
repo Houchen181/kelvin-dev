@@ -339,8 +339,8 @@ def test_auto_page_size_steps_by_the_window():
 
 
 def test_page_size_keeps_the_floors_from_85_percent():
-    """The smallest page size is 85 %, where 12 px text renders at 10.2 px and 28 px targets at 23.8 px. A stored size
-    under 85 % reads as 85 %, never as Auto."""
+    """The smallest page size is 85 %, where 12 px text renders at 10.2 px and a target at 24 px (--target, below). A
+    stored size under 85 % reads as 85 %, never as Auto."""
     js = _read("app.js")
     sizes = re.search(r"const SIZES = \[([^\]]*)\];", js).group(1)
     assert [float(s) for s in sizes.split(",")] == [0.85, 0.9, 1, 1.1, 1.25, 1.5]
@@ -353,6 +353,25 @@ def test_page_size_keeps_the_floors_from_85_percent():
     assert 'if ($("zoom-out").title !== least) $("zoom-out").title = least;' in show
     # the desktop app's old window zoom becomes the nearest of these sizes, so 80 % there becomes 85 % too
     assert "SIZES.reduce((a, b) => (Math.abs(b - t) < Math.abs(a - t) ? b : a))" in _function(js, "appZoomOff")
+
+
+def test_a_target_is_never_under_24_window_px():
+    """A mouse target's floor is one token, --target: 28 page px, or 24 / --zoom when that is more, so at every page
+    size a target is 24 window px or more (at 85 %: 28.24 page px, 24 on the screen). Every rule that floored a target
+    at 28 px uses it; the logo (no target) and the touch grip (touch keeps 100 % and 40 px) do not."""
+    css = {n: _uncommented_css(n) for n in ("app.css", "home.css", "seq.css", "welcome.css")}
+    assert "--target: max(28px, calc(24px / var(--zoom)));" in css["app.css"]
+    floor = re.compile(r"(?<![-\w])(?:min-)?(?:width|height): 28px")
+    left = [(n, line.strip()[:60]) for n, s in css.items() for line in s.split("\n") if floor.search(line)]
+    assert all(".logo {" in line or ".seq-grip {" in line for _, line in left), left
+    used = sum(s.count("var(--target)") for s in css.values())
+    assert used >= 26, used
+    for sel in (".seq-act {", ".hk-btn {", ".assess-more {", ".rv-fold {", ".switch {", ".attach-x {"):
+        rules = [line for s in css.values() for line in s.split("\n") if line.startswith(sel)]
+        assert any("var(--target)" in rule for rule in rules), sel
+    # the floor in window px at each page size: 24 or more
+    for z in (0.85, 0.9, 1, 1.1, 1.25, 1.5):
+        assert max(28, 24 / z) * z >= 24 - 1e-9
 
 
 def test_page_size_never_leaves_the_layout_under_its_least_height():
