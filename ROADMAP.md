@@ -403,7 +403,7 @@ Also asked for (2026-11-03): six changes to the portal: open on the chat instead
 - Not yet: the subagent tried only with a scripted stand-in on the test lab (no real model on this computer); the iPhone app's Analyze is still the manual one.
 
 
-Also asked for (2026-11-04): the Runs section and the scan editor. Status: on branch feature/runs-scan, not released.
+Also asked for (2026-11-04): the Runs section and the scan editor. Status: released in Kelvin 0.3.43.
 - **Runs is Scan | Sequence:** the Scan shows the measurement now (the run in progress, its plots and Stop; then the run as it ended, until the next) over the scans, scripts and experiments, each with ▶ (now) and ＋ (last in the sequence), a script's settings typed first, New scan and Import script or VI…; the Sequence is only the queue, with the step row and Paste a plan. History is gone: earlier runs are the Analysis pane's, and Report… is in its head.
 - **New scan, as Special Measure's:** how many loops, a card for each, the innermost first: what it changes (an instrument, then its parameter, from menus that tell two of one model apart by address; a variable; the time), from, to, step and points, the settings moving with it, its wait and start wait, and what it records (the innermost at each point, an outer loop once per value). Setup and At the end from the same menus, a switch's value from its words.
 - **Renaming an instrument** (Lab panel, Rename…): the lab config (comments kept, a version in its history) and everything Kelvin keeps of it follow, the sample's protection first; its connection carries over; past runs keep their names; experiments that name it are said.
