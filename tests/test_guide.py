@@ -13,8 +13,9 @@ STATIC = Path(guide.__file__).parent / "web" / "static"
 
 
 def test_every_name_on_the_map_is_in_the_portal():
-    ui = html.unescape((STATIC / "index.html").read_text(encoding="utf-8") +
-                       (STATIC / "app.js").read_text(encoding="utf-8"))
+    # the page and every script of it: app.js, and the parts kept apart (Home, the sequence, the first start)
+    ui = html.unescape("".join(p.read_text(encoding="utf-8") for p in [STATIC / "index.html"] +
+                               sorted(STATIC.glob("*.js"))))
     names = set(re.findall(r"\*\*(.+?)\*\*", guide.portal_map()))
     assert len(names) > 60 and not sorted(n for n in names if n not in ui)   # renamed in the portal: fix the map
     assert guide.portal_map().startswith("# Where things are in Kelvin's portal")

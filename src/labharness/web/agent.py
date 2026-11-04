@@ -36,6 +36,7 @@ from .providers.base import SESSION, Emit, ModelInfo, Provider, sees_images, tex
 from . import brevity, compaction, memory, review, rules as rulebook
 from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, READ_SKILL_FILE, SAVE_RECIPE, SAVE_SKILL, USE_SKILL, Know
 from .wakeups import WAKE_ME, Waker
+from .notices import Notices
 from .settings import Settings
 from .store import MAX_NOTE, ChatStore
 from ..labmemory import KINDS as LAB_KINDS, without_notes as without_lab_notes
@@ -50,9 +51,17 @@ Use units. Prefer a short list or small table over paragraphs. While a plan runs
 progress and plots live in a Runs pane beside the chat; when it finishes, the conversation shows the automatic
 assessment and the pane shows the key results, plots with fits and the data. So do not repeat them: add what
 they cannot (interpretation, anything suspicious, the next step).
+The person's Home (the Chat | Home switch above the chat) is their page of the lab at a glance, and yours to keep:
+when a run or a queue item gives a result worth keeping, put it there with home_add (kind result: the key number with
+its error, unit and run_id), and when you have a concrete next step, a next block whose button adds its scan to the
+sequence. One block per result; keep a block up to date with its key rather than adding another; take off what no
+longer holds (home_remove). Not for lookups, failed or refused calls, or dry runs.
 When you cite a paper, link it: [Author Year](url), using only papers you found with search_papers or the
 project's reading list; never invent a reference. Queries to search_papers leave the computer: describe the
 physics, not confidential sample or project details.
+A user message may begin with a <lab_events> block: what the person did meanwhile to the sequence or to Home in
+the portal (skipped, stopped, reordered or changed a block; took a block off Home...), written by Kelvin, not by the
+person. Take it into account where it bears on your work; don't repeat it back.
 A user message may begin with a <second_opinion> block: another model's review of your previous answer, asked for by
 the user. Weigh it on its merits and say briefly where you agree or not. A run_plan result may start with a second
 opinion on the plan; mention its concerns if they matter.
@@ -297,6 +306,7 @@ DEFERRED = {
                                  "find_maker_files", "library_api", "save_manual"],
     "makers' software": ["install_for_instrument", "installed_software", "environments", "remove_environment"],
     "editing and keeping the queue": ["queue_change", "queue_edit", "queue_pause", "queue_save", "queue_load"],
+    "keeping the person's Home": ["home_update", "home_remove", "home_list"],
     "watching readings": ["watch", "unwatch", "watches"],
     "pulse boards and sequences": ["run_on_board", "show_sequence", "save_sequence"],
     "SQL on the catalog of runs": ["query_runs"],
@@ -319,6 +329,8 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
 MCP_ONLY = {"remember_shared"}
 # the lab's memory, looked up: never in an incognito chat, which uses no memory at all
 LAB_MEMORY_TOOLS = {"shared_memory"}
+# the person's Home (homeboard.py): a page kept across chats, so never written from an incognito chat
+HOME_TOOLS = {"home_add", "home_update", "home_remove", "home_list"}
 # readings: beside another chat's change to the lab, as an instrument that change uses isn't asked (its latest values
 # instead: LabRuntime._reading)
 READINGS = {"lab_status", "get_value", "health_check", "show_sequence"}
@@ -338,6 +350,9 @@ OFF_LAB |= ANALYSIS
 # the portal's own readers: the team chat, and the Analysis pane's work on kept runs
 LOOKUPS |= {"team_chat", "analyze"}
 OFF_LAB |= {"team_chat", "analyze"}
+# Home is the person's page, never the lab: its tools work beside a run, from any chat
+LOOKUPS |= {"home_list"}
+OFF_LAB |= HOME_TOOLS
 QUEUE_FILED = {"queue_add", "queue_load"}   # items filed under the chat that queued them (its project, folder)
 MAX_TURNS = 4      # chats answering at once
 LAB_WAIT_S = 10.0  # how long a chat's lab call waits while another chat works the lab, before it says so
@@ -561,6 +576,7 @@ class ChatAgent:
         self.team: Optional[Any] = None   # the lab's team chat (teamchat.py), which team_chat reads (app.py)
         self._steer: Dict[str, List[str]] = {}   # what the person wrote while Kelvin worked, by chat, until read
         self.waker = Waker(self)   # chats continued later (wake_me), when the time or the lab says
+        self.notices = Notices(self)   # what the person did to the sequence or Home, for the chats it concerns
         self.know = Know(store)    # skills and recipes (skills.py)
 
     # ------------------------------------------------------------------ the chats answering now
@@ -784,6 +800,7 @@ class ChatAgent:
 
     async def _take_steer(self, chat: Dict[str, Any], emit: Emit) -> None:
         """The messages the person wrote meanwhile, into the chat before the model's next step."""
+        await self.notices.at_step(chat, emit)   # the person's changes to the sequence or Home meanwhile
         waiting = self._steer.pop(chat["id"], [])
         if not waiting:
             return
@@ -803,7 +820,7 @@ class ChatAgent:
         the lab's memory (the lab's facts and lessons, everyone's: labmemory.py), as it has the lab's instruments."""
         if chat.get("incognito"):   # not kept, so never continued later either; Kelvin's own skills only
             own = self.know.index(incognito=True)
-            lab_tools = [t for t in self._lab_tools(chat) if t["name"] not in LAB_MEMORY_TOOLS]
+            lab_tools = [t for t in self._lab_tools(chat) if t["name"] not in LAB_MEMORY_TOOLS | HOME_TOOLS]
             return {"system": "\n\n".join([SYSTEM] + self._brevity() + [INCOGNITO] +
                                            ([READ_GUIDE + "\n" + own] if own else []) + [
                                                self._more_tools(chat), self._files(), self._folder(chat)]),
@@ -1112,6 +1129,13 @@ class ChatAgent:
         provider = self.providers.get(str(model_key).partition(":")[0])
         return "%s %s" % (provider.label, model_key.partition(":")[2]) if provider else model_key
 
+    def failure(self, model_key: str, e: BaseException) -> str:
+        """Why a model's request outside a turn failed (a second opinion, a card's draft, a project's opening): in
+        plain words on one line, its service's own, never a key (describe_error)."""
+        from .modelerrors import describe
+        provider = self.providers.get(self.model_key(model_key).partition(":")[0])
+        return describe_error(provider, e) if provider is not None else describe("The model", "", e)
+
     def claim(self, chat_id: str, model_key: str) -> Provider:
         self._may_start(chat_id)
         model_key = self.model_key(model_key)   # the caller passes the same key to run_turn: model_key() it first
@@ -1162,6 +1186,7 @@ class ChatAgent:
             self.recall(chat, message)
             self._attach_review(chat, message)
             self._stamp(chat)
+            self.notices.at_turn(chat, message)   # the person's changes since its last message, with it
             chat["messages"].append(message)
             if chat.get("title", "New chat") == "New chat":
                 first = text.strip().splitlines()[0]
@@ -1187,6 +1212,7 @@ class ChatAgent:
         finally:
             if self.turns.get(chat_id) is turn:
                 del self.turns[chat_id]
+                self.notices.after_turn(chat_id)   # a change told after its last step: into its thread
             _TURN.reset(held)
             SESSION.reset(session)
             self._steer.pop(chat_id, None)   # not read in time: the portal sends it as the next message
@@ -1402,6 +1428,8 @@ class ChatAgent:
             return "not a tool in Kelvin's chats: keep a fact about the lab with remember, scope lab", True, None
         if name in LAB_MEMORY_TOOLS and chat.get("incognito"):   # called by its name: it isn't this chat's
             return "not in an incognito chat: it uses no memory, not the lab's either", True, None
+        if name in HOME_TOOLS and chat.get("incognito"):   # Home outlives the chat, which leaves nothing behind
+            return "not in an incognito chat: it leaves nothing behind, Home included", True, None
         if name == "wake_me" and not chat.get("incognito"):
             return _without_opinion(self.waker.add(chat["id"], args))
         if name == "wait" and _seconds(args) > WAIT_S:   # other chats would wait too
@@ -1800,6 +1828,7 @@ class ChatAgent:
             self.recall(chat, message)
             self._attach_review(chat, message)
             self._stamp(chat)
+            self.notices.at_turn(chat, message)   # the person's changes since its last message, with it
             chat["messages"].append(message)
             if chat.get("title", "New chat") == "New chat":
                 first = text.strip().splitlines()[0]
@@ -1841,6 +1870,7 @@ class ChatAgent:
         finally:
             if self.turns.get(chat_id) is turn:
                 del self.turns[chat_id]
+                self.notices.after_turn(chat_id)   # a change told while the lanes answered: into its thread
             _TURN.reset(held)
             SESSION.reset(session)
 
@@ -2116,13 +2146,12 @@ class ChatAgent:
 
     def _kept(self) -> List[Any]:
         """What Kelvin runs as a person chose it, which a chat's write_file never saves (folderfiles.off_limits): the
-        lab's scripts folder, and the scripts a person imported into their library, each with its whole folder (a
+        lab's scripts folders, and the scripts a person imported into their library, each with its whole folder (a
         Python environment, wherever it is, folderfiles refuses itself)."""
         rt = self.runtime
         kept: List[Any] = []
         try:
-            folder = rt.scripts_folder()
-            kept += [folder] if folder else []
+            kept += [f for f in rt.scripts_folders() if f]
             kept += list(rt.library.chosen())   # none while the library can't be read: none of them runs then either
         except Exception:
             pass

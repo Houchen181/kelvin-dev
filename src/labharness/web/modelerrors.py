@@ -2,8 +2,9 @@
 
 A key that is missing, wrong or revoked, or expired; no credit left on the account; a rate or plan limit; the service
 overloaded, down or out of reach; a model it doesn't offer: each is said as what it is, with what to do about it and
-the service's own words where they add something. A key is never repeated, not even the masked part some services
-echo back."""
+the service's own words where they add something. Anything else is the service's own words after its name, on one
+line, or its error's number when it gave none. A key is never repeated, not even the masked part some services echo
+back."""
 from __future__ import annotations
 
 import re
@@ -43,20 +44,38 @@ def _body_error(e: BaseException) -> Dict[str, Any]:
         err = body.get("error")
         if isinstance(err, dict):
             return err
-        return {"message": err} if isinstance(err, str) else body
+        if isinstance(err, str):
+            return {"message": err}
+        # FastAPI's, which gateways are built on: {"detail": "..."}, or what was wrong with the request, each its msg
+        detail = body.get("detail")
+        if isinstance(detail, list) and detail and isinstance(detail[0], dict):
+            detail = detail[0].get("msg")
+        if isinstance(detail, str) and detail.strip() and not body.get("message"):
+            return dict(body, message=detail.strip())
+        return body
+    if isinstance(body, str) and body.strip() and not body.lstrip().startswith("<"):
+        return {"message": body.strip()}   # words alone ({"error": "Model is unavailable"} as OpenAI's SDK keeps it)
     return {}
 
 
 def _said(e: BaseException) -> str:
-    """The service's own words, their first line, with anything like a key taken out."""
+    """The service's own words, their first line, with anything like a key taken out; "error 400" when it gave none
+    (an empty message, a web page)."""
     err = _body_error(e)
     text = err.get("message") if isinstance(err.get("message"), str) else ""
     if not text:
         msg = getattr(e, "message", None)
         text = msg if isinstance(msg, str) and not msg.startswith("Error code:") else ""
     text = re.sub(r"^Error code: \d+ - ", "", (text or str(e)).strip())
+    text = re.sub(r"^Error code: (\d+)$", r"error \1", text)   # the SDK's alone: the service gave no words
     first = text.splitlines()[0] if text else type(e).__name__
     return _KEYLIKE.sub("…", first)[:300]
+
+
+def refused(e: BaseException) -> bool:
+    """Did the service itself turn the key down: wrong or revoked, out of credit, not allowed, or over a limit? Not
+    a request it only couldn't serve (a list it doesn't have) or never got."""
+    return _status(e) in (401, 402, 403, 429)
 
 
 def _kinds(e: BaseException) -> str:
@@ -144,7 +163,9 @@ def describe(label: str, service: str, e: BaseException) -> str:
     if status is not None and status >= 500:
         return "%s had a problem on its side (error %d); nothing is wrong with your key. Try again shortly." % (
             label, status)
-    return "%s error: %s" % (label, said)
+    if re.fullmatch(r"error \d+", said):   # it gave no words of its own
+        return "%s refused the request (%s)." % (label, said)
+    return "%s: %s" % (label, said)   # anything else in the service's own words ("OpenCode Go: Model is unavailable")
 
 
 def unavailable(key: str, providers: Dict[str, Any]) -> str:

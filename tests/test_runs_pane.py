@@ -1,7 +1,8 @@
-"""The Runs pane's page: Schedule · History in its header, the open runs' tabs in a row below it; the Schedule as
-Special Measure's window: Kelvin's scans and the person's scripts beside the queue (below it when narrow), ⇒ between
-them, the step row under the scans; the recent runs and Run again in the History (GET/POST /api/library, /api/queue,
-/api/runs/{id}/again)."""
+"""The Runs pane's page: Sequence · History in its header, the open runs' tabs in a row below it, in the History.
+The Sequence (seq.js) is the queue's one place, with the step row and Paste a plan among its functions; the recent
+runs and Run again in the History (GET/POST /api/library, /api/queue, /api/runs/{id}/again). 0.3.39's Schedule
+(Special Measure's window: the scans beside the queue, ⇒ between them) stays on the page, built and working, never
+shown."""
 import re
 
 import pytest
@@ -27,34 +28,73 @@ def test_every_id_the_portal_script_uses_is_on_the_page():
     assert len(used) > 300 and not sorted(used - made)
 
 
-def test_the_header_is_schedule_and_history_and_the_open_runs_have_a_row_below_it():
-    head = PAGE[PAGE.index('<section id="runpane"'):PAGE.index('<section id="anpane"')]
+def test_the_header_is_sequence_and_history_and_the_open_runs_have_a_row_below_it():
+    head = PAGE[PAGE.index('<section id="runpane"'):PAGE.index('<section id="edpane"')]
     header = head[head.index("<header"):head.index("</header>")]
     seg = re.search(r'<div id="runs-seg"[^>]*>', header).group(0)
-    assert 'role="tablist"' in seg
+    assert 'role="tablist"' in seg and 'aria-label="Sequence and history"' in seg
     tabs = re.findall(r'<button id="(open-\w+)"[^>]*role="tab"[^>]*aria-controls="([\w-]+)"', header)
-    assert tabs == [("open-schedule", "schedule-view"), ("open-history", "history-view")]
-    schedule = re.search(r'<button id="open-schedule"[^>]*>(.*?)</button>', header).group(0)
-    assert 'class="on"' in schedule and 'aria-selected="true"' in schedule and ">Schedule<" in schedule
-    assert 'id="queue-count"' in schedule   # the queue's badge, on the tab that shows it
-    assert ">History</button>" in header and 'tabindex="-1"' in header.split('id="open-history"')[1].split(">")[0]
+    assert tabs == [("open-schedule", "seq-view"), ("open-history", "history-view")]
+    sequence = re.search(r'<button id="open-schedule"[^>]*>(.*?)</button>', header).group(0)
+    assert 'class="on"' in sequence and 'aria-selected="true"' in sequence and ">Sequence<" in sequence
+    assert 'tabindex="-1"' not in sequence
+    assert 'id="queue-count"' in sequence   # the queue's badge, on the tab that shows it
+    history = re.search(r'<button id="open-history"[^>]*>', header).group(0)
+    assert ">History</button>" in header and 'class="on"' not in history and 'aria-selected="false"' in history
+    assert 'tabindex="-1"' in history
     assert 'id="open-report"' in header and 'id="close-runs"' in header and 'data-pane="runpane"' in header
-    for gone in ("open-runs", "open-scans", "open-queue", 'id="runs-view"', "runs-history", "runs-menu"):
+    for gone in ("open-runs", "open-scans", "open-queue", 'id="runs-view"', "runs-history", "runs-menu", "seqpane",
+                 "toggle-seq", "close-seq"):
         assert gone not in PAGE + JS, gone
     assert "showRunsMenu" not in JS
     row = re.search(r'<div id="run-tabs"[^>]*>', head).group(0)
-    assert head.index(row) > head.index("</header>") and " hidden" in row   # shown while runs are open
-    for panel in ("schedule-view", "history-view"):
+    assert head.index(row) > head.index("</header>") and " hidden" in row   # the History's, while runs are open
+    for panel in ("seq-view", "history-view"):
         assert re.search(r'id="%s"[^>]*role="tabpanel"' % panel, head), panel
-    assert re.search(r'<div id="history-view"[^>]*hidden>', head) and 'view: "schedule"' in JS   # the Schedule first
-    keys = _js("segKeys")
+    assert not re.search(r'<div id="seq-view"[^>]*hidden>', head) and 'view: "schedule"' in JS   # the Sequence first
+    assert re.search(r'<div id="history-view"[^>]*hidden>', head)
+    assert '<div id="schedule-view" class="schedule-view" hidden>' in head   # 0.3.39's Schedule: never shown
+    keys = _js("runsSegKeys")   # the Lab's choices have their own segKeys
     assert all(k in keys for k in ("ArrowRight", "ArrowLeft", "Home", "End"))
+    assert '$("runs-seg").addEventListener("keydown", runsSegKeys);' in JS
+    assert "const order = Object.keys(VIEWS)," in keys   # both tabs
     view = _js("showView")
-    assert "aria-selected" in view and "tabIndex" in view and "loadRunList()" in view and "loadScans()" in view
-    assert "loadQueue()" in view and 'QUEUE.open = view === "schedule"' in view
+    assert "aria-selected" in view and "tabIndex" in view and "loadRunList()" in view and "loadQueue()" in view
+    assert "tabsRow();" in view and '$("open-report").hidden = view !== "history";' in view and "seqSight();" in view
+    assert "QUEUE.open" not in view and "loadScans()" not in view   # the hidden Schedule's lists are never drawn
+    assert 'RUNS.view !== "history" || !RUNS.tabs.size' in _js("tabsRow")
     assert '$("history-view").append(body)' in _js("runTab") and 'showView("history")' in _js("selectRun")
-    assert "showView(RUNS.view)" in _js("toggleRuns")   # opened: the view it shows, as it is now
+    assert "showView(RUNS.view)" in _js("toggleRuns") and "seqSight();" in _js("toggleRuns")
     assert 'RUNS.view === "history"' in _js("openReport")   # This run: the one the History shows
+
+
+def test_the_queue_is_the_sequence_the_runs_panes_first_view():
+    """One UI for the queue: the Sequence (seq.js), the Runs pane's first tab. What showed the queue (Run, Run again, a
+    lab experiment's Run, the editor's Run) opens the pane on it, with the queue's answer as its line, and Home's
+    Sequence opens it too (toggleSeq). The step row and Paste a plan are the Sequence's; what they add, and what the
+    queue says, reaches it at once (kelvin:queue). 0.3.39's Schedule stays on the page, built, never shown."""
+    show = _js("showQueue")
+    assert 'RUNS.view = "schedule";' in show and 'if (RUNS.open) showView("schedule"); else toggleRuns(true);' in show
+    assert "seqSight(message);" in show and "fullShow" not in show
+    seq = _js("toggleSeq")
+    assert "showQueue(message)" in seq and "toggleRuns(false)" in seq
+    sight = _js("seqSight")
+    assert 'const open = RUNS.open && RUNS.view === "schedule";' in sight
+    assert 'emit("seq", { open, opened: open && !RUNS.seqOpen, message: message || "" });' in sight
+    assert '$("open-schedule").addEventListener("click", () => showView("schedule"));' in JS
+    assert "showQueue();" not in JS   # every Run says what the queue said
+    assert len(re.findall(r'showQueue\(\(r\.message \|\| ""\)\.split\("\\n"\)\[0\]\)', JS)) == 4
+    assert "#open-schedule { display: none; }" not in CSS
+    assert "#toggle-runs .seq-badge:not([hidden]) + .live-dot { display: none; }" in CSS   # the count stands for the dot
+    assert "initSchedule();" in _js("initRunsPane")   # the step row and Paste a plan are its code
+    assert 'emit("queue", { queue: r });' in _js("stepGo")
+    op = _js("queueOp")
+    assert 'emit("queue", { queue: r, message: quiet ? "" : r.message || "" });' in op
+    assert 'emit("queue", { message: e.message });' in op
+    seqjs = (STATIC / "seq.js").read_text(encoding="utf-8")
+    assert 'document.addEventListener("kelvin:queue"' in seqjs and 'K.$("seq-view")' in seqjs
+    assert 'K.$("step-row")' in seqjs and 'K.$("queue-paste")' in seqjs and 'pill = K.$("toggle-runs")' in seqjs
+    assert '"Built-in"' not in seqjs and "WAIT_TEXT" not in seqjs   # a wait is the step row's
 
 
 def test_the_side_panels_stay_independent():
@@ -71,19 +111,27 @@ def test_the_side_panels_stay_independent():
 
 
 def test_the_scan_editor_is_a_side_panel_of_its_own():
+    """It has no button of its own: it stands right after Runs, in Runs' column (tests/test_panel_layout.py)."""
     work = PAGE[PAGE.index('<div id="workcol"'):PAGE.index('<div id="sidecol"')]
-    assert work.index('<section id="runpane"') < work.index('<section id="edpane"') < work.index('<section id="anpane"')
-    pane = PAGE[PAGE.index('<section id="edpane"'):PAGE.index('<section id="anpane"')]
+    assert work.index('<section id="anpane"') < work.index('<section id="runpane"') < work.index('<section id="edpane"')
+    pane = PAGE[PAGE.index('<section id="edpane"'):PAGE.index('<div id="sidecol"')]
     assert 'id="edpane-resize"' in pane and 'id="close-editor"' in pane and 'aria-labelledby="ed-title"' in pane
     assert re.search(r'edpane: \[\(\) => ED\.open, "workcol", \d+, "lh\.edWidth"\]', JS)
     assert "PANE_W.edpane" in _js("initPanes")
     toggle = _js("toggleEditor")
     assert '$("edpane").hidden = !ED.open' in toggle and "fitLayout()" in toggle
-    assert "ED.open" in _js("syncScrim") and "if (ED.open) toggleEditor(false);" in JS   # the scrim closes all, as ever
+    assert "edpane: toggleEditor," in JS and "if (ED.open) toggleEditor(false);" not in JS   # the scrim closes no panel
     opened = _js("openEditor")
-    assert 'op: "parts", id: id || null' in opened and "toggleEditor(true)" in opened and "confirm(" in opened
+    assert 'op: "parts", id: id || null' in opened and "await edLeave()" in opened
+    # to the screen like every opener that is not its own button: there already, its head rings (the click model)
+    assert 'Kelvin.paneShow("edpane")' in opened and "toggleEditor(true)" not in opened
+    # with changes, × and another scan ask in the page: Save, Discard or Keep editing (never confirm())
+    leave = _js("edLeave")
+    assert "Kelvin.askYes(" in leave and '{ ok: "Save", alt: "Discard"' in leave and 'cancel: "Keep editing"' in leave
+    assert "await edSave(false);" in leave and "return !edDirty();" in leave and "confirm(" not in leave
+    assert "edDirty() && !(await edLeave())" in _js("closeEditor") and '"click", closeEditor' in _js("initEditor")
     for label in (">Edit scan<", ">Plan text<", ">+ Loop<", ">Loops<", ">Record<", ">Setup<", ">At the end<",
-                  ">As written<", ">Add to queue<", ">Run<", ">Save<", ">Save as scan<", ">Revert<"):
+                  ">As written<", ">Add to sequence<", ">Run<", ">Save<", ">Save as scan<", ">Revert<"):
         assert label in pane, label
     assert re.search(r'<button id="ed-save-as"[^>]* hidden>', pane)   # only for a scan waiting in the queue
 
@@ -163,7 +211,8 @@ def test_the_scan_editor_follows_the_contract():
     run = _js("edRun")
     assert '{ op: "run", parts: ED.parts, from: ED.id } : { op: "run", id: ED.id }' in run
     assert "body.queue = true" in run
-    assert 'busyWhile(queue ? ["ed"] : ["ed", "start"]' in run and "showQueue()" in run
+    assert 'busyWhile(queue ? ["ed"] : ["ed", "start"]' in run
+    assert r'showQueue((r.message || "").split("\n")[0])' in run   # the Sequence, with what the queue said
     buttons = _js("edButtons")
     assert "!(ED.item ? dirty : dirty || !ED.id)" in buttons and 'BUSY.has("start")' in buttons and "!c.loads" in buttons
     assert "if (ED.parts) edButtons();" in _js("syncBusy")   # a Run waiting for its approval holds the editor's too
@@ -191,11 +240,11 @@ def test_the_recent_runs_list_opens_a_run_and_a_run_view_goes_back_to_it():
 
 def test_run_again_follows_the_contract():
     view = _js("buildRunView")
-    assert '"Run again"' in view and "loadAgain(tab)" in view and "Add to the queue" not in view   # its own now
+    assert '"Run again"' in view and "loadAgain(tab)" in view and "Add to sequence" not in view   # its own now
     load = _js("loadAgain")
     assert '"/api/runs/" + encodeURIComponent(tab.runId) + "/again"' in load
     parts = _js("againParts")
-    for text in ('"Run again"', '"Add to the queue"', '"As it ran then"', '"As it is now"', "Restore these ",
+    for text in ('"Run again"', '"Add to sequence"', '"As it ran then"', '"As it is now"', "Restore these ",
                  "Every setting is as it was.", "Couldn't read ", "c.why", "s.as_ran !== false", "as_ran_why", "c.differs && c.settable", "c.drive",
                  "restore: n > 0 && restore.checked", "body.version = pick.version", "body.queue = true",
                  "queueFromState(r.queue)", "renderQueue()"):
@@ -258,10 +307,11 @@ def test_a_long_run_file_says_it_shows_its_end():
 
 def test_the_schedule_stands_the_scans_beside_the_queue_with_an_arrow_between():
     """The scans and the queue side by side when the pane has room (and in full screen), else the scans above the
-    queue; ⇒ between them (⇓ when one is above the other); the step row and Paste a plan under the scans."""
+    queue; ⇒ between them (⇓ when one is above the other). Never shown now; the step row and Paste a plan, once under
+    its scans, are the Sequence's."""
     view = PAGE[PAGE.index('<div id="schedule-view"'):PAGE.index('<div id="history-view"')]
-    order = ['<section id="scans-view"', 'id="step-row"', 'id="queue-paste-open"', 'class="sched-mid"',
-             '<button id="sched-add"', '<section id="queue-view"']
+    assert 'id="step-row"' not in view and 'id="queue-paste-open"' not in view
+    order = ['<section id="scans-view"', 'class="sched-mid"', '<button id="sched-add"', '<section id="queue-view"']
     assert [view.index(t) for t in order] == sorted(view.index(t) for t in order), order
     arrow = re.search(r'<button id="sched-add"[^>]*>(.*?)</button>', view).group(0)
     assert '<span class="to-side">⇒</span><span class="to-below">⇓</span>' in arrow and " disabled" in arrow
@@ -359,9 +409,10 @@ def test_the_step_row_writes_the_queues_own_step_format_and_kelvin_checks_it(tmp
                      r'<option value="settle">Wait until settled</option></select>', row)
     for text in ('id="step-key"', 'list="step-set-keys"', 'id="step-value"', 'id="step-time"', 'id="step-time-unit"',
                  'id="step-read"', 'list="step-read-keys"', 'id="step-within"', 'id="step-for"', 'id="step-timeout"',
-                 '<button id="step-add" class="sched-arrow small"', 'id="step-save"', 'id="step-cancel"'):
+                 '<button id="step-add" class="btn small primary"', ">Add</button>", 'id="step-save"', 'id="step-cancel"'):
         assert text in row, text
-    assert '<button id="queue-paste-open" class="link soft"' in PAGE and ">Paste a plan</button>" in PAGE
+    assert PAGE.index('<div id="seq-view"') < PAGE.index('<div id="step-row"') < PAGE.index('<div id="schedule-view"')
+    assert '<button id="queue-paste-open" class="btn small"' in PAGE and ">Paste a plan</button>" in PAGE   # a button that looks like one
     assert re.search(r'<form id="queue-paste" class="q-paste" hidden>', PAGE) and 'id="queue-text"' in PAGE
     assert (r'const QUEUE_STEP = "step: cool to 2 K\nset: { tc.T_set: 2 }\nstabilize: { read: tc.T, within: 0.02, '
             r'for: 120, timeout: 7200 }\nwait: 600";') in JS
@@ -423,11 +474,12 @@ def test_edit_on_a_queued_item_opens_it_where_it_can_be_edited():
     assert "dirty : dirty || !ED.id" in _js("edButtons")   # an item saved unchanged would run again
 
 
-def test_a_run_that_starts_while_the_person_types_in_the_schedule_only_gets_its_tab():
-    """A queued scan that starts takes the pane to its run, as ever, unless the person is typing in the schedule (a
-    step, a filter, a name) or dragging in it: then it gets its tab and the schedule stays."""
+def test_a_run_that_starts_while_the_sequence_is_shown_only_gets_its_tab():
+    """A run that starts takes the pane to it, as ever, unless the pane shows the Sequence: then it gets its tab, the
+    Sequence stays (its blocks show their runs), and History's dot says a run is running."""
     notice = _js("noticeRun")
     assert "if (!scheduling()) openRun(runId, plan);" in notice and 'setTabStatus(tab, "running")' in notice
-    busy = _js("scheduling")
-    assert 'RUNS.view === "schedule"' in busy and "QUEUE.dragging" in busy
-    assert 'at.closest("input, textarea, select")' in busy and '$("schedule-view").contains(at)' in busy
+    assert 'return RUNS.open && RUNS.view === "schedule";' in _js("scheduling")
+    dots = _js("liveDots")
+    assert '$("runs-dot").hidden = !live;' in dots and '$("open-history").classList.toggle("live", live);' in dots
+    assert "#open-history.live::after" in CSS and "#open-history.live.on::after { display: none; }" in CSS

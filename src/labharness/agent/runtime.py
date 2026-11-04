@@ -128,6 +128,29 @@ class _Either:
         return any(a.covers(value) for a in self.each)
 
 
+def _plain(value: Any) -> str:
+    """A value as a block shows it: 0.6, 2e-06, text as it is, a list as written."""
+    if isinstance(value, float):
+        return "%g" % value
+    if isinstance(value, (list, tuple, dict)):
+        return json.dumps(_json_safe(value), ensure_ascii=False)
+    return str(value)
+
+
+def _json_safe(value: Any) -> Any:
+    """A value as JSON carries it, so a page's poll never fails on one: text for what JSON has no word for (a date
+    YAML read), None for a number that isn't finite (a script's 1e999)."""
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 def _granted(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
     """A queue's approvals with a later card's added: both hold, drive by drive."""
     out = dict(old)
@@ -622,9 +645,10 @@ class LabRuntime:
         self.cards_dir: Optional[Path] = None   # the user's own cards (~/Kelvin/cards); set by the app
         self.home: Optional[Path] = None        # ~/Kelvin, where each instrument has its folder; set by the app
         self.collection: Any = None             # the instrument collection (collection.py) while it is switched on
-        # the lab's scripts folder a person named (Set up), the only one run_script runs from, and the Python a person
-        # set for those scripts ("" = the best one found); the app keeps both in Settings, for everyone on this computer
-        self.scripts_folder: Callable[[], Optional[str]] = lambda: None
+        # the lab's scripts folders a person named (Settings, Set up), the only ones run_script runs from, and the
+        # Python a person set for those scripts ("" = the best one found); the app keeps both in Settings, for everyone
+        # on this computer
+        self.scripts_folders: Callable[[], List[str]] = lambda: []
         self.scripts_python: Callable[[], str] = lambda: ""
         self.setup_status: Dict[str, Any] = {"state": "idle"}   # setting up connected instruments (autosetup.py)
         self.data_problem: Optional[str] = None   # why the chosen data folder is not in use, if it is not
@@ -656,6 +680,7 @@ class LabRuntime:
         self.lab_changed: Callable[[str], None] = lambda what: None
         self.switched_off_for: Optional[Callable[[str], Iterable[str]]] = None   # who a person switched off, per lab
         self.queue = ScanQueue(self.data_dir / "queue.json")   # scans lined up to run one after another
+        self.home_board: Any = None   # the person's Home (homeboard.py), in the portal; its tools say so without it
         self.auto_report = "both"   # after each run (in its folder) and each queue (in reports/): both, pdf, pptx, off
         self.mounted: Dict[str, Any] = self._load_mounted()   # the sample in the setup now (project, device, since)
         # a person's hands on the sample (who, since): every drive held at safe; the app keeps it across restarts
@@ -686,6 +711,20 @@ class LabRuntime:
         self._queue_thread: Optional[threading.Thread] = None
         # the ids of the items the running start of the queue is for, when it had a pause point (_queue_loop's only)
         self._queue_only: Optional[List[str]] = None
+        self.queue_started_by: Optional[str] = None   # the chat that started the queue last (None: a person)
+        # the portal hears of an item that failed (the chats it concerns are told: web/notices.py); never stops it
+        self.queue_heard: Optional[Callable[[Item, str], None]] = None
+        self._queue_skip: Optional[Tuple[str, str]] = None   # (the running item a person skipped, who): it ends
+        self._queue_now = threading.local()   # the queue's thread: the item it runs (.item), which its run's live names
+        self._queue_step_now: Optional[Dict[str, Any]] = None   # a running step's phase and when it ends, for its block
+        # what the Sequence shows of each item, kept so a poll of /api/state reads no file (queue_view): by item
+        # (its text), the file a script item runs, that file's settings (by its time and size), the library's colours
+        self._seq_items: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        self._seq_found: Dict[Tuple[str, str, str], Tuple[Optional[Path], float]] = {}
+        self._seq_read: Dict[str, Tuple[Tuple[int, int], Dict[str, Any]]] = {}
+        self._seq_lib: Tuple[Any, Dict[str, str], Dict[str, str], Dict[str, str]] = (None, {}, {}, {})
+        self._seq_saved: Tuple[Any, List[str]] = (None, [])
+        self._seq_lock = threading.RLock()   # those, for polls on several threads at once
         self.interrupted: List[str] = []   # the runs a crash or power cut ended, found when Kelvin started (tidy_runs)
         # the latest dry runs that went wrong, by the plan's text (a queue's: its items'), as (when, what they said):
         # the real run's card says so (a queue was approved minutes after its rehearsal said two items would fail)
@@ -931,7 +970,9 @@ class LabRuntime:
                 self.live = {"run_id": event["run_id"], "plan": event["plan"], "total": event["total"], "done": 0,
                              "eta_s": None, "status": "running", "phase": "setup", "axes": event["axes"],
                              "measures": event["measures"], "rows": [], "trace": None,
-                             "script": bool(event.get("script"))}   # a lab script's: no total
+                             "script": bool(event.get("script")),   # a lab script's: no total
+                             # the queue item it runs for (started on the queue's thread): its block shows its progress
+                             "queue_item": getattr(self._queue_now, "item", None)}
                 self.live_meta = dict(self.running_meta)   # whose it is, kept after it ends
             elif self.live is None or self.live["run_id"] != event["run_id"]:
                 return
@@ -2863,7 +2904,220 @@ class LabRuntime:
         return self.queue.text(lambda item: not self.may_see(item.whose(), cache))
 
     def queue_view(self) -> Dict[str, Any]:
-        return dict(self.queue.view(), saved=saved_queues(self.data_dir / "queues"))
+        """The queue for the portal's Sequence (and /api/state, polled every few seconds): ScanQueue.view, its
+        saved queues, and for each item a line saying what it does (summary); a script item's settings with their
+        values in its file and the values it runs with (settable, notes, params), a step's set values, wait and the
+        reading it settles (set, wait, stabilize); the colour and name a person gave its library entry (an item it
+        ran from, or the same script or scan); the running item's progress ({done, total, eta_s, phase,
+        run_id} of its run, or a step's {phase: stabilize | wait, until}). What costs is kept: a file is read again
+        only when it changed (its time and size), and only what an item's text says is worked out again when it
+        changes."""
+        view = self.queue.view()
+        saved_dir = self.data_dir / "queues"
+        try:
+            st = saved_dir.stat()
+            stamp: Any = (str(saved_dir), st.st_mtime_ns)
+        except OSError:
+            stamp = (str(saved_dir), None)
+        if self._seq_saved[0] != stamp:
+            self._seq_saved = (stamp, saved_queues(saved_dir))
+        view["saved"] = list(self._seq_saved[1])
+        try:
+            with self._seq_lock:
+                items = self._seq_view_items(view["items"], view["changed"])
+        except Exception:   # a display never stands in the way of the queue
+            items = view["items"]
+        view["items"] = items
+        return view
+
+    def _seq_settable(self, text: str) -> Dict[str, Any]:
+        """A script item's settings with their values in its file ({name: value}), as its block has them."""
+        with self._seq_lock:
+            return self._seq_settings(self._seq_file(load_script_item(text), self.queue.changed), {})["settable"]
+
+    def _seq_view_items(self, items: List[Dict[str, Any]], changed: float) -> List[Dict[str, Any]]:
+        """The items of queue_view with what the Sequence shows of each (queue_view)."""
+        import os
+        colors, names, by_file = self._seq_library()
+        stamps: Dict[str, Optional[Tuple[int, int]]] = {}   # each file looked at once per view
+        out = []
+        for raw in items:
+            item = dict(raw)
+            text = str(item.get("text") or "")
+            kept = self._seq_items.get(item["id"])
+            if kept is None or kept[0] != text:
+                kept = (text, self._seq_static(item))
+                self._seq_items[item["id"]] = kept
+            static = dict(kept[1])
+            spec = static.pop("_spec", None)
+            item.update(static)
+            entry = item.get("library")
+            if spec is not None:   # a script: its file's settings, as they are now
+                path = self._seq_file(spec, changed)
+                item.update(self._seq_settings(path, stamps))
+                if path is not None and not entry:
+                    entry = by_file.get(os.path.normcase(str(path)))
+            elif item.get("kind") == "plan" and not entry:
+                entry = by_file.get(text.strip())
+            if entry and colors.get(entry):
+                item["color"] = colors[entry]
+            if entry and names.get(entry):
+                item["name"] = names[entry]
+            if item.get("status") == "running":
+                progress = self._seq_progress(item["id"])
+                if progress is not None:
+                    item["progress"] = progress
+            out.append(item)
+        if len(self._seq_items) > 2 * len(items) + 50:   # items gone from the queue
+            ids = {i["id"] for i in items}
+            self._seq_items = {k: v for k, v in self._seq_items.items() if k in ids}
+        return out
+
+    def _seq_static(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """What an item's text alone says, for its block: its summary, and a step's set values, wait and the reading it
+        settles (stabilize), a script's values (params) and its parsed form (_spec, for its file). Worked out once per
+        text."""
+        from ..scanlibrary import summary
+        kind, text, out = item.get("kind"), str(item.get("text") or ""), {"summary": ""}   # type: ignore[var-annotated]
+        try:
+            if kind == "plan":
+                out["summary"] = summary(load_yaml(text), self._unit_of)
+            elif kind == "step":
+                step = load_step(text)
+                out["wait"] = step.wait
+                out["set"] = _json_safe({"%s.%s" % (i, p): v for i, p, v in step.sets})
+                out["stabilize"] = step.stabilize.key if step.stabilize is not None else None   # the reading it settles
+                out["summary"] = self._step_words(step)
+            elif kind == "script":
+                spec = load_script_item(text)
+                out["params"] = _json_safe(dict(spec.params))
+                out["summary"] = " · ".join(
+                    ([", ".join("%s = %s" % (k, _plain(v)) for k, v in spec.params.items())] if spec.params else [])
+                    + ([" ".join(spec.args)] if spec.args else []))
+                out["_spec"] = spec
+        except Exception:
+            pass
+        if out["summary"].strip().lower() == str(item.get("name") or "").strip().lower():
+            out["summary"] = ""   # a Wait block called "wait 10 min" says nothing more under its name
+        return out
+
+    def _step_words(self, step: Any) -> str:
+        """A step in a few words: "magnet.B → 500 mT · settle tc.T · wait 10 min"."""
+        from ..scanqueue import span_words
+        parts = []
+        for instr, param, value in step.sets:
+            key = "%s.%s" % (instr, param)
+            spec = self._spec(key)
+            try:
+                shown = spec.show(spec.coerce(value)) if spec is not None else _plain(value)
+            except Exception:
+                shown = _plain(value)
+            parts.append("%s → %s" % (key, shown))
+        if step.stabilize is not None:
+            parts.append("settle %s" % step.stabilize.key)
+        if step.wait:
+            parts.append("wait %s" % span_words(step.wait))
+        return " · ".join(parts)
+
+    def _seq_file(self, spec: ScriptItem, changed: float) -> Optional[Path]:
+        """The file a script item runs (one of the lab's experiments' versions, a run's script.py for a version:, or
+        the script in the scripts folders or the library), found once: finding a bare name walks the scripts folders.
+        One not found is looked for again only after the queue changed."""
+        from .. import scriptrun
+        folders = self.scripts_folders()
+        key = (spec.path, spec.version or "", tuple(folders))
+        hit = self._seq_found.get(key)
+        if hit is not None and (hit[0] is not None or hit[1] == changed):
+            return hit[0]
+        path: Optional[Path] = None
+        try:
+            kept = self._kept_version(spec.path)
+            if kept is not None:
+                path = Path(kept.path)
+            elif spec.version:
+                path = self._run_dir(spec.version) / "script.py"
+            else:
+                path = scriptrun.locate(spec.path, folders, self.library.chosen())
+        except Exception:
+            path = None
+        if len(self._seq_found) > 500:
+            self._seq_found.clear()
+        self._seq_found[key] = (path, changed)
+        return path
+
+    def _seq_settings(self, path: Optional[Path], stamps: Dict[str, Optional[Tuple[int, int]]]) -> Dict[str, Any]:
+        """A script's settings with their values in its file ({settable, notes}, and problem when it can't be read),
+        read again only when the file changed (its time and size). stamps: the files looked at in this view."""
+        from .. import scriptrun
+        if path is None:
+            return {"settable": {}, "notes": {}, "problem": "not found"}
+        key = str(path)
+        if key not in stamps:
+            try:
+                st = path.stat()
+                stamps[key] = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                stamps[key] = None
+        stamp = stamps[key]
+        if stamp is None:
+            for k, (found, _) in list(self._seq_found.items()):   # looked for again once the queue changes
+                if found is not None and str(found) == key:
+                    self._seq_found[k] = (None, -1.0)
+            return {"settable": {}, "notes": {}, "problem": "%s is not there" % path.name}
+        hit = self._seq_read.get(key)
+        if hit is not None and hit[0] == stamp:
+            return dict(hit[1])
+        try:
+            found = scriptrun.parameters(scriptrun.source_of(path))
+            out: Dict[str, Any] = {"settable": _json_safe({q.name: q.value for q in found}),
+                                   "notes": {q.name: q.note for q in found if q.note}}
+        except scriptrun.ScriptError as e:
+            out = {"settable": {}, "notes": {}, "problem": str(e)}
+        if len(self._seq_read) > 500:
+            self._seq_read.clear()
+        self._seq_read[key] = (stamp, out)
+        return dict(out)
+
+    def _seq_library(self) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
+        """The colours and names people gave their library's entries ({entry id: colour}, {entry id: name}: only
+        those they named), and those entries by a script's file or a scan's text ({file or text: entry id}), read
+        again only when library.json changes."""
+        import os
+        path = self.library.path
+        try:
+            st = path.stat()
+            stamp: Any = (str(path), st.st_mtime_ns, st.st_size)
+        except OSError:
+            stamp = (str(path), None, None)
+        if self._seq_lib[0] != stamp:
+            try:
+                entries = self.library.entries() if stamp[1] is not None else []
+            except OSError:
+                entries = []
+            colors = {e["id"]: str(e["color"]) for e in entries if e.get("color")}
+            names = {e["id"]: str(e["name"]) for e in entries if e.get("named") and e.get("name")}
+            by_file: Dict[str, str] = {}   # a script's entry by its file; a scan's by its text (one dragged in)
+            for e in entries:
+                if e["id"] in colors or e["id"] in names:
+                    if e.get("kind") == "script" and e.get("path"):
+                        by_file[os.path.normcase(str(e["path"]))] = e["id"]
+                    elif e.get("kind") == "plan" and e.get("text"):
+                        by_file[str(e["text"]).strip()] = e["id"]
+            self._seq_lib = (stamp, colors, names, by_file)
+        return self._seq_lib[1], self._seq_lib[2], self._seq_lib[3]
+
+    def _seq_progress(self, item_id: str) -> Optional[Dict[str, Any]]:
+        """How far the running item is: its run's points ({done, total, eta_s, phase, run_id}: a script's has no
+        total), or a step's {phase: stabilize | wait, until: when it ends at the latest, epoch seconds}."""
+        step = self._queue_step_now
+        if step is not None and step.get("item") == item_id:
+            return {"phase": step["phase"], "until": step["until"]}
+        with self._live_lock:
+            live = self.live
+            if live is None or live.get("status") != "running" or live.get("queue_item") != item_id:
+                return None
+            return {"done": live.get("done") or 0, "total": live.get("total"), "eta_s": live.get("eta_s"),
+                    "phase": live.get("phase"), "run_id": live.get("run_id")}
 
     def _queue_problems(self, text: str) -> List[str]:
         """What stops an item from running on this lab, before it joins the queue. It is checked beside whatever
@@ -2998,8 +3252,17 @@ class LabRuntime:
         fields = json.loads(json.dumps(data, default=str)) if isinstance(data, dict) else {}
         return {"item": item.id, "kind": item.kind, "fields": fields}
 
-    def queue_change(self, op: str, ref: Any = None, position: Optional[int] = None, by: str = "agent") -> str:
-        """move, remove, again (put a finished item back in line), clear (remove finished items)."""
+    def queue_change(self, op: str, ref: Any = None, position: Optional[int] = None, by: str = "agent",
+                     name: Any = None) -> str:
+        """move, remove, again (put a finished item back in line), clear (remove finished items), skip (a waiting
+        item won't run; the running one ends now and the queue goes on: queue_skip), duplicate (a copy right after
+        it), rename (the sequence: name)."""
+        if op == "skip":
+            return self.queue_skip(ref, by)
+        if op == "duplicate":
+            return self.queue_duplicate(ref, by)
+        if op == "rename":
+            return self.queue_rename(name, by)
         try:
             if op == "move":
                 item = self.queue.move(ref, int(position or 1))
@@ -3026,7 +3289,190 @@ class LabRuntime:
             self.queue.save()
         self.gate.log.write("queue_on_error", by=by, value=value)
 
-    def queue_save(self, name: str) -> str:
+    def queue_rename(self, name: Any, by: str = "agent") -> str:
+        """The sequence's name ("" or None: the minute, as a new sequence's)."""
+        try:
+            now = self.queue.rename(name)
+        except ValueError as e:
+            return "not changed: %s" % e
+        self.gate.log.write("queue_rename", by=by, name=now)
+        return "renamed %s" % now
+
+    def queue_skip(self, ref: Any, by: str = "agent") -> str:
+        """Skip an item. A waiting one won't run (again puts it back in line). The running one ends now, as stop_run
+        ends a run (a scan's on_abort steps run, a script's drives go back to safe, a step's wait ends, its own card
+        is declined), and the queue goes on to the next item, whatever on a failure says (_queue_loop): only that
+        item, which must still be running when the skip comes, so a skip meant for an item that finished meanwhile
+        never ends the next one (the queue can't pick the next while this holds its lock)."""
+        q = self.queue
+        with q.lock:
+            try:
+                item = q.find(ref)
+            except KeyError as e:
+                return "not changed: %s" % e.args[0]
+            running = item.status == "running"
+            if running:
+                self._queue_skip = (item.id, by)
+                self.gate.request_abort()   # what runs now ends; the next item, picked after this, is not touched
+                decline = getattr(self.approver, "decline_from", None)
+                thread = getattr(self._queue_thread, "ident", None)
+                if decline is not None and thread is not None:   # its own card (a script's), if one waits
+                    decline(thread, "a skip by %s" % by)
+            else:
+                try:
+                    q.skip(item.id, by)
+                except ValueError as e:
+                    return "not changed: %s" % e
+        self.gate.log.write("queue_skip", by=by, item=item.id, name=item.name, running=running or None)
+        return "skipping %s: it ends now, and the queue goes on" % item.name if running else "skipped %s" % item.name
+
+    def queue_duplicate(self, ref: Any, by: str = "agent") -> str:
+        """A copy of an item right after it, waiting: the same text and note, filed as it is (whose work it is)."""
+        try:
+            (copy,) = self.queue.copies([(ref, None)], by=by)
+        except (KeyError, PlanError) as e:
+            return "not changed: %s" % (e.args[0] if e.args else e)
+        self.gate.log.write("queue_duplicate", by=by, item=copy.id, name=copy.name,
+                            position=self.queue.items.index(copy) + 1)
+        return "duplicated %s as #%d" % (copy.name, self.queue.items.index(copy) + 1)
+
+    def queue_params(self, ref: Any, params: Optional[Dict[str, Any]] = None, wait: Any = None,
+                     sets: Optional[Dict[str, Any]] = None, by: str = "agent") -> str:
+        """An item's values changed in place: a script's settings (params: {name: value}, None takes one out, so the
+        file's own holds), or a step's wait (seconds) and set values ({instr.param: value}, None takes one out). Not
+        while it runs; checked as queue_edit checks an edit (and, like an edit, a finished item is back in line). A
+        script's value is kept as its setting's type in the file (0.5 for "0.5")."""
+        from .. import scriptrun
+        from ..scanqueue import item_with
+        try:
+            item = self.queue.find(ref)
+        except KeyError as e:
+            return "not changed: %s" % e.args[0]
+        if item.status == "running":
+            return "not changed: %s is running; its values can change after it finishes" % item.name
+        if params is not None and not (isinstance(params, dict) and all(isinstance(k, str) for k in params)):
+            return "not changed: params is a mapping of setting: value"
+        if sets is not None and not (isinstance(sets, dict) and all(isinstance(k, str) for k in sets)):
+            return "not changed: set is a mapping of instrument.parameter: value"
+        try:
+            if item.kind == "script":
+                if params is None:
+                    return "not changed: give a script's params"
+                settable = self._seq_settable(item.text)
+                typed: Dict[str, Any] = {}
+                for k, v in params.items():
+                    typed[k] = scriptrun._coerce(scriptrun.Param(k, settable[k], 0, "setting"), v) \
+                        if v is not None and k in settable else v
+                text = item_with(item.text, params=typed)
+            elif item.kind == "step":
+                if wait is None and sets is None:
+                    return "not changed: give a step's wait or set"
+                if wait is not None:
+                    wait = float(wait)
+                text = item_with(item.text, sets=sets, **({"wait": wait} if wait is not None else {}))
+            else:
+                return "not changed: %s is a scan: its values are in the scan editor" % item.name
+        except scriptrun.ScriptError as e:
+            return "not changed: %s" % e
+        except (PlanError, TypeError, ValueError) as e:
+            return "not changed: %s" % (e.args[0] if e.args else e)
+        out = self.queue_edit(item.id, text, by)
+        return out if out.startswith("not changed") else "changed %s" % self.queue.find(item.id).name
+
+    def queue_ladder(self, refs: Any, key: Any, values: Any, by: str = "agent") -> str:
+        """A ladder (labMaster's sweep): one copy of these items per value, with that value set, appended in the
+        queue's order, value after value. key: a script's setting (params), a step's wait or one of its set values
+        (instr.param, or the lab's own name for it), or one of a scan's setup values (the same); an item it isn't
+        for goes along unchanged (a wait between the scans), but a scan whose setup lacks it is refused when it is a
+        key no other item takes. At most MAX_COPIES items; each copy is checked as queue_add checks one, and none is
+        added unless all pass."""
+        from .. import scriptrun
+        from ..scanqueue import MAX_COPIES, item_with
+        key = str(key or "").strip()
+        if not key:
+            return "not added: name the setting to step (key)"
+        # a step's and a scan's settings are kept as instrument.parameter, so the lab's own name for one (names:, a
+        # Special Measure channel's) stands for it there, as queue_add takes it; a script's setting keeps its name
+        full = self.lab.config.names.get(key, key)
+        if not isinstance(values, (list, tuple)) or not values:
+            return "not added: give the values (a list)"
+        if any(v is None or isinstance(v, (dict, list)) for v in values):
+            return "not added: each value is a number or a word"
+        refs = list(refs) if isinstance(refs, (list, tuple)) else [refs] if refs else []
+        if not refs:
+            return "not added: tick the items to step"
+        try:
+            chosen = sorted({self.queue.find(r).id: self.queue.find(r) for r in refs}.values(),
+                            key=self.queue.items.index)
+        except (KeyError, ValueError) as e:
+            return "not added: %s" % (e.args[0] if e.args else e)
+        total = len(chosen) * len(values)
+        if total > MAX_COPIES:
+            return "not added: at most %d items at once (this is %d)" % (MAX_COPIES, total)
+
+        def takes(item: Item) -> Optional[Tuple[str, Optional[Any]]]:
+            """How this item takes the key: (item_with's argument, a script's setting as its file has it, to give a
+            value its type), or None: it goes along unchanged."""
+            try:
+                data = load_yaml(item.text)
+                if item.kind == "script" and key.isidentifier():
+                    settable = self._seq_settable(item.text)
+                    if key in settable:
+                        return "params", scriptrun.Param(key, settable[key], 0, "setting")
+                    return ("params", None) if key in load_script_item(item.text).params else None
+                if item.kind == "step":
+                    if key == "wait":
+                        return "wait", None
+                    return ("sets", None) if re.match(r"^[A-Za-z_][\w-]*\.[A-Za-z_]\w*$", full) else None
+                if item.kind == "plan" and isinstance(data, dict) and full in (data.get("setup") or {}):
+                    return "setup", None
+            except Exception:
+                return None
+            return None
+        how = [takes(i) for i in chosen]
+        if not any(how):
+            plans = [i.name for i in chosen if i.kind == "plan"]
+            return "not added: no item takes %s%s" % (key, " (a scan takes only one of its setup values: %s)" % (
+                ", ".join(plans)) if plans else "")
+        made: List[Tuple[Any, Optional[str]]] = []
+        problems: List[str] = []
+        for value in values:
+            for item, way in zip(chosen, how):
+                if way is None:
+                    made.append((item, None))
+                    continue
+                arg, setting = way
+                try:
+                    if arg == "wait":
+                        text = item_with(item.text, wait=float(value))
+                    else:
+                        given = scriptrun._coerce(setting, value) if setting is not None else value
+                        text = item_with(item.text, **{arg: {key if arg == "params" else full: given}})
+                    found = self._queue_problems(text)
+                except scriptrun.ScriptError as e:
+                    found = [str(e)]
+                except (PlanError, TypeError, ValueError) as e:
+                    found = [e.args[0] if e.args else str(e)]
+                if found:
+                    problems.append("%s at %s = %s: %s" % (item.name, key, _plain(value),
+                                                          "; ".join(map(str, found[:2]))))
+                    if len(problems) >= 3:
+                        break
+                made.append((item, text))
+            if len(problems) >= 3:
+                break
+        if problems:
+            return "not added: " + "; ".join(problems)
+        copies = self.queue.copies(made, position=len(self.queue.items) + 1, by=by)
+        self.gate.log.write("queue_ladder", by=by, key=key, values=len(values), items=len(copies))
+        return "added %d items: %s = %s" % (len(copies), key, ", ".join(_plain(v) for v in values[:8]) + (
+            " …" if len(values) > 8 else ""))
+
+    def queue_save(self, name: str = "") -> str:
+        """The waiting items (or all, when none waits) kept as a named queue; no name: the sequence's own, made to
+        fit a saved queue's name."""
+        from ..scanqueue import saved_name
+        name = str(name or "").strip() or saved_name(self.queue.name)
         try:
             path = save_named(self.data_dir / "queues", name, self.queue.waiting() or list(self.queue.items))
         except (ValueError, OSError) as e:
@@ -3034,10 +3480,12 @@ class LabRuntime:
         return "saved the queue as %s" % path.name
 
     def queue_load(self, name: str, by: str = "agent") -> str:
+        """A saved queue's items, added at the end, each checked; into an empty queue it takes the saved name too."""
         try:
             entries = load_named(self.data_dir / "queues", name)
         except KeyError as e:
             return e.args[0]
+        empty = not self.queue.items
         added, problems = 0, []
         for text, note in entries:
             out = self.queue_add(text, None, note, by)
@@ -3045,6 +3493,11 @@ class LabRuntime:
                 problems.append(out)
             else:
                 added += 1
+        if empty and added:
+            try:
+                self.queue.rename(str(name).strip())
+            except ValueError:
+                pass
         return "\n".join(["added %d items from %s" % (added, name)] + problems + [self._queue_text()])
 
     def _queue_drives(self, items: List[Item]) -> Dict[str, List[Any]]:
@@ -3259,6 +3712,7 @@ class LabRuntime:
                 if self.queue.state in ("running", "pausing"):
                     return "the queue is already running\n" + self._queue_text()
                 self.gate.queue_actions = got["actions"]   # its scans do these, not asking again
+                self.queue_started_by = getattr(self.viewer, "chat", None) if by != "human" else None
                 self.queue.state, self.queue.reason = "running", ""
                 self.queue.save()
                 # a start with a pause point (Run and Run again make one) is for these items alone, by id
@@ -3341,15 +3795,64 @@ class LabRuntime:
         return {"ok": True, "grants": grants, "actions": frozenset(starting) | frozenset(running), "title": title,
                 "duration": duration}
 
-    def queue_pause(self, by: str = "agent") -> str:
-        """Finish the item that is running, then stop there. Stop (the Stop button) also ends the running scan."""
-        with self.queue.lock:
-            if self.queue.state != "running":
-                return "the queue is not running\n" + self._queue_text()
-            self.queue.state, self.queue.reason = "pausing", "paused by %s" % by
-            self.queue.save()
+    def queue_pause(self, by: str = "agent", want: Optional[str] = None) -> str:
+        """Finish the item that is running, then stop there. Stop (the Stop button) also ends the running scan.
+        want: the state a person's Pause showed as it was pressed (the portal's), so a screen a poll out of date never
+        flips it the wrong way: "running" (it read Pause) pauses as above; "pausing" (it read Pausing…) takes back a
+        person's own pause that has not taken effect (_own_pause): the item running goes on, then the queue as
+        approved, and nothing starts that was not running. Kelvin's pause, or one a failure, a guard, a block's Pause
+        after or a stop made, is never taken back (Resume or Retry once it has paused). With want, a queue no longer
+        in that state changes nothing: "not changed: ..." saying why in a few words, cause first (the portal's 409,
+        shown in the Sequence's one-line bar); without it, as ever."""
+        if want not in (None, "running", "pausing"):
+            raise ValueError("want is the state the button showed: running or pausing")
+        q = self.queue
+        with q.lock:
+            if want == "pausing":
+                why = self._pause_kept()
+                if why:
+                    return "not changed: " + why
+                q.state, q.reason = "running", ""   # the loop, still on its item, goes on after it
+                q.save()
+            elif q.state != "running":
+                if want is None:
+                    return "the queue is not running\n" + self._queue_text()
+                return "not changed: " + ("already " + q.state if q.state in ("pausing", "paused") else "not running")
+            else:
+                q.state, q.reason = "pausing", "paused by %s" % by
+                q.save()
+        if want == "pausing":   # logged as the pause is: the lab's record, and the chats told (web/notices.py)
+            self.gate.log.write("queue_pause_taken_back", by=by)
+            return "the pause is taken back: the queue goes on"
         self.gate.log.write("queue_pause", by=by)
         return "the queue pauses after the item that is running"
+
+    def _pause_asked(self) -> bool:
+        """The queue pausing because someone asked (queue_pause: a person, or Kelvin), not yet in effect. A failure,
+        a guard trip, a declined check, a block's Pause after or a stop meanwhile makes the pause theirs (_queue_loop,
+        _queue_ask_again, stop), which is never taken back. Under the queue's lock."""
+        q = self.queue
+        return q.state == "pausing" and q.reason.startswith("paused by ")
+
+    def _own_pause(self) -> bool:
+        """The queue pausing because a person pressed Pause (the portal's, by "human"), not yet in effect: the one
+        pause that can be taken back (queue_pause's want "pausing"); Kelvin's is not. Under the queue's lock."""
+        return self._pause_asked() and self.queue.reason.startswith("paused by human")
+
+    def _pause_kept(self) -> Optional[str]:
+        """Why the queue's pause can't be taken back now, in a few words, cause first, that name no item: the
+        Sequence's bar shows them on one line (None: it can). Under the queue's lock."""
+        q = self.queue
+        if q.state in ("running", "paused"):
+            return "already " + q.state
+        if q.state != "pausing" or self._queue_thread is None or not self._queue_thread.is_alive():
+            return "not running"
+        if self._own_pause():
+            return None
+        return "%s made this pause" % (
+            "Kelvin" if q.reason.startswith("paused by ") else "Stop" if q.reason.startswith("stopped by ") else
+            "Pause after" if q.reason.startswith("paused after ") else
+            "a change" if q.reason.endswith("(added or changed after the queue was approved)") else "a failure")
 
     def _queue_loop(self, grants: Dict[str, Allowed], by: str, approved: Optional[Dict[str, str]] = None,
                     only: Optional[List[str]] = None) -> None:
@@ -3366,6 +3869,7 @@ class LabRuntime:
         q = self.queue
         started = time.time()
         left = None if only is None else set(only)   # the items of this start not run yet
+        self._queue_skip = None   # a skip is for an item that runs in this loop
         while True:
             fresh: List[Item] = []
             with q.lock:
@@ -3417,14 +3921,28 @@ class LabRuntime:
                 said = [a.text for a in list(self.monitor.alarms) if a.latest >= t0 and a.text not in message]
                 message += "; alarm: " + "; ".join(said) if said else ""
             with q.lock:   # a person's stop of the scan, or a guard trip, is never an error to go on after
-                if not ok and q.state == "running" and (q.on_error == "pause" or item.status == "stopped" or tripped):
+                skip = self._queue_skip if self._queue_skip and self._queue_skip[0] == item.id else None
+                if skip is not None:
+                    self._queue_skip = None
+                skipped = skip is not None and not ok and not tripped   # it ended at the skip (a trip still pauses)
+                if skipped:   # a person skipped it: it ends there, and the queue goes on whatever on a failure says
+                    q.mark(item, "skipped", "skipped by %s" % skip[1])
+                # a pause asked for meanwhile (queue_pause) becomes this one, the failure's or the block's Pause
+                # after, which is never taken back: a take-back then can't run the queue past either
+                if not ok and not skipped and (q.state == "running" or self._pause_asked()) and (
+                        q.on_error == "pause" or item.status == "stopped" or tripped):
                     q.state, q.reason = "pausing", "%s: %s%s" % (item.name, message, "; a guard tripped, so the "
                                                                  "queue pauses whatever on a failure says"
                                                                  if tripped and q.on_error != "pause" else "")
                     q.save()
-                elif item.then_pause and q.state == "running" and q.next_waiting() is not None:
+                elif item.then_pause and (q.state == "running" or self._pause_asked()) and q.next_waiting() is not None:
                     q.state, q.reason = "pausing", "paused after %s, as asked" % item.name   # the rest wait for you
                     q.save()
+            if not ok and not skipped and item.status == "failed" and self.queue_heard is not None:
+                try:   # the chats it concerns hear of it (the portal's notices); never the queue's business
+                    self.queue_heard(item, message)
+                except Exception:
+                    pass
         done = sum(1 for i in q.items if i.status == "done")
         self.gate.log.write("queue_end", by=by, state=q.state, reason=q.reason, done=done)
         ran = [i.run_id for i in q.items if i.run_id and i.started and i.started >= started]
@@ -3462,7 +3980,7 @@ class LabRuntime:
             self.gate.log.write("queue_approved", by=by, items=len(items))
             return got
         with q.lock:
-            if q.state == "running":
+            if q.state == "running" or self._pause_asked():   # one asked for meanwhile is this one now (queue_pause)
                 q.state = "pausing"
                 q.reason = "%s (added or changed after the queue was approved)" % got["said"].splitlines()[0]
                 q.save()
@@ -3519,6 +4037,7 @@ class LabRuntime:
                 q.mark(item, "stopped", "a person pressed Stop before it started")
                 return False, "stopped before it started"
             self.busy, self._acted = "queue %d/%d: %s" % (position, len(q.items), item.name), True
+            self._queue_now.item = item.id   # its run's live view names it (_on_progress): its block's progress
             try:   # filed as the item was queued, never under a chat whose call goes on meanwhile (attributed)
                 uses = self._involved(self._uses(item.text))   # the instruments it uses; the rest stay readable
                 whose = item.whose()
@@ -3554,6 +4073,7 @@ class LabRuntime:
                 return False, str(e)
             finally:
                 self.busy = None
+                self._queue_now.item = None
                 self._caps_if_waiting()
                 self._refresh()
 
@@ -3572,16 +4092,30 @@ class LabRuntime:
                 return False, "stopped" if stopped else r.message
         warnings: List[str] = []
         try:
-            if step.stabilize:
+            if step.stabilize:   # its block says it settles, and when it gives up at the latest
+                self._queue_step_now = {"item": item.id, "phase": "stabilize",
+                                        "until": self._wall_until(step.stabilize.timeout)}
                 self.engine._stabilize(step.stabilize, gen, warnings)
             stops = self.lab.stops.count
+            if step.wait:   # and when its wait ends
+                self._queue_step_now = {"item": item.id, "phase": "wait", "until": self._wall_until(step.wait)}
             if self.gate.stop_generation != gen or not self.lab.stops.sleep(self.lab.clock, step.wait, stops):
                 raise _Abort("stop requested")   # a stop ends the wait at once, not at its next second
         except _Abort:
             q.mark(item, "stopped", "stopped while waiting")
             return False, "stopped"
+        finally:
+            self._queue_step_now = None
         q.mark(item, "done", "; ".join(warnings))
         return True, ""
+
+    def _wall_until(self, seconds: float) -> float:
+        """When (the computer's clock, epoch seconds) this much of the lab's time has passed: a simulated lab's clock
+        may run faster (ScaledClock), or pass at once (SimClock)."""
+        clock = self.lab.clock
+        if getattr(clock, "simulated", False) and not getattr(clock, "speed", None):
+            return time.time()
+        return time.time() + max(0.0, float(seconds)) / float(getattr(clock, "speed", None) or 1.0)
 
     def _queue_script(self, item: Item, position: int, gen: int) -> Tuple[bool, str]:
         """A script item, run as run_script runs one: it can't be rehearsed, so it asks a person as it starts (the
@@ -3622,6 +4156,8 @@ class LabRuntime:
 
     def _entry_view(self, e: Dict[str, Any]) -> Dict[str, Any]:
         view = dict(e, last_run=(e.get("runs") or [None])[0])
+        view.setdefault("color", "")   # a person's colour and note for it (library_meta): "" for none
+        view.setdefault("note", "")
         if e["kind"] == "script":
             view.setdefault("params", {})
             view.setdefault("args", [])
@@ -3646,13 +4182,13 @@ class LabRuntime:
         except scriptrun.ScriptError as e:
             out["problem"] = str(e)
             return out
-        out["settable"] = {q.name: q.value for q in found}
+        out["settable"] = _json_safe({q.name: q.value for q in found})   # as JSON carries it (a script's 1e999)
         out["notes"] = {q.name: q.note for q in found if q.note}
         return out
 
     def library_import(self, path: Any, by: str = "human") -> Dict[str, Any]:
         """A script a person chose (the Runs panel's Import): in their library from now on, where it may run though it
-        is outside the lab's scripts folder, with the same check and approval as any; and what check_script says of
+        is outside the lab's scripts folders, with the same check and approval as any; and what check_script says of
         it now ({entry, check}). ValueError: it can't be imported, in words."""
         from .. import scriptrun
         raw = str(path or "").strip().strip('"')
@@ -3687,6 +4223,58 @@ class LabRuntime:
         self.gate.log.write("library", by=by, change=op + "d", name=entry.get("name"), path=entry.get("path"))
         return entry
 
+    def library_meta(self, entry_id: str, name: Any = None, color: Any = None, note: Any = None,
+                     by: str = "human") -> Dict[str, Any]:
+        """A person's name, colour (#rrggbb; "" for none) and note for an entry of the library, each only when given:
+        how the entry, and the queue's items of it, show. KeyError: none such; ValueError: not a name, a colour or a
+        note."""
+        entry = self.library.meta(entry_id, name, color, note)
+        self.gate.log.write("library", by=by, change="described", name=entry.get("name"), path=entry.get("path"),
+                            color=entry.get("color") or None)
+        return self._entry_view(entry)
+
+    def library_files(self) -> Dict[str, Any]:
+        """The scripts a person may add as functions: every .py and .ipynb in the lab's scripts folders (Settings) and
+        their sub-folders, environments, caches, hidden folders and links left out (scanlibrary.runnable_files), at
+        most scanlibrary.MAX_FILES in all, each folder its share (a big one hides none of the others), each by its
+        path in its folder: {folders, files: [{path, rel, name, kind, folder}], more, folder: the first of them, None
+        when none is set}. Read only."""
+        from ..scanlibrary import MAX_FILES, runnable_files, shares
+        roots = [Path(f).expanduser() for f in self.scripts_folders()]
+        lists = [runnable_files(root, MAX_FILES) for root in roots]
+        room = shares([len(found) for found, _ in lists], MAX_FILES)
+        files = [dict(f, folder=str(root)) for root, (found, _), n in zip(roots, lists, room) for f in found[:n]]
+        return {"folder": str(roots[0]) if roots else None, "folders": [str(r) for r in roots], "files": files,
+                "more": any(cut or len(found) > n for (found, cut), n in zip(lists, room))}
+
+    def library_inspect(self, path: Any) -> Dict[str, Any]:
+        """What a script offers as a function, read and never run or imported: {name (the file's), path, settable
+        ({name: value in the file}), notes ({name: the comment beside it}), problem (why it can't be read or run,
+        else None)}. A path relative to the lab's scripts folders is read in the first that has it. ValueError: no
+        path."""
+        from .. import scriptrun
+        raw = str(path or "").strip().strip('"')
+        if not raw:
+            raise ValueError("give the script's path")
+        p = Path(raw).expanduser()
+        roots = [Path(f).expanduser() for f in self.scripts_folders()]
+        if not p.is_absolute() and roots:
+            rel = p
+            p = next((r / rel for r in roots if (r / rel).exists()), roots[0] / rel)
+        out: Dict[str, Any] = {"name": p.name, "path": str(p), "settable": {}, "notes": {}, "problem": None}
+        if not p.is_absolute():
+            out["problem"] = "give the script's full path, such as C:\\Lab\\scripts\\sweep.py"
+        elif not p.is_file():
+            out["problem"] = "%s %s" % (p, "is a folder: choose a script in it" if p.is_dir() else "does not exist")
+        else:
+            try:
+                found = scriptrun.parameters(scriptrun.source_of(scriptrun._runnable(p)))
+                out["settable"] = _json_safe({q.name: q.value for q in found})
+                out["notes"] = {q.name: q.note for q in found if q.note}
+            except scriptrun.ScriptError as e:
+                out["problem"] = str(e)
+        return out
+
     def library_run(self, entry_id: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
                     at_end: bool = False, by: str = "human", at: Optional[int] = None) -> Dict[str, Any]:
         """An entry of the library, run again (queue_run_now), as whose work its latest run was (its marks: a
@@ -3711,9 +4299,9 @@ class LabRuntime:
         python = self._python_here(item["script"], entry.get("python"), notes)
         if python:
             item["python"] = python
-        with self.attributed(whose):
+        with self.attributed(whose):   # its item knows its entry: the Sequence shows the entry's name and colour
             return self.queue_run_now([yaml.safe_dump(item, sort_keys=False, allow_unicode=True)], at_end, by, notes,
-                                      at=at)
+                                      library=entry_id, at=at)
 
     def _python_here(self, script: str, python: Any, notes: List[str]) -> Optional[str]:
         """The Python a run had (as its record names it), if Kelvin still runs the lab's scripts with it here; else
@@ -3721,8 +4309,7 @@ class LabRuntime:
         if not python:
             return None
         from .. import scriptrun
-        folder = self.scripts_folder()
-        roots = [Path(folder).expanduser().resolve()] if folder else []
+        roots = [Path(f).expanduser().resolve() for f in self.scripts_folders()]
         if scriptrun.python_named(Path(script), roots, self.scripts_python() or "", str(python)):
             return str(python)
         notes.append("It ran with %s, which isn't here now: it runs with the Python Kelvin picks" % python)
@@ -5251,13 +5838,18 @@ class LabRuntime:
             self._script_cards = (stamp, lab_registry(self.home))
         return self._script_cards[1]
 
-    def survey_scripts(self, path: str) -> str:
+    def survey_scripts(self, path: str = "") -> str:
         """The lab's own scripts, read for how the lab works now (scripts.py): each instrument's address, settings,
-        commands and the values used, the card that fits, and each script's outline. Nothing in them is run."""
+        commands and the values used, the card that fits, and each script's outline. path: a folder or a script; ""
+        for every one of the lab's scripts folders, read as one. Nothing in them is run."""
         from .. import scripts as lab_scripts
         from ..adapters import resource_name
+        where: Any = str(path or "").strip() or self.scripts_folders()
+        if not where:
+            return ("not read: this lab has no scripts folders yet (a person adds them in Settings → Instruments → "
+                    "Your lab's scripts): survey the folder the person names")
         try:
-            found = lab_scripts.survey(path, self.script_cards(), own=self._kelvins())
+            found = lab_scripts.survey(where, self.script_cards(), own=self._kelvins())
         except (OSError, ValueError) as e:
             return "not read: %s" % e
         in_lab = {resource_name(ic.address): name for name, ic in self.lab.config.instruments.items()}
@@ -5265,11 +5857,11 @@ class LabRuntime:
                 if i.address and resource_name(i.address) in in_lab]
         return found.text() + ("\n\nAlready in this lab: " + ", ".join(here) if here else "") + "\n\n" + SCRIPTS_NEXT
 
-    def scripts_found(self, folder: str) -> Dict[str, Any]:
-        """The lab's scripts read for the Set up panel (a person chose the folder): each instrument with its likely
-        card, the limits from the values the scripts use, and who answers at its address now, asked as a scan asks
-        (*IDN? only; a serial port isn't tried, as its framing takes long to find). An identity reply decides the
-        card. Raises OSError for a folder that isn't there."""
+    def scripts_found(self, folder: Any) -> Dict[str, Any]:
+        """The lab's scripts read for the Set up panel (folder: the one a person chose, or the lab's scripts folders, a
+        list read as one): each instrument with its likely card, the limits from the values the scripts use, and who
+        answers at its address now, asked as a scan asks (*IDN? only; a serial port isn't tried, as its framing takes
+        long to find). An identity reply decides the card. Raises OSError for a folder that isn't there."""
         from .. import scripts as lab_scripts
         registry = self.script_cards()
         found = lab_scripts.survey(folder, registry)
@@ -6282,7 +6874,7 @@ class LabRuntime:
     def _prepare_script(self, path: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
                         drives: Optional[Dict[str, Any]] = None, version: Optional[str] = None,
                         python: str = "", action: str = "") -> Any:
-        """A script from the lab's scripts folder, or one the person imported into their library, read and ready
+        """A script from the lab's scripts folders, or one the person imported into their library, read and ready
         (nothing is run, no instrument is asked). version: a run of it whose script.py runs, as it ran then. python:
         the Python to run it in, one Kelvin runs the lab's scripts with (scriptrun.python_named). action: an
         experiment's action to run (scriptrun.prepare). scriptrun.ScriptError (KeyError for a version that isn't
@@ -6301,8 +6893,7 @@ class LabRuntime:
             prep.fenced = True   # and its process fenced as a rehearsal's is: kelvin.lab, and nothing past it
             prep.title = kept.name
             return prep
-        folder = self.scripts_folder()
-        folders, chosen = [folder] if folder else [], self.library.chosen()
+        folders, chosen = self.scripts_folders(), self.library.chosen()
         source = sha = None
         if version:   # that run's copy runs in the file's folder, under its name, though the file may be gone
             source, sha = self._script_as_run(version, scriptrun.locate(path, folders, chosen, missing=True))
@@ -6355,8 +6946,7 @@ class LabRuntime:
         if kept is not None:   # one of the lab's experiments: its version's file
             path, text = kept.path, scriptrun.source_of(kept.path)
         else:
-            folder = self.scripts_folder()
-            path = scriptrun.locate(spec.path, [folder] if folder else [], self.library.chosen(),
+            path = scriptrun.locate(spec.path, self.scripts_folders(), self.library.chosen(),
                                     missing=bool(spec.version))
             text = self._script_as_run(spec.version, path)[0] if spec.version else scriptrun.source_of(path)
         source, _ = scriptrun.with_params(text, dict(spec.params))

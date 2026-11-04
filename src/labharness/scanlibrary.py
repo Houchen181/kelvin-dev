@@ -1,6 +1,6 @@
 """The person's library of scans and scripts, for the Runs panel: every plan and every script Kelvin ran, kept by what
 it is, so the exact same measurement is a click away; and the scripts a person imported, which may run though they
-are outside the lab's scripts folder (a person chose each one; scriptrun.locate).
+are outside the lab's scripts folders (a person chose each one; scriptrun.locate).
 
     library.json, in the data folder (each person's own, beside queue.json):
     {"entries": [{"id", "kind": "plan" | "script", "name", "source": "kelvin" | "you" | "labview" | "specialmeasure",
@@ -16,7 +16,10 @@ its path (resolved), with the values (params) and arguments its last run had, th
 the file as that run read it, so the panel can say when the file has changed since. Every run notes its entry as it
 starts (LabRuntime._noted, through RunStore's hook), and noting never stops a run. The file is written whole, then put
 in place; one that can't be read as a library is kept aside (library.json.broken-<time>) and a new one starts, so a
-broken file never stops Kelvin."""
+broken file never stops Kelvin.
+
+The portal calls the entries functions (the Sequence's list, as labMaster's): a person gives one a colour and a
+note as well as a name (meta), and picks a new one from the scripts in the lab's scripts folders (runnable_files)."""
 from __future__ import annotations
 
 import hashlib
@@ -24,6 +27,7 @@ import json
 import math
 import os
 import re
+import stat
 import threading
 import time
 from pathlib import Path
@@ -33,6 +37,12 @@ FILE = "library.json"
 MAX_RUNS = 10       # the runs an entry lists, newest first
 MAX_ENTRIES = 400   # beyond this, the entries Kelvin noted itself go, least recently used first (a person's stay)
 MAX_NAME = 80
+MAX_NOTE = 300
+MAX_FILES = 1000    # the scripts runnable_files lists at most
+MAX_LOOKED = 50000  # and the files and folders it looks through at most (a scripts folder set to a whole drive)
+# folders whose scripts are no lab's own: environments, caches, packages (and every hidden folder: .git, .venv...)
+SKIP_DIRS = {".git", ".venv", "venv", "env", "__pycache__", "node_modules", "site-packages"}
+COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _LOCK = threading.RLock()   # every library file, one change at a time (runs start on several threads)
 
 
@@ -119,6 +129,78 @@ def plain_name(name: Any) -> str:
     return text
 
 
+def plain_color(color: Any) -> str:
+    """A colour a person gives an entry: #rrggbb (in lower case), or "" for none (ValueError otherwise)."""
+    text = str(color or "").strip()
+    if text and not COLOR.match(text):
+        raise ValueError("a colour is #rrggbb, such as #2f6fb0")
+    return text.lower()
+
+
+def plain_note(note: Any) -> str:
+    """A note a person gives an entry: one line, at most MAX_NOTE characters, "" for none (ValueError otherwise)."""
+    text = " ".join(str(note or "").split())
+    if len(text) > MAX_NOTE:
+        raise ValueError("a note is at most %d characters" % MAX_NOTE)
+    return text
+
+
+def _link(path: Any) -> bool:
+    """A link, or a junction (Windows' link to a folder): either may lead out of the folder it is in."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return True
+    return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) == 0xA0000003   # IO_REPARSE_TAG_MOUNT_POINT
+
+
+def runnable_files(root: Path, most: int = MAX_FILES) -> Tuple[List[Dict[str, str]], bool]:
+    """The scripts Kelvin can run in a folder and its sub-folders (.py, .ipynb), SKIP_DIRS, hidden folders, links and
+    junctions left out (what one leads to is listed where it is, if that is a folder Kelvin runs from: scriptrun.locate
+    runs nothing reached out of them): ([{path, rel (with /), name, kind: py | ipynb}], at most `most`, by their path
+    in it; whether there were more). Read only: no file is opened."""
+    found: List[Dict[str, str]] = []
+    more, looked = False, 0
+    try:
+        root = Path(root)
+        if not root.is_dir():
+            return [], False
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")
+                                 and not _link(os.path.join(dirpath, d)))
+            looked += len(dirnames) + len(filenames)
+            for name in sorted(filenames):
+                kind = os.path.splitext(name)[1].lower().lstrip(".")
+                if kind not in ("py", "ipynb") or name.startswith("."):
+                    continue
+                path = Path(dirpath) / name
+                if _link(path):
+                    continue
+                found.append({"path": str(path), "rel": path.relative_to(root).as_posix(), "name": name,
+                              "kind": kind})
+            if len(found) > most or looked > MAX_LOOKED:
+                more = True
+                break
+    except OSError:
+        pass
+    found.sort(key=lambda f: (f["rel"].lower(), f["rel"]))
+    if len(found) > most:
+        found, more = found[:most], True
+    return found, more
+
+
+def shares(sizes: List[int], most: int) -> List[int]:
+    """How many of each of several lists to keep, at most `most` in all: one of each in turn while there is room, so a
+    long list leaves the others room, and a short one gives them what it doesn't use (the first ones first)."""
+    room = [0] * len(sizes)
+    while most > 0 and any(r < s for r, s in zip(room, sizes)):
+        for i, s in enumerate(sizes):
+            if most > 0 and room[i] < s:
+                room[i] += 1
+                most -= 1
+    return room
+
+
 class Library:
     """The person's library in one file (library.json). Thread-safe: each change reads, changes and writes the whole
     file under one lock."""
@@ -182,7 +264,7 @@ class Library:
         return found[entry_id]
 
     def chosen(self) -> List[str]:
-        """The scripts a person imported: they may run though they are outside the lab's scripts folder."""
+        """The scripts a person imported: they may run though they are outside the lab's scripts folders."""
         try:
             return [str(e["path"]) for e in self.entries()
                     if e.get("kind") == "script" and e.get("source") == "you" and e.get("path")]
@@ -256,7 +338,8 @@ class Library:
         if extra <= 0:
             return
         spare = sorted((e for e in found.values() if e.get("source") not in ("you", "labview", "specialmeasure")
-                        and not e.get("named")),
+                        and not e.get("named")
+                        and not e.get("color") and not e.get("note")),   # one a person coloured or noted stays too
                        key=lambda e: e.get("used") or e.get("added") or 0)
         for e in spare[:extra]:
             found.pop(e["id"], None)
@@ -283,7 +366,7 @@ class Library:
 
     def add_script(self, path: Any) -> Dict[str, Any]:
         """A script a person imported (its path, checked by the caller): it may run from now on. One already in the
-        library (Kelvin ran it from the scripts folder) keeps its runs and becomes theirs."""
+        library (Kelvin ran it from the scripts folders) keeps its runs and becomes theirs."""
         entry_id = script_id(path)
         with _LOCK:
             found = self._read()
@@ -326,6 +409,28 @@ class Library:
             found[entry_id].update(name=text, named=True)
             self._write(found)
             return found[entry_id]
+
+    def meta(self, entry_id: str, name: Any = None, color: Any = None, note: Any = None) -> Dict[str, Any]:
+        """A person's name, colour and note for an entry, each only when given (not None): a colour is #rrggbb, and ""
+        takes the colour or the note off. KeyError: no such entry; ValueError: not a name, a colour or a note (then
+        nothing changes)."""
+        text = plain_name(name) if name is not None else None
+        shade = plain_color(color) if color is not None else None
+        words = plain_note(note) if note is not None else None
+        with _LOCK:
+            found = self._read()
+            if entry_id not in found:
+                raise KeyError("nothing called %r in the library" % entry_id)
+            entry = found[entry_id]
+            if text is not None:
+                entry.update(name=text, named=True)
+            for key, value in (("color", shade), ("note", words)):
+                if value:
+                    entry[key] = value
+                elif value is not None:
+                    entry.pop(key, None)
+            self._write(found)
+            return entry
 
     def remove(self, entry_id: str) -> Dict[str, Any]:
         """Out of the library (its runs stay). A script a person imported may no longer run from outside the scripts

@@ -585,7 +585,7 @@ def test_the_data_folder_and_unshared_runs_are_out_of_reach_wherever_they_are(tm
     runs = sorted(d for d in (tmp_path / "Shared" / "nda-runs").iterdir() if d.is_dir())
     assert runs and all("acme" in d.name for d in runs)
     exported = next(runs[-1].rglob("*.csv"))
-    inner = next(f for f in runs[0].rglob("*") if f.is_file() and f.suffix != ".h5")
+    inner = next(f for f in runs[0].rglob("*") if f.is_file() and f.suffix not in (".h5", ".pptx"))   # a file it reads as text
     out = p.turn(p.other, [("read_examples", {"path": str(tmp_path / "LabData")}),
                            ("survey_scripts", {"path": str(tmp_path / "LabData")}),
                            ("read_examples", {"path": str(tmp_path / "Shared")}),

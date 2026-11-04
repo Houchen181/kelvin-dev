@@ -15,6 +15,7 @@ provider so reasoning state (thinking blocks, thought signatures) survives.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -23,6 +24,15 @@ Emit = Callable[[Dict[str, Any]], Awaitable[None]]
 # the chat a model request belongs to (agent.py sets it for each turn), for services that route and cache by
 # conversation (OpenCode's x-opencode-session)
 SESSION: contextvars.ContextVar = contextvars.ContextVar("kelvin_session", default="")
+
+
+def opencode_session(outside: str = "") -> Dict[str, str]:
+    """OpenCode routes and caches by conversation, and its Go plan refuses a request without one: a stable session
+    for each chat, not the chat's own id. outside: the session for a request outside any chat (a project's opening, a
+    card, the list of models), which a person's own OpenCode connection sends (openai_provider.py); the hub's send
+    none there, and the hub sends one per person (providers/hub.py)."""
+    seed = SESSION.get() or outside
+    return {"x-opencode-session": "kelvin-" + hashlib.sha256(seed.encode()).hexdigest()[:24]} if seed else {}
 
 
 @dataclass
@@ -105,6 +115,9 @@ def user_text(message: Dict[str, Any]) -> str:
         text = "%s\n\n%s" % (text, message["attached_text"])
     if message.get("brief"):   # the word budget, with the latest message only (brevity.py), set when the request is built
         text = "%s\n\n%s" % (text, message["brief"])
+    if message.get("events"):   # the person's changes to the sequence or Home meanwhile (notices.py)
+        from ..notices import block as events_block
+        text = "%s\n\n%s" % (events_block(message["events"]), text) if text else events_block(message["events"])
     review = message.get("review")
     if review:   # a second opinion on the previous answer, asked for by the user
         text = '<second_opinion model="%s" verdict="%s">\n%s\n</second_opinion>\n\n%s' % (

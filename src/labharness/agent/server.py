@@ -20,6 +20,7 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp.types import ToolAnnotations
 
 from .. import carddraft, datatools, expr, fitting, guide
+from ..homeboard import describe as describe_block
 from .._version import __version__
 from ..catalog import MAX_ROWS as QUERY_ROWS, SCHEMA_TEXT
 from ..collection import Collection
@@ -135,12 +136,13 @@ You are connected to a physics lab through Kelvin.
   yourself: web_search, read_web_page (a page's text and its links, PDFs first), save_manual (keeps the PDF, with the
   instrument's address), then draft_card with manual. Never use the screen to search or to download.
 - A lab that already runs its instruments from its own scripts (Python, notebooks, MATLAB): survey_scripts on the
-  folder the person names reads how it works (addresses, connection settings, commands, the values used, the card
-  that fits each instrument) without running anything; set the lab up from it with the person, and offer each
-  measurement script as a recipe. When the person wants one of their scripts run as it is (from the lab's scripts
-  folder, or one they imported in the Runs panel), use run_script: it runs in the lab's own Python with every
-  command it sends through the gate, after one approval, and its readings become a run like a plan's. params
-  changes its settings for that run (check_script lists them); never edit the person's script to change a value.
+  folder the person names, or with no path on every one of the lab's scripts folders, reads how it works
+  (addresses, connection settings, commands, the values used, the card that fits each instrument) without running
+  anything; set the lab up from it with the person, and offer each measurement script as a recipe. When the person
+  wants one of their scripts run as it is (from the lab's scripts folders, or one they imported in the Runs panel),
+  use run_script: it runs in the lab's own Python with every command it sends through the gate, after one
+  approval, and its readings become a run like a plan's. params changes its settings for that run (check_script
+  lists them); never edit the person's script to change a value.
 - A lab that runs its instruments from LabVIEW: survey_labview on its LabVIEW folder reads NI MAX and its projects
   and VIs the same way (never running a VI) and translates each VI it could read into a scan, saying what didn't
   translate; a scan is a plan, run with run_plan once the person agrees. Never guess what a VI not read does.
@@ -439,12 +441,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return outside(rt, "a maker's example files", rt.read_examples(path))
 
     @server.tool(annotations=READ, structured_output=False)
-    def survey_scripts(path: str) -> str:
+    def survey_scripts(path: str = "") -> str:
         """Read the lab's own measurement scripts (Python, notebooks, MATLAB) in a folder or file the person named,
-        to set Kelvin up the way the lab already works: each instrument's address and connection settings, the
-        commands it takes and the values the lab uses, the Kelvin card that fits, limits from those values, and an
-        outline of each script (sweeps, waits, readings, files saved) to keep as recipes. Only reads them: nothing
-        is run, and nothing is sent to an instrument."""
+        or with no path in every one of the lab's scripts folders (each script then by its full path), to set Kelvin
+        up the way the lab already works: each instrument's address and connection settings, the commands it takes
+        and the values the lab uses, the Kelvin card that fits, limits from those values, and an outline of each
+        script (sweeps, waits, readings, files saved) to keep as recipes. Only reads them: nothing is run, and
+        nothing is sent to an instrument."""
         return outside(rt, "the lab's scripts", rt.survey_scripts(path))
 
     @server.tool(annotations=READ, structured_output=False)
@@ -531,11 +534,12 @@ def build_server(rt: LabRuntime) -> MCPServer:
                    drives: Optional[Dict[str, Any]] = None, action: str = "", dry_run: bool = False,
                    background: bool = False) -> str:
         """Run one of the lab's own measurement scripts (Python or a notebook) as it is, in the lab's own Python:
-        script is its file name or path in the lab's scripts folder (the one the person named in Set up), or one the
-        person imported in the Runs panel; Kelvin runs nothing from elsewhere. Every command it sends to a lab
-        instrument (pyvisa, pyserial, a socket) goes through
-        the safety gate on Kelvin's own connection: readings and settings run, drives are checked against the
-        limits, ramped and watched. A person approves the run once; Kelvin reads the script first for the drive
+        script is its path in one of the lab's scripts folders (those the person named in Settings or Set up: a file
+        name is the file at the top of a folder, else the only one in their sub-folders; when two folders have it at
+        the top, or two sub-folders, give its full path), or one the person imported in the Runs panel; Kelvin runs
+        nothing from elsewhere. Every command it sends to a lab instrument (pyvisa, pyserial, a socket)
+        goes through the safety gate on Kelvin's own connection: readings and settings run, drives are checked against
+        the limits, ramped and watched. A person approves the run once; Kelvin reads the script first for the drive
         ranges it uses. params: values for its settings for this run, without editing the file ({"VMAX": 2});
         args: its command-line arguments; drives: the range of a drive the script works out as it runs, when you
         know it ({"smu.V": [0, 5]}), else such a drive is approved within its limits. A refusal, a person's no or
@@ -878,10 +882,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
-    def queue_change(action: str, item: Optional[str] = None, position: Optional[int] = None) -> str:
-        """Rearrange the queue. action: move (item to position), remove (item), again (put a finished item back in
-        line) or clear (remove every finished item). Items are named by their number in queue_show, or their id."""
-        return rt.queue_change(action, item, position)
+    def queue_change(action: str, item: Optional[str] = None, position: Optional[int] = None,
+                     name: Optional[str] = None) -> str:
+        """Rearrange the queue (the portal's Sequence). action: move (item to position), remove (item), again (put a
+        finished item back in line), clear (remove every finished item), skip (item: a waiting one won't run; the
+        running one ends now, as at a stop, and the queue goes on to the next without pausing), duplicate (item: a
+        copy right after it) or rename (the sequence's name: name). Items are named by their number in queue_show, or
+        their id."""
+        return rt.queue_change(action, item, position, name=name)
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
@@ -917,6 +925,96 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def queue_load(name: str) -> str:
         """Add a saved queue's items to the end of the queue."""
         return rt.queue_load(name)
+
+    # ------------------------------------------------------------------ Home: the person's page of blocks
+    def home_board() -> Any:
+        return getattr(rt, "home_board", None)
+
+    NO_HOME = "Home is a page of Kelvin's portal: this Kelvin has none (an agent over MCP has no Home)"
+
+    def block_fields(**given: Any) -> Dict[str, Any]:
+        """The fields a call gave (None: not given)."""
+        return {k: v for k, v in given.items() if v is not None}
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def home_add(title: str, kind: str = "result", text: str = "", value: Optional[Union[float, str]] = None,
+                 error: Optional[Union[float, str]] = None, unit: str = "", items: Optional[List[str]] = None,
+                 run_id: str = "", watch: str = "", actions: Optional[List[Dict[str, Any]]] = None, tone: str = "",
+                 key: str = "") -> str:
+        """Put a block on the person's Home: the page beside the chat (its Chat | Home switch) where they see the
+        lab at a glance. Add one when a run or a queue item gives a result worth keeping, or when you have a
+        concrete next step for them; never for a lookup, a refused or failed call, or a dry run. kind: result (the
+        key number a run gave: value, error, unit and its run_id), next (a step you suggest, with actions: a button
+        that adds its scan or step to the sequence, {"do": "queue", "text": <plan or step YAML>, "label": "..."},
+        or one that asks you, {"do": "ask", "text": <the question>}), watch (an instrument's reading, shown live:
+        watch="tc.T_sample"), note, or check (items: a short checklist the person ticks). Other buttons: {"do":
+        "run", "run_id"} opens a run, {"do": "pane", "pane": "sequence" | "runs" | "lab" | "analysis"} a panel. title:
+        a few words; text: one or two sentences (Markdown); tone: ok, warn or bad. key: a short name of your own
+        for a block you keep up to date: adding one with a key already on Home changes that block instead. Say in
+        your answer only what the block cannot (do not repeat it)."""
+        board = home_board()
+        if board is None:
+            return NO_HOME
+        viewer = rt.viewer
+        fields = block_fields(kind=kind, title=title, text=text, value=value, error=error, unit=unit, items=items,
+                              run_id=run_id, watch=watch, actions=actions, tone=tone, key=key)
+        try:
+            block, added = board.add(fields, by="kelvin", chat=getattr(viewer, "chat", None))
+        except ValueError as e:
+            return "not on Home: %s" % e
+        except OSError as e:
+            return "not on Home: Kelvin could not write it (%s)" % e
+        return "%s Home: %s" % ("on" if added else "changed on", describe_block(block))
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def home_update(block: str, title: Optional[str] = None, text: Optional[str] = None,
+                    value: Optional[Union[float, str]] = None, error: Optional[Union[float, str]] = None,
+                    unit: Optional[str] = None, items: Optional[List[str]] = None, run_id: Optional[str] = None,
+                    watch: Optional[str] = None, actions: Optional[List[Dict[str, Any]]] = None,
+                    tone: Optional[str] = None, kind: Optional[str] = None) -> str:
+        """Change a block on Home (by its id, b-..., or the key you gave it): only the fields given change; "" (or
+        []) empties one. A checklist keeps the person's ticks on the items still there."""
+        board = home_board()
+        if board is None:
+            return NO_HOME
+        fields = block_fields(kind=kind, title=title, text=text, value=value, error=error, unit=unit, items=items,
+                              run_id=run_id, watch=watch, actions=actions, tone=tone)
+        try:
+            changed = board.update(block, fields, by="kelvin")
+        except KeyError as e:
+            return "not changed: %s (home_list shows what is there)" % e.args[0]
+        except ValueError as e:
+            return "not changed: %s" % e
+        except OSError as e:
+            return "not changed: Kelvin could not write it (%s)" % e
+        return "changed on Home: %s" % describe_block(changed)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def home_remove(block: str) -> str:
+        """Take a block off Home (by its id or key), e.g. a suggestion that no longer holds."""
+        board = home_board()
+        if board is None:
+            return NO_HOME
+        try:
+            gone = board.remove(block)
+        except KeyError as e:
+            return "nothing removed: %s" % e.args[0]
+        except OSError as e:
+            return "nothing removed: Kelvin could not write it (%s)" % e
+        return "taken off Home: %s" % describe_block(gone)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def home_list() -> str:
+        """The blocks on the person's Home, pinned first, then the newest: id, kind, title, value, and what the
+        person ticked or pinned."""
+        board = home_board()
+        if board is None:
+            return NO_HOME
+        try:
+            blocks = board.blocks()
+        except OSError as e:
+            return "Kelvin could not read Home (%s)" % e
+        return "\n".join(describe_block(b) for b in blocks) if blocks else "Home has no blocks yet."
 
     @server.tool(annotations=ACT, structured_output=False)   # accept writes the run's fits (never an instrument)
     def analyze_run(run_id: str, column: Optional[str] = None, model: Optional[str] = None,
@@ -1164,7 +1262,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--approval-timeout", type=float, default=120, help="seconds before an unanswered request is declined")
     ap.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
     ap.add_argument("--mcp-port", type=int, default=8766, help="port for --transport streamable-http (127.0.0.1 only)")
-    ap.add_argument("--scripts", help="the lab's scripts folder: run_script runs only the scripts in it")
+    ap.add_argument("--scripts", action="append", default=[],
+                    help="one of the lab's scripts folders (again for each other one): run_script runs only the "
+                         "scripts in them")
     ap.add_argument("--scripts-python", default="",
                     help="the Python that runs them (default: the first found that has what a script imports)")
     args = ap.parse_args(argv)
@@ -1179,7 +1279,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     except (OSError, ValueError, AttributeError):
         off = False
     collection = None if off else Collection(home)
-    from ..web.settings import Settings
+    from ..web.settings import Settings, fold_folders
     lab, _, info = open_home_lab(home, Settings(home / "settings.json").switched_off, collection)
     envelope = load_envelope(args.envelope, lab.config, lab.registry) if args.envelope else None
     approver = WebApprover(timeout=args.approval_timeout)
@@ -1193,7 +1293,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     from .. import expstore
     runtime.experiments = expstore.Store(home / "experiments")   # the lab's experiments, the app's too
     runtime.labview_map = home / "labview-map.yaml"
-    runtime.scripts_folder = lambda: args.scripts
+    folders, folded = fold_folders(args.scripts)   # as Settings: one twice kept once, one in another left out
+    for note in folded:
+        print("Kelvin: --scripts %s" % note, file=sys.stderr, flush=True)
+    runtime.scripts_folders = lambda: list(folders)
     runtime.scripts_python = lambda: args.scripts_python
     from .. import envs
     envs.cleanup()

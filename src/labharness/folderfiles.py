@@ -187,7 +187,7 @@ def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: 
             if _within(target, whole):
                 return ("%s is %s, so only a person changes it: Kelvin runs what is there as a person chose it. Give "
                         "it in the answer; the person saves it if they want it" % (target, (
-                            "in the lab's scripts folder (%s)" % k) if path.is_dir() else
+                            "in one of the lab's scripts folders (%s)" % k) if path.is_dir() else
                         "in the folder of %s, a script the person imported (what it imports and reads there is "
                         "theirs)" % path.name))
         env = environment(target)

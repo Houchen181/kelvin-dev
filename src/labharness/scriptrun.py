@@ -1,10 +1,10 @@
 """A lab's own scripts, run as they are, with every instrument command through Kelvin's safety gate.
 
 Many labs run their instruments from their own Python scripts and notebooks. Kelvin runs one from the lab's scripts
-folder (the one a person named in Set up) in the lab's own Python, with its stand-in for the lab's instruments loaded
-first (data/scriptshim/kelvin_shim.py): pyvisa, pyserial or a socket to a lab instrument reaches Kelvin instead of the
-instrument, and Kelvin passes each command through the safety gate on its own connection, as if the agent had sent
-it. So a script gets what a plan gets:
+folders (those a person named in Settings, Set up or the first start) in the lab's own Python, with its stand-in for
+the lab's instruments loaded first (data/scriptshim/kelvin_shim.py): pyvisa, pyserial or a socket to a lab
+instrument reaches Kelvin instead of the instrument, and Kelvin passes each command through the safety gate on its
+own connection, as if the agent had sent it. So a script gets what a plan gets:
 
     before   the script is read, never run (scripts.py): the lab instruments it opens and the drive values it uses
              become one approval by a person, like a plan's; what Kelvin can't check is said there (an instrument not
@@ -96,9 +96,10 @@ def _inside(path: Path, root: Path) -> bool:
 
 def locate(path: str, folders: Sequence[Any], chosen: Sequence[Any] = (), missing: bool = False) -> Path:
     """The script to run: inside one of the lab's scripts folders (a person named them), or one of the files a person
-    imported into their library (chosen: each one a person picked, in the Runs panel), never elsewhere. A bare file
-    name may be in a sub-folder, if it is there once, or name an imported file. missing: its path in full may name a
-    file that is gone, in a folder that is still there (an earlier run's copy of it runs there, as it ran then)."""
+    imported into their library (chosen: each one a person picked, in the Runs panel), never elsewhere. A path in the
+    folders names one script (the same path in two of them: say which); a bare file name may be in a sub-folder, if it
+    is there once, or name an imported file. missing: its path in full may name a file that is gone, in a folder that
+    is still there (an earlier run's copy of it runs there, as it ran then)."""
     roots = [Path(f).expanduser().resolve() for f in folders if f]
     picked: Dict[str, Path] = {}
     for c in chosen:
@@ -106,33 +107,48 @@ def locate(path: str, folders: Sequence[Any], chosen: Sequence[Any] = (), missin
             p = Path(str(c)).expanduser().resolve()
             picked[os.path.normcase(str(p))] = p
     if not roots and not picked:
-        raise ScriptError("this lab has no scripts folder: a person names it in Set up (Lab → Set up → From your "
-                          "scripts…), and Kelvin runs only the scripts in it, or those they import in the Runs panel")
-    where = ", ".join(str(r) for r in roots) or "none named in Set up"
+        raise ScriptError("this lab has no scripts folder: a person adds them in Settings (Instruments → Your lab's "
+                          "scripts → Add folder…) or Set up, and Kelvin runs only the scripts in them, or those they "
+                          "import in the Runs panel")
+    where = ", ".join(str(r) for r in roots) or "none named"
+    noun = "scripts folder" if len(roots) == 1 else "scripts folders"
     p = Path(str(path).strip().strip('"')).expanduser()
     tries = [p] if p.is_absolute() else [r / p for r in roots]
+    found: List[Path] = []
     for t in tries:
         t = t.resolve()
         here = t.is_file() or (missing and p.is_absolute() and not t.exists() and t.parent.is_dir())
-        if here and (any(_inside(t, r) for r in roots) or os.path.normcase(str(t)) in picked):
-            return _runnable(t)
+        if here and (any(_inside(t, r) for r in roots) or os.path.normcase(str(t)) in picked) and t not in found:
+            found.append(t)
+    if len(found) == 1:
+        return _runnable(found[0])
+    if found:
+        raise ScriptError("there are several %s in the %s: %s; say which" % (p, noun, ", ".join(map(str, found))))
     if p.is_absolute():
         if p.exists():
-            raise ScriptError("%s is outside the lab's scripts folder (%s): Kelvin runs only the scripts a person put "
-                              "there, or imported in the Runs panel" % (p, where))
+            raise ScriptError("%s is outside the lab's %s (%s): Kelvin runs only the scripts a person put there, or "
+                              "imported in the Runs panel" % (p, noun, where))
         raise ScriptError("%s does not exist" % p)
     if len(p.parts) == 1:
-        hits = [(r, h) for r in roots for h in _named(r, p.name)]
-        seen = {os.path.normcase(str(h.resolve())) for _, h in hits}
+        # by its name: each file once, and only one inside the folders with its links followed (a link or a junction
+        # out of them leads nowhere, as a path through one does)
+        hits: List[Tuple[Optional[Path], Path]] = []
+        seen: Set[str] = set()
+        for r in roots:
+            for h in _named(r, p.name):
+                real = h.resolve()
+                if os.path.normcase(str(real)) not in seen and any(_inside(real, x) for x in roots):
+                    seen.add(os.path.normcase(str(real)))
+                    hits.append((r, h))
         hits += [(None, c) for k, c in picked.items() if c.name.lower() == p.name.lower() and c.is_file()
                  and k not in seen]
         if len(hits) == 1:
             return _runnable(hits[0][1].resolve())
-        if hits:
-            raise ScriptError("there are several %s in the scripts folder%s: %s; say which" % (
-                p.name, " and the scripts imported" if any(r is None for r, _ in hits) else "",
-                ", ".join(str(h.relative_to(r)) if r is not None else str(h) for r, h in hits)))
-    raise ScriptError("no script %s in the lab's scripts folder (%s)" % (path, where))
+        if hits:   # each by its path in its folder, or in full when there are several folders
+            raise ScriptError("there are several %s in the %s%s: %s; say which" % (
+                p.name, noun, " and the scripts imported" if any(r is None for r, _ in hits) else "",
+                ", ".join(str(h.relative_to(r)) if r is not None and len(roots) == 1 else str(h) for r, h in hits)))
+    raise ScriptError("no script %s in the lab's %s (%s)" % (path, noun, where))
 
 
 def _named(root: Path, name: str, most: int = 6) -> List[Path]:

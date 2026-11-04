@@ -62,7 +62,7 @@ def test_openrouters_list_says_which_models_take_pictures():
         {"id": "old/one", "created": 1, "supported_parameters": ["tools"]}]}
     p = OpenAIProvider("openrouter", "OpenRouter", "k", base_url="https://openrouter.ai/api/v1",
                        models_url="https://openrouter.ai/api/v1/models", tools_only=True,
-                       fetch=lambda url, key: listed, preset="openrouter")
+                       fetch=lambda url, key, headers: listed, preset="openrouter")
     assert [m.id for m in asyncio.run(p.models())] == ["deepseek/deepseek-v4.1-flash", "z-ai/glm-5.3", "old/one"]
     assert sees_images(p, "deepseek/deepseek-v4.1-flash") and not sees_images(p, "z-ai/glm-5.3")
     assert sees_images(p, "old/one")   # it says nothing: Kelvin sends them

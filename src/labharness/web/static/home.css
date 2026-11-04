@@ -1,0 +1,219 @@
+/* Home (home.js): the lab at a glance, labMaster's Home in Kelvin's colours. One line of hello (the greeting, what goes
+   on now, the lab's name); three tiles on one row, each the link to its pane; under them, in the rest of the height, the
+   blocks Kelvin keeps, in a region of their own that scrolls when there are more than fit. Home fits by construction
+   (brief 1.1): the page never scrolls. Drawn with the kit at the end of app.css (its tokens, .kcard, .chip) and the fit
+   tokens of the density tier (the value after each comma is the roomy tier's, for a page without them); light and dark
+   come from the tokens alone. That is Home on a laptop, a 1080p screen, a tablet, beside panes and on a phone. Where
+   Home is big (1040 px wide and 1200 tall: the 1440p monitor), the rule at the end draws the big monitor's Home: the
+   greeting on a line of its own, the 2 + 1 large tiles and three columns of blocks in a column of 1040 px. */
+
+/* the conversation's place (as .scroller: from a zero basis, so the top bar keeps its own height when it wraps), and the
+   container Home's parts are sized by: its width (one-line tiles under 700 px) and its height (one-line tiles when it
+   is short, the large tiles when it is big). It scrolls only if even that cannot fit: it never clips */
+.homeview { flex: 1 1 0%; min-height: 0; overflow-y: auto; background: var(--page); container: home / size;
+  --home-shadow: 0 1px 2px rgba(20, 32, 44, 0.04), 0 12px 28px -18px rgba(20, 32, 44, 0.24); }   /* softer than a card's */
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .homeview {
+    --home-shadow: 0 1px 2px rgba(0, 0, 0, 0.32), 0 14px 30px -18px rgba(0, 0, 0, 0.7); }
+}
+#app.full .main > .homeview { display: none !important; }   /* a panel in full screen: Home is out of sight, as the chat is */
+/* the column: the whole height, up to 1440 px of width; the hello and the tiles as tall as they are, the blocks the rest */
+.home-col { box-sizing: border-box; height: 100%; max-width: calc(1440px + 2 * var(--pad-page, 24px)); margin: 0 auto;
+  padding: var(--pad-page, 24px); display: flex; flex-direction: column; gap: var(--sp-4, 16px); }
+
+/* ---------- the hello, on one line: the greeting, what goes on now, the lab's name ---------- */
+.home-hello { flex: none; display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px var(--sp-4, 16px); min-width: 0; }
+.home-greet { margin: 0; font-size: var(--fs-display, 30px); line-height: 1.2; color: var(--text); }
+.home-state { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; min-width: 0; font-size: 15px; color: var(--text-2); }
+.home-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--line-strong); }
+.home-state.ok .home-dot { background: var(--ok); }
+.home-state.warn .home-dot { background: var(--warn); }
+.home-state.bad .home-dot { background: var(--danger); }
+.home-state.ok .home-say { color: var(--text); }
+.home-state.warn .home-say { color: var(--warn); }
+.home-state.bad .home-say { color: var(--danger); font-weight: 600; }
+.home-say { min-width: 0; overflow-wrap: anywhere; }
+.home-labname { font-size: 15px; color: var(--muted); }
+
+/* ---------- the tiles: one row of three, each the link to its pane (the whole card is its button), a ring under the
+   pointer and no lift; as tall as what they hold, up to the tier's cap ---------- */
+.home-tiles { flex: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-4, 16px); }
+.home-tile { position: relative; display: flex; flex-direction: column; gap: var(--sp-2, 8px); min-width: 0; max-height: 300px;
+  overflow: hidden; padding: var(--pad-card, 18px 20px); background: var(--card); border: 1px solid var(--card-line);
+  border-radius: 16px; box-shadow: var(--home-shadow); cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+html.fit-compact .home-tile { max-height: 220px; }
+html.fit-tight .home-tile { max-height: 150px; }
+.home-tile:hover, .home-tile:has(.home-tile-go:focus-visible) {
+  border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--home-shadow); }
+.home-tile.live { border-color: var(--accent); }
+.home-tile-head { display: flex; align-items: center; gap: var(--sp-2, 8px); min-width: 0; }
+.home-tile-go { flex: 1 1 auto; min-width: 0; margin: 0; padding: 0; border: 0; background: none; cursor: pointer; text-align: left;
+  font-family: var(--display); font-size: var(--fs-title, 16px); font-weight: 600; line-height: 22px; letter-spacing: -0.005em;
+  color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.home-tile-go::after { content: ""; position: absolute; inset: 0; }   /* the card is its button */
+.home-tile-go:focus-visible { outline: none; }
+.home-kpi { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--sp-2, 8px); min-width: 0; }
+.home-kpi-n { font-family: var(--display); font-size: var(--fs-kpi, 36px); font-weight: 600; line-height: 1.05; letter-spacing: -0.01em;
+  color: var(--text); font-variant-numeric: lining-nums tabular-nums; white-space: nowrap; }   /* the display face's figures, not its old-style ones */
+.home-kpi-unit { font-size: 13px; color: var(--muted); }
+.home-kpi-unit:empty { display: none; }
+.home-tile-body { display: grid; gap: var(--sp-2, 8px); min-width: 0; }
+.home-bar { height: 5px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.home-bar-fill { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--accent);
+  transition: width .42s var(--ease-switch); }
+.home-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 15px; line-height: 20px; color: var(--text); }
+.home-line-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-line-num { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* the runs and the watched readings: short rows in a tile (a run's row is a link to it, 30 px a row) */
+.home-mini { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; min-width: 0; }
+.home-runs { gap: 0; }
+.home-none { font-size: 13px; line-height: 20px; color: var(--muted); }
+.home-run { position: relative; z-index: 1; display: flex; align-items: center; gap: var(--sp-2, 8px); width: 100%; min-width: 0;
+  min-height: 30px; margin: 0; padding: 0; border: 0; border-radius: var(--radius-s); background: none; cursor: pointer;
+  text-align: left; font-size: 13px; line-height: 20px; color: var(--text); }
+.home-run:hover { background: var(--hover); box-shadow: -6px 0 0 var(--hover), 6px 0 0 var(--hover); }   /* the row's width and 6 px more each side, without moving it */
+.home-run:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.home-run-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-run-time { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.home-st { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--line-strong); }
+.home-st.ok { background: var(--ok); }
+.home-st.warn { background: var(--warn); }
+.home-st.bad { background: var(--danger); }
+.home-st.run { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }   /* a live run's dot: the one pulse left */
+.home-watch { display: flex; align-items: baseline; gap: var(--sp-2, 8px); min-width: 0; padding: 1px 0; font-size: 13px; line-height: 20px; }
+.home-watch-key { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.home-watch-val { flex: none; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.home-watch.alarm .home-watch-val { color: var(--danger); }
+/* the first watched reading over the last ten minutes: a line on a soft area, as labMaster's Temperature tile */
+.home-spark-row { padding: 2px 0 4px; }
+.home-spark { display: block; width: 100%; height: 48px; overflow: visible; }
+html.fit-compact .home-spark { height: 36px; }
+html.fit-tight .home-spark { height: 28px; }
+.home-spark-fill { fill: var(--accent-soft); stroke: none; }
+.home-spark-line { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+.home-spark-row.alarm .home-spark-fill { fill: var(--danger-soft); }
+.home-spark-row.alarm .home-spark-line { stroke: var(--danger); }
+
+/* ---------- Kelvin's blocks: the rest of the height, a region of their own (pinned first, then the newest, as the
+   server keeps them); a .kcard each, its thin edge the kind's colour ---------- */
+.home-blocks { flex: 1 1 0%; min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  align-content: start; gap: var(--sp-4, 16px); margin: -4px; padding: 4px; }   /* 4 px of room for a card's ring and shadow */
+.home-blocks[hidden] { display: none; }
+.kcard.home-block { display: flex; flex-direction: column; gap: var(--sp-2, 8px); min-width: 0; padding: var(--pad-card, 18px 20px);
+  border-radius: 14px; border-left-width: 3px; box-shadow: var(--home-shadow); transition: box-shadow .4s ease; }
+.kcard.home-block.fresh { box-shadow: 0 0 0 2px var(--accent), var(--home-shadow); transition: none; }   /* it just arrived */
+/* the head: the kind, the name, the tools. The tools stand 2 px out of its line above, beside and below (.hk-tools);
+   its box takes them in, its margin out and its padding back, so it sits where it did and nothing spills out of it at
+   any page size (2 px are 2.2 at 110 %) */
+.hk-head { display: flex; align-items: flex-start; gap: var(--sp-2, 8px); min-width: 0; margin: -2px -2px -2px 0;
+  padding: 2px 2px 2px 0; }
+.hk-kind { flex: none; display: grid; place-items: center; height: 22px; color: var(--kind); }
+.hk-kind svg { width: 17px; height: 17px; }
+.hk-name { flex: 1 1 auto; min-width: 0; line-height: 22px; overflow-wrap: anywhere; }   /* the title, and how long ago after it */
+.hk-title { display: inline; margin: 0; font-size: 15px; font-weight: 600; line-height: inherit; color: var(--text); }
+.hk-ago { margin-left: 2px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.hk-tools { flex: none; display: flex; gap: 2px; margin: -2px -2px -2px 0; }
+/* a block's tools: faint (35 %) until the pointer or the focus is on the block, so they are there to find, touch too */
+.hk-btn { display: grid; place-items: center; min-width: 28px; height: 28px; padding: 0 6px; border: 0; border-radius: var(--radius-s);
+  background: none; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; opacity: .35;
+  transition: opacity .12s; }
+.hk-btn svg { width: 16px; height: 16px; }
+.hk-btn:hover { background: var(--hover); color: var(--text); }
+.hk-btn:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
+.home-block:hover .hk-btn, .home-block:focus-within .hk-btn, .hk-pin[aria-pressed="true"], .hk-del.confirm { opacity: 1; }
+.hk-pin[aria-pressed="true"] { color: var(--accent); }
+.hk-pin[aria-pressed="true"] svg { fill: currentColor; }
+.hk-del.confirm { color: var(--danger); background: var(--danger-soft); }
+.hk-value { font-size: 22px; font-weight: 650; line-height: 1.2; color: var(--text); font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere; }
+html.fit-tight .hk-value { font-size: 20px; }
+.hk-value.ok { color: var(--ok); }
+.hk-value.warn { color: var(--warn); }
+.hk-value.bad, .hk-value.alarm { color: var(--danger); }
+/* its text: three lines (two in the compact and tight tiers), the whole as its tip when cut (home.js) */
+.hk-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; font-size: 13px;
+  line-height: 1.5; color: var(--text-2); overflow-wrap: anywhere; }
+html:is(.fit-compact, .fit-tight) .hk-text { -webkit-line-clamp: 2; }
+.hk-text p, .hk-text ul, .hk-text ol, .hk-text pre, .hk-text table { margin: 0 0 6px; }
+.hk-text > :last-child { margin-bottom: 0; }
+.hk-text ul, .hk-text ol { padding-left: 20px; }
+.hk-text a { color: var(--accent); }
+.hk-check { list-style: none; margin: 0; padding: 0; display: grid; }
+.hk-check label { display: flex; align-items: center; gap: 9px; min-height: 30px; font-size: 13px; line-height: 20px; color: var(--text);
+  cursor: pointer; }
+.hk-check input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.hk-check li.done span { color: var(--muted); text-decoration: line-through; }
+.hk-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }   /* at the card's foot, in line along a row */
+
+/* a finger's targets are 40 px (brief 1.1.9). For their room, minor lines give way sooner: how long ago a block came
+   (its title keeps the head to one line beside the wider tools), and a tile's third run in the compact tier */
+@media (pointer: coarse) {
+  .hk-btn { min-width: 40px; height: 40px; }
+  .hk-kind, .hk-name { margin-top: 7px; }   /* the title's first line centred beside the taller tools */
+  .home-block .btn.small, .home-open { min-height: 40px; }
+  .hk-check label { min-height: 40px; }
+  .home-run { min-height: 40px; }
+  .home-col .hk-ago, html.fit-compact .home-runs > .k-minor { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-st.run { animation: none; }
+  .home-bar-fill, .kcard.home-block { transition: none; }
+}
+
+/* ---------- one-line tiles: each tile one line (its title, its number, its chip), one under the other in a narrow main
+   column (a phone, or panes beside Home), side by side when Home is short (the terminal or the notices under the top
+   bar take its height), so the blocks keep theirs ---------- */
+@container home (max-width: 699px) or (max-height: 559px) {
+  .home-tile { flex-direction: row; align-items: center; gap: var(--sp-3, 12px); height: 40px; max-height: none;
+    padding: 0 var(--sp-4, 16px); border-radius: 12px; }
+  html.fit-compact .home-tile, html.fit-tight .home-tile { max-height: none; }
+  .home-tile-head { display: contents; }
+  .home-tile-go { align-self: stretch; }   /* the line's height: the button is as tall as the tile */
+  .home-kpi { order: 1; flex: none; flex-wrap: nowrap; }
+  .home-kpi-n { font-size: 20px; }
+  .home-tile .chip { order: 2; }
+  .home-tile-body { display: none; }
+  @media (pointer: coarse) { .home-tile { height: 42px; } }   /* a finger's 40 px, inside its border */
+}
+@container home (max-width: 699px) {   /* 12 px sides and gaps: two columns of blocks from a main column of 556 px */
+  .home-col { padding: var(--sp-3, 12px) 12px; }
+  .home-tiles { grid-template-columns: minmax(0, 1fr); gap: var(--sp-2, 8px); }
+  .home-blocks { gap: var(--sp-3, 12px); }
+}
+
+/* ---------- Home on a big screen: where Home's own box is as wide as the column below (so the blocks always stand
+   three to a row) and tall enough for three rows of them whole under the large tiles, even full ones (three runs,
+   three readings and the line: 1193 px), so always the roomy tier: the 1440p monitor, in the app or a Chrome tab. A
+   column of 1040 px with 32 px sides, the greeting on a line of its own over what goes on, the 2 + 1 large tiles (the
+   Lab's on a row of its own), three columns of blocks. The blocks keep their region: when there are more than fit
+   they scroll in it, never the page. Below the rule (a laptop, a 1080p screen, a tablet, panes beside Home, a phone)
+   Home is the fitted one above. Its selectors are the fitted Home's, so it stays last and wins where it holds ---------- */
+@container home (min-width: 1040px) and (min-height: 1200px) {
+  .home-col { max-width: 1040px; padding: 34px 32px 32px; gap: 26px; }
+  .home-hello { align-items: center; gap: 6px 10px; }
+  .home-greet { flex-basis: 100%; font-size: 34px; }
+  .home-state { align-items: center; gap: 4px 10px; min-height: 30px; font-size: 16px; }
+  .home-labname { font-size: 16px; }
+  .home-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  .home-tile-lab { grid-column: 1 / -1; }
+  .home-tile { gap: 14px; min-height: 210px; max-height: none; padding: 24px 26px 18px; }
+  .home-tile-head { gap: 10px; }
+  .home-tile-go { font-size: 20px; line-height: 28px; }   /* the title's button 28 px, the card its target */
+  /* the number's line holds its figures (1.14 em of the display face, so nothing spills at 110 or 125 %); the row's
+     margin gives back what that adds */
+  .home-kpi { gap: 2px 10px; margin: -2px 0; }
+  .home-kpi-n { font-size: 44px; line-height: 1.15; }
+  .home-tile-body { gap: 10px; }
+  :is(.home-kpi-unit, .home-none, .home-run) { font-size: 14px; }
+  .home-run-time { font-size: 13px; }
+  .home-watch { gap: 10px; padding: 2px 0; font-size: 15px; }
+  .home-watch-key { flex: 0 1 auto; }   /* a reading's value beside its name, not a window away */
+  .home-spark-row { padding: 2px 0 6px; }
+  .home-blocks { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .kcard.home-block { gap: 10px; padding: 18px 18px 14px; border-radius: 15px; }
+  .hk-value { font-size: 26px; }
+  .hk-text { font-size: 14px; line-height: 1.55; }
+  .hk-check label { font-size: 14px; }
+}

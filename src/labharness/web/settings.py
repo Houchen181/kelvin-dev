@@ -34,7 +34,8 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
                      "updates", "hub_old_runs", "collection", "idle_off", "idle_off_all",
                      "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_from", "smtp_to",   # email notices
-                     "heartbeat_minutes", "approval_wait", "lab_scripts_python"}
+                     "heartbeat_minutes", "approval_wait", "lab_scripts_python",
+                     "sequence_react"}   # Kelvin answers a stop or a failure of the sequence at once (notices.py)
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
        "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection", "idle_off",
@@ -159,6 +160,68 @@ def _load(path: Optional[Path]) -> Dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+# ------------------------------------------------------------------ the lab's scripts folders
+
+def _folder_text(folder: Any) -> str:
+    """A folder as a person gave it, without the spaces and quotes around it (Windows' Copy as path adds quotes)."""
+    return str(folder or "").strip().strip('"').strip()
+
+
+def _folder_key(folder: str) -> Path:
+    """A folder as the lab's scripts folders are compared: its full path, links and junctions followed (Windows
+    compares without case)."""
+    try:
+        return Path(folder).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return Path(os.path.abspath(folder))
+
+
+def script_folders(value: Any) -> Optional[List[str]]:
+    """The lab's scripts folders as settings.json keeps them: a list, or one folder as text (as Kelvin kept it before
+    a lab could have several; "" none). None while nobody has been asked."""
+    if value is None:
+        return None
+    items = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    return [t for t in (_folder_text(f) for f in items) if t]
+
+
+def fold_folders(folders: Any) -> Tuple[List[str], List[str]]:
+    """The lab's scripts folders, folded rather than refused: the same folder twice (however written) is kept once, and
+    one inside another is left out, as the outer one holds its scripts (an outer one added later takes the place of
+    those inside it). Returns the folders in the order given, and what was folded, in words."""
+    kept: List[Tuple[str, Path]] = []
+    said: List[str] = []
+    for text in script_folders(folders if isinstance(folders, str) else list(folders)) or []:
+        key = _folder_key(text)
+        same = next((t for t, k in kept if k == key), None)
+        outer = next((t for t, k in kept if k in key.parents), None)
+        if same is not None:
+            said.append("%s is listed already" % text)
+        elif outer is not None:
+            said.append("%s covers %s" % (outer, text))
+        else:
+            inner = [(t, k) for t, k in kept if key in k.parents]
+            said += ["%s covers %s" % (text, t) for t, _ in inner]
+            kept = [x for x in kept if x not in inner] + [(text, key)]
+    return [t for t, _ in kept], said
+
+
+def folder_problem(folder: str) -> Optional[str]:
+    """Why a folder can't be one of the lab's scripts folders (None: it can): named by its full path, a folder that is
+    there now, and no Kelvin run's (a run keeps the script it ran)."""
+    from ..folderfiles import run_of
+    p = Path(_folder_text(folder)).expanduser()
+    if not p.is_absolute():
+        return "give the folder's full path, such as C:\\Lab\\scripts"
+    if not p.exists():
+        return "%s does not exist" % p
+    if not p.is_dir():
+        return "%s is not a folder" % p
+    if run_of(p.resolve()) is not None:
+        return "%s is in a Kelvin run, not the lab's scripts" % p
+    return None
 
 
 def reseal(folder: Any, old: Any, new: Any) -> int:
@@ -321,7 +384,9 @@ class Settings:
                 value = value if value in CARD_LANGUAGES else ""
             if name == "checklist":  # the first-run checklist on the start screen: shown until hidden
                 value = "hidden" if value.lower() in ("hidden", "hide", "off", "false", "0", "no") else ""
-            if name == "ask_folder":  # the folder picker opens for each new chat (desktop app): on unless off
+            if name == "sequence_react":  # a chat answers a stop or failure of its sequence at once: off unless on
+                value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
+            if name == "ask_folder":  # a folder is asked for each new chat (app or browser): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
@@ -429,6 +494,7 @@ class Settings:
             "text_size": float(_text_size(str(self._user.get("text_size") or 1)) or 1),
             "card_language": self.card_language,
             "checklist": self._user.get("checklist") != "hidden",
+            "sequence_react": self._user.get("sequence_react") == "on",
             "updates": self.updates,
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "own_keys": _own_keys(),   # Kelvin from source: the person's own API keys and services (edition.py)
@@ -442,7 +508,7 @@ class Settings:
                       "from": self._user.get("smtp_from", ""), "to": self._user.get("smtp_to", "")},
             "heartbeat_minutes": int(self.heartbeat_s // 60),
             "approval_wait": int(self.approval_wait_s // 60),   # 0: declined after the first wait, as before
-            "lab_scripts": self.lab_scripts or "",
+            "lab_scripts": self.lab_scripts or [],
             "lab_scripts_python": self.lab_scripts_python,
         }
 
@@ -680,15 +746,49 @@ class Settings:
         self._save()
 
     @property
-    def lab_scripts(self) -> Optional[str]:
-        """The folder of the scripts the lab runs its instruments with, which Kelvin reads to set them up (scripts.py):
-        "" once a person said there are none, None while nobody has been asked."""
-        value = self._lab.get("lab_scripts")
-        return None if value is None else str(value)
+    def lab_scripts(self) -> Optional[List[str]]:
+        """The folders of the scripts the lab runs its instruments with, which Kelvin reads to set them up (scripts.py)
+        and the only ones run_script runs from: [] once a person said there are none, None while nobody has been
+        asked. One folder kept as text, as before a lab could have several, is a list of it until they change."""
+        return script_folders(self._lab.get("lab_scripts"))
 
-    def set_lab_scripts(self, folder: str) -> None:
-        self._lab["lab_scripts"] = str(folder or "")
+    def lab_scripts_with(self, folders: Any) -> Tuple[List[str], List[str]]:
+        """The lab's scripts folders as they would be (folders: a list, or one as text; "" none), folded
+        (fold_folders), with what was folded in words; nothing is kept. ValueError: one not named before can't be
+        one (folder_problem)."""
+        before = {_folder_key(f) for f in self.lab_scripts or []}
+        wanted = script_folders(folders if isinstance(folders, str) else list(folders or [])) or []
+        for f in wanted:
+            problem = folder_problem(f) if _folder_key(f) not in before else None
+            if problem:
+                raise ValueError(problem)
+        return fold_folders(wanted)
+
+    def set_lab_scripts(self, folders: Any) -> Tuple[List[str], List[str]]:
+        """Keep the lab's scripts folders (lab_scripts_with; [] or "": there are none), as a list."""
+        kept, said = self.lab_scripts_with(folders)
+        self._lab["lab_scripts"] = kept
         self._save()
+        return kept, said
+
+    def add_lab_scripts(self, folder: Any) -> Tuple[List[str], List[str]]:
+        """One folder added to the lab's scripts folders as they are now, and kept (set_lab_scripts): an add that read
+        the folders first keeps one taken off meanwhile off. ValueError: it can't be one (folder_problem)."""
+        text = _folder_text(folder)
+        if not text:
+            raise ValueError(folder_problem(text))
+        return self.set_lab_scripts((self.lab_scripts or []) + [text])
+
+    def remove_lab_scripts(self, folder: str) -> List[str]:
+        """One of the lab's scripts folders taken off (the last one off: there are none). KeyError: it isn't one."""
+        key = _folder_key(_folder_text(folder))
+        now = self.lab_scripts or []
+        kept = [f for f in now if _folder_key(f) != key]
+        if len(kept) == len(now):
+            raise KeyError("%s is not one of the lab's scripts folders" % _folder_text(folder))
+        self._lab["lab_scripts"] = kept
+        self._save()
+        return kept
 
     @property
     def lab_scripts_python(self) -> str:

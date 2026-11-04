@@ -19,8 +19,8 @@ from test_scan_review import During, ai_saves  # noqa: E402
 
 
 def kept_by_person(rt):
-    """What web/agent.py's ChatAgent._kept gives write_file: the lab's scripts folder, the scripts imported."""
-    return [rt.scripts_folder()] + rt.library.chosen()
+    """What web/agent.py's ChatAgent._kept gives write_file: the lab's scripts folders, the scripts imported."""
+    return rt.scripts_folders() + rt.library.chosen()
 
 
 # ------------------------------------------------------------------ 1: the code beside an imported script
