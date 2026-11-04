@@ -206,7 +206,8 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 
 /* ---------- layout ---------- */
 /* the frame: the window, below the top bar and the notice row (.chrome, fixed above it: --chrome-h); the page never
-   scrolls, only regions do, until the window is too short to hold 560 page px (a phone on its side, 200 % zoom) */
+   scrolls, only regions do, until the window is too short to hold 560 page px (a phone on its side, 200 % zoom). Page
+   size offers no size that leaves less (PAGE_LEAST in app.js) */
 .app { display: flex; height: calc(100 * var(--vh)); min-height: 560px; padding-top: var(--chrome-h); overflow: hidden; }
 .sidebar {
   width: 264px; flex: none; display: flex; flex-direction: column;
@@ -715,9 +716,10 @@ body:not(.incognito) #empty-sub { display: none; }
 .set-page[hidden] { display: none; }
 .set-title { margin: 2px 0 -8px; font-size: 17px; }
 /* a section of one field: its title says what the field's label would (Account is not one: its card of what acts at
-   once, "fit S", stands over Your account) */
-.set-page:is([data-page="memory"], [data-page="literature"], [data-page="notifications"], [data-page="phone"], [data-page="updates"]) > .field:first-of-type > .field-row:first-child > .field-label { visibility: hidden; }
-.set-page:is([data-page="memory"], [data-page="literature"], [data-page="notifications"], [data-page="phone"], [data-page="updates"]) > .field:first-of-type > .field-row:first-child:has(> .field-label:only-child) { display: none; }
+   once, "fit S", stands over Your account). A card of what acts at once over that field keeps its own label (Skills
+   over Memory's field) */
+.set-page:is([data-page="memory"], [data-page="literature"], [data-page="notifications"], [data-page="phone"], [data-page="updates"]) > :is(.field:first-of-type:not(.set-now), .set-now:first-of-type + .field) > .field-row:first-child > .field-label { visibility: hidden; }
+.set-page:is([data-page="memory"], [data-page="literature"], [data-page="notifications"], [data-page="phone"], [data-page="updates"]) > :is(.field:first-of-type:not(.set-now), .set-now:first-of-type + .field) > .field-row:first-child:has(> .field-label:only-child) { display: none; }
 @media (max-width: 640px) {
   .set-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 12px; }
   .set-nav { flex-direction: row; padding: 0 0 8px; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -1345,7 +1347,8 @@ body.resizing .plot-svg { pointer-events: none; }
 .approval-title .card-lang { font-size: 12px; margin-left: 6px; white-space: nowrap; }
 
 /* the lab's roles and its config history (web/governance.py) */
-.roles-list { list-style: none; margin: 6px 0; padding: 0; display: grid; gap: 6px; }
+.roles-list { margin: 6px 0; padding: 0; border: 0; min-width: 0; display: grid; gap: 6px; }
+#roles-msg:empty { display: none; }   /* a refusal of the roles Save sent, said under them until the next Save */
 .role-row { display: flex; gap: 10px; align-items: center; }
 .role-row span { min-width: 9rem; }
 .pin-dialog select { width: 100%; margin-top: 8px; }
@@ -2336,9 +2339,8 @@ body.incognito .composer { background: color-mix(in srgb, var(--text) 4%, var(--
 
 /* ===== fit S: Settings, Save and Cancel ===== */
 /* Settings keep Save and Cancel. What acts at once stands in a card of its own at the top of its
-   page (.set-now: the phone through the hub on Account, Compare models on Models, Phone access, Page size), drawn as
-   the kit's cards are; on the
-   Settings pages a switch acts at once and a tick box waits for Save */
+   page (.set-now: the phone through the hub on Account, Compare models on Models, the skills on Memory, Phone access,
+   Page size), drawn as the kit's cards are; on the Settings pages a switch acts at once and a tick box waits for Save */
 .set-page > .set-now { padding: 12px 14px; border: 1px solid var(--card-line); border-radius: var(--radius);
   background: var(--card); box-shadow: var(--card-shadow); }
 /* a section holding a change that waits for Save: a dot after its name in the list on the left, as the Lab strip's dot

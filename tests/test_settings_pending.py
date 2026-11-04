@@ -2,9 +2,10 @@
 (settingsBody), and the same function says what waits for Save: what it would send now that differs from what it sent
 as the dialog opened. Save is offered only then; the button beside it reads Close while nothing waits and Cancel once
 something does, and a dot on a section's name says where the change is. What acts at once stands in a card of its own
-at the top of its page (.set-now): the phone through the hub on Account, Compare models on Models, Phone access, Page
-size. On the Settings pages a switch acts at once and a tick box waits for Save (or for the button of its own row); in
-a row, a skill's switch and a service's Pictures (a choice of three) act at once, and no list does. The head's × and
+at the top of its page (.set-now): the phone through the hub on Account, Compare models on Models, the skills on
+Memory, Phone access, Page size. On the Settings pages a switch acts at once and a tick box waits for Save (or for the
+button of its own row); in a row, a skill's switch and a service's Pictures (a choice of three) act at once, and no list
+does. The lab's roles picked under Give roles… wait for Save like any field, which sends them to their own endpoint. The head's × and
 Esc ask first while something waits, and do nothing while a Save is on its way; Enter in a box never closes the
 dialog."""
 import re
@@ -63,7 +64,8 @@ def test_one_function_says_what_save_sends_and_what_waits():
     assert js.count("function settingsBody(") == 1
     body = _function(js, "settingsBody")
     save = _function(js, "saveSettings")
-    assert "const body = settingsBody();" in save and "body." not in save   # Save builds no body of its own
+    # Save builds no body of its own: what settingsBody gives, the roles split off for their own endpoint
+    assert "const sent = settingsBody(), { roles, ...body } = sent," in save and "body." not in save
     diff = _function(js, "settingsDiff")
     assert "settingsBody()" in diff and "SETS.start" in diff and "JSON.stringify(now[k]) !== JSON.stringify(start[k])" in diff
     assert "SETS.start = settingsBody();" in _function(js, "settingsStart")
@@ -96,15 +98,26 @@ def test_one_function_says_what_save_sends_and_what_waits():
 def test_what_acts_at_once_stands_in_a_card_at_the_top_of_its_page():
     # Compare models on Models since 2026-11-03: Compare under the message box, off unless switched on
     for page, control in (("account", 'id="relay-on"'), ("models", 'id="compare-on"'), ("phone", 'id="phone-on"'),
-                          ("display", 'class="zoom-row"')):
+                          ("display", 'class="zoom-row"'), ("memory", 'id="global-know"')):
         section = _page(page)
         after = re.sub(r"<!--.*?-->", "", section[section.index("</h3>") + 5:], flags=re.S).lstrip()
         assert after.startswith("<div") and "set-now" in after[:after.index(">")], page   # first, under the title
         cards = _cards(section)
         assert len(cards) == 1 and control in cards[0], page
         assert 'type="checkbox"' not in cards[0], page
-    assert "set-now" not in "".join(_page(p) for p in ("instruments", "data", "memory", "literature",
-                                                         "notifications", "updates"))
+    assert "set-now" not in "".join(_page(p) for p in ("instruments", "data", "literature", "notifications", "updates"))
+    # Memory: the skills (their switches, Show, Download and Add a skill…) act at once, so they stand in the card at the
+    # top; what waits for Save (Learn from conversations, Instructions, About you) is under it, outside the card
+    memory = _page("memory")
+    skills = _cards(memory)[0]
+    for part in ('id="global-know-add"', 'id="global-know-file"', 'id="global-know-count"'):
+        assert part in skills, part
+    for part in ('id="learn"', 'id="global-instructions"', 'id="global-notes"'):
+        assert part not in skills and memory.index(skills) + len(skills) < memory.index(part), part
+    # the card keeps its own label (Skills); the field under it is the page's one, its label said by the page's title
+    css = re.sub(r"/\*.*?\*/", "", _read("app.css"), flags=re.S)
+    assert (":is(.field:first-of-type:not(.set-now), .set-now:first-of-type + .field) > .field-row:first-child > "
+            ".field-label { visibility: hidden; }") in css
     # drawn as the kit's cards are, from its tokens alone (light and dark)
     css = re.sub(r"/\*.*?\*/", "", _read("app.css"), flags=re.S)
     card = re.search(r"\.set-page > \.set-now \{([^}]*)\}", css).group(1)
@@ -226,8 +239,10 @@ def test_a_reload_from_settings_says_what_it_lets_go():
     assert link.index("const lost") < link.index("location.reload();")
     where = _function(js, "settingsWhere")
     assert "settingsPages(settingsDiff())" in where and 'querySelectorAll(".set-nav button")' in where
-    # the roles editor (Give roles…, its own Save roles) starts folded at each opening: picks not kept are let go
-    assert '$("roles-list").hidden = $("roles-actions").hidden = true;' in _function(js, "openSettings")
+    # the roles Give roles… shows start folded at each opening, shown again as they are saved: picks not saved are
+    # let go with the rest of what waited
+    opening = _function(js, "openSettings")
+    assert '$("roles-list").replaceChildren();' in opening and '$("roles-list").hidden = true;' in opening
 
 
 def test_a_services_pictures_is_a_choice_that_acts_at_once():
@@ -258,7 +273,52 @@ def test_saving_closes_and_a_refusal_keeps_what_waits():
     save = _function(js, "saveSettings")
     ok = save[save.index("try {"):save.index("} catch (e) {")]
     refused = save[save.index("} catch (e) {"):save.index("} finally {")]
-    assert 'await api("/api/settings", { body });' in ok and "SETS.start = body;" in ok
-    assert '$("settings-dialog").close();' in ok and 'toast("Settings saved.");' in ok
+    assert 'await api("/api/settings", { body });' in ok and "SETS.start = sent;" in ok
+    assert '$("settings-dialog").close();' in ok and 'toast(!withRoles ? "Settings saved." :' in ok
     assert '$("settings-msg").textContent = e.message;' in refused and "close()" not in refused and "SETS.start" not in refused
     assert "SETS.saving = false;" in save[save.index("} finally {"):]
+
+
+def test_the_roles_picked_wait_for_save_like_any_field():
+    """Lab roles (Instruments, with accounts and the owner's PIN): Give roles… only shows a role to pick for each
+    person. The picks are fields of the dialog: a change puts the dot on Instruments, Close reads Cancel, × and Esc
+    ask, and the dialog's Save sends them to the roles' own endpoint before the rest (the PIN asked there, by api());
+    refused, nothing else is sent, the reason shows under the roles and their page is shown."""
+    js, dlg, page = _read("app.js"), _dialog(), _page("instruments")
+    # no Save roles nor a Cancel of their own: one Save per dialog
+    assert 'id="roles-save"' not in dlg and 'id="roles-cancel"' not in dlg and 'id="roles-actions"' not in dlg
+    assert "roles-save" not in js and "roles-cancel" not in js and "roles-actions" not in js
+    # the picks sit in a fieldset named after what Save sends, so settingsPages finds their page (the dot)
+    assert re.search(r'<fieldset id="roles-list" name="roles"[^>]*\bhidden></fieldset>', page)
+    assert re.search(r'<span id="roles-msg" class="hint bad" role="status"></span>', page)
+    body = _function(js, "settingsBody")
+    assert "body.roles = rolesPicked();" in body
+    picked = _function(js, "rolesPicked")
+    assert 'if ($("roles-list").hidden || !picks.length) return undefined;' in picked   # not shown: nothing waits
+    assert "if (sel.value) roles[sel.dataset.person] = sel.value;" in picked   # no role: left out (a trainee)
+    # shown as they are saved: nothing waits until a pick changes; Give roles… greyed while they show, its tip why
+    edit = _function(js, "editRoles")
+    assert 'sel.value = r.roles[p.name] || "";' in edit and '"data-person": p.name' in edit
+    assert edit.index('$("roles-list").hidden = false;') < edit.index('settingsFilled(["roles"]);')
+    button = _function(js, "rolesButton")
+    assert "b.disabled = !r || !r.pin || shown;" in button and '"Picked below: Save keeps them"' in button
+    assert "rolesButton();" in _function(js, "rolesState")
+    # a pick is a change in the form like any other: weighed at its change event, found on Instruments
+    assert '$("settings-form").addEventListener("change", settingsChanged);' in js
+    assert '<section class="set-page" data-page="instruments"' in dlg and '<fieldset id="roles-list"' in page
+    # Save: the roles first, to /api/roles (api() asks the owner's PIN on its 403 and tries again), only when they
+    # changed; kept, they no longer wait; then the rest, as before
+    save = _function(js, "saveSettings")
+    assert 'withRoles = settingsDiff().includes("roles");' in save
+    assert 'await api("/api/roles", { body: { roles } }).catch((e) => { e.roles = true; throw e; });' in save
+    assert save.index('api("/api/roles"') < save.index("SETS.start.roles = roles;") < save.index('api("/api/settings"')
+    api = js[js.index("async function api(path, opts = {}) {"):js.index("function askPin(")]
+    assert "if (res.status === 403 && data && data.pin && opts.body && !opts.noPin)" in api
+    # refused: under the roles, their page shown, the message at the bottom cleared; nothing else was sent
+    refused = save[save.index("} catch (e) {"):save.index("} finally {")]
+    assert 'if (e.roles) {' in refused and '$("roles-msg").textContent = e.message;' in refused
+    assert 'settingsPage("instruments");' in refused and "close()" not in refused
+    assert '$("roles-msg").textContent = "";' in save[:save.index("try {")]   # cleared at each Save
+    # the roles' own endpoint is unchanged: the PIN, and once there are roles an owner signed in
+    gov = (STATIC.parent / "governance.py").read_text(encoding="utf-8")
+    assert 'Route("/api/roles", roles_view, methods=["GET", "POST"])' in gov
