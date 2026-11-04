@@ -174,17 +174,22 @@ def test_the_pane_being_typed_in_is_not_put_away_for_a_pane_that_came_by_itself(
     assert "ROOM.asked = true;" in show and "} finally { ROOM.asked = was; }" in show
     assert show.index("ROOM.asked = true;") < show.index("TOGGLE[id](true)") < show.index("fullShow(id);")
     assert "asked: false" in JS[JS.index("const LOOK = {}, ROOM = {"):]
-    assert "paneShow" not in _js("noticeRun") + _js("openRun")   # a run that starts: not asked for
+    assert "paneShow" not in _js("noticeRun") + _js("showNewRun") + _js("openRun")   # a run that starts: not asked for
 
 
 def test_a_run_that_starts_never_puts_a_pane_away():
     """A run that starts opens Runs only where Runs stands beside the main column and the panes open now, at their
     least widths (fitsBeside). Where it would not, the screen stays as it is: no pane is put away, the main column keeps
     its place (a phone), and the dot on Runs (its sequence's count in the accent, where it shows one) says a run is on;
-    the run waits in the Scan for Runs' button. Asked for (a chat's Show data, Home's runs), a run opens as ever."""
-    notice = _js("noticeRun")
-    assert 'if (fitsBeside("runpane")) openRun(runId, plan);\n      else selectRun(runId);' in notice
-    assert "toggleRuns" not in notice and "paneShow" not in notice and "fullShow" not in notice
+    the run waits in the Scan for Runs' button. A run Kelvin ran that ended before the Runs pane saw it (toolEnd) is
+    shown by the same rule. Asked for (a chat's Show data, Home's runs), a run opens as ever."""
+    new = _js("showNewRun")
+    assert 'if (fitsBeside("runpane")) openRun(runId, plan);\n    else selectRun(runId);' in new
+    assert "toggleRuns" not in new and "paneShow" not in new and "fullShow" not in new
+    # both ways the page hears of a run by itself go through it, and neither opens Runs on its own
+    notice, end = _js("noticeRun"), JS[JS.index("    toolEnd(id, content"):JS.index("    runProgress(ev) {")]
+    assert "showNewRun(runId, plan);" in notice and "if (fresh) showNewRun(runId, tab.plan);" in end
+    assert not re.search(r"openRun|toggleRuns|paneShow", notice + end)
     fits = _js("fitsBeside")
     assert "return isOpen(id) || sum([...openPanes(), id].map(least)) <= paneRoom();" in fits
     assert "fitsBeside" not in _js("openRun") + _js("paneShow")   # asked for: shown, making room as ever
@@ -213,6 +218,10 @@ def test_runs_opens_wider_the_first_time_on_a_big_window():
     assert "const wide = Math.max(420, layoutW() * 0.42);" in init
     assert 'PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(960, wide));' in init
     assert 'PANE_W.anpane = kept("lh.anWidth") || kept("lh.runsWidth") || Math.round(Math.min(720, wide));' in init
+    # a drag keeps the widths of the panes open only: a closed pane's first width is never kept as if dragged, so
+    # dragging the Lab's edge on a laptop does not fix Runs at the laptop's width for the big monitor
+    assert "for (const p of openPanes()) store(PANES[p][3], String(PANE_W[p]));" in init
+    assert "for (const p of Object.keys(PANES)) store(" not in JS
 
     def first(w, cap=960):
         return round(min(cap, max(420, w * 0.42)))

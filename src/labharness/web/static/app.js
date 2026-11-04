@@ -928,10 +928,9 @@
     if (window.ResizeObserver) new ResizeObserver(cut).observe(text);
     cut();
     const whole = (on) => {
-      if (on && !more2 && text.scrollHeight <= text.clientHeight + 1) return false;   // two lines say it all
+      if (on && !more2 && text.scrollHeight <= text.clientHeight + 1) return;   // two lines say it all
       show(on);
       cut();
-      return true;
     };
     box.append(as);
     const rows = [];
@@ -1116,20 +1115,23 @@
     toggleRuns(true);
   }
 
-  // a run started (seen in the chat stream or in the lab state): its view, the Scan's from now on, shown and followed;
-  // while the pane shows the Sequence the Sequence stays, and Scan's dot says a run is on. Runs opens by itself only
-  // where it stands beside the panes open now (fitsBeside): it never puts one away, nor takes the chat's place. Else
-  // the screen stays as it is, the dot on Runs says a run is on, and Runs' button shows the run in the Scan
+  // a run started (seen in the chat stream or in the lab state): its view, the Scan's from now on, shown and followed
   function noticeRun(runId, plan) {
     if (RUNS.tabs.has(runId) || RUNS.dismissed.has(runId)) return;
-    const tab = runTab(runId, plan);
-    setTabStatus(tab, "running");
-    RUNS.active = runId;
-    if (!scheduling()) {
-      if (fitsBeside("runpane")) openRun(runId, plan);
-      else selectRun(runId);
-    }
+    setTabStatus(runTab(runId, plan), "running");
+    showNewRun(runId, plan);
     pollLive();
+  }
+  // a run the page hears of by itself (it started, or it ended before the Runs pane saw it): the Scan's run from now
+  // on. While the pane shows the Sequence the Sequence stays, and Scan's dot says a run is on. Runs opens by itself only
+  // where it stands beside the panes open now (fitsBeside): it never puts one away, nor takes the chat's place. Else
+  // the screen stays as it is, the dot on Runs (its sequence's count in the accent, where it shows one) says a run is
+  // on, and Runs' button shows the run in the Scan
+  function showNewRun(runId, plan) {
+    RUNS.active = runId;
+    if (scheduling()) return;
+    if (fitsBeside("runpane")) openRun(runId, plan);
+    else selectRun(runId);
   }
   function scheduling() {
     return RUNS.open && RUNS.view === "schedule";
@@ -1441,8 +1443,8 @@
       const c = v.charts.getBoundingClientRect(), z = layoutZoom();
       return c.height >= c.width * 0.4 && c.height / z > least + 1;
     };
-    for (const [k, all] of [[true, true], [true, false]]) {
-      open(k, all);
+    for (const all of [true, false]) {
+      open(true, all);
       if (room()) return;
     }
     open(false, false);
@@ -1542,7 +1544,7 @@
     ROOM.shown = open;
     // One more will not fit beside the main column even at the least widths: the pane looked at least recently is put
     // away, and its toggle lays out again. Never the pane being typed in, unless the room is for one the person or a
-    // waiting request asked for (paneShow): a run that starts, or Kelvin's analyze, never takes it away mid-sentence
+    // waiting request asked for (paneShow): Kelvin's analyze never takes it away mid-sentence
     // (with no other to go, the newcomer goes, and waits for its button). Not while full screen covers them (they wait
     // under it), nor while the window is still changing size or out of sight: a window being sized, or minimized,
     // closes nothing
@@ -1763,8 +1765,8 @@
   function initPanes() {
     const kept = (key) => Number(store(key)) || 0;
     // the first time, Runs and Analysis open at 42 % of the window, never under 420: Runs up to 960 (on a big monitor
-    // a run's analysis then stands beside its plots), Analysis up to 720 (until it has its own width: the one it
-    // shared with Runs). A width dragged is kept
+    // a run's analysis then stands beside its plots), Analysis up to 720. A width dragged is kept, and Analysis takes
+    // Runs' kept width until it has its own
     const wide = Math.max(420, layoutW() * 0.42);
     PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(960, wide));
     PANE_W.anpane = kept("lh.anWidth") || kept("lh.runsWidth") || Math.round(Math.min(720, wide));
@@ -1773,8 +1775,9 @@
     PANE_W.teampanel = kept("lh.teamWidth") || PANE_W.labpanel;
     if (sideNarrow()) SIDE.hidden = true;   // a narrow window opens on the chat or Home, never on the list (not kept)
     for (const id of Object.keys(PANES)) {
+      // kept: the widths of the panes open (the one dragged, and those it read back), never a closed one's first width
       edgeResize($(id + "-resize"), $(id), (w) => sizePane(id, w), () => {
-        for (const p of Object.keys(PANES)) store(PANES[p][3], String(PANE_W[p]));
+        for (const p of openPanes()) store(PANES[p][3], String(PANE_W[p]));
       });
       // looking at a pane: a press or the focus inside it (opening it is one too: fitLayout); kept with the layout
       const looked = () => { look(id); layoutSaid(); };
@@ -2704,7 +2707,7 @@
       const fresh = live && !RUNS.tabs.has(runId) && !RUNS.dismissed.has(runId);   // over before the Runs pane saw it
       const tab = fresh ? runTab(runId, step.card.plan || runId.replace(/^\d{8}-\d{6}-/, "")) : RUNS.tabs.get(runId);
       if (tab && !tab.final) { setTabStatus(tab, "finishing"); loadFinal(tab); }   // the Analysis pane hears of it
-      if (fresh) openRun(runId, tab.plan);
+      if (fresh) showNewRun(runId, tab.plan);
     }
     runProgress(ev) {  // the data go to the runs pane; the conversation keeps a compact card
       const step = this.steps.get(ev.call_id);

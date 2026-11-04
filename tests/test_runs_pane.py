@@ -505,14 +505,16 @@ def test_edit_on_a_queued_item_opens_it_where_it_can_be_edited():
 
 
 def test_a_run_that_starts_while_the_sequence_is_shown_waits_in_the_scan():
-    """A run that starts takes the pane to it (the Scan), as ever, unless the pane shows the Sequence: then the
-    Sequence stays (its blocks show their runs), and Scan's dot says a run is running."""
-    notice = _js("noticeRun")
-    assert "if (!scheduling()) {" in notice and 'setTabStatus(tab, "running")' in notice
-    assert notice.index("if (!scheduling()) {") < notice.index("openRun(runId, plan);")
+    """A run that starts takes the pane to it (the Scan), unless the pane shows the Sequence or Runs would not fit
+    beside the panes open: with the Sequence shown the Sequence stays (its blocks show their runs), and Scan's dot says
+    a run is running. A run Kelvin ran that ended before the pane saw it follows the same rule (showNewRun)."""
+    notice, new = _js("noticeRun"), _js("showNewRun")
+    assert 'setTabStatus(runTab(runId, plan), "running");' in notice and "showNewRun(runId, plan);" in notice
+    assert "if (scheduling()) return;" in new
+    assert new.index("if (scheduling()) return;") < new.index("openRun(runId, plan);")
     assert 'return RUNS.open && RUNS.view === "schedule";' in _js("scheduling")
     # the Scan has it all the same (shown when Scan is opened), and a run that ended before it goes once it is over
-    assert "RUNS.active = runId;" in notice
+    assert new.index("RUNS.active = runId;") < new.index("if (scheduling()) return;")
     assert '[...RUNS.tabs.values()].find((t) => t.status === "running") || null;' in _js("showView")
     assert 'find((t) => t.status === "running" || t.status === "finishing")' in _js("closeRunTab")   # never an old one
     assert "if (ended && RUNS.active !== tab.runId && RUNS.tabs.has(RUNS.active)) closeRunTab(tab.runId);" in _js("loadFinal")
@@ -559,28 +561,36 @@ def test_key_results_wait_for_a_width_and_the_picker_reads_as_history():
 
 
 def test_a_finished_runs_plot_keeps_a_landscape_shape_and_its_analysis_takes_the_height_left():
-    """One plot is never taller than 3:4 of its width: the run view's main part is a container, and the bound is 3/4
-    of what the plot gets of it (all of it above the analysis; less the analysis's column and the gap beside it from
-    900 px). Never under the plots' least (160), so a small screen keeps what it has. The height it leaves goes to
-    the key results and the whole assessment, which open by themselves where there is room, judged once (keysOnce):
-    beside the plots the key results (14 rows or fewer, a window not short) and the whole assessment when the side
-    then holds it; above the plots both, else the key results alone, when the plots keep 2/5 of their width in height
-    and stay above their least; else neither. On a 2560 x 1440 monitor Runs opens 960 wide, so its plot, key results
-    and Next show without a press."""
-    main = re.search(r"\.run-view > \.rv-main \{([^}]*)\}", CSS).group(1)
-    assert "container: rvmain / inline-size;" in main and "gap: 8px;" in main
-    assert ".rv-charts:has(> .plots > .plot:only-child) { max-height: max(160px, 75cqi); }" in CSS
-    wide = CSS[CSS.index("@container runview (min-width: 900px) {"):]
-    wide = wide[:wide.index("\n}\n")]
-    columns = "grid-template-columns: minmax(0, 1fr) clamp(280px, 34%, 420px);"
-    assert columns in wide   # the plots' column: the main part less the gap and the analysis's column
-    assert (".rv-charts:has(> .plots > .plot:only-child) { max-height: max(160px, calc(.75 * (100cqi - 8px - "
-            "clamp(280px, 34cqi, 420px)))); }") in wide
+    """Each plot is never taller than 3:4 of its width, however many there are: each is a container, its drawing 3/4 of
+    its own width less 48 px (its head, legend and padding take up to 64), standing at the top of its row; a shorter
+    row takes it whole (max-height 100 %) and its drawing gives way down to 120, so a small screen keeps what it has.
+    The height a plot leaves goes to the key results and the whole assessment, which open by themselves where there is room,
+    judged once (keysOnce): beside the plots the key results (14 rows or fewer, a window not short) and the whole
+    assessment when the side then holds it; above the plots both, else the key results alone, when the plots keep 2/5
+    of their width in height and stay above their least; else neither. On a 2560 x 1440 monitor Runs opens 960 wide,
+    so its plot, key results and Next show without a press."""
+    plot = re.search(r"\n\.rv-charts \.plot\.fill \{([^}]*)\}", CSS).group(1)
+    assert "container-type: inline-size;" in plot and "align-self: start;" in plot and "max-height: 100%;" in plot
+    drawing = re.search(r"\n\.rv-charts \.plot\.fill > \.plot-svg \{([^}]*)\}", CSS).group(1)
+    assert "flex: 0 1 auto;" in drawing and "height: max(120px, calc(75cqi - 48px));" in drawing
+    assert "min-height: 120px;" in drawing
+    assert ":only-child" not in CSS[CSS.index("/* ===== fit E"):]   # one rule for one plot or many
+    assert ".rv-charts > .plots { flex: 1 1 0; min-height: 0; grid-auto-rows: minmax(160px, 1fr); }" in CSS
+    assert ".plots { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }" in CSS
     assert ".rv-charts { flex: 1 1 0; min-height: 160px;" in CSS
-    # at 2560 x 1440 (Runs 960, its run view 959 less 24 of padding): the plot's column and its bound
+
+    def card(width, row):   # a plot's height: its drawing (in its content box) and up to 64 px, never over its row
+        drawing = max(120, 0.75 * (width - 26) - 48)
+        return min(row, drawing + 64)
+    # at 2560 x 1440, Runs 960: one plot beside the analysis (its column 600 to 620 px)
     w = 959 - 24
     col = w - 8 - min(max(280, 0.34 * w), 420)
-    assert 600 < col < 620 and 0.75 * col < 470
+    assert 600 < col < 620 and card(col, 1000) <= 0.75 * col
+    # Runs kept at 720, a run of two values: two plots of 342 side by side, each landscape (it was 342 x 540)
+    two = (695 - 10) / 2
+    assert two >= 300 and card(two, 540) <= 0.75 * two and card(two, 540) < two
+    # a small screen: a row shorter than 3:4 is taken whole, as before
+    assert card(560, 200) == 200
     keys = _js("keysOnce")
     beside = keys[keys.index("if (w >= 900) {"):keys.index("const least = ")]
     assert 'if (document.documentElement.classList.contains("fit-tight")) return;' in beside
@@ -588,8 +598,8 @@ def test_a_finished_runs_plot_keeps_a_landscape_shape_and_its_analysis_takes_the
     assert "const keys = v.keysRows > 0 && v.keysRows <= 14;" in keys
     assert "return c.height >= c.width * 0.4 && c.height / z > least + 1;" in keys
     assert "const least = parseFloat(getComputedStyle(v.charts).minHeight) || 0;" in keys
-    tries = keys[keys.index("for (const [k, all] of [[true, true], [true, false]]) {"):]
-    assert tries.index("open(k, all);") < tries.index("if (room()) return;") < tries.index("open(false, false);")
+    tries = keys[keys.index("for (const all of [true, false]) {"):]
+    assert tries.index("open(true, all);") < tries.index("if (room()) return;") < tries.index("open(false, false);")
     assert "rvOpen(v.keys, k, null, true)" in keys   # opened still: no easing, nothing moves
     # judged by the view drawn whole: the plots and the files first
     final = JS[JS.index("if (tab.final && !v.finalDrawn) {"):]
@@ -598,7 +608,7 @@ def test_a_finished_runs_plot_keeps_a_landscape_shape_and_its_analysis_takes_the
     assert "if (a) { v.keysPending = true; v.keysRows = a.table ? a.rows : 0; v.whole = a.whole; }" in final
     # the whole assessment without a press only when there is more than its two lines
     block = _js("analysisBlock")
-    assert "if (on && !more2 && text.scrollHeight <= text.clientHeight + 1) return false;" in block
+    assert "if (on && !more2 && text.scrollHeight <= text.clientHeight + 1) return;" in block
     assert "return { box, table, rows: rows.length, whole };" in block
 
 
