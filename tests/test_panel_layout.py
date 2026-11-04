@@ -163,9 +163,9 @@ def test_least_widths_are_what_the_heads_hold_at():
 
 
 def test_the_pane_being_typed_in_is_not_put_away_for_a_pane_that_came_by_itself():
-    """A run that starts (noticeRun opens Runs) or Kelvin's analyze never puts away the pane the person is typing in:
-    the focus in a field inside it. A pane the person or a waiting request asked for (paneShow, a top-bar button) still
-    makes room as ever, so a request is never out of sight."""
+    """Kelvin's analyze never puts away the pane the person is typing in: the focus in a field inside it (a run that
+    starts puts none away at all: test_a_run_that_starts_never_puts_a_pane_away). A pane the person or a waiting
+    request asked for (paneShow, a top-bar button) still makes room as ever, so a request is never out of sight."""
     typed = _js("typedIn")
     assert "const a = document.activeElement;" in typed
     assert '(a.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(a.tagName))' in typed
@@ -175,6 +175,53 @@ def test_the_pane_being_typed_in_is_not_put_away_for_a_pane_that_came_by_itself(
     assert show.index("ROOM.asked = true;") < show.index("TOGGLE[id](true)") < show.index("fullShow(id);")
     assert "asked: false" in JS[JS.index("const LOOK = {}, ROOM = {"):]
     assert "paneShow" not in _js("noticeRun") + _js("openRun")   # a run that starts: not asked for
+
+
+def test_a_run_that_starts_never_puts_a_pane_away():
+    """A run that starts opens Runs only where Runs stands beside the main column and the panes open now, at their
+    least widths (fitsBeside). Where it would not, the screen stays as it is: no pane is put away, the main column keeps
+    its place (a phone), and the dot on Runs (its sequence's count in the accent, where it shows one) says a run is on;
+    the run waits in the Scan for Runs' button. Asked for (a chat's Show data, Home's runs), a run opens as ever."""
+    notice = _js("noticeRun")
+    assert 'if (fitsBeside("runpane")) openRun(runId, plan);\n      else selectRun(runId);' in notice
+    assert "toggleRuns" not in notice and "paneShow" not in notice and "fullShow" not in notice
+    fits = _js("fitsBeside")
+    assert "return isOpen(id) || sum([...openPanes(), id].map(least)) <= paneRoom();" in fits
+    assert "fitsBeside" not in _js("openRun") + _js("paneShow")   # asked for: shown, making room as ever
+    main, side = (int(x) for x in re.search(r"const CHAT_MIN = (\d+), SIDEBAR_W = (\d+);", JS).groups())
+
+    def fits_at(width, open_panes, touch=False, list_shown=True):   # fitsBeside's sum, with the least widths of PANES
+        least = _least(touch)
+        return sum(least[p] for p in open_panes + ["runpane"]) <= width - (side if list_shown else 0) - main
+
+    # an iPad's 1180 with the list shown and the Lab open: the Lab stays and Runs waits; with the list hidden both stand
+    assert not fits_at(1180, ["labpanel"], touch=True) and fits_at(1180, ["labpanel"], touch=True, list_shown=False)
+    # 1280x720 (90 %: 1422 page px) with the list shown: Runs opens beside Lab, not beside Lab and Analysis
+    assert fits_at(1280 / 0.9, ["labpanel"]) and not fits_at(1280 / 0.9, ["labpanel", "anpane"])
+    assert not fits_at(390, [], touch=True, list_shown=False)   # a phone: the chat stays; Runs' button shows the run
+    # the mark: the dot, or the sequence's count in the accent while a run is on
+    dots = _js("liveDots")
+    assert '$("runs-dot").hidden = !live;' in dots and '$("toggle-runs").classList.toggle("run-live", live);' in dots
+    assert "#toggle-runs:is(.live, .run-live) .seq-badge { background: var(--accent); color: var(--accent-ink); }" in CSS
+
+
+def test_runs_opens_wider_the_first_time_on_a_big_window():
+    """The first time, Runs opens at 42 % of the window (never under 420) up to 960 page px, so at 2560 x 1440 a run's
+    analysis stands beside its plots (the view 900 or wider); Analysis keeps 720 at most. A width dragged is kept, and
+    Analysis takes Runs' kept width until it has its own."""
+    init = _js("initPanes")
+    assert "const wide = Math.max(420, layoutW() * 0.42);" in init
+    assert 'PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(960, wide));' in init
+    assert 'PANE_W.anpane = kept("lh.anWidth") || kept("lh.runsWidth") || Math.round(Math.min(720, wide));' in init
+
+    def first(w, cap=960):
+        return round(min(cap, max(420, w * 0.42)))
+    assert first(2560) == 960 and first(2560) - 1 >= 900   # less its border: the run view beside its analysis
+    assert first(1920) == 806 and first(1920, 720) == 720
+    assert first(1366 / 0.9) == first(1366 / 0.9, 720)   # a laptop: as before
+    # at 1920 x 1080 with the list shown Runs and Lab still stand side by side, narrowed alike
+    least = _least()
+    assert least["runpane"] + least["labpanel"] <= 1920 - 264 - 520 < first(1920) + 380
 
 
 def test_a_pane_that_cannot_stand_beside_the_main_column_takes_the_content_area_alone():

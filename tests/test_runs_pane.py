@@ -508,7 +508,8 @@ def test_a_run_that_starts_while_the_sequence_is_shown_waits_in_the_scan():
     """A run that starts takes the pane to it (the Scan), as ever, unless the pane shows the Sequence: then the
     Sequence stays (its blocks show their runs), and Scan's dot says a run is running."""
     notice = _js("noticeRun")
-    assert "if (!scheduling()) openRun(runId, plan);" in notice and 'setTabStatus(tab, "running")' in notice
+    assert "if (!scheduling()) {" in notice and 'setTabStatus(tab, "running")' in notice
+    assert notice.index("if (!scheduling()) {") < notice.index("openRun(runId, plan);")
     assert 'return RUNS.open && RUNS.view === "schedule";' in _js("scheduling")
     # the Scan has it all the same (shown when Scan is opened), and a run that ended before it goes once it is over
     assert "RUNS.active = runId;" in notice
@@ -544,14 +545,61 @@ def test_key_results_wait_for_a_width_and_the_picker_reads_as_history():
     picker gives a run's time in the History's words; the report and Revert are outlined buttons."""
     keys = _js("keysOnce")
     assert keys.index("if (!w) return;") < keys.index("v.keysPending = false;")
-    # open by themselves only with room: 14 rows or fewer, a view 900 page px wide or more, a window not short
-    assert "Kelvin.zoom()" in keys   # the width in the page's pixels
-    assert 'v.keysRows <= 14 && w >= 900 && !document.documentElement.classList.contains("fit-tight")' in keys
-    assert 'document.addEventListener("kelvin:layout", () => keysOnce(RUNS.tabs.get(RUNS.active)));' in JS
+    assert "getBoundingClientRect().width / layoutZoom()" in keys   # the width in the page's pixels
+    # judged when it is shown, in full screen, or when the Scan is shown again over the Sequence: then after the
+    # layout that shows it (toggleRuns tells what is in sight before it lays the panes out)
+    assert "const keysNow = () => keysOnce(RUNS.tabs.get(RUNS.active));" in JS
+    assert 'document.addEventListener("kelvin:layout", keysNow);' in JS
+    assert 'document.addEventListener("kelvin:seq", () => queueMicrotask(keysNow));' in JS
+    toggle = _js("toggleRuns")
+    assert toggle.index("showView(RUNS.view)") < toggle.index("fitLayout();")
     assert "const anWhen = (r) => startedText(r);" in JS
     for bid in ("open-report", "ed-revert"):   # buttons look like buttons: outlined, not ghosts
         assert re.search(r'<button id="%s" class="btn small" ' % bid, PAGE), bid
 
+
+def test_a_finished_runs_plot_keeps_a_landscape_shape_and_its_analysis_takes_the_height_left():
+    """One plot is never taller than 3:4 of its width: the run view's main part is a container, and the bound is 3/4
+    of what the plot gets of it (all of it above the analysis; less the analysis's column and the gap beside it from
+    900 px). Never under the plots' least (160), so a small screen keeps what it has. The height it leaves goes to
+    the key results and the whole assessment, which open by themselves where there is room, judged once (keysOnce):
+    beside the plots the key results (14 rows or fewer, a window not short) and the whole assessment when the side
+    then holds it; above the plots both, else the key results alone, when the plots keep 2/5 of their width in height
+    and stay above their least; else neither. On a 2560 x 1440 monitor Runs opens 960 wide, so its plot, key results
+    and Next show without a press."""
+    main = re.search(r"\.run-view > \.rv-main \{([^}]*)\}", CSS).group(1)
+    assert "container: rvmain / inline-size;" in main and "gap: 8px;" in main
+    assert ".rv-charts:has(> .plots > .plot:only-child) { max-height: max(160px, 75cqi); }" in CSS
+    wide = CSS[CSS.index("@container runview (min-width: 900px) {"):]
+    wide = wide[:wide.index("\n}\n")]
+    columns = "grid-template-columns: minmax(0, 1fr) clamp(280px, 34%, 420px);"
+    assert columns in wide   # the plots' column: the main part less the gap and the analysis's column
+    assert (".rv-charts:has(> .plots > .plot:only-child) { max-height: max(160px, calc(.75 * (100cqi - 8px - "
+            "clamp(280px, 34cqi, 420px)))); }") in wide
+    assert ".rv-charts { flex: 1 1 0; min-height: 160px;" in CSS
+    # at 2560 x 1440 (Runs 960, its run view 959 less 24 of padding): the plot's column and its bound
+    w = 959 - 24
+    col = w - 8 - min(max(280, 0.34 * w), 420)
+    assert 600 < col < 620 and 0.75 * col < 470
+    keys = _js("keysOnce")
+    beside = keys[keys.index("if (w >= 900) {"):keys.index("const least = ")]
+    assert 'if (document.documentElement.classList.contains("fit-tight")) return;' in beside
+    assert "open(true, true);" in beside and "if (v.side.scrollHeight > v.side.clientHeight + 1) v.whole(false);" in beside
+    assert "const keys = v.keysRows > 0 && v.keysRows <= 14;" in keys
+    assert "return c.height >= c.width * 0.4 && c.height / z > least + 1;" in keys
+    assert "const least = parseFloat(getComputedStyle(v.charts).minHeight) || 0;" in keys
+    tries = keys[keys.index("for (const [k, all] of [[true, true], [true, false]]) {"):]
+    assert tries.index("open(k, all);") < tries.index("if (room()) return;") < tries.index("open(false, false);")
+    assert "rvOpen(v.keys, k, null, true)" in keys   # opened still: no easing, nothing moves
+    # judged by the view drawn whole: the plots and the files first
+    final = JS[JS.index("if (tab.final && !v.finalDrawn) {"):]
+    final = final[:final.index("return;")]
+    assert final.index("v.charts.replaceChildren(runCharts(tab.final));") < final.index("keysOnce(tab);")
+    assert "if (a) { v.keysPending = true; v.keysRows = a.table ? a.rows : 0; v.whole = a.whole; }" in final
+    # the whole assessment without a press only when there is more than its two lines
+    block = _js("analysisBlock")
+    assert "if (on && !more2 && text.scrollHeight <= text.clientHeight + 1) return false;" in block
+    assert "return { box, table, rows: rows.length, whole };" in block
 
 
 def test_save_as_offers_the_sequences_name_as_a_file_name_may_hold_it():

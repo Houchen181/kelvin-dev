@@ -1589,7 +1589,7 @@ button.link:disabled { opacity: .5; cursor: default; }   /* waiting, as a .btn d
 #open-scan.live.on::after { display: none; }
 .runpane .pane-head > .runs-seg { margin-left: 0; }
 .seq-badge { background: var(--accent-soft); color: color-mix(in srgb, var(--accent) 75%, var(--text)); }
-#toggle-runs.live .seq-badge { background: var(--accent); color: var(--accent-ink); }
+#toggle-runs:is(.live, .run-live) .seq-badge { background: var(--accent); color: var(--accent-ink); }   /* a sequence or a run on */
 #toggle-runs .seq-badge:not([hidden]) + .live-dot { display: none; }
 /* the Runs pane's body: the Scan or the Sequence fills it, and their regions scroll on their own */
 #seq-view[hidden], #scan-view[hidden] { display: none; }
@@ -1977,12 +1977,14 @@ dialog[open]::backdrop { animation: k-fade .15s ease; }
 #runpane > .pane-head > #runs-seg { margin-right: auto; }
 
 /* a run's view: its head, how far it got (the run's id at the end of that line), its files on one row, then its plots
-   filling what is left (never under 160 px) with the analysis and the row of what is a press away above them, or beside
-   them from 900 px. It scrolls (data-region run) only when what was opened needs more than there is */
+   filling what is left (never under 160 px, and one plot never taller than 3:4 of its width) with the analysis and the
+   row of what is a press away above them, or beside them from 900 px. It scrolls (data-region run) only when what was
+   opened needs more than there is. Its main part is a container (rvmain): the plots' bound is a share of its width */
 .run-view:not([hidden]) { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px;
   padding: var(--sp-2, 8px) var(--sp-3, 12px) var(--sp-3, 12px); }
 .run-view > * { flex: none; min-width: 0; }
-.run-view > .rv-main { flex: 1 1 0; min-height: 160px; display: flex; flex-direction: column; gap: 8px; }
+.run-view > .rv-main { flex: 1 1 0; min-height: 160px; display: flex; flex-direction: column; gap: 8px;
+  container: rvmain / inline-size; }
 .rv-progress { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
 .rv-count { min-width: 0; }   /* its whole width: it wraps only when it alone is wider than the row */
 .rv-id { flex: 1 1 0; min-width: 0; text-align: right; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden;
@@ -2021,8 +2023,11 @@ dialog[open]::backdrop { animation: k-fade .15s ease; }
 .rv-files > .rv-files-more { padding-inline: 7px; min-height: 28px; }   /* only its icon: 28 px, as its neighbours */
 .rv-file-view:not([hidden]) { display: grid; gap: 4px; margin: 0; }
 .rv-file-view .rv-file-text { max-height: min(320px, calc(35 * var(--vh, 1vh))); }
-/* the plots fill what is left: their rows share the height, none under 160 px, each drawn as tall as its place */
+/* the plots fill what is left: their rows share the height, none under 160 px, each drawn as tall as its place. One plot
+   keeps a landscape shape, never taller than 3:4 of its width (the main part's, less the analysis beside it from
+   900 px): the height it leaves is the analysis's (keysOnce opens it there) */
 .rv-charts { flex: 1 1 0; min-height: 160px; display: flex; flex-direction: column; }
+.rv-charts:has(> .plots > .plot:only-child) { max-height: max(160px, 75cqi); }
 .rv-charts > .plots { flex: 1 1 0; min-height: 0; grid-auto-rows: minmax(160px, 1fr); }
 .plot.fill { display: flex; flex-direction: column; min-height: 0; padding-bottom: 4px; }
 .plot.fill > .plot-svg { flex: 1 1 0; min-height: 140px; }
@@ -2035,6 +2040,7 @@ dialog[open]::backdrop { animation: k-fade .15s ease; }
   .run-view > .rv-main { display: grid; grid-template-columns: minmax(0, 1fr) clamp(280px, 34%, 420px); grid-template-rows: minmax(0, 1fr); }
   .rv-side { order: 0; min-height: 0; overflow-y: auto; }
   .rv-charts { min-height: 0; }
+  .rv-charts:has(> .plots > .plot:only-child) { max-height: max(160px, calc(.75 * (100cqi - 8px - clamp(280px, 34cqi, 420px)))); }
 }
 @container runshead (max-width: 400px) {   /* a narrow pane's head: its buttons a little closer in */
   #runs-seg button { padding-inline: 9px; }

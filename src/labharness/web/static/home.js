@@ -99,9 +99,6 @@
   }
   // the alarms on now (a Got it does not end one: its reading is still out of range until it clears)
   const alarmsOn = (s) => ((s && s.alarms) || []).filter((a) => a && !a.cleared);
-  // the person's own pause (the Sequence's Pause), not yet in effect: still running, as the Sequence's bar has it
-  // (seq.js ownPause, runtime.py _own_pause)
-  const ownPause = (q) => q.state === "pausing" && /^paused by human/.test(q.reason || "");
 
   // ------------------------------------------------------------------ the page: the hello, the tiles, the blocks
   // a tile's place: its pane, the view of it the tile shows (the Sequence; the runs are the Analysis pane's), and the
@@ -217,8 +214,8 @@
     const pending = (s.pending || []).length;
     if (pending) return { tone: "warn", words: pending === 1 ? "Approval waiting" : pending + " approvals waiting", open: true };
     const n = sequence(s);
-    if (n.q.state === "running" || n.q.state === "pausing") {
-      const it = n.item || (n.next >= 0 ? n.items[n.next] : null), run = n.q.state === "running" || ownPause(n.q);
+    if (n.q.state === "running" || n.q.state === "pausing") {   // any pause waiting for the running block: amber
+      const it = n.item || (n.next >= 0 ? n.items[n.next] : null), run = n.q.state === "running";
       return { tone: run ? "ok" : "warn", words: it ? it.name + " · " + n.at + " of " + n.total : run ? "Running" : "Pausing" };
     }
     if (n.q.state === "paused") return { tone: "warn", words: "Paused" };
@@ -247,11 +244,11 @@
 
   // ------------------------------------------------------------------ the tiles
   function renderSeq(s) {
-    const n = sequence(s), t = H.parts.seq, st = n.q.state, own = ownPause(n.q);
-    // states are tinted pills; the running one the accent's soft fill. The person's own pause still runs, as the
-    // Sequence's bar says it; Kelvin's, a failure's, a guard's or Stop's says Pausing. As on the bar, why is the tip: of
-    // any pause, the person's own too, and of a finished sequence that ended for a reason
-    const [kind, words] = st === "running" || own ? ["blue", "Running"] : st === "pausing" ? ["warn", "Pausing"]
+    const n = sequence(s), t = H.parts.seq, st = n.q.state;
+    // states are tinted pills; the running one the accent's soft fill. Any pause waiting for the running block (the
+    // person's own too) says Pausing, as the Sequence's bar does. As on the bar, why is the tip: of any pause, and of a
+    // finished sequence that ended for a reason
+    const [kind, words] = st === "running" ? ["blue", "Running"] : st === "pausing" ? ["warn", "Pausing"]
       : st === "paused" ? ["warn", "Paused"] : !n.total || n.next >= 0 ? ["line", "Idle"]
       : n.items.some((i) => i.status === "failed") ? ["bad", "Failed"] : ["ok", "Done"];
     chip(t, kind, words);

@@ -441,14 +441,18 @@ def test_the_sequences_pause_is_an_armed_action():
     assert "if (came || pause.dataset.want !== want) pauseAt = Date.now();" in js
     assert 'own ? "Pausing…" : "Pause"' in js and 'classList.toggle("armed", own)' in js
     assert 'pause.hidden = st !== "running" && !own' in js             # Kelvin's, a failure's or a stop's: no button
-    # the state chip says Running while the person's own pause waits (the button says Pausing…), else Pausing
-    assert 'if (q.state === "running" || ownPause(q)) {' in js
-    assert 'if (q.state === "pausing") return ["Pausing", "warn", q.reason || ""];' in js
-    # Home's Sequence tile and its state line say it as the bar does: Running while the person's own pause waits
+    # the state chip says Pausing (amber) while any pause waits for the running block, the person's own too (its
+    # button says Pausing… as well); Running only while nothing waits to pause, and then no tip
+    chip = js[js.index("function stateChip(q) {"):js.index("function renderHead() {")]
+    assert "ownPause" not in chip
+    assert 'if (q.state === "running") {' in chip and '"Running", "run", ""];' in chip
+    assert 'if (q.state === "pausing") return ["Pausing", "warn", q.reason || ""];' in chip
+    assert chip.index('if (q.state === "running") {') < chip.index('if (q.state === "pausing")') < chip.index('"paused"')
+    # Home's Sequence tile and its state line say it as the bar does: Pausing, amber, for the person's own pause too
     home = (STATIC / "home.js").read_text(encoding="utf-8")
-    assert 'const ownPause = (q) => q.state === "pausing" && /^paused by human/.test(q.reason || "");' in home
-    assert 'st === "running" || own ? ["blue", "Running"] : st === "pausing" ? ["warn", "Pausing"]' in home
-    assert 'run = n.q.state === "running" || ownPause(n.q);' in home and 'tone: run ? "ok" : "warn"' in home
+    assert "ownPause" not in home
+    assert 'st === "running" ? ["blue", "Running"] : st === "pausing" ? ["warn", "Pausing"]' in home
+    assert 'run = n.q.state === "running";' in home and 'tone: run ? "ok" : "warn"' in home
     # the tile's tip is why, as the bar's is: of any pause (the person's own too), and of a sequence that ended for one
     assert ('const why = st === "pausing" || st === "paused" ? said : (kind === "ok" || kind === "bad") && '
             'said !== "finished" ? said : "";') in home
