@@ -167,7 +167,8 @@ def test_a_run_its_step_followed_or_that_ended_unseen_gets_its_card_and_tab():
     assert "toolEnd(id, content, isError, runId, images, live)" in end
     assert "runId = runId || (step.card && step.card.runId);" in end   # a script that read nothing Kelvin knows
     assert "const fresh = live && !RUNS.tabs.has(runId) && !RUNS.dismissed.has(runId);" in end
-    assert "if (fresh) openRun(runId, tab.plan);" in end   # over before the Runs pane saw it: shown now
+    # over before the Runs pane saw it: shown as a run that starts is (showNewRun), never putting a pane away
+    assert "if (fresh) showNewRun(runId, tab.plan);" in end and "openRun" not in end
     assert 'setTabStatus(tab, "finishing"); loadFinal(tab);' in end   # loadFinal tells the Analysis pane
     assert "reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id, ev.images, true);" in JS   # as it happens
     assert ", true)" not in _js("replayMessage")   # a chat read back opens no tabs

@@ -630,11 +630,13 @@
   function stateChip(q) {
     const all = q.items || [];
     if (!all.length && q.state !== "running" && q.state !== "pausing") return ["Idle", "line", ""];   // nothing to resume
-    if (q.state === "running" || ownPause(q)) {   // the person's own pause: still running, and Pause says Pausing…
+    if (q.state === "running") {
       const at = all.findIndex((i) => i.status === "running");
-      return [at >= 0 ? "Running " + (at + 1) + " of " + all.length : "Running", "run", q.state === "running" ? "" : q.reason];
+      return [at >= 0 ? "Running " + (at + 1) + " of " + all.length : "Running", "run", ""];
     }
-    if (q.state === "pausing") return ["Pausing", "warn", q.reason || ""];   // Kelvin's, a failure's, a guard's or Stop's
+    // any pause that waits for the running block: the person's own (Pausing… takes it back), Kelvin's, a failure's, a
+    // guard's or Stop's; why is the tip
+    if (q.state === "pausing") return ["Pausing", "warn", q.reason || ""];
     if (q.state === "paused") return ["Paused", "warn", q.reason || ""];
     if (all.length && !q.waiting && !q.running) return ["Done", "ok", q.reason && q.reason !== "finished" ? q.reason : ""];
     return ["Idle", "line", ""];

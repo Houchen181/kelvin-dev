@@ -902,7 +902,8 @@
     monotonic: "monotonic", structured: "structure", value: "value", none: "too few points" };
 
   // a finished run's automatic analysis: {box: its assessment, two lines and the rest a press away (a disclosure: its
-  // chevron, or a click on it), table: its key results (or null), rows: how many}; the run view folds the table
+  // chevron, or a click on it), table: its key results (or null), rows: how many, whole(on): the whole assessment
+  // shown or folded without a press, when there is more than its two lines}; the run view folds the table
   function analysisBlock(a) {
     const box = h("div", { class: "analysis" });
     const ok = !a.issues.length;
@@ -912,11 +913,11 @@
     const more = h("button", { class: "assess-more", type: "button", "aria-expanded": "false", "aria-controls": body.id,
                                title: "The whole assessment", "aria-label": "The whole assessment", hidden: true }, icon("chev"));
     const as = h("div", { class: "assess" + (ok ? "" : " warn") }, h("span", { class: "assess-icon" }, icon(ok ? "check" : "warn")), body, more);
-    const flip = () => {
-      const on = more.getAttribute("aria-expanded") !== "true";
+    const show = (on) => {
       more.setAttribute("aria-expanded", String(on));
       as.classList.toggle("open", on);
     };
+    const flip = () => show(more.getAttribute("aria-expanded") !== "true");
     more.addEventListener("click", (e) => { e.stopPropagation(); flip(); });
     as.addEventListener("click", (e) => { if (!more.hidden && !e.target.closest("a, button") && !String(getSelection()).trim()) flip(); });
     // closed: the assessment's first two lines; the chevron is there while there is more (Next, an issue, a third line)
@@ -924,6 +925,11 @@
     const cut = () => { more.hidden = !as.classList.contains("open") && !more2 && text.scrollHeight <= text.clientHeight + 1; };
     if (window.ResizeObserver) new ResizeObserver(cut).observe(text);
     cut();
+    const whole = (on) => {
+      if (on && !more2 && text.scrollHeight <= text.clientHeight + 1) return;   // two lines say it all
+      show(on);
+      cut();
+    };
     box.append(as);
     const rows = [];
     for (const s of a.series.slice(0, 6)) {
@@ -935,7 +941,7 @@
       for (const r of s.results) rows.push(h("tr", {}, h("td", {}, r.name), h("td", {}, r.value)));
     }
     const table = rows.length ? h("div", { class: "results" }, h("table", {}, h("tbody", {}, ...rows))) : null;
-    return { box, table, rows: rows.length };
+    return { box, table, rows: rows.length, whole };
   }
   // a part of the run view a press away: a small button that keeps its name, its chevron turning while the part shows
   // under the row of these buttons (aria-expanded); onOpen each time it opens
@@ -1006,9 +1012,12 @@
     tab.status = status;
     liveDots();
   }
-  function liveDots() {   // a run running: a dot on the Runs button, and on Scan while the Sequence is shown
+  // a run running: a dot on the Runs button (its sequence's count in the accent instead, where it shows one), and on
+  // Scan while the Sequence is shown
+  function liveDots() {
     const live = [...RUNS.tabs.values()].some((t) => t.status === "running");
     $("runs-dot").hidden = !live;
+    $("toggle-runs").classList.toggle("run-live", live);
     $("open-scan").classList.toggle("live", live);
   }
   function selectRun(runId) {
@@ -1104,15 +1113,23 @@
     toggleRuns(true);
   }
 
-  // a run started (seen in the chat stream or in the lab state): its view, the Scan's from now on, shown and followed;
-  // while the pane shows the Sequence the Sequence stays, and Scan's dot says a run is on
+  // a run started (seen in the chat stream or in the lab state): its view, the Scan's from now on, shown and followed
   function noticeRun(runId, plan) {
     if (RUNS.tabs.has(runId) || RUNS.dismissed.has(runId)) return;
-    const tab = runTab(runId, plan);
-    setTabStatus(tab, "running");
-    RUNS.active = runId;
-    if (!scheduling()) openRun(runId, plan);
+    setTabStatus(runTab(runId, plan), "running");
+    showNewRun(runId, plan);
     pollLive();
+  }
+  // a run the page hears of by itself (it started, or it ended before the Runs pane saw it): the Scan's run from now
+  // on. While the pane shows the Sequence the Sequence stays, and Scan's dot says a run is on. Runs opens by itself only
+  // where it stands beside the panes open now (fitsBeside): it never puts one away, nor takes the chat's place. Else
+  // the screen stays as it is, the dot on Runs (its sequence's count in the accent, where it shows one) says a run is
+  // on, and Runs' button shows the run in the Scan
+  function showNewRun(runId, plan) {
+    RUNS.active = runId;
+    if (scheduling()) return;
+    if (fitsBeside("runpane")) openRun(runId, plan);
+    else selectRun(runId);
   }
   function scheduling() {
     return RUNS.open && RUNS.view === "schedule";
@@ -1378,14 +1395,14 @@
       v.analysis.replaceChildren(...(a ? [a.box] : []));
       v.results.replaceChildren(...(a && a.table ? [a.table] : []));
       v.keys.hidden = !(a && a.table);
-      if (a && a.table) { v.keysPending = true; v.keysRows = a.rows; }
-      keysOnce(tab);
+      if (a) { v.keysPending = true; v.keysRows = a.table ? a.rows : 0; v.whole = a.whole; }
       v.charts.replaceChildren(runCharts(tab.final));
       v.plan.hidden = !tab.final.plan_text;
       v.planBox.querySelector("pre").textContent = tab.final.plan_text || "";
       v.again.hidden = false;
       runFiles(tab, v.files, v.fileView);
       if (!v.table.hidden) v.table.replaceChildren(runTable(tab.final));
+      keysOnce(tab);   // drawn whole first: judged by what it takes
       return;
     }
     if (running && !tab.timer) {  // live plots: redraw at most a few times a second
@@ -1397,18 +1414,44 @@
       }, 300);
     }
   }
-  // a finished run's key results open by themselves only where there is room for them: beside the plots (the view
-  // 900 px or wider), a window not short (tight), and 14 rows or fewer. Judged once, when its view first has a width: a
-  // run that finished out of sight (another tab, the Sequence, Runs closed) is judged when it is first shown
+  // a finished run's key results (14 rows or fewer) and its whole assessment (Next, the issues) open by themselves only
+  // where there is room for them. Judged once, when its view first has a size: a run that finished out of sight (the
+  // Sequence shown, Runs closed) is judged when it is first shown. Beside the plots (the view 900 px or wider, a window
+  // not short): the key results, and the whole assessment when the side then holds it without scrolling. Above the
+  // plots: both, or else the key results alone, when the plots keep at least 2/5 of their width in height (no flatter
+  // than 5:2) and stay above their least (so the view needs no scrolling). Each is opened, measured and folded again in
+  // one go, before anything is drawn: nothing moves. (A plot is drawn again at its new height a moment later, so its
+  // picture is not what is measured: its place is)
   function keysOnce(tab) {
     const v = tab && tab.view;
     if (!v || !v.keysPending) return;
-    const w = tab.body.getBoundingClientRect().width / ((Kelvin.zoom && Number(Kelvin.zoom())) || 1);
+    const w = tab.body.getBoundingClientRect().width / layoutZoom();
     if (!w) return;
     v.keysPending = false;
-    if (v.keysRows <= 14 && w >= 900 && !document.documentElement.classList.contains("fit-tight")) rvOpen(v.keys, true, null, true);
+    const keys = v.keysRows > 0 && v.keysRows <= 14;
+    const open = (k, all) => { if (keys) rvOpen(v.keys, k, null, true); v.whole(all); };
+    if (w >= 900) {
+      if (document.documentElement.classList.contains("fit-tight")) return;
+      open(true, true);
+      if (v.side.scrollHeight > v.side.clientHeight + 1) v.whole(false);
+      return;
+    }
+    const least = parseFloat(getComputedStyle(v.charts).minHeight) || 0;   // the page's pixels, as w
+    const room = () => {
+      const c = v.charts.getBoundingClientRect(), z = layoutZoom();
+      return c.height >= c.width * 0.4 && c.height / z > least + 1;
+    };
+    for (const all of [true, false]) {
+      open(true, all);
+      if (room()) return;
+    }
+    open(false, false);
   }
-  document.addEventListener("kelvin:layout", () => keysOnce(RUNS.tabs.get(RUNS.active)));   // shown, or full screen
+  // shown, full screen, or the Scan shown again: then once the layout that shows it is done (Runs opening lays out
+  // after it says what is in sight), still before anything is drawn
+  const keysNow = () => keysOnce(RUNS.tabs.get(RUNS.active));
+  document.addEventListener("kelvin:layout", keysNow);
+  document.addEventListener("kelvin:seq", () => queueMicrotask(keysNow));
 
   // The side panels each open and close on their own, and each keeps the width it was left at (drag its left edge).
   // Beside the main column (the chat or Home), which keeps at least CHAT_MIN pixels, they stand side by side in the
@@ -1484,6 +1527,11 @@
     const open = openPanes();
     return open.length === 1 && paneRoom() < least(open[0]) ? open[0] : null;
   }
+  // a pane would stand beside the main column and the panes open now, all at their least widths: opening it puts
+  // none of them away and leaves the main column in its place (under full screen too, for when it ends)
+  function fitsBeside(id) {
+    return isOpen(id) || sum([...openPanes(), id].map(least)) <= paneRoom();
+  }
   // the layout for the panels open now, the sidebar and the window, after anything that opens, closes or sizes one
   // and on every resize; the classes say how app.css places them, in the page's own pixels (no media query: they
   // follow the page size)
@@ -1494,7 +1542,7 @@
     ROOM.shown = open;
     // One more will not fit beside the main column even at the least widths: the pane looked at least recently is put
     // away, and its toggle lays out again. Never the pane being typed in, unless the room is for one the person or a
-    // waiting request asked for (paneShow): a run that starts, or Kelvin's analyze, never takes it away mid-sentence
+    // waiting request asked for (paneShow): Kelvin's analyze never takes it away mid-sentence
     // (with no other to go, the newcomer goes, and waits for its button). Not while full screen covers them (they wait
     // under it), nor while the window is still changing size or out of sight: a window being sized, or minimized,
     // closes nothing
@@ -1714,15 +1762,20 @@
   }
   function initPanes() {
     const kept = (key) => Number(store(key)) || 0;
-    PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(720, Math.max(420, layoutW() * 0.42)));
-    PANE_W.anpane = kept("lh.anWidth") || PANE_W.runpane;   // until it has its own: the one it shared with Runs
+    // the first time, Runs and Analysis open at 42 % of the window, never under 420: Runs up to 960 (on a big monitor
+    // a run's analysis then stands beside its plots), Analysis up to 720. A width dragged is kept, and Analysis takes
+    // Runs' kept width until it has its own
+    const wide = Math.max(420, layoutW() * 0.42);
+    PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(960, wide));
+    PANE_W.anpane = kept("lh.anWidth") || kept("lh.runsWidth") || Math.round(Math.min(720, wide));
     PANE_W.edpane = kept("lh.edWidth") || 460;
     PANE_W.labpanel = kept("lh.labWidth") || 380;
     PANE_W.teampanel = kept("lh.teamWidth") || PANE_W.labpanel;
     if (sideNarrow()) SIDE.hidden = true;   // a narrow window opens on the chat or Home, never on the list (not kept)
     for (const id of Object.keys(PANES)) {
+      // kept: the widths of the panes open (the one dragged, and those it read back), never a closed one's first width
       edgeResize($(id + "-resize"), $(id), (w) => sizePane(id, w), () => {
-        for (const p of Object.keys(PANES)) store(PANES[p][3], String(PANE_W[p]));
+        for (const p of openPanes()) store(PANES[p][3], String(PANE_W[p]));
       });
       // looking at a pane: a press or the focus inside it (opening it is one too: fitLayout); kept with the layout
       const looked = () => { look(id); layoutSaid(); };
@@ -2652,7 +2705,7 @@
       const fresh = live && !RUNS.tabs.has(runId) && !RUNS.dismissed.has(runId);   // over before the Runs pane saw it
       const tab = fresh ? runTab(runId, step.card.plan || runId.replace(/^\d{8}-\d{6}-/, "")) : RUNS.tabs.get(runId);
       if (tab && !tab.final) { setTabStatus(tab, "finishing"); loadFinal(tab); }   // the Analysis pane hears of it
-      if (fresh) openRun(runId, tab.plan);
+      if (fresh) showNewRun(runId, tab.plan);
     }
     runProgress(ev) {  // the data go to the runs pane; the conversation keeps a compact card
       const step = this.steps.get(ev.call_id);
