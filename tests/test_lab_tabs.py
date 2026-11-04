@@ -69,9 +69,10 @@ def test_every_way_into_a_part_chooses_its_tab():
     assert 'chooseLabPart(form.closest(".lab-part").dataset.part);' in _function(js, "partForm")   # Add…, a note's pencil
     assert "partForm(\"labmem-form\", true);" in _function(js, "editLabNote")
     # nothing else chooses a part: every reveal goes through partForm, the strip or its keys (and, wide or narrowing,
-    # the part pressed or holding the focus)
+    # the part pressed or holding the focus), or a link to the Lab on one part (paneShow: an alarm's)
     callers = [m.start() for m in re.finditer(r"chooseLabPart\(", js)]
-    allowed = [_function(js, n) for n in ("partForm", "initLabTabs", "labTabKeys", "chooseLabPart", "labTabRoles")]
+    allowed = [_function(js, n) for n in ("partForm", "initLabTabs", "labTabKeys", "chooseLabPart", "labTabRoles",
+                                          "paneShow")]
     for at in callers:
         assert any(js.index(body) <= at < js.index(body) + len(body) for body in allowed), js[at - 80:at + 40]
     # a request waiting is asked above every part, so it shows whichever part is chosen
@@ -132,8 +133,8 @@ def test_the_chosen_part_is_kept_and_a_part_that_shows_nothing_is_never_chosen()
     assert 'const labTabShown = (id) => LAB_TABS.tabs.has(id) && !$("lab-sec-" + id).hidden;' in js
     assert 'const kept = store("lh.labPart");' in build
     assert "chooseLabPart(labTabShown(kept) ? kept : [...LAB_TABS.tabs.keys()].find(labTabShown));" in build
-    assert choose.startswith("function chooseLabPart(id) {\n    if (!labTabShown(id)) return;")
-    assert 'store("lh.labPart", id);' in choose and 'tab.hidden = $("lab-sec-" + k).hidden;' in choose
+    assert choose.startswith("function chooseLabPart(id, keep = true) {\n    if (!labTabShown(id)) return;")
+    assert 'if (keep) store("lh.labPart", id);' in choose and 'tab.hidden = $("lab-sec-" + k).hidden;' in choose
     assert ".filter((t) => !t.hidden)" in _function(js, "labTabKeys")   # the keys step over a part not shown
 
 

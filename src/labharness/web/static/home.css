@@ -43,8 +43,12 @@
   overflow: hidden; padding: var(--pad-card, 18px 20px); background: var(--card); border: 1px solid var(--card-line);
   border-radius: 16px; box-shadow: var(--home-shadow); cursor: pointer; transition: border-color .15s, box-shadow .15s; }
 html.fit-compact .home-tile { max-height: 220px; }
-.home-tile:hover, .home-tile:has(.home-tile-go:focus-visible) {
+/* its ring: under a pointer that hovers (a touch screen keeps :hover on what was tapped), or for the keyboard */
+:where(html:not(.k-pointer)) .home-tile:has(.home-tile-go:focus-visible) {
   border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--home-shadow); }
+@media (hover: hover) {
+  .home-tile:hover { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--home-shadow); }
+}
 .home-tile.live { border-color: var(--accent); }
 .home-tile-head { display: flex; align-items: center; gap: var(--sp-2, 8px); min-width: 0; }
 .home-tile-go { flex: 1 1 auto; min-width: 0; margin: 0; padding: 0; border: 0; background: none; cursor: pointer; text-align: left;

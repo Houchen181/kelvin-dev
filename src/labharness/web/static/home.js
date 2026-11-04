@@ -110,9 +110,11 @@
     analysis: ["anpane", null, () => K.toggleAnalysis(true)],
   };
   // a tile is a link to its place: Kelvin.paneShow shows the pane when it is not on the screen (in full
-  // screen too), and when it is, leaves it there and rings its head; a tile never hides it
+  // screen too), and when it is, leaves it there and rings its head; a tile never hides it. The Lab's place is Watches
+  // while an alarm is on (its chip counts them), else the part chosen last
   function goTo(name) {
-    const [pane, view, open] = PLACES[name];
+    const [pane, place, open] = PLACES[name];
+    const view = name === "lab" ? (alarmsOn(K.S.last).length ? "watches" : "kept") : place;
     if (K.paneShow) K.paneShow(pane, view); else open();
   }
   function tile(name, title) {   // a card that is its pane's link: its title, its number, what it holds

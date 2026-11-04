@@ -135,6 +135,12 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 [hidden] { display: none !important; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* the focus ring is the keyboard's. A press of the mouse or a finger marks the page (html.k-pointer, app.js) until the
+   next key, so a control pressed, or one the page gives the focus after it (a menu closing back onto its button, a
+   dialog's first button), draws no ring and no glow; a key brings them back at once. A text field keeps its caret and
+   its border while it is typed in */
+html.k-pointer :focus-visible:not(textarea, input:is(:not([type]), [type="text"], [type="search"], [type="number"], [type="email"],
+  [type="url"], [type="password"], [type="tel"]), .drop-on) { outline: none !important; }
 
 .nokey { max-width: 520px; margin: calc(18 * var(--vh)) auto; padding: 0 16px; text-align: center; }
 .nokey img { display: block; margin: 0 auto 12px; }
@@ -281,7 +287,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
   background: var(--raised); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: var(--shadow); }
 .menu-item { display: flex; align-items: center; gap: 9px; width: 100%; border: 0; background: none; padding: 7px 9px; border-radius: 7px;
   font-size: 13.5px; color: var(--text); cursor: pointer; text-align: left; }
-.menu-item:hover, .menu-item:focus-visible { background: var(--hover); outline: none; }
+.menu-item:hover, :where(html:not(.k-pointer)) .menu-item:focus-visible { background: var(--hover); outline: none; }
 .menu-item svg { width: 15px; height: 15px; color: var(--muted); }
 .menu-item .menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .menu-item.danger, .menu-item.danger svg { color: var(--danger); }
@@ -547,7 +553,10 @@ body:not(.incognito) #empty-sub { display: none; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 4px 2px 2px; font-size: 12.5px; color: var(--text-2); }
 .legend .key { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+/* a few words for a moment: placeToast (app.js) stands it just above the message box, centred on the main column; as
+   wide as its words, never wider than the window */
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px); opacity: 0; pointer-events: none;
+  width: max-content; max-width: calc(100% - 32px);
   background: var(--text); color: var(--bg); padding: 9px 16px; border-radius: 10px; font-size: 14px; box-shadow: var(--shadow);
   transition: opacity .2s, transform .2s; z-index: 50; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
@@ -564,7 +573,9 @@ body:not(.incognito) #empty-sub { display: none; }
   max-width: 780px; margin: 0 auto; background: var(--raised); border: 1px solid var(--line-strong);
   border-radius: 20px; box-shadow: var(--shadow); padding: 12px 12px 8px 16px;
 }
-.composer:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--line-strong)); }
+/* the box is the message field's: its border takes the accent while the field is typed in, never for a button of its
+   row (each button has its own keyboard ring) */
+.composer:has(#input:focus) { border-color: color-mix(in srgb, var(--accent) 55%, var(--line-strong)); }
 .composer textarea { width: 100%; border: 0; outline: none; resize: none; background: none; line-height: 1.5; max-height: 220px; min-height: 26px; padding: 2px 0; }
 .composer-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .slash-menu { position: absolute; left: 10px; right: 10px; bottom: calc(100% + 6px); z-index: 20; max-height: 280px; overflow-y: auto;
@@ -686,8 +697,14 @@ body:not(.incognito) #empty-sub { display: none; }
 .field label, .field-label { font-weight: 550; font-size: 14px; }
 .field input, .field select, .field textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 7px 10px;
   background: var(--raised); color: var(--text); font-size: 14px; }
-.field input:focus, .field select:focus, .field textarea:focus, .add-row input:focus, .add-row select:focus, .pane-filter:focus,
-.inst-tools input:focus, .mount-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* a field typed in glows while it has the focus; a box or a round choice (checkbox, radio) pressed does not: it has the
+   keyboard's ring alone (:focus-visible), which a press takes away (k-pointer) */
+:is(.field, .add-row, .inst-tools) input:where(:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"])):focus,
+.field textarea:focus, .pane-filter:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* a list (select) rings for the keyboard only: pressed with the mouse or a finger it keeps its own border (k-pointer) */
+.field select:focus, .add-row select:focus, .mount-select:focus { outline: none; }
+:where(html:not(.k-pointer)) :is(.field select, .add-row select, .mount-select):focus-visible {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .field input[type="checkbox"], .field input[type="radio"] { width: auto; }
 .field textarea { resize: vertical; min-height: 84px; max-height: calc(50 * var(--vh)); line-height: 1.45; }
 .field-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
@@ -929,10 +946,19 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .alert.cleared { border-color: var(--card-line); background: var(--card); }
 .alert.cleared > svg { color: var(--muted); }
 .alert-body .alert-when { color: var(--muted); font-size: 12px; }
+/* the alarms after the newest, counted on one row that opens Lab → Watches: the whole row is its button */
+.alert-more { min-height: 30px; font: inherit; color: var(--text); text-align: left; cursor: pointer; }
+@media (hover: hover) {   /* a pointer over it; a touch screen keeps :hover on what was tapped, and the ring would stay */
+  .alert-more:hover { box-shadow: inset 0 0 0 1px var(--danger); }
+}
+.alert.alert-more > svg:last-child { width: 16px; height: 16px; color: var(--text-2); }
 .alarm-history { margin: 0 0 8px; font-size: 13px; }
-/* Alarm history: a disclosure (its button) over its list, which opens by height (.k-fold, foldOpen in app.js) */
+/* Alarm history: a disclosure (its button) over its list, which opens by height (.k-fold, foldOpen in app.js); each
+   alarm nobody has answered has its Got it at the right */
 .alarm-history .k-fold-in > ul { margin: 4px 0 0; }
-.alarm-history li { display: grid; gap: 1px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.alarm-history li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.alarm-history li > div { flex: 1 1 auto; min-width: 0; display: grid; gap: 1px; }
+.alarm-history li > .btn { flex: none; }
 .alarm-history li span { color: var(--muted); font-size: 12px; }
 .watch-list { list-style: none; margin: 0 0 6px; padding: 0; display: grid; gap: 2px; }
 .watch { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 8px; font-size: 13px; }
@@ -987,7 +1013,7 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .runpane { position: relative; flex: none; width: 560px; min-width: 0; display: flex; flex-direction: column;
   background: var(--page); border-left: 1px solid var(--line); }
 .pane-resize { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 5; touch-action: none; }
-.pane-resize:hover, .pane-resize:focus-visible, body.resizing .pane-resize {
+.pane-resize:hover, :where(html:not(.k-pointer)) .pane-resize:focus-visible, body.resizing .pane-resize {
   outline: none; background: linear-gradient(to right, transparent 3px, var(--accent) 3px, var(--accent) 5px, transparent 5px); }
 body.resizing { cursor: col-resize; user-select: none; }
 .hint.bad { color: var(--danger); }
@@ -1011,7 +1037,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   background: var(--term-bg); color: var(--term-text); border-top: 1px solid var(--term-line); }
 .termpane[hidden] { display: none; }
 .term-resize { position: absolute; left: 0; right: 0; top: -4px; height: 8px; cursor: row-resize; z-index: 5; touch-action: none; }
-.term-resize:hover, .term-resize:focus-visible, body.resizing-v .term-resize { background: color-mix(in srgb, var(--term-prompt) 40%, transparent); outline: none; }
+.term-resize:hover, :where(html:not(.k-pointer)) .term-resize:focus-visible, body.resizing-v .term-resize { background: color-mix(in srgb, var(--term-prompt) 40%, transparent); outline: none; }
 body.resizing-v { cursor: row-resize; user-select: none; }
 .term-head { display: flex; align-items: center; gap: 10px; padding: 4px 8px 4px 14px; background: var(--term-head);
   border-bottom: 1px solid var(--term-line); font-size: 12.5px; }
@@ -1291,6 +1317,15 @@ body.resizing .plot-svg { pointer-events: none; }
 #app.full #workcol, #app.full #sidecol { flex: 1 1 auto; min-height: 0; width: auto !important; }
 #app.full .full-on { flex: 1 1 auto; width: auto !important; height: auto !important; min-width: 0; min-height: 0;
   border-left: 0; border-top: 0; }
+/* on a wide window what the panel holds stands in a column as wide as Home's (1440 px and its padding), centred, so a
+   field stays near its label and a button near what it acts on; the panel's head stays across the window. Not the
+   terminal, whose lines are as long as they are */
+#app.full:not(.full-term) .full-on > :not(header) {
+  margin-inline: max(0px, calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2)); }
+/* a band at the panel's foot (the editor's Run and Add to sequence, Team chat's message box) keeps its line and its
+   fill across, and centres what it holds in the same column, its own side padding (--foot-x) kept */
+#app.full:not(.full-term) .full-on > :is(.ed-foot, .team-form, .team-name-form) { margin-inline: 0;
+  padding-inline: max(var(--foot-x), calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2 + var(--foot-x))); }
 
 /* Settings, Instruments: the lab's scripts folders, and what Kelvin installed for instruments */
 .env-list { list-style: none; padding: 0; margin: 4px 0 6px; }
@@ -1410,7 +1445,8 @@ body.resizing .plot-svg { pointer-events: none; }
 .tm-text { padding: 6px 11px; border-radius: 14px; background: var(--surface-1); border: 1px solid var(--card-line); font-size: var(--fs-body, 15px);
   line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tm.mine .tm-text { background: var(--accent-soft); border-color: transparent; }
-.team-form, .team-name-form { display: flex; align-items: flex-end; gap: 8px; padding: var(--sp-2, 8px) var(--sp-3, 12px) var(--sp-3, 12px);
+.team-form, .team-name-form { --foot-x: var(--sp-3, 12px); display: flex; align-items: flex-end; gap: 8px;
+  padding: var(--sp-2, 8px) var(--foot-x) var(--sp-3, 12px);
   border-top: 1px solid var(--line); background: var(--panel); flex: none; }
 .team-form textarea, .team-name-form input { flex: 1; min-width: 0; border: 1px solid var(--line-strong); border-radius: 14px;
   padding: 7px 12px; background: var(--raised); color: var(--text); font: inherit; font-size: var(--fs-body, 15px); resize: none; max-height: 160px;
@@ -1424,7 +1460,8 @@ body.resizing .plot-svg { pointer-events: none; }
 .an-run { min-width: 0; width: 100%; }
 .an-body select { border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 6px 8px; background: var(--raised);
   color: var(--text); font: inherit; font-size: 13.5px; min-width: 0; }
-.an-body select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.an-body select:focus { outline: none; }
+:where(html:not(.k-pointer)) .an-body select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 /* the subagent at work: what it does now */
 .an-status { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 13px; }
 .an-note { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
@@ -1474,7 +1511,9 @@ body.resizing .plot-svg { pointer-events: none; }
 .ed-f > i { font-style: normal; }
 .ed-in { min-width: 0; border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 4px 8px; background: var(--raised);
   color: var(--text); font-size: 13.5px; font-variant-numeric: tabular-nums; }
-.ed-in:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.ed-in:focus { outline: none; }
+.ed-in:where(:not(select)):focus, :where(html:not(.k-pointer) select).ed-in:focus-visible {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .ed-in:disabled { color: var(--muted); background: transparent; }
 .ed-in::placeholder { color: var(--muted); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-style: italic; }
 .ed-short { width: 66px; }
@@ -1512,7 +1551,8 @@ body.resizing .plot-svg { pointer-events: none; }
 .ed-plan .btn svg { width: 14px; height: 14px; }
 .ed-problems { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; color: var(--danger); font-size: 12.5px; overflow-wrap: anywhere; }
 .ed-problems:empty { display: none; }
-.ed-foot { flex: none; display: grid; gap: 6px; padding: 8px 14px 12px; border-top: 1px solid var(--line); background: var(--panel); }
+.ed-foot { --foot-x: 14px; flex: none; display: grid; gap: 6px; padding: 8px var(--foot-x) 12px; border-top: 1px solid var(--line);
+  background: var(--panel); }
 .ed-state { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-height: 18px; font-size: 13px; }
 .ed-status { font-weight: 600; font-variant-numeric: tabular-nums; }
 .ed-msg { color: var(--muted); overflow-wrap: anywhere; }
@@ -1617,7 +1657,9 @@ button.link:disabled { opacity: .5; cursor: default; }   /* waiting, as a .btn d
 /* fields */
 .kfield { border: 1px solid var(--line-strong); background: var(--panel); border-radius: var(--radius-s); padding: 6px 9px; min-width: 0;
   font-size: 14px; color: var(--text); }
-.kfield:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.kfield:focus { outline: none; }
+.kfield:where(:not(select)):focus, :where(html:not(.k-pointer) select).kfield:focus-visible {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .kfield.bad { border-color: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
 select.kfield { padding-right: 26px; }
 
@@ -1647,7 +1689,7 @@ select.kfield { padding-right: 26px; }
 .folder-items { display: flex; flex-direction: column; height: min(calc(46 * var(--vh)), 360px); overflow: auto; border: 1px solid var(--card-line);
   border-radius: var(--radius-s); background: var(--card); }
 .folder-items:focus { outline: none; }
-.folder-items:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+:where(html:not(.k-pointer)) .folder-items:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .folder-item { display: flex; flex: none; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0;
   border-top: 1px solid var(--line); background: none; color: var(--text); font-size: 14px; text-align: left; cursor: pointer; }
 .folder-item:first-child { border-top: 0; }
@@ -1655,8 +1697,8 @@ select.kfield { padding-right: 26px; }
 .folder-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder-item:hover { background: var(--hover); }
 .folder-item:focus { outline: none; }
-.folder-item:focus-visible { background: var(--accent-soft); color: var(--accent); }
-.folder-item:focus-visible svg { color: var(--accent); }
+:where(html:not(.k-pointer)) .folder-item:focus-visible { background: var(--accent-soft); color: var(--accent); }
+:where(html:not(.k-pointer)) .folder-item:focus-visible svg { color: var(--accent); }
 .folder-items > .hint { margin: 0; padding: 8px 10px; }
 .folder-note { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0; overflow-wrap: anywhere; }
 .folder-note:empty { display: none; }
@@ -1687,9 +1729,9 @@ select.kfield { padding-right: 26px; }
 #toggle-sidebar[data-tip]::after { left: 0; transform: translate(0, -4px); }
 /* a name shows while its button has the keyboard's focus, or under a pointer that hovers (a touch screen keeps :hover
    on what was tapped, and the name would stay over the pane's head) */
-.topbar-right .pill[data-tip]:focus-visible::after { opacity: 1; transform: translate(-50%, 0); transition-delay: .12s; }
-.topbar-right .pill[data-tip]:last-child:focus-visible::after { transform: none; }
-#toggle-sidebar[data-tip]:focus-visible::after { opacity: 1; transform: none; transition-delay: .12s; }
+:where(html:not(.k-pointer)) .topbar-right .pill[data-tip]:focus-visible::after { opacity: 1; transform: translate(-50%, 0); transition-delay: .12s; }
+:where(html:not(.k-pointer)) .topbar-right .pill[data-tip]:last-child:focus-visible::after { transform: none; }
+:where(html:not(.k-pointer)) #toggle-sidebar[data-tip]:focus-visible::after { opacity: 1; transform: none; transition-delay: .12s; }
 @media (hover: hover) {
   .topbar-right .pill[data-tip]:hover::after { opacity: 1; transform: translate(-50%, 0); transition-delay: .12s; }
   .topbar-right .pill[data-tip]:last-child:hover::after { transform: none; }
@@ -1819,7 +1861,7 @@ dialog[open]::backdrop { animation: k-fade .15s ease; }
   .switch { width: 44px; height: 40px; }
   #toggle-sidebar, .topbar .topbar-right .pill { min-width: 40px; min-height: 40px; justify-content: center; }
   .topbar .mode-seg button { min-height: 40px; }
-  #notices :is(.btn, button.link) { min-height: 40px; }   /* Got it, Unlock…, the update's button */
+  #notices :is(.btn, button.link, .alert-more) { min-height: 40px; }   /* Got it, Unlock…, the update's button, n more */
 }
 @media (prefers-reduced-motion: reduce) {
   .switch::before, .switch > span { transition: background-color .15s ease, border-color .15s ease; }
@@ -2146,7 +2188,7 @@ select.ed-in { padding: 4px 6px; text-overflow: ellipsis; }
 .ed-set > .ed-unit { flex: 0 0 44px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }   /* values in a column */
 .ed-adds { display: flex; flex-wrap: wrap; gap: 6px; }
 /* the footer: the points and time (and what the last action said) at the left of the buttons, on one row */
-.ed-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 14px; }
+.ed-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px var(--foot-x); }
 .ed-foot > .ed-problems { flex: 1 1 100%; }
 .ed-state { flex: 1 1 90px; min-width: 0; display: grid; gap: 0; line-height: 1.35; }
 .ed-actions { flex: none; gap: 6px; }
