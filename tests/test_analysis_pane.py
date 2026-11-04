@@ -1,10 +1,9 @@
 """The Analysis pane after the overnight user test of Kelvin 0.3.32 (2026-10-30): a symmetrized curve counts each point
-once, the CSV has every curve, units follow expressions and steps, the pane gives a fit its start and held values,
-i, t and repeat are columns to choose, the server draws a map a curve per outer value (for the pane, the API and
-Kelvin's tool alike), a kept fit records what made it, the pane's hints don't look like values, and a chat made
-elsewhere reaches the sidebar."""
+once, the CSV has every curve, units follow expressions and steps, a fit takes start and held values, i, t and repeat
+are columns to choose, the server draws a map a curve per outer value (for the API and Kelvin's tool alike), a kept
+fit records what made it, and a chat made elsewhere reaches the sidebar. Since 2026-11-03 the pane itself has no
+fields: its analysis subagent decides (test_analysis_subagent.py); the routes stay for the phones."""
 import asyncio
-import html
 import re
 
 import pytest
@@ -177,14 +176,18 @@ def test_a_fit_takes_start_and_held_values_and_says_its_parameters(rt):
     assert "needs" not in str(held["curves"][0]["fit"].get("error"))
 
 
-def test_the_pane_has_start_and_hold_fields_and_keeps_them_through_edits():
-    assert 'id="an-fitparams"' in PAGE and 'id="an-group"' in PAGE
-    fields = _js("renderFitParams")
-    assert '"checkbox"' in fields and '"hold"' in fields and "fit.fix = fix" in fields and "fit.start = start" in fields
-    changed = JS[JS.index("const fitChanged = (now) => {"):JS.index('$("an-model").addEventListener("change"')]
-    assert "old[k]" in changed and "fit[k] = Object.fromEntries(kept)" in changed   # Kelvin's start and fix stay
-    assert "Object.keys(ANA.hold)" in _js("anColumns")   # graphene, with C_g and aspect held
-    assert '{ key: "unit", hint: "unit", text: true }' in JS   # the scale step says the unit of its result
+def test_the_subagent_gives_a_fit_its_start_and_held_values_as_the_pane_did():
+    """The pane's start and hold fields went with its other fields (2026-11-03): the analysis subagent's show takes
+    them, as Kelvin's analyze does, with a scale step's unit; the figure's steps say what was held."""
+    from labharness.web import analyst
+    from labharness.web.agent import ANALYZE
+    show = analyst.show_tool(ANALYZE)["schema"]
+    fit = show["properties"]["fit"]["properties"]
+    assert {"start", "fix", "lo", "hi"} <= set(fit) and "unit" in show["properties"]["steps"]["items"]["properties"]
+    assert "runs" not in show["properties"] and show["required"] == ["title"]   # this dataset alone, always titled
+    assert analyst.steps({"fit": {"model": "graphene", "fix": {"C_g": 1.21e-4, "aspect": 2}}}, {})[-1] == \
+        "Fitted graphene's resistance model with C_g = 0.000121, aspect = 2 held"
+    assert 'id="an-fitparams"' not in PAGE and "function renderFitParams(" not in JS
 
 
 # ------------------------------------------------------------------ 5. i, t and repeat
@@ -197,7 +200,6 @@ def test_i_t_and_repeat_are_columns_to_choose(rt):
     out = compute(rt, {"runs": [run], "x": "smu.V", "y": "lockin.X", "group": "repeat"})
     assert [c["label"].split(" · ")[1] for c in out["curves"]] == ["repeat = 1", "repeat = 2", "repeat = 3"]
     assert compute(rt, {"runs": [run], "x": "smu.V", "y": "lockin.X", "where": "i < 11"})["curves"][0]["n"] == 11
-    assert "cols.others" in _js("anColumns")   # suggested under x, y and per
 
 
 # ------------------------------------------------------------------ 6. a map grouped by the server
@@ -250,8 +252,8 @@ def test_a_map_is_a_curve_per_outer_value_for_the_api_kelvins_tool_and_keep(rt, 
     assert "/fits/lockin.X lorentzian @ magnet.B = 500 mT" in said
     (kept,) = fitting.stored(rt._run_dir(run))
     assert kept["spec"]["group"] == "magnet.B"
-    spec = _js("anSpec")
-    assert 'if (!ANA.auto.group) out.group = s.group || "";' in spec   # the pane leaves it to the server
+    # the pane shows Kelvin's analysis with the steps it took, the server's group among them
+    assert shown["steps"] == ["Plotted lockin.X (V) against smu.V (V)", "A curve per magnet.B", "Fitted a Lorentzian"]
 
 
 # ------------------------------------------------------------------ 7. what a kept fit records
@@ -275,14 +277,12 @@ def test_a_kept_fit_records_linear_power_its_start_values_and_its_row(rt):
 
 # ------------------------------------------------------------------ 8. hints that look like hints
 
-def test_the_panes_hints_dont_look_like_values_and_a_disabled_button_looks_disabled():
-    where = re.search(r'<input id="an-where"[^>]*>', PAGE).group(0)
-    assert 'placeholder="all points"' in where and not re.search(r"&gt;|&lt;|>|<", html.unescape(
-        re.search(r'placeholder="([^"]*)"', where).group(1)))
-    assert 'placeholder="one curve"' in re.search(r'<input id="an-group"[^>]*>', PAGE).group(0)
-    assert '$("an-where").placeholder' not in JS   # no longer an example condition of the run's
+def test_the_pane_has_no_fields_to_hint_and_a_disabled_button_looks_disabled():
+    # the pane's where and per fields went (2026-11-03): its subagent decides which points and curves to draw
+    pane = PAGE[PAGE.index('<section id="anpane"'):PAGE.index("</section>", PAGE.index('<section id="anpane"'))]
+    assert not re.search(r"<input\b|placeholder=", pane) and '$("an-where")' not in JS
     css = (STATIC / "app.css").read_text(encoding="utf-8")
-    assert ".an-body input::placeholder" in css and "font-style: italic" in css.split(".an-body input::placeholder")[1]
+    assert ".an-body input::placeholder" not in css
     dark = re.search(r"@media \(prefers-color-scheme: dark\) \{[^{}]*\{ opacity: \.35; \}", css)
     assert dark and ".btn:disabled" in dark.group(0)
 

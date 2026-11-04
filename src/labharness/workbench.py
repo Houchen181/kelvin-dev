@@ -409,9 +409,10 @@ def _curves(rt: Any, spec: Dict[str, Any], notes: List[str], most: int = MAX_CUR
     return out, total
 
 
-def _worked(np: Any, c: Dict[str, Any], steps: Sequence[Any]
+def _worked(np: Any, c: Dict[str, Any], steps: Sequence[Any], trail: Optional[List[Dict[str, str]]] = None
             ) -> Tuple[Any, Any, Optional[str], Optional[str], str, str]:
-    """A curve through the steps: (x, y, x unit, y unit, x name, y name)."""
+    """A curve through the steps: (x, y, x unit, y unit, x name, y name). trail: given, it gets the names and units
+    each step found the curve with (what the Analysis pane says of the step: a crop's ends in x's unit then)."""
     x, y = _finite(np, np.asarray(c["x"], dtype=float), np.asarray(c["y"], dtype=float))
     if not x.size:
         raise AnalysisError("%s has no points to work on" % c["label"])
@@ -419,6 +420,8 @@ def _worked(np: Any, c: Dict[str, Any], steps: Sequence[Any]
     for s in steps:
         if not isinstance(s, dict):
             raise AnalysisError("each step is {op, ...}")
+        if trail is not None:
+            trail.append({"x": xn, "x_unit": xu or "", "y": yn, "y_unit": yu or ""})
         x, y, xu, yu, xn, yn = step(np, x, y, xu, yu, xn, yn, s)
         if not x.size:
             raise AnalysisError("no points are left after %s" % s.get("op"))
@@ -518,7 +521,8 @@ def _no_unit(axis: str, name: str) -> str:
 
 def compute(rt: Any, spec: Dict[str, Any]) -> Dict[str, Any]:
     """The spec worked out: each curve after the steps (and its fit), with the axes' names and units, the group the
-    curves are drawn per, and the fit's parameters by name (for their start and fixed values)."""
+    curves are drawn per, and the fit's parameters by name (for their start and fixed values); the names and units
+    as plotted before the steps (plotted) and as each step found them (at_steps), for saying the steps in words."""
     np = _np()
     steps = _steps(spec)
     f = spec.get("fit") or {}
@@ -529,8 +533,9 @@ def compute(rt: Any, spec: Dict[str, Any]) -> Dict[str, Any]:
     unknown: List[str] = []
     deadline = time.monotonic() + FITS_S
     found, _ = _curves(rt, spec, notes)
-    for c in found:
-        x, y, xu, yu, xn, yn = _worked(np, c, steps)
+    trail: List[Dict[str, str]] = []   # the first curve's names and units at each step (every curve has the same)
+    for k, c in enumerate(found):
+        x, y, xu, yu, xn, yn = _worked(np, c, steps, trail if k == 0 else None)
         axes = {"x": xn, "x_unit": xu or "", "y": yn, "y_unit": yu or ""}
         for axis, u, n in (("x", xu, xn), ("y", yu, yn)):
             if u is None and _no_unit(axis, n) not in unknown:
@@ -541,7 +546,11 @@ def compute(rt: Any, spec: Dict[str, Any]) -> Dict[str, Any]:
             out["fit"] = _fit(np, x, y, xu, yu, "%s vs %s" % (yn, xn), f, deadline)
         curves.append(out)
     result = {"curves": curves, "axes": axes, "notes": notes + unknown,
-              "group": next((c["by"] for c in found if c["by"]), "")}
+              "group": next((c["by"] for c in found if c["by"]), ""), "at_steps": trail}
+    if found:
+        c = found[0]
+        result["plotted"] = {"x": c["xn"], "x_unit": c["xu"] or "", "y": c["yn"], "y_unit": c["yu"] or "",
+                             "row": c.get("row")}
     if fit_on:
         try:
             result["params"] = list(_model(f)[0].params)

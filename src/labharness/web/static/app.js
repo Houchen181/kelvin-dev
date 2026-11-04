@@ -1728,8 +1728,9 @@
   }
   // The layout as this browser leaves it (per browser, never in the link, whose hash holds the key): the panels open,
   // in the order they were looked at, full screen and Sequence | History, beside what each part keeps itself (the
-  // widths above, Chat | Home, the sidebar, the terminal and its height). After every change the parts kept apart hear
-  // of it (kelvin:layout: the panels on the screen, the one in full screen, Chat | Home, the sidebar shown).
+  // widths above, the sidebar, the terminal and its height; never Chat | Home, as Kelvin opens on the chat). After
+  // every change the parts kept apart hear of it (kelvin:layout: the panels on the screen, the one in full screen,
+  // Chat | Home, the sidebar shown).
   const LAYOUT = { back: false, said: "", kept: "" };
   function layoutSaid() {
     const now = { panes: Object.keys(TOGGLE).filter(paneVisible), full: FULL[0] || null,
@@ -1974,7 +1975,7 @@
     out.eln = runButton("Lab notebook", "The run's record as Markdown with its plots, for a lab notebook (ELN)", "download",
       () => fetchDownload("/api/runs/" + encodeURIComponent(runId) + "/eln", runId + ".zip", "lab notebook record"));
     out.analyze = runButton("Analyze", "Open this run in the Analysis pane", null,
-      () => openAnalysis({ runs: [runId] }, null, { x: true, y: true, group: true }));
+      () => openAnalysis({ run: runId }));   // Kelvin's analysis subagent works on it there
     return out;
   }
   // a file Kelvin's code writes, downloaded with the access key (its name from its Content-Disposition)
@@ -2632,12 +2633,12 @@
   class Reply {
     constructor(modelKey) {
       this.el = h("div", { class: "msg assistant" });
-      this.who = h("span", {}, "Kelvin");
+      this.who = h("span", {}, "Kelvin");   // Kelvin answers, whichever model it uses (Compare's lanes say theirs)
       this.el.append(h("div", { class: "who" }, mark(), this.who));
       this.text = null; this.buf = ""; this.raf = 0; this.thinking = null; this.steps = new Map();
       this.setModel(modelKey);
     }
-    setModel(key) { if (key) this.who.textContent = "Kelvin · " + (S.labels[key] || key.split(":").pop()); }
+    setModel(key) { if (key) this.model = key; }   // kept, never shown: the header says only Kelvin
     addText(delta) {
       if (!this.text) { this.endThinking(); this.text = h("div", { class: "md cursor" }); this.buf = ""; this.el.append(this.text); }
       this.buf += delta;
@@ -2763,8 +2764,8 @@
     finish() {
       this.endText(); this.endThinking();
       for (const step of this.steps.values()) if (!step.done && step.unknown) { step.unknown(); step.done = true; }
-      if (!this.tools && this.el.querySelector(":scope > .md")) {   // Copy: the answer's text, as shown
-        const btn = h("button", { class: "link soft", type: "button", title: "Copy this answer" }, icon("copy"), "Copy");
+      if (!this.tools && this.el.querySelector(":scope > .md")) {   // Copy, its icon alone: the answer's text, as shown
+        const btn = h("button", { class: "link soft copy-btn", type: "button", title: "Copy", "aria-label": "Copy this answer" }, icon("copy"));
         btn.addEventListener("click", () => copyText([...this.el.querySelectorAll(":scope > .md")]
           .map((e) => e.dataset.src || e.innerText).join("\n\n"), btn));
         this.tools = h("div", { class: "msg-tools" }, btn);
@@ -2785,7 +2786,7 @@
         ? mediaImg(a.file, a.name)
         : h("span", { class: "file-chip", title: a.run ? a.name + ": run " + a.run : a.name }, svgIcon("M7 3h7l5 5v13H7zM14 3v5h5"),
             a.name + attachedSize(a)))) : null;
-    const copy = h("button", { class: "link soft", type: "button", title: "Copy your message" }, icon("copy"), "Copy");
+    const copy = h("button", { class: "link soft copy-btn", type: "button", title: "Copy", "aria-label": "Copy your message" }, icon("copy"));
     copy.addEventListener("click", () => copyText(text, copy));
     return h("div", { class: "msg user" }, files, h("div", { class: "bubble" }, text), h("div", { class: "msg-tools user-tools" }, copy));
   }
@@ -2832,6 +2833,14 @@
       document.body.append(box);
       box.select();
       try { document.execCommand("copy"); } finally { box.remove(); }
+    }
+    if (btn.classList.contains("copy-btn")) {   // its icon alone (a message's Copy): a tick for a moment, named Copied
+      clearTimeout(btn.copied);
+      btn.replaceChildren(icon("check"));
+      btn.title = "Copied";
+      btn.classList.add("copied");
+      btn.copied = setTimeout(() => { btn.replaceChildren(icon("copy")); btn.title = "Copy"; btn.classList.remove("copied"); }, 1500);
+      return;
     }
     const said = btn.lastChild;
     said.textContent = "Copied";
@@ -2915,8 +2924,7 @@
       if (reply) { replayMessage(reply, m); S.lastReply = reply; }
     });
     if (reply) reply.finish();
-    offerReview(S.lastReply);
-    offerRecheck(S.lastReply);
+    offerRecheck(S.lastReply);   // an earlier second opinion on the latest answer: another model can re-check it
     showEmpty(!chat.messages.length);
     requestAnimationFrame(toBottom);
   }
@@ -4025,12 +4033,13 @@
     if (!text) return;
     const model = $("model").value;
     if (!model) { openSettings(); return; }
-    const extra = S.compare.filter((k) => k !== model);
+    const extra = compareOn() ? S.compare.filter((k) => k !== model) : [];   // Compare, when Settings has it on
     if (extra.length) return sendCompare(text, [model, ...extra]);
     const attachments = await startSend(model);
     if (attachments === null) return;
     $("input").placeholder = askHint();
     showEmpty(false);
+    for (const el of document.querySelectorAll(".msg-actions")) el.remove();   // the answer before is no longer the latest
     thread.append(userBubble(text, attachments));
     const chatId = S.chatId;
     const live = { reply: new Reply(model), box: h("div", { class: "turn-live" }), from: null, steers: [] };
@@ -4074,7 +4083,6 @@
       live.reply.error("Lost the connection to the portal (" + e.message + "). The lab keeps its own log.");
     } finally {
       live.reply.finish();
-      if (S.chatId === chatId) offerReview(live.reply);
       finishLive(chatId, live);
     }
   }
@@ -4119,7 +4127,9 @@
         const reply = new Reply(key);
         const pick = h("button", { class: "btn small", type: "button" }, "Continue with this answer");
         pick.addEventListener("click", () => chooseLane(i));
-        const el = h("div", { class: "lane" }, reply.el, h("div", { class: "lane-foot" }, pick));
+        // which model answered: comparing them is the point here (every other answer says only Kelvin)
+        const who = h("span", { class: "lane-model" }, S.labels[key] || key.split(":").pop());
+        const el = h("div", { class: "lane" }, reply.el, h("div", { class: "lane-foot" }, who, pick));
         return { reply, el, pick };
       });
       this.el = h("div", { class: "compare", style: "--lanes:" + keys.length }, ...this.lanes.map((l) => l.el));
@@ -4141,7 +4151,7 @@
       const chat = await api("/api/chats/" + S.chatId);
       renderChat(chat);
       const last = [...chat.messages].reverse().find((m) => m.role === "user");
-      if (last && last.compare) { S.compare = last.compare.models.filter((k) => k !== r.model).slice(0, 2); compareLabel(); }
+      if (compareOn() && last && last.compare) { S.compare = last.compare.models.filter((k) => k !== r.model).slice(0, 2); compareLabel(); }
       toast("Continuing with " + (S.labels[r.model] || r.model) + ".");
     } catch (e) { toast(e.message); }
   }
@@ -4194,9 +4204,27 @@
       view.lanes[0].reply.error("Lost the connection to the portal (" + e.message + ").");
     } finally {
       for (const l of view.lanes) l.reply.finish();
-      if (S.chatId === chatId) offerReview(S.lastReply);
       finishLive(chatId, live);   // models being compared read nothing meanwhile: what you added is the next message
     }
+  }
+  // Compare stands under the message box only while Settings → Models has Compare models on (off by default). Off, a
+  // message goes to the chosen model alone: the models ticked before are let go, and its menu closes
+  const compareOn = () => !!(S.settings && S.settings.compare_models);
+  function applyCompare() {
+    const on = compareOn();
+    $("compare-wrap").hidden = !on;
+    if (on) return;
+    $("compare-menu").hidden = true;
+    $("compare-btn").setAttribute("aria-expanded", "false");
+    if (S.compare.length) { S.compare = []; compareLabel(); }
+  }
+  async function setCompare(on) {   // its switch (swFlip): at once; a refusal turns it back, the reason beside it
+    $("compare-status").textContent = "";
+    try {
+      const r = await api("/api/settings", { body: { compare_models: on ? "on" : "off" } });
+      S.settings = r.settings;
+      applyCompare();
+    } catch (e) { $("compare-status").textContent = e.message; throw e; }
   }
   function compareLabel() {
     const n = S.compare.length;
@@ -4568,46 +4596,9 @@
       h("ul", {}, ...notes.map((n) => h("li", {}, h("span", { class: "memory-kind" }, n.kind),
         h("span", {}, n.text), h("span", { class: "memory-meta" }, n.scope === "global" ? "every chat" : "this project")))));
   }
-  function offerReview(reply) {  // the latest answer can get a second opinion from another model
-    for (const el of document.querySelectorAll(".msg-actions")) el.remove();
-    if (!reply || !S.chatId || !reply.el.querySelector(".md")) return;
-    const btn = h("button", { class: "link soft", type: "button", "aria-haspopup": "true" }, icon("check"), "Second opinion");
-    const menu = h("div", { class: "pane-menu review-menu", hidden: true });
-    const wrap = h("div", { class: "msg-actions pane-menu-wrap" }, btn, menu);
-    btn.addEventListener("click", () => {
-      if (!menu.hidden) { menu.hidden = true; return; }
-      const preferred = (S.settings && S.settings.reviewer) || "";
-      const models = (S.groups || []).flatMap((g) => g.models.map((m) => ({ key: m.key, label: m.label, provider: g.label })));
-      models.sort((a, b) => (b.key === preferred) - (a.key === preferred));
-      for (let i = models.length - 1; i >= 0; i--) if (!modelAllowed(models[i].key, S.chatRules)) models.splice(i, 1);
-      menu.replaceChildren(h("div", { class: "pane-menu-note" }, "Which model should check this answer?"),
-        ...models.map((m) => {
-          const item = h("button", { class: "pane-menu-item", type: "button" }, h("span", {}),
-            h("span", { class: "pm-name" }, m.label), h("span", { class: "pm-meta" }, m.key === preferred ? "your reviewer" : m.provider));
-          item.addEventListener("click", () => { menu.hidden = true; askReview(reply, wrap, m.key); });
-          return item;
-        }));
-      menu.hidden = false;
-    });
-    (reply.tools || reply.el).append(wrap);
-  }
-  async function askReview(reply, wrap, model) {
-    const pending = h("div", { class: "review pending" }, h("span", { class: "spinner" }),
-      h("span", {}, "Asking " + (S.labels[model] || model) + " for a second opinion…"));
-    (reply.tools && reply.tools.contains(wrap) ? reply.tools : wrap).before(pending);   // above the answer's buttons
-    wrap.hidden = true;
-    try {
-      const r = await api("/api/chats/" + S.chatId + "/review", { body: { model } });
-      const card = reviewCard(r);
-      pending.replaceWith(card);
-      reply.reviewEl = card; reply.reviewData = r;
-      offerRecheck(reply);
-      $("input").placeholder = "Reply — Kelvin will see the second opinion";
-    } catch (e) {
-      pending.replaceWith(h("div", { class: "callout bad" }, e.message));
-      wrap.hidden = false;
-    }
-  }
+  // (an answer has no Second opinion button under it any more, the user's call of 2026-11-03: Copy alone stays there.
+  // Plans still get one from the reviewer chosen in Settings → Models, and an answer's second opinion given before
+  // still shows, with its re-check: offerRecheck)
 
   function handle(reply, ev, chatId) {   // chatId: the chat answering (it may not be the one on screen)
     const here = chatId === undefined || chatId === S.chatId;
@@ -4636,7 +4627,7 @@
       case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id, ev.images, true); pollState(); break;
       case "run_progress": reply.runProgress(ev); break;
       case "computer_step": reply.computerStep(ev); break;
-      case "analysis": if (here) openAnalysis(ev.spec, ev.result); break;
+      case "analysis": if (here) openAnalysis(ev); break;   // Kelvin's analyze: its spec, result and steps
       case "note": reply.note(ev.text); break;
       case "memory": reply.memory(ev.notes); break;
       case "review_start": reply.reviewStart(ev); break;
@@ -8308,6 +8299,8 @@
     fillDefaultModel();
     fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
     $("reviewer").options[0].textContent = "Off";
+    swSet($("compare-on"), compareOn());   // a switch: it acts at once, never waits for Save
+    $("compare-status").textContent = "";
     const words = S.settings ? S.settings.answer_words : 200, length = $("answer-words"), chosen = words ? String(words) : "off";
     if (![...length.options].some((o) => o.value === chosen)) length.append(h("option", { value: chosen }, "Up to " + words + " words"));
     length.value = chosen;
@@ -8667,6 +8660,7 @@
     try {
       const r = await api("/api/settings", { body });
       S.settings = r.settings;
+      applyCompare();
       SETS.start = body;
       applyModels(r.models.groups, r.default_model, r.auto_model, r.models.hub);
       $("settings-dialog").close();
@@ -9070,31 +9064,14 @@
     $("team-list").addEventListener("scroll", () => { if ($("team-list").scrollTop < 40) loadOlderTeam(); });
   }
 
-  // ------------------------------------------------------------------ analysis: post-processing kept runs
-  // A run's columns, or expressions of them, through steps, then a fit; the server works it out (workbench.py). Kelvin's
-  // analyze tool opens this pane with its own spec, which the person changes here; Keep fit keeps it with its run.
-  const ANA = { open: false, spec: { runs: [], x: "", y: "", where: "", steps: [], fit: null }, result: null, runs: [],
-               models: [], hold: {}, params: [], paramsFor: "", gen: 0, timer: null, auto: { x: true, y: true, group: true },
-               follow: false, traces: new Map() };
-  // op: [its name, its fields: {key, hint (the placeholder), value (its default), choices: [[value, label]], text (a word,
-  // not a number), before and after (a word beside the box, so a filled-in number still says what it is)}]
-  const X_FROM = { key: "lo", hint: "from x" }, X_TO = { key: "hi", hint: "to x" };
-  const AN_STEPS = {
-    crop: ["Crop", [X_FROM, X_TO]],
-    bin: ["Bin", [{ key: "width", hint: "x width" }]],
-    smooth: ["Smooth", [{ key: "points", value: 5, after: "points" }]],
-    deriv: ["d/dx", []],
-    integrate: ["∫ dx", []],
-    background: ["Background", [{ key: "order", value: 1, choices: [[0, "constant"], [1, "linear"], [2, "quadratic"], [3, "cubic"]] },
-      X_FROM, X_TO]],
-    normalize: ["Normalize", [{ key: "how", value: "max", choices: [["max", "to its max"], ["range", "0 to 1"], ["first", "to the first point"], ["mean", "to its mean"]] }]],
-    scale: ["Scale", [{ key: "factor", value: 1, before: "×" }, { key: "offset", value: 0, before: "+" }, { key: "unit", hint: "unit", text: true }]],
-    symmetrize: ["Symmetrize", []],
-    antisymmetrize: ["Antisymmetrize", []],
-    fft: ["FFT", []],
-    abs: ["|y|", []],
-    log10: ["log₁₀ |y|", []],
-  };
+  // ------------------------------------------------------------------ analysis: a dataset, as Kelvin's subagent sees it
+  // The pane holds a dataset picker and what Kelvin's analysis subagent made of the dataset (web/analyst.py): it reads
+  // the run, decides by itself how to process the data and how to show them, and each figure it draws comes with the
+  // processing steps it took, a few words each. A dataset is analyzed once: picked again, what was found shows (Analyze
+  // again asks anew). Until the person picks one, the pane follows the newest run (or the one the Runs pane shows), and
+  // a run still measuring waits for its end. Kelvin's analyze tool in the chat shows its own analysis here the same way.
+  // (The routes that work out a spec by hand, /api/analysis with its columns, Keep and CSV, stay for the phones.)
+  const ANA = { open: false, run: "", runs: [], follow: false, done: new Map(), job: null, ctl: null };
   const anWhen = (r) => r.run_id.slice(9, 11) + ":" + r.run_id.slice(11, 13) + " " + r.run_id.slice(4, 6) + "/" + r.run_id.slice(6, 8);
   const anRunLabel = (r) => r.plan + " · " + anWhen(r) + (r.status && r.status !== "done" ? " · " + r.status : "")
     + (r.unshared ? " · unshared" : "");
@@ -9105,54 +9082,166 @@
     $("toggle-analysis").setAttribute("aria-pressed", String(ANA.open));
     $("toggle-analysis").classList.toggle("on", ANA.open);
     fitLayout();
-    if (!ANA.open) return;
-    if (!ANA.spec.runs.length || anFollows()) startAnalysis();   // the newest run
-    else loadAnalysisRuns().then(renderAnalysisForm);   // runs measured since it was last open
-  }
-  // the pane follows the newest run (or the one the Runs pane shows) until the person makes the analysis theirs: picks
-  // a run, or changes a field, a step or the fit. What Kelvin's analyze (or a run's Analyze) opened stays
-  function anFollows() {
-    const s = ANA.spec, a = ANA.auto;
-    return ANA.follow && a.x && a.y && a.group && s.runs.length <= 1 && !s.where && !s.steps.length && !s.fit;
+    if (!ANA.open) return;   // an analysis at work goes on: it shows when the pane is back
+    if (!ANA.run || ANA.follow) startAnalysis();   // the newest run
+    else loadAnalysisRuns();   // runs measured since it was last open
   }
   async function loadAnalysisRuns() {
-    // the runs this chat's model may see: what the pane hands to Kelvin goes into this chat
+    // the runs this chat's model may see: the subagent reads them as that model
     try { ANA.runs = (await api("/api/runs?limit=100&chat=" + encodeURIComponent(S.chatId || ""))).runs; } catch (e) { ANA.runs = []; }
     $("an-run").replaceChildren(...ANA.runs.map((r) => h("option", { value: r.run_id }, anRunLabel(r))));
+    pickShown(ANA.run);
   }
-  // the run picker and the compare menu as they are now, while the pane is open: a run ended, or another chat (whose
-  // model may see other runs) opened. A pane that follows the newest run shows it; else only the list changes: what
-  // the person is writing in the form stays
+  function pickShown(id) {   // the picker on the dataset shown (one older than the list's too)
+    if (id && !ANA.runs.some((r) => r.run_id === id)) $("an-run").append(h("option", { value: id }, id));
+    $("an-run").value = id || "";
+  }
+  // the picker as it is now, while the pane is open: a run ended, or another chat (whose model may see other runs)
+  // opened. A pane that follows the newest run analyzes it; one showing the dataset the person picked keeps it
   async function refreshAnalysisRuns() {
     if (!ANA.open) return;
-    if (!ANA.spec.runs.length || anFollows()) return startAnalysis();   // "No runs yet.", or following: the newest
+    if (!ANA.run || ANA.follow) return startAnalysis();
     await loadAnalysisRuns();
-    const first = ANA.spec.runs[0];
-    if (!ANA.runs.some((r) => r.run_id === first)) $("an-run").append(h("option", { value: first }, first));
-    $("an-run").value = first;
   }
-  // the pane opened by a person: the run the Runs pane shows, else the latest
+  // the pane opened by a person: the run the Runs pane shows, else the newest, followed until the person picks one
   async function startAnalysis() {
     await loadAnalysisRuns();
-    if (!ANA.runs.length) { anMessage("No runs yet."); return; }
+    if (!ANA.runs.length) { drawAnalysis(anJob("", { notes: ["No runs yet."] })); return; }
     const shown = RUNS.active && ANA.runs.some((r) => r.run_id === RUNS.active) ? RUNS.active : ANA.runs[0].run_id;
-    ANA.spec = { runs: [shown], x: "", y: "", where: "", group: "", steps: [], fit: null };
-    ANA.auto = { x: true, y: true, group: true };
     ANA.follow = true;
-    await anColumns(shown);
-    renderAnalysisForm();
-    computeAnalysis(true);
+    analyzeRun(shown);
   }
-  // Kelvin's analyze tool: its spec in the form, its result drawn (a run's Analyze: that run, its defaults)
-  async function openAnalysis(spec, result, auto) {
-    spec = spec || {};
-    const runs = result && result.curves.length ? [...new Set(result.curves.map((c) => c.run))] : (spec.runs || []);
-    ANA.spec = { runs, x: spec.x || "", y: spec.y || "", where: spec.where || "", group: spec.group || "", row: spec.row,
-      steps: Array.isArray(spec.steps) ? spec.steps.map((s) => Object.assign({}, s)) : [],
-      fit: spec.fit ? Object.assign({}, spec.fit) : null };
-    ANA.auto = auto || { x: !spec.x, y: !spec.y, group: spec.group === undefined || spec.group === null };   // what Kelvin left out follows the run, as the server's does
-    ANA.follow = false;   // the runs it was asked about
-    ANA.paramsFor = "";   // Kelvin's start and fixed values shown in the fit's fields
+  // a dataset in the pane: what its analysis said so far (its steps, figures, notes), and once done what it keeps
+  function anJob(run, more) {
+    const r = ANA.runs.find((x) => x.run_id === run);
+    return Object.assign({ run, key: r ? (r.status || "") + "/" + (r.points || 0) : "", figures: [], kept: null,
+      summary: "", notes: [], error: "", working: false, step: "" }, more || {});
+  }
+  // a dataset picked (by the person, the pane following the newest run, a run's Analyze): what was found before, or
+  // Kelvin's analysis subagent at work on it. again: anew, whatever was found
+  async function analyzeRun(id, again) {
+    if (!again && ANA.ctl && ANA.job && ANA.job.run === id && ANA.job.working) { pickShown(id); return; }   // at work on it
+    if (ANA.ctl) { ANA.ctl.abort(); ANA.ctl = null; }   // the dataset before: its analysis stops, and so does its model
+    ANA.run = id;
+    pickShown(id);
+    const fresh = anJob(id), kept = ANA.done.get(id);
+    if (!again && kept && kept.key === fresh.key) { drawAnalysis(kept); return; }
+    const r = ANA.runs.find((x) => x.run_id === id);
+    if (!again && ANA.follow && r && r.status === "running") {   // analyzed once it ends (refreshAnalysisRuns)
+      drawAnalysis(anJob(id, { kept: [], notes: ["Still measuring: Kelvin analyzes it once it ends."] }));
+      return;
+    }
+    const job = Object.assign(fresh, { working: true });
+    drawAnalysis(job);
+    const ctl = new AbortController();
+    ANA.ctl = ctl;
+    try {
+      const res = await fetch("/api/analysis/auto", { method: "POST", signal: ctl.signal,
+        headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ run: id, chat: S.chatId || "", model: $("model").value || "", again: !!again }) });
+      if (!res.ok) {
+        let msg = "HTTP " + res.status;
+        try { msg = (await res.json()).error || msg; } catch (e) { /* not JSON */ }
+        throw new Error(msg);
+      }
+      await readEvents(res, (ev) => anEvent(job, ev));
+    } catch (e) {
+      if (ctl.signal.aborted) return;   // another dataset was picked: it shows now
+      job.error = job.error || "The analysis stopped: " + e.message;
+    } finally {
+      if (ANA.ctl === ctl) ANA.ctl = null;
+    }
+    job.working = false;
+    if (!job.error && job.kept && job.complete) ANA.done.set(id, job);   // found: shown as it is when picked again
+    if (ANA.job === job) drawAnalysis(job);
+  }
+  function anEvent(job, ev) {   // what the subagent says as it works, drawn as it comes while its dataset is shown
+    const here = ANA.job === job;
+    if (ev.type === "step") { job.step = ev.text; if (here) anStatus(job); }
+    else if (ev.type === "figure") { job.figures.push(ev); if (here) $("an-figures").append(anFigureEl(ev)); }
+    else if (ev.type === "note") { job.notes.push(ev.text); if (here) anNotes(job); }
+    else if (ev.type === "error") { job.error = ev.message; if (here) anNotes(job); }
+    else if (ev.type === "done") {
+      job.kept = ev.figures || [];
+      job.summary = ev.summary || "";
+      job.complete = !!ev.complete;   // the model's whole analysis (not one cut short, nor the dataset as measured)
+      job.working = false;
+      if (here) drawAnalysis(job);
+    }
+  }
+  function drawAnalysis(job) {
+    ANA.job = job;
+    anStatus(job);
+    anNotes(job);
+    $("an-summary").textContent = job.summary || "";
+    $("an-summary").hidden = !job.summary;
+    const shown = job.kept ? job.kept.map((n) => job.figures.find((f) => f.n === n)).filter(Boolean) : job.figures;
+    $("an-figures").replaceChildren(...shown.map(anFigureEl));
+    $("an-again").disabled = !job.run || job.working;
+  }
+  function anStatus(job) {   // at work: what it does now
+    $("an-status").hidden = !job.working;
+    if (job.working) $("an-status").replaceChildren(h("span", { class: "spinner" }), h("span", {}, (job.step || "Starting") + "…"));
+  }
+  function anNotes(job) {
+    const said = job.notes.map((t) => h("p", {}, t)).concat(job.error ? [h("p", { class: "bad" }, job.error)] : []);
+    $("an-note").replaceChildren(...said);
+    $("an-note").hidden = !said.length;
+  }
+  // one figure: its title, the plot, the processing steps it took, its fit's results (drawn once, kept with it)
+  function anFigureEl(f) {
+    if (f.el) return f.el;
+    const r = f.result || {}, a = r.axes || {}, all = r.curves || [];
+    const curves = all.slice(0, SERIES);
+    const many = new Set(curves.map((c) => c.run)).size > 1;
+    for (const c of curves) {   // a curve's name: its group, and which run only when there are several
+      const run = ANA.runs.find((x) => x.run_id === c.run);
+      const rest = c.label.startsWith(c.run) ? c.label.slice(c.run.length).replace(/^ · /, "") : c.label;
+      const who = run ? run.plan + " " + anWhen(run) : c.run;
+      c.name = many ? who + (rest ? " · " + rest : "") : rest || a.y || who;
+    }
+    const series = curves.map((c) => ({ name: c.name, points: c.x.map((x, i) => ({ x, y: c.y[i] }))
+      .filter((p) => typeof p.x === "number" && typeof p.y === "number") })).filter((s) => s.points.length);
+    const fits = curves.map((c) => (c.fit && !c.fit.error ? c.fit.curve : null));
+    const one = series.length === 1 && fits[0] ? { x: fits[0].x, y: fits[0].y, label: curves[0].fit.model + " fit" } : null;
+    const notes = (r.notes || []).slice();
+    if (all.length > SERIES) notes.push(all.length + " curves: the first " + SERIES + " are drawn");
+    const steps = f.steps || [];
+    f.el = h("figure", { class: "an-figure" },
+      h("figcaption", { class: "an-fig-title" }, f.title || "Figure"),
+      h("div", { class: "an-plot" }, series.length ? lineChart({ title: a.y || "y", series, xKey: a.x || "x", xUnit: a.x_unit || "",
+        yUnit: a.y_unit || "", height: 230, fit: one, fits: one ? null : fits }) : h("div", { class: "pane-empty" }, "No points")),
+      steps.length ? h("ol", { class: "an-taken", "aria-label": "Processing steps" }, ...steps.map((s) => h("li", {}, s))) : null,
+      notes.length ? h("p", { class: "an-msg" }, notes.join(" · ")) : null,
+      anFits(curves));
+    return f.el;
+  }
+  function pm(v, err, unit) {   // 4.0012 ± 0.0003 GHz
+    if (typeof v !== "number") return "—";
+    if (typeof err !== "number" || !(err > 0)) return fmt(v, unit);
+    const [f, p] = prefixFor(Math.abs(v) || err, unit);
+    const d = Math.max(0, Math.min(8, 1 - Math.floor(Math.log10(err / f))));
+    return (v / f).toFixed(d) + " ± " + (err / f).toFixed(d) + (unit ? " " + p + unit : "");
+  }
+  const sig = (v, n) => (typeof v === "number" ? String(Number(v.toPrecision(n || 3))) : "—");
+  function anFits(curves) {   // each fitted curve's parameters with their errors, then χ²ᵣ and R²
+    const fitted = curves.filter((c) => c.fit);
+    if (!fitted.length) return null;
+    return h("div", { class: "an-fit" }, ...fitted.map((c) => {
+      const head = fitted.length > 1 ? h("div", { class: "an-fit-head" }, c.name || c.label) : null;
+      if (c.fit.error) return h("div", { class: "an-fit-card bad" }, head, c.fit.error);
+      const rows = c.fit.params.map((p) => h("tr", {}, h("th", {}, p.name), h("td", {}, pm(p.value, p.error, p.unit) + (p.held ? " (held)" : ""))));
+      for (const d of c.fit.derived || []) rows.push(h("tr", { class: "derived" }, h("th", {}, d.name), h("td", {}, pm(d.value, d.error, d.unit))));
+      return h("div", { class: "an-fit-card" }, head, h("table", { class: "an-params" }, ...rows),
+        h("div", { class: "an-fit-foot" }, "χ²ᵣ " + sig(c.fit.chi2_red) + " · R² " + sig(c.fit.r2, 4) + (c.fit.converged ? "" : " · not converged")),
+        c.fit.warnings && c.fit.warnings.length ? h("ul", { class: "an-warn" }, ...c.fit.warnings.map((w) => h("li", {}, w))) : null);
+    }));
+  }
+  // the pane brought to the screen with a dataset: a run's Analyze (run: the subagent analyzes it), or Kelvin's
+  // analyze tool in the chat (spec, result and steps: Kelvin's own analysis, shown as the subagent's figures are)
+  async function openAnalysis(ev) {
+    ev = ev || {};
+    ANA.follow = false;   // the dataset asked for, not the newest
     const seen = paneVisible("anpane");
     if (!ANA.open) {
       ANA.open = true;   // shown without starting the pane's own default
@@ -9163,373 +9252,27 @@
     }
     if (seen) { look("anpane"); ring($("anpane").querySelector(":scope > header")); }   // asked for: looked at
     else fullShow("anpane");   // to the screen, even in full screen or under the list
+    const result = ev.result, spec = ev.spec || {};
+    const run = ev.run || (result && (result.curves || []).length ? result.curves[0].run : (spec.runs || [])[0]) || "";
     await loadAnalysisRuns();
-    if (runs.length) await anColumns(runs[0]);
-    renderAnalysisForm();
-    if (result) {
-      ANA.gen += 1;   // what the person asked before is not drawn over it
-      clearTimeout(ANA.timer);
-      ANA.timer = null;
-      ANA.again = ANA.pending = false;
-      $("an-plot").classList.remove("busy");
-      ANA.resultSpec = JSON.parse(JSON.stringify(anSpec()));
-      showAnalysis(result);
-    } else computeAnalysis(true);
-  }
-  // a run's columns: the suggestions under x, y, where and per, the models. Until the person picks them, x and y follow
-  // the run (its innermost swept axis and first reading), and the server draws a map a curve per value of its outer axis
-  async function anColumns(runId) {
-    let cols;
-    try { cols = await api("/api/analysis/columns?run=" + encodeURIComponent(runId)); }
-    catch (e) { anMessage(e.message, true); return; }
-    ANA.hold = cols.hold || {};   // models fitted with values the person gives (graphene: C_g and aspect)
-    ANA.models = cols.models.filter((m) => m !== "resonator").concat(Object.keys(ANA.hold));
-    const all = cols.axes.concat(cols.readings, cols.others || [], cols.traces);
-    ANA.traces = new Map(cols.traces.map((c) => [c.key, c.x_unit === "Hz" ? "frequency" : "x"]));
-    $("an-cols").replaceChildren(...all.map((c) => h("option", { value: c.key, label: c.unit || "" })));
-    const keys = new Set(all.map((c) => c.key));
-    const plain = (t) => /^[\w.]+$/.test(t);   // a column's name, not an expression of columns
-    const s = ANA.spec, auto = ANA.auto;
-    const gone = (t) => plain(t) && !keys.has(t) && t !== "t" && t !== "i";   // a column this run doesn't have
-    if (auto.x || !s.x || gone(s.x)) { s.x = cols.axes.length ? cols.axes[cols.axes.length - 1].key : "t"; auto.x = true; }
-    if (auto.y || !s.y || gone(s.y)) {
-      s.y = cols.readings.length ? cols.readings[0].key : cols.traces.length ? cols.traces[0].key : "";
-      auto.y = true;
-    }
-    if (auto.group) s.group = "";   // the server's, shown once it answers
-  }
-  function renderAnalysisForm() {
-    const s = ANA.spec;
-    if (s.runs.length && !ANA.runs.some((r) => r.run_id === s.runs[0])) {   // a run older than the list's
-      $("an-run").append(h("option", { value: s.runs[0] }, s.runs[0]));
-    }
-    $("an-run").value = s.runs[0] || "";
-    traceAxis();
-    $("an-y").value = s.y || "";
-    $("an-where").value = s.where || "";
-    $("an-group").value = s.group || "";
-    const chips = s.runs.slice(1).map((id) => {
-      const r = ANA.runs.find((x) => x.run_id === id);
-      return anChip(r ? anRunLabel(r) : id, () => { s.runs = s.runs.filter((x) => x !== id); renderAnalysisForm(); computeAnalysis(true); });
-    });
-    if (s.row !== undefined && s.row !== null && s.row !== "") chips.push(anChip("row " + s.row, () => { s.row = null; renderAnalysisForm(); computeAnalysis(true); }));
-    $("an-chips").replaceChildren(...chips);
-    $("an-chips").hidden = !chips.length;
-    renderSteps();
-    const f = s.fit || {};
-    const known = ANA.models.includes(f.model);
-    $("an-model").replaceChildren(h("option", { value: "" }, "No fit"),
-      ...ANA.models.map((m) => h("option", { value: m }, m.replace(/_/g, " "))), h("option", { value: "expr" }, "f(x) = …"));
-    $("an-model").value = !f.model ? "" : known ? f.model : "expr";
-    $("an-expr").hidden = $("an-model").value !== "expr";
-    $("an-expr").value = f.model && !known ? f.model : "";
-    $("an-lo").value = f.lo === undefined || f.lo === null ? "" : f.lo;
-    $("an-hi").value = f.hi === undefined || f.hi === null ? "" : f.hi;
-    renderFitParams();
-  }
-  // under the fit, a row per parameter: where it starts from, or the value it is held at. They stay through changes
-  // to the window and the expression; drawn again only when the parameters change, so typing keeps its place
-  function renderFitParams() {
-    const f = ANA.spec.fit;
-    const names = f && f.model ? ANA.params : [];
-    const must = (f && ANA.hold[f.model]) || [];
-    const key = (f && f.model) + "|" + names.join(",");
-    if (key === ANA.paramsFor) return;
-    ANA.paramsFor = key;
-    $("an-fitparams").replaceChildren(...names.map((name) => {
-      const held = must.includes(name) || name in ((f && f.fix) || {});
-      const value = held ? (f.fix || {})[name] : (f.start || {})[name];
-      const input = h("input", { type: "number", step: "any", placeholder: held ? "value" : "start", "aria-label": name + (held ? ", held at" : ", starts from") });
-      input.value = value === undefined || value === null ? "" : String(value);
-      const box = h("input", { type: "checkbox", "aria-label": "Hold " + name });
-      box.checked = held;
-      box.disabled = must.includes(name);   // known values the model can't fit (graphene's C_g)
-      const changed = (now) => {
-        const fit = ANA.spec.fit;
-        if (!fit) return;
-        const start = Object.assign({}, fit.start), fix = Object.assign({}, fit.fix);
-        delete start[name];
-        delete fix[name];
-        const v = input.value.trim();
-        if (v !== "" && isFinite(Number(v))) (box.checked ? fix : start)[name] = Number(v);
-        if (Object.keys(start).length) fit.start = start; else delete fit.start;
-        if (Object.keys(fix).length) fit.fix = fix; else delete fit.fix;
-        input.placeholder = box.checked ? "value" : "start";
-        input.setAttribute("aria-label", name + (box.checked ? ", held at" : ", starts from"));
-        computeAnalysis(now);
-      };
-      input.addEventListener("input", () => changed(false));
-      box.addEventListener("change", () => {
-        if (box.checked && input.value.trim() === "") {   // held where the fit has it now
-          const c = ANA.result && ANA.result.curves.find((x) => x.fit && x.fit.params);
-          const p = c && c.fit.params.find((x) => x.name === name);
-          if (p && typeof p.value === "number") input.value = String(Number(p.value.toPrecision(6)));
-        }
-        changed(true);
-      });
-      return h("div", { class: "an-param" }, h("span", { class: "an-param-name" }, name), input,
-        h("label", { class: "an-hold" }, box, h("span", {}, "hold")));
-    }));
-  }
-  function traceAxis() {   // a trace is drawn against its own x
-    const own = ANA.traces && ANA.traces.get(ANA.spec.y);
-    $("an-x").disabled = !!own;
-    $("an-x").placeholder = own || "";
-    $("an-x").value = own ? "" : ANA.spec.x || "";
-  }
-  function anChip(text, remove) {
-    return h("span", { class: "an-chip" }, h("span", {}, text),
-      h("button", { class: "icon-btn", type: "button", "aria-label": "Remove " + text, onclick: remove }, icon("x")));
-  }
-  function renderSteps() {
-    $("an-steps").replaceChildren(...ANA.spec.steps.map((st, i) => {
-      const [name, fields] = AN_STEPS[st.op] || [st.op, []];
-      const row = h("div", { class: "an-step" }, h("span", { class: "an-step-name" }, name));
-      for (const { key, hint, value, choices, text, before, after } of fields) {
-        if (st[key] === undefined && value !== undefined) st[key] = value;
-        const input = choices
-          ? h("select", { "aria-label": name + ": " + key }, ...choices.map(([v, label]) => h("option", { value: String(v) }, label)))
-          : h("input", text ? { class: "an-text", spellcheck: "false", autocomplete: "off", placeholder: hint || "", "aria-label": name + ": " + (hint || key) }
-            : { type: "number", step: "any", placeholder: hint || "", "aria-label": name + ": " + (hint || after || key) });
-        input.value = st[key] === undefined || st[key] === null ? "" : String(st[key]);
-        input.addEventListener(choices ? "change" : "input", () => {
-          const v = input.value.trim();
-          if (choices) st[key] = typeof choices[0][0] === "number" ? Number(v) : v;
-          else if (v === "") delete st[key];
-          else st[key] = text ? v : Number(v);
-          computeAnalysis();
-        });
-        if (before) row.append(h("span", { class: "an-unit" }, before));
-        row.append(input);
-        if (after) row.append(h("span", { class: "an-unit" }, after));
-      }
-      row.append(h("button", { class: "icon-btn", type: "button", "aria-label": "Remove " + name,
-        onclick: () => { ANA.spec.steps.splice(i, 1); renderSteps(); computeAnalysis(true); } }, icon("x")));
-      return row;
-    }));
-  }
-  function anMessage(text, bad) {
-    $("an-msg").textContent = text || "";
-    $("an-msg").classList.toggle("bad", !!bad);
-    $("an-msg").hidden = !text;
-  }
-  function anSpec() {
-    const s = ANA.spec;
-    const out = { runs: s.runs, x: s.x, y: s.y, where: s.where, steps: s.steps };
-    if (!ANA.auto.group) out.group = s.group || "";   // "": one curve; left out, the server draws a map per its outer axis
-    if (s.row !== undefined && s.row !== null && s.row !== "") out.row = s.row;
-    if (s.fit && s.fit.model) out.fit = s.fit;
-    return out;
-  }
-  // one request at a time: what the person changes meanwhile goes once it is back (the server's threads stay free)
-  function computeAnalysis(now) {
-    clearTimeout(ANA.timer);
-    ANA.pending = true;
-    $("an-keep").disabled = true;   // a fit is kept as shown, never one being worked out
-    ANA.timer = setTimeout(runAnalysis, now ? 0 : 450);
-  }
-  async function runAnalysis() {
-    ANA.timer = null;
-    if (!ANA.spec.runs.length) { ANA.pending = false; return; }
-    if (ANA.busy) { ANA.again = true; return; }
-    ANA.busy = true;
-    ANA.again = false;
-    const gen = ANA.gen, sent = JSON.parse(JSON.stringify(anSpec()));
-    $("an-plot").classList.add("busy");
-    let r = null;
-    try { r = await api("/api/analysis", { body: { spec: sent } }); }
-    catch (e) { if (gen === ANA.gen && !ANA.again && !ANA.timer) anMessage(e.message, true); }
-    ANA.busy = false;
-    if (gen !== ANA.gen) {   // Kelvin's analysis came meanwhile, and stays; an edit made since still goes
-      if (ANA.again && !ANA.timer) runAnalysis();
-      return;
-    }
-    if (ANA.again || ANA.timer) {   // changed meanwhile: the newest spec now (or when its pause ends)
-      if (!ANA.timer) runAnalysis();
-      return;
-    }
-    ANA.pending = false;
-    $("an-plot").classList.remove("busy");
-    if (r) { ANA.resultSpec = sent; showAnalysis(r); }
-  }
-  function showAnalysis(r) {
-    ANA.result = r;
-    if (ANA.auto.group) { ANA.spec.group = r.group || ""; $("an-group").value = ANA.spec.group; }   // a map's own
-    if (r.params) ANA.params = r.params;   // an expression being typed keeps the rows it had
-    else if (!(ANA.spec.fit && ANA.spec.fit.model)) ANA.params = [];
-    renderFitParams();
-    const curves = r.curves.slice(0, SERIES), a = r.axes || {};
-    const notes = (r.notes || []).slice();
-    if (r.curves.length > SERIES) notes.push(r.curves.length + " curves: the first " + SERIES + " are drawn");
-    anMessage(notes.join(" · "));
-    const many = new Set(curves.map((c) => c.run)).size > 1;
-    for (const c of curves) {   // a curve's name: its group, and which run only when there are several
-      const r = ANA.runs.find((x) => x.run_id === c.run);
-      const rest = c.label.startsWith(c.run) ? c.label.slice(c.run.length).replace(/^ · /, "") : c.label;
-      const run = r ? r.plan + " " + anWhen(r) : c.run;
-      c.name = many ? run + (rest ? " · " + rest : "") : rest || run;
-    }
-    const series = curves.map((c) => ({ name: c.name, points: c.x.map((x, i) => ({ x, y: c.y[i] }))
-      .filter((p) => typeof p.x === "number" && typeof p.y === "number") })).filter((s) => s.points.length);
-    const fits = curves.map((c) => (c.fit && !c.fit.error ? c.fit.curve : null));
-    const one = series.length === 1 && fits[0] ? { x: fits[0].x, y: fits[0].y, label: curves[0].fit.model + " fit" } : null;
-    $("an-plot").replaceChildren(series.length ? lineChart({ title: a.y || "y", series, xKey: a.x || "x", xUnit: a.x_unit || "",
-      yUnit: a.y_unit || "", fill: true, fit: one, fits: one ? null : fits }) : h("div", { class: "pane-empty" }, "No points"));
-    renderFit(curves);
-    $("an-keep").disabled = !curves.some((c) => c.fit && !c.fit.error);
-    $("an-csv").disabled = !series.length;
-  }
-  function pm(v, err, unit) {   // 4.0012 ± 0.0003 GHz
-    if (typeof v !== "number") return "—";
-    if (typeof err !== "number" || !(err > 0)) return fmt(v, unit);
-    const [f, p] = prefixFor(Math.abs(v) || err, unit);
-    const d = Math.max(0, Math.min(8, 1 - Math.floor(Math.log10(err / f))));
-    return (v / f).toFixed(d) + " ± " + (err / f).toFixed(d) + (unit ? " " + p + unit : "");
-  }
-  const sig = (v, n) => (typeof v === "number" ? String(Number(v.toPrecision(n || 3))) : "—");
-  function renderFit(curves) {
-    const fitted = curves.filter((c) => c.fit);
-    $("an-fit").replaceChildren(...fitted.map((c) => {
-      const head = fitted.length > 1 ? h("div", { class: "an-fit-head" }, c.name || c.label) : null;
-      if (c.fit.error) return h("div", { class: "an-fit-card bad" }, head, c.fit.error);
-      const rows = c.fit.params.map((p) => h("tr", {}, h("th", {}, p.name), h("td", {}, pm(p.value, p.error, p.unit) + (p.held ? " (held)" : ""))));
-      for (const d of c.fit.derived || []) rows.push(h("tr", { class: "derived" }, h("th", {}, d.name), h("td", {}, pm(d.value, d.error, d.unit))));
-      return h("div", { class: "an-fit-card" }, head, h("table", { class: "an-params" }, ...rows),
-        h("div", { class: "an-fit-foot" }, "χ²ᵣ " + sig(c.fit.chi2_red) + " · R² " + sig(c.fit.r2, 4) + (c.fit.converged ? "" : " · not converged")),
-        c.fit.warnings && c.fit.warnings.length ? h("ul", { class: "an-warn" }, ...c.fit.warnings.map((w) => h("li", {}, w))) : null);
-    }));
-  }
-  // the drawn curves' fits, as shown (the spec that made them); a fit kept under the same name is replaced only on a yes
-  async function keepAnalysisFit() {
-    const r = ANA.result, spec = ANA.resultSpec;
-    if (!r || !spec || ANA.pending) return;
-    $("an-keep").disabled = true;
-    let kept = 0;
-    const failed = [];
-    for (let i = 0; i < Math.min(r.curves.length, SERIES); i++) {
-      const c = r.curves[i];
-      if (!c.fit || c.fit.error) continue;
-      const body = { spec, curve: i };
-      try {
-        try { await api("/api/analysis/keep", { body }); }
-        catch (e) {
-          if (!(e.data && e.data.exists)) throw e;
-          if (!(await askYes("Replace “" + e.data.exists + "”?\nIt is kept with " + (c.name || c.label) + " already.",
-            { ok: "Replace", cancel: "Keep it", danger: true }))) continue;
-          await api("/api/analysis/keep", { body: Object.assign({ replace: true }, body) });
-        }
-        kept += 1;
-      } catch (e) { failed.push((c.name || c.label) + ": " + e.message); }
-    }
-    toast(failed.length ? "Not kept: " + failed.join("; ") : !kept ? "Nothing kept" : kept === 1 ? "Fit kept with its run" : kept + " fits kept with their runs");
-    $("an-keep").disabled = ANA.pending;   // a compute started meanwhile: Keep waits for its result
-  }
-  function askAboutAnalysis() {
-    const s = ANA.spec;
-    if (!s.runs.length) return;
-    exitFull();   // the question is asked in the chat
-    const parts = [s.runs.join(", "), "y = " + s.y, "x = " + s.x];
-    if (s.where) parts.push("where " + s.where);
-    if (s.group) parts.push("a curve per " + s.group);
-    if (s.row !== undefined && s.row !== null && s.row !== "") parts.push("row " + s.row);
-    if (s.steps.length) parts.push("steps: " + s.steps.map((st) => st.op + Object.entries(st).filter(([k]) => k !== "op")
-      .map(([k, v]) => " " + k + "=" + v).join("")).join(", "));
-    if (s.fit && s.fit.model) {
-      const f = s.fit, set = (o) => Object.entries(o || {}).map(([k, v]) => k + "=" + v).join(" ");
-      const has = (v) => v !== undefined && v !== null && v !== "";
-      parts.push("fit: " + f.model + (has(f.lo) || has(f.hi) ? " from " + (has(f.lo) ? f.lo : "the start") + " to " + (has(f.hi) ? f.hi : "the end") : "")
-        + (set(f.start) ? ", start " + set(f.start) : "") + (set(f.fix) ? ", held " + set(f.fix) : ""));
-    }
-    const input = $("input");
-    input.value = "In the Analysis pane (" + parts.join("; ") + "): ";
-    autosize();
-    updateSend();
-    input.focus();
-    input.setSelectionRange(input.value.length, input.value.length);
-  }
-  function showCompareMenu() {
-    const menu = $("an-run-menu");
-    if (!menu.hidden) { menu.hidden = true; $("an-more-run").setAttribute("aria-expanded", "false"); return; }
-    const free = ANA.runs.filter((r) => !ANA.spec.runs.includes(r.run_id));
-    menu.replaceChildren(...(free.length ? free.map((r) => {
-      const b = h("button", { class: "pane-menu-item", type: "button", role: "menuitem" }, h("span", {}),
-        h("span", { class: "pm-plan" }, r.plan), h("span", { class: "pm-meta" }, anWhen(r)));
-      b.addEventListener("click", () => {
-        menu.hidden = true;
-        $("an-more-run").setAttribute("aria-expanded", "false");
-        if (ANA.spec.runs.length >= 8) { toast("At most 8 runs at once"); return; }
-        ANA.spec.runs.push(r.run_id);
-        renderAnalysisForm();
-        computeAnalysis(true);
-      });
-      return b;
-    }) : [h("div", { class: "pane-menu-note" }, "No other runs.")]));
-    menu.hidden = false;
-    $("an-more-run").setAttribute("aria-expanded", "true");
+    if (!result) { if (run) analyzeRun(run); else startAnalysis(); return; }
+    if (ANA.ctl) { ANA.ctl.abort(); ANA.ctl = null; }
+    ANA.run = run;
+    pickShown(run);
+    const a = result.axes || {};
+    const job = anJob(run, { kept: [1], notes: ["Kelvin's analysis, from the chat."],
+      figures: [{ n: 1, title: (a.y || spec.y || "y") + " against " + (a.x || spec.x || "x"), spec, result, steps: ev.steps || [] }] });
+    if (run) ANA.done.set(run, job);
+    drawAnalysis(job);
   }
   function initAnalysis() {
     $("toggle-analysis").addEventListener("click", () => pillClick("anpane", toggleAnalysis));
     $("close-analysis").addEventListener("click", () => toggleAnalysis(false));
-    $("an-add-step").replaceChildren(h("option", { value: "" }, "+ Step"),
-      ...Object.entries(AN_STEPS).map(([op, [name]]) => h("option", { value: op }, name)));
-    $("an-add-step").addEventListener("change", (e) => {
-      const op = e.target.value;
-      e.target.value = "";
-      if (!op) return;
-      ANA.spec.steps.push({ op });
-      renderSteps();
-      computeAnalysis(true);
-    });
-    $("an-run").addEventListener("change", async () => {
-      const id = $("an-run").value;
+    $("an-run").addEventListener("change", () => {
       ANA.follow = false;   // the person's pick
-      ANA.spec.runs = [id].concat(ANA.spec.runs.slice(1).filter((x) => x !== id));
-      await anColumns(id);
-      renderAnalysisForm();
-      computeAnalysis(true);
+      analyzeRun($("an-run").value);
     });
-    for (const [id, key] of [["an-x", "x"], ["an-y", "y"], ["an-where", "where"], ["an-group", "group"]]) {
-      $(id).addEventListener("input", () => {
-        ANA.spec[key] = $(id).value.trim();
-        if (key !== "where") ANA.auto[key] = false;   // the person's choice now, kept when the run changes
-        if (key === "y") traceAxis();
-        computeAnalysis();
-      });
-    }
-    // the fit's model and window; its start and held values stay (Kelvin's too), those of parameters it still has
-    const fitChanged = (now) => {
-      const m = $("an-model").value;
-      $("an-expr").hidden = m !== "expr";
-      const model = m === "expr" ? $("an-expr").value.trim() : m;
-      const num = (id) => ($(id).value.trim() === "" ? null : Number($(id).value));
-      const old = ANA.spec.fit || {}, fit = model ? { model, lo: num("an-lo"), hi: num("an-hi") } : null;
-      const names = model.split(/[^\w.]+/);
-      for (const k of ["start", "fix"]) {
-        const kept = Object.entries((fit && old[k]) || {}).filter(([name]) => model === old.model || (m === "expr" && names.includes(name)));
-        if (kept.length) fit[k] = Object.fromEntries(kept);
-      }
-      ANA.spec.fit = fit;
-      computeAnalysis(now);
-    };
-    $("an-model").addEventListener("change", () => {
-      const expr = $("an-model").value === "expr";
-      ANA.params = [];   // the new model's, once Kelvin has worked it out
-      fitChanged(!expr);
-      renderFitParams();
-      if (expr) $("an-expr").focus();
-    });
-    for (const id of ["an-expr", "an-lo", "an-hi"]) $(id).addEventListener("input", () => fitChanged(false));
-    $("an-keep").addEventListener("click", keepAnalysisFit);
-    $("an-csv").addEventListener("click", () => fetchDownload("/api/analysis/csv", (ANA.spec.runs[0] || "analysis") + "-analysis.csv",
-      "data", { spec: Object.assign(anSpec(), { fit: undefined }) }));
-    $("an-ask").addEventListener("click", askAboutAnalysis);
-    $("an-more-run").addEventListener("click", (e) => { e.stopPropagation(); showCompareMenu(); });
-    document.addEventListener("click", (e) => {
-      if (!$("an-run-menu").hidden && !e.target.closest("#anpane .pane-menu-wrap")) {
-        $("an-run-menu").hidden = true;
-        $("an-more-run").setAttribute("aria-expanded", "false");
-      }
-    });
+    $("an-again").addEventListener("click", () => { if (ANA.run) analyzeRun(ANA.run, true); });
   }
 
   const SUGGESTIONS = [
@@ -9546,13 +9289,12 @@
   function emit(name, detail) { document.dispatchEvent(new CustomEvent("kelvin:" + name, { detail })); }
   // the top bar's switch: Home takes the conversation's place; the panels beside them stay as they are. Either side,
   // even the one chosen, brings the main column back on the screen (exitFull): full screen ends, and a pane alone or
-  // the sidebar in its place goes
+  // the sidebar in its place goes. The side isn't kept: Kelvin always opens on the chat (initMode)
   function setMode(mode, quiet) {
     const home = mode === "home", was = S.mode;
     const change = !was || (was === "home") !== home;
     if (change) {
       S.mode = home ? "home" : "chat";
-      store("lh.mode", S.mode);
       $("app").classList.toggle("home-on", home);
       $("homeview").hidden = !home;
       for (const v of ["scroller", "homeview"]) $(v).style.animation = "";   // a real switch: the view comes in (app.css)
@@ -9586,7 +9328,7 @@
       setMode(e.key === "ArrowLeft" || e.key === "Home" ? "chat" : "home");
       $(S.mode === "home" ? "mode-home" : "mode-chat").focus();
     });
-    setMode(store("lh.mode") === "home" ? "home" : "chat", true);
+    setMode("chat", true);   // entering Kelvin: the chat, never Home, whichever side was on when it was left
   }
   // ------------------------------------------------------------------ motion, as labMaster moves (app.css, the end):
   // what switches on one curve (quick out, a long settle), what appears on another; none when asked for less motion
@@ -9882,6 +9624,8 @@
       S.compare = S.compare.filter((k) => k !== $("model").value); compareLabel();
     });
     $("compare-btn").addEventListener("click", toggleCompareMenu);
+    applyCompare();   // hidden until Settings → Models switches it on
+    swFlip($("compare-on"), setCompare);
     swFlip($("phone-on"), switchPhone);
     $("svc-preset").addEventListener("change", servicePreset);
     $("chatgpt-signin").addEventListener("click", signInChatGPT);

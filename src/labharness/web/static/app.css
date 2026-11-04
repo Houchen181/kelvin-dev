@@ -842,7 +842,8 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .lane { border: 1px solid var(--card-line); border-radius: var(--radius); padding: 4px 14px 10px; background: var(--card); min-width: 0; }
 .lane.chosen { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .lane .msg { margin: 10px 0; }
-.lane-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--line); padding-top: 8px; }
+.lane-foot { display: flex; justify-content: flex-end; align-items: center; gap: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.lane-model { margin-right: auto; min-width: 0; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lane.chosen .lane-foot .btn { color: var(--accent); }
 .review { border: 1px solid var(--card-line); border-left: 4px solid var(--muted); border-radius: var(--radius); padding: 8px 12px;
   background: var(--card); display: grid; gap: 4px; font-size: 14px; }
@@ -888,6 +889,13 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .zoom-now { min-width: 3.5em; text-align: center; font-variant-numeric: tabular-nums; }
 .msg-tools > .link { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; }
 .msg-tools > .link svg { width: 14px; height: 14px; }
+/* a message's Copy: its icon alone (its name in its tip), bare as the other icon buttons (never button.link's outlined
+   box), a tick for a moment once copied */
+.msg-tools > .copy-btn { padding: 5px; border-color: transparent; background: none; color: var(--muted); }
+.msg-tools > .copy-btn svg { width: 15px; height: 15px; }
+.msg-tools > .copy-btn:hover { background: var(--hover); color: var(--text); border-color: transparent; }
+.msg-tools > .copy-btn.copied { color: var(--ok); }
+@media (pointer: coarse) { .msg-tools > .copy-btn { min-width: 40px; justify-content: center; } }
 .copy-box { position: fixed; left: -9999px; top: 0; opacity: 0; }
 .msg-actions > .link { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; }
 .msg-actions > .link svg { width: 14px; height: 14px; }
@@ -1421,56 +1429,33 @@ body.resizing .plot-svg { pointer-events: none; }
   overflow-y: hidden; }
 .team-form .send { width: 34px; height: 34px; flex: none; }
 
-/* ---------- the Analysis pane: post-processing kept runs (workbench.py) ---------- */
+/* ---------- the Analysis pane: a dataset, as Kelvin's analysis subagent sees it (web/analyst.py) ---------- */
 .pane-title { font-size: 15px; font-weight: 600; margin: 0; white-space: nowrap; }
-.an-body { padding: 12px 14px 20px; display: flex; flex-direction: column; gap: 8px; }
-.an-body > * { flex-shrink: 0; }   /* in half a column the pane scrolls; the plot never squeezes over the fit's fields */
-.an-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.an-run { flex: 1; min-width: 0; }
-.an-body select, .an-body input { border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 6px 8px; background: var(--raised);
+.an-body { padding: 12px 14px 20px; display: flex; flex-direction: column; gap: 10px; }
+.an-body > * { flex-shrink: 0; }   /* in half a column the pane scrolls; a figure never squeezes */
+.an-run { min-width: 0; width: 100%; }
+.an-body select { border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 6px 8px; background: var(--raised);
   color: var(--text); font: inherit; font-size: 13.5px; min-width: 0; }
-.an-body select:focus, .an-body input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.an-field { display: flex; align-items: center; flex: 1 1 160px; min-width: 0; border: 1px solid var(--line-strong); border-radius: var(--radius-s);
-  background: var(--raised); }
-.an-field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.an-field span { padding: 0 2px 0 9px; color: var(--muted); font-size: 12.5px; font-style: italic; }
-.an-body .an-field input { border: 0; background: transparent; flex: 1; outline: none; box-shadow: none; font-size: 13.5px; }
-.an-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.an-chip { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; padding: 1px 2px 1px 10px; border-radius: 999px;
-  background: var(--card); border: 1px solid var(--card-line); font-size: 13px; font-weight: 550; }
-.an-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.an-chip .icon-btn, .an-step .icon-btn { padding: 3px; }
-.an-chip .icon-btn svg, .an-step .icon-btn svg { width: 14px; height: 14px; }
-.an-steps { display: flex; flex-direction: column; gap: 6px; }
-.an-steps:empty { display: none; }
-.an-step { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 4px 4px 4px 10px; border: 1px solid var(--card-line);
-  border-radius: 10px; background: var(--card); }
-.an-step-name { font-size: 13px; font-weight: 600; margin-right: auto; }
-.an-body .an-step input { width: 84px; padding: 4px 6px; }
-.an-body .an-step select { padding: 4px 6px; }
-.an-add-step { align-self: flex-start; color: var(--text-2); }
-.an-where { flex: 2 1 180px; }
-.an-per { flex: 1 1 120px; }
-.an-body input::placeholder { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-style: italic; }   /* a hint, never a value */
-.an-body .an-field input:disabled { color: var(--muted); }
-.an-body .an-step input.an-text { width: 64px; font-family: ui-monospace, Consolas, monospace; }
+.an-body select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* the subagent at work: what it does now */
+.an-status { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 13px; }
+.an-note { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
+.an-note p { margin: 0; }
+.an-note .bad { color: var(--danger); }
+.an-summary { margin: 0; font-size: 14px; line-height: 1.45; }
+/* each figure it drew: its title, the plot, the processing steps it took, its fit */
+.an-figures { display: flex; flex-direction: column; gap: 12px; }
+.an-figures:empty { display: none; }
+.an-figure { margin: 0; padding: 10px 12px 12px; border: 1px solid var(--card-line); border-radius: var(--radius);
+  background: var(--card); box-shadow: var(--card-shadow); display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.an-fig-title { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .an-plot { min-height: 60px; }
-.an-plot.busy { opacity: .55; transition: opacity .2s .25s; }
-.an-msg { font-size: 12.5px; color: var(--muted); }
-.an-msg.bad { color: var(--danger); }
-.an-fitrow #an-model { flex: 1 1 140px; }
-.an-body .an-fitrow input { width: 90px; }
-.an-body .an-fitrow #an-expr { flex: 2 1 180px; width: auto; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
-.an-fitparams { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px 12px; }
-.an-fitparams:empty { display: none; }
-.an-param { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.an-param-name { font-size: 13px; font-weight: 550; color: var(--text-2); min-width: 3ch; overflow-wrap: anywhere; }
-.an-body .an-param input[type="number"] { flex: 1; width: 0; min-width: 60px; padding: 4px 6px; }
-.an-hold { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: var(--muted); cursor: pointer; }
-.an-body .an-hold input { margin: 0; padding: 0; border: 0; accent-color: var(--accent); }
+.an-taken { margin: 0; padding-left: 20px; display: grid; gap: 2px; color: var(--text-2); font-size: 12.5px; line-height: 1.4; }
+.an-taken li::marker { color: var(--muted); font-variant-numeric: tabular-nums; }
+.an-msg { margin: 0; font-size: 12.5px; color: var(--muted); }
 .an-fit { display: flex; flex-direction: column; gap: 8px; }
 .an-fit:empty { display: none; }
-.an-fit-card { border: 1px solid var(--card-line); border-radius: var(--radius); padding: 8px 12px; background: var(--card); box-shadow: var(--card-shadow); font-size: 13px; }
+.an-fit-card { border-top: 1px solid var(--line); padding-top: 8px; font-size: 13px; }
 .an-fit-card.bad { color: var(--danger); }
 .an-fit-head { font-weight: 600; margin-bottom: 4px; overflow-wrap: anywhere; }
 .an-params { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
@@ -1479,9 +1464,13 @@ body.resizing .plot-svg { pointer-events: none; }
 .an-params tr.derived th, .an-params tr.derived td { color: var(--muted); }
 .an-fit-foot { margin-top: 4px; color: var(--muted); font-size: 12px; }
 .an-warn { margin: 4px 0 0; padding-left: 18px; color: var(--warn); font-size: 12px; }
-.an-actions { justify-content: flex-end; }
+/* a chip with its x (the scan editor's, ed-chip) */
+.an-chip { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; padding: 1px 2px 1px 10px; border-radius: 999px;
+  background: var(--card); border: 1px solid var(--card-line); font-size: 13px; font-weight: 550; }
+.an-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.an-chip .icon-btn { padding: 3px; }
+.an-chip .icon-btn svg { width: 14px; height: 14px; }
 .runpane .pane-head > .runs-seg { margin-left: -6px; }   /* "Runs" lines up with the other panes' titles */
-.an-unit { color: var(--muted); font-size: 12.5px; }
 
 /* ---------- Scans: the selected rows, numbered in the order ⇒ adds them ---------- */
 .q-item.lib.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--raised)); }
@@ -2318,7 +2307,8 @@ body.incognito .composer { background: color-mix(in srgb, var(--text) 4%, var(--
 
 /* ===== fit S: Settings, Save and Cancel ===== */
 /* Settings keep Save and Cancel. What acts at once stands in a card of its own at the top of its
-   page (.set-now: the phone through the hub on Account, Phone access, Page size), drawn as the kit's cards are; on the
+   page (.set-now: the phone through the hub on Account, Compare models on Models, Phone access, Page size), drawn as
+   the kit's cards are; on the
    Settings pages a switch acts at once and a tick box waits for Save */
 .set-page > .set-now { padding: 12px 14px; border: 1px solid var(--card-line); border-radius: var(--radius);
   background: var(--card); box-shadow: var(--card-shadow); }

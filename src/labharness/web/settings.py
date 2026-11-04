@@ -35,7 +35,8 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "updates", "hub_old_runs", "collection", "idle_off", "idle_off_all",
                      "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_from", "smtp_to",   # email notices
                      "heartbeat_minutes", "approval_wait", "lab_scripts_python",
-                     "sequence_react"}   # Kelvin answers a stop or a failure of the sequence at once (notices.py)
+                     "sequence_react",   # Kelvin answers a stop or a failure of the sequence at once (notices.py)
+                     "compare_models"}   # Compare under the message box (Settings -> Models): off unless on
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
        "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection", "idle_off",
@@ -386,6 +387,8 @@ class Settings:
                 value = "hidden" if value.lower() in ("hidden", "hide", "off", "false", "0", "no") else ""
             if name == "sequence_react":  # a chat answers a stop or failure of its sequence at once: off unless on
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
+            if name == "compare_models":  # Compare (several models answer at once) in the chat: off unless on
+                value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "ask_folder":  # a folder is asked for each new chat (app or browser): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
@@ -495,6 +498,7 @@ class Settings:
             "card_language": self.card_language,
             "checklist": self._user.get("checklist") != "hidden",
             "sequence_react": self._user.get("sequence_react") == "on",
+            "compare_models": self._user.get("compare_models") == "on",
             "updates": self.updates,
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "own_keys": _own_keys(),   # Kelvin from source: the person's own API keys and services (edition.py)

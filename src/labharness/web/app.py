@@ -82,9 +82,10 @@ HUB_SHARING = False
 # Claude Code bridge: while Claude works the screen, this computer's browser only reads and stops, so its clicks never
 # answer for a person (an approval, a rollback, Hands on the sample, a sample's protection, a project's rules, a PIN).
 # What passes: what only makes the lab safer (Stop, Bring to safe, an alarm's Got it, the restart card's safe: its
-# route keeps the card's dismiss locked) and what only reads, though sent as a POST (the Analysis pane's working out
-# and its CSV; keeping a fit writes, so it waits)
-WHILE_OPERATING = ("/api/stop", "/api/runs/stop", "/api/safe", "/api/incident", "/api/analysis", "/api/analysis/csv")
+# route keeps the card's dismiss locked) and what only reads, though sent as a POST (the Analysis pane's working out,
+# its subagent's and its CSV; keeping a fit writes, so it waits)
+WHILE_OPERATING = ("/api/stop", "/api/runs/stop", "/api/safe", "/api/incident", "/api/analysis", "/api/analysis/auto",
+                   "/api/analysis/csv")
 ACK_WHILE_OPERATING = re.compile(r"^/api/alarms/[^/]+/ack$")
 OPERATING = ("Claude is operating this computer, so everything in Kelvin but Stop, Bring to safe and reading is locked "
              "until it finishes. Press Stop to end it.")
@@ -769,10 +770,16 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     def analysis_runs(path: str, body: bytes, query: str) -> List[str]:
         """The runs an Analysis pane request names, read as its route reads them (workbench.run_ids): its spec's,
-        "last" when it names none, or every ?run= given."""
+        "last" when it names none, or every ?run= given; the subagent's (/auto), its one run."""
         from urllib.parse import parse_qs
         if path.rstrip("/").endswith("/columns"):
             asked = parse_qs(query or "").get("run") or ["last"]
+        elif path.rstrip("/").endswith("/auto"):
+            try:
+                ask = json.loads(body or b"{}")
+            except ValueError:
+                ask = {}
+            asked = [str(ask.get("run") or "").strip() or "last"] if isinstance(ask, dict) else ["last"]
         else:
             try:
                 ask = json.loads(body or b"{}")
@@ -3301,8 +3308,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(409, "Kelvin isn't working on this chat now: send it as a new message.")
         return JSONResponse({"ok": True})
 
-    def stream_events(work: Any) -> Response:
-        """Run `work(emit)` to the end even if the browser goes away; stream its events as NDJSON."""
+    def stream_events(work: Any, leave_stops: bool = False) -> Response:
+        """Run `work(emit)` to the end even if the browser goes away (leave_stops: until it does); stream its events
+        as NDJSON."""
         queue: asyncio.Queue = asyncio.Queue()
 
         async def run() -> None:
@@ -3316,14 +3324,42 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         task.add_done_callback(lambda t: tasks.remove(t) if t in tasks else None)
 
         async def events():
-            while True:
-                event = await queue.get()
-                if event is None:
-                    return
-                yield json.dumps(event, ensure_ascii=False) + "\n"
+            ended = False
+            try:
+                while True:
+                    event = await queue.get()
+                    if event is None:
+                        ended = True
+                        return
+                    yield json.dumps(event, ensure_ascii=False) + "\n"
+            finally:
+                if leave_stops and not ended and not task.done():   # the browser went before the end: nobody
+                    task.cancel()                                    # reads what the work would say
 
         return StreamingResponse(events(), media_type="application/x-ndjson",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    async def analysis_auto(request: Request) -> Response:
+        """POST {run, chat, model, again}: the Analysis pane's subagent on one dataset (analyst.py): the model (the
+        message box's, as the chat may use it) reads the run and decides by itself how to process and show it,
+        streamed as NDJSON: each step it takes, each figure it draws, then which it keeps and one line on what they
+        show. It only reads, and stops when the pane does (another dataset picked, the page closed). What it found
+        is told again while the run is unchanged, unless again. With no model, the run as measured."""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not str(body.get("run") or "").strip():
+            return error(400, "send {run, chat, model}: the dataset to analyze")
+        try:
+            chat, model = agent.analyst_for(str(body.get("chat") or ""), str(body.get("model") or ""))
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else "no such chat")
+        except ValueError as e:
+            return error(400, str(e))
+        run = str(body["run"]).strip()
+        again = body.get("again") is True
+        return stream_events(lambda emit: agent.analyze_dataset(chat, run, model, emit, again), leave_stops=True)
 
     async def compare(request: Request) -> Response:
         """Several models answer one message side by side (reading the lab only)."""
@@ -4276,6 +4312,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/team", team_view, methods=["GET", "POST"]),
         Route("/api/analysis", analysis_view, methods=["POST"]),
         Route("/api/analysis/columns", analysis_columns),
+        Route("/api/analysis/auto", analysis_auto, methods=["POST"]),
         Route("/api/analysis/keep", analysis_keep, methods=["POST"]),
         Route("/api/analysis/csv", analysis_csv, methods=["POST"]),
         Route("/api/notify/test", notify_test, methods=["POST"]),

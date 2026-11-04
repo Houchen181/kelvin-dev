@@ -665,7 +665,7 @@
     const app = document.getElementById("app");
     if (app) app.inert = false;
   }
-  // Done or Skip: not again in this browser; Home. With no scripts folder added, the first setup's question about
+  // Done or Skip: not again in this browser; the chat. With no scripts folder added, the first setup's question about
   // the lab's scripts is answered "none", as here, so it doesn't come back as a dialog. A new key, local model or
   // ChatGPT sign-in: the page's list of models is redone (Kelvin.refreshModels when the page lends it, else a reload)
   async function finish() {
@@ -678,7 +678,7 @@
     if (W.state && W.state.ask_scripts && !W.scripts.folders.length) {
       try { await K.api("/api/instruments/scripts-folder", { body: { folder: "" } }); } catch (e) { warn(e); }
     }
-    safe(K.setMode, "home");
+    safe(K.setMode, "chat");
     if (W.changed && typeof K.refreshModels !== "function") { location.reload(); return; }
     hide();
     if (W.changed) K.api("/api/bootstrap").then((b) => K.refreshModels(b)).catch(warn);
