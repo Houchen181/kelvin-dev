@@ -93,6 +93,11 @@ def test_one_function_says_what_save_sends_and_what_waits():
     # a load that fills the model lists again (a service added or removed) is no change of the person's
     refresh = _function(js, "refreshModels")
     assert "settingsFilled(Object.keys(picked));" in refresh and "settingsPending();" in refresh
+    # the welcome redraws the model list in place after a key, a local model or a ChatGPT sign-in: the page lends it
+    names = js[js.index("window.Kelvin = {"):]
+    assert "refreshModels," in names[:names.index("};")]
+    welcome = (STATIC / "welcome.js").read_text(encoding="utf-8")
+    assert 'K.api("/api/bootstrap").then((b) => K.refreshModels(b))' in welcome
 
 
 def test_what_acts_at_once_stands_in_a_card_at_the_top_of_its_page():

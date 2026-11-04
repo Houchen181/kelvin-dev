@@ -7087,6 +7087,7 @@
       if (count && loop && li.dataset.i !== "time") count.textContent = loopCount(loop);
     }
     $("ed-plan-text").textContent = c.text || "";
+    $("ed-copy").disabled = !c.text;   // nothing to copy until the scan makes a plan
     edButtons();
   }
   function edButtons() {
@@ -9130,12 +9131,14 @@
   // real window, which the zoom does not change, so it never feeds back on itself: 100 % on a big window (1600 × 900 or
   // more), on a touch screen and under 1000 px wide; 85 % under 680 px tall; 90 % otherwise (the person's own "90 % on
   // a laptop"). A choice in Settings → Page size (85 to 150 %) overrides it on this browser (lh.pageSize). A size is
-  // offered only while the layout keeps its least height at it on this window (PAGE_LEAST, .app's min-height in
-  // app.css): a choice too big for the window is applied as the largest size that fits, and kept, so a taller window
-  // gets it back. fitTiers also sets the density tier on <html> by the layout's height, the window's divided by the page
-  // size: fit-roomy (900 or more), fit-compact (720 to 899) or fit-tight.
+  // offered only while the layout keeps its least height and its least width at it on this window (PAGE_LEAST, .app's
+  // min-height in app.css; PAGE_LEAST_W, the narrowest page whose top bar keeps its controls apart, a phone's): a choice
+  // too big for the window is applied as the largest size that fits, and kept, so a bigger window gets it back.
+  // fitTiers also sets the density tier on <html> by the layout's height, the window's divided by the page size:
+  // fit-roomy (900 or more), fit-compact (720 to 899) or fit-tight.
   const SIZES = [0.85, 0.9, 1, 1.1, 1.25, 1.5];
   const PAGE_LEAST = 560;
+  const PAGE_LEAST_W = 360;
   const FIT = { zoom: 1, tier: "", timer: 0, still: 0, wheel: 0, native: false };
   try { localStorage.removeItem("lh.v"); } catch (e) { /* kept nowhere */ }   // a layout choice an earlier version kept
   const inApp = () => !!(window.pywebview && window.pywebview.api && window.pywebview.api.set_zoom);
@@ -9149,8 +9152,10 @@
     if (w < 1000 || window.matchMedia("(pointer: coarse)").matches) return 1;
     return w >= 1600 && h >= 900 ? 1 : h < 680 ? 0.85 : 0.9;
   }
-  // a size fits this window when the layout keeps its least height at it
-  const sizeFits = (z) => window.innerHeight / z >= PAGE_LEAST;
+  // a size fits this window when the layout keeps its least height and its least width at it
+  const fitsTall = (z) => window.innerHeight / z >= PAGE_LEAST;
+  const fitsWide = (z) => window.innerWidth / z >= PAGE_LEAST_W;
+  const sizeFits = (z) => fitsTall(z) && fitsWide(z);
   // the size applied: the choice, or Auto, held at the largest size that fits (the smallest when none does). Auto on a
   // touch screen keeps 100 %, for its 40 px targets
   function pageSize() {
@@ -9183,24 +9188,35 @@
     emit("fit", { zoom: z, tier });
   }
   // Settings → Display → Page size: the size applied; − and + greyed at the ends, + also where the next size would not
-  // fit the window, the reason their tip; a choice held smaller is said on the line under them
+  // fit the window, the reason their tip. The line under them says a choice held smaller, else why the window greys +
+  // (a disabled button shows no tip to the keyboard or a finger). When the button holding the focus greys or goes, the
+  // focus moves to another of the row's, so it never falls out of Settings
   function showPage() {
     if (!$("zoom-now")) return;
     const z = FIT.zoom, chosen = pageChoice(), pct = (s) => Math.round(s * 100) + "%";
     const next = SIZES.find((s) => s > z + 0.001), cramped = !!next && !sizeFits(next);
-    const now = chosen ? pct(z) : "Auto · " + pct(z), held = chosen > z + 0.001 ? pct(chosen) + " chosen: a taller window shows it" : "";
+    const why = !next ? pct(z) + " is the largest"
+      : !cramped ? ""
+      : !fitsWide(next) ? "At " + pct(next) + " the page would be narrower than its least width of " + PAGE_LEAST_W + " px on this window"
+      : "At " + pct(next) + " the page would be under its least height of " + PAGE_LEAST + " px on this window";
+    const bigger = !fitsWide(chosen) ? (fitsTall(chosen) ? "wider" : "bigger") : "taller";
+    const now = chosen ? pct(z) : "Auto · " + pct(z);
+    const held = chosen > z + 0.001 ? pct(chosen) + " chosen: a " + bigger + " window shows it" : cramped ? why : "";
     if ($("zoom-now").textContent !== now) $("zoom-now").textContent = now;
     if ($("zoom-held").textContent !== held) $("zoom-held").textContent = held;
     $("zoom-held").hidden = !held;
+    const row = [$("zoom-in"), $("zoom-out"), $("zoom-reset")], had = document.activeElement;
     $("zoom-out").disabled = z <= SIZES[0];
     const least = z <= SIZES[0] ? pct(SIZES[0]) + " is the smallest" : "";
     if ($("zoom-out").title !== least) $("zoom-out").title = least;
     $("zoom-in").disabled = !next || cramped;
-    const why = !next ? pct(z) + " is the largest"
-      : cramped ? "At " + pct(next) + " the page would be under its least height of " + PAGE_LEAST + " px on this window" : "";
     if ($("zoom-in").title !== why) $("zoom-in").title = why;
     $("zoom-reset").hidden = !chosen;
     $("zoom-hint").hidden = !inApp();
+    if (row.includes(had) && (had.disabled || had.hidden)) {
+      const to = row.find((b) => b !== had && !b.disabled && !b.hidden);
+      if (to) to.focus();
+    }
   }
   function stepPage(dir) {   // +1 bigger, -1 smaller, 0 back to Auto; never bigger than the window holds (sizeFits)
     let z = 0;
@@ -10008,7 +10024,7 @@
     $, h, api, icon, md, toast, fmt, store, S, MARK,
     setMode, ask, sendMessage, newChat, openChat, pollState,
     toggleSeq, toggleRuns, toggleLab, toggleAnalysis, openRun, openRunList, showView, showScan, fitLayout, exitFull, thumb,
-    openEditor, openVersions, openLabSetup, openSettings, settingsPage, openCards,
+    openEditor, openVersions, openLabSetup, openSettings, settingsPage, openCards, refreshModels,
     pickFolder, hasPicker, hasFilePicker, isVI, importVI, openReview, folderLabels, popMenu, closeMenu, lineChart, getRun, runCharts,
     zoom: pageZoom, askYes, askText, fitTiers,   // the fit's contract (the page size, the in-page question)
   };

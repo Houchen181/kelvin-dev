@@ -215,3 +215,41 @@ def test_a_panel_in_full_screen_keeps_its_content_in_homes_column():
     assert len(eds) == 2 and all("padding: 8px var(--foot-x)" in e for e in eds)
     home = (STATIC / "home.css").read_text(encoding="utf-8")
     assert "max-width: calc(1440px + 2 * var(--pad-page, 24px))" in home   # the same column as Home's
+
+
+def test_a_full_screen_panels_regions_reach_across_the_side_space():
+    """The column is held inside what scrolls, not around it, so the wheel scrolls a panel from the side space too: a
+    region that is the panel's body (the Analysis, the scan editor, Team chat's messages) keeps the whole width with
+    the column in its padding; the Lab's body holds the column in its padding and its outer parts reach out over the
+    side space (--full-side, measured on the Lab with cqw); the Runs pane's body keeps the whole width, the Scan's
+    measurement keeps the column and its list holds it in its padding."""
+    css = re.sub(r"/\*.*?\*/", "", CSS, flags=re.S)
+    side = "calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2"
+    assert ("#app.full:not(.full-term) .full-on > :is(#an-body, #ed-body) { margin-inline: 0;\n"
+            "  padding-inline: max(14px, %s + 14px)); }" % side) in css
+    assert ("#app.full:not(.full-term) #teampanel > .team-list { margin-inline: 0;\n"
+            "  padding-inline: max(var(--sp-3, 12px), %s + var(--sp-3, 12px))); }" % side) in css
+    assert re.search(r"\n\.an-body \{ padding: 12px 14px 20px;", css) and re.search(r"\n\.ed-body \{[^}]*padding: 10px 14px 12px;", css)
+    assert "#teampanel .team-list { padding: var(--sp-1, 4px) var(--sp-3, 12px) var(--sp-3, 12px); }" in css
+    assert "--full-side: max(0px, calc((100cqw - 1440px - 2 * var(--pad-page, 24px)) / 2));" in css
+    assert "#labpanel { container: lab / inline-size;" in css   # cqw is the Lab's width
+    assert ("#app.full:not(.full-term) #labpanel > .lab-scroll { margin-inline: 0; "
+            "padding-inline: calc(var(--sp-4, 16px) + var(--full-side)); }") in css
+    assert "margin-inline-start: calc(-4px - var(--full-side)); padding-inline-start: calc(4px + var(--full-side));" in css
+    assert "margin-inline-end: calc(-4px - var(--full-side)); padding-inline-end: calc(4px + var(--full-side));" in css
+    assert "#app.full:not(.full-term) #runpane > #run-body { margin-inline: 0; }" in css
+    assert "#app.full:not(.full-term) #scan-live { margin-inline: max(0px, %s); }" % (side + ")") in css
+    assert "padding-inline: max(var(--sp-3, 12px), %s + var(--sp-3, 12px))); }" % side in css
+
+
+def test_the_full_screen_sequence_stands_in_its_blocks_column():
+    """In full screen the Sequence's bar, blocks, ＋ Add and step stand in the blocks' own column (920 px, seq.css),
+    centred, so Start and ⋯ end where the blocks end; the blocks' region keeps the whole width."""
+    css = re.sub(r"/\*.*?\*/", "", CSS, flags=re.S)
+    seq = (STATIC / "seq.css").read_text(encoding="utf-8")
+    assert ".seq-list > *, .seq-add, .seq-extra { max-width: 920px; }" in seq
+    assert ("#app.full:not(.full-term) #seq-view :is(.seq-bar, .seq-list, .seq-extra) {\n"
+            "  max-width: none; padding-inline: max(var(--sp-3, 12px), calc((100% - 920px) / 2)); }") in css
+    assert ("#app.full:not(.full-term) #seq-view .seq-add { margin-inline: max(var(--sp-3, 12px), "
+            "calc((100% - 920px) / 2)); }") in css
+    assert 'id="seq-view"' in PAGE and 'id="run-body"' in PAGE

@@ -174,8 +174,10 @@ html:is(.fit-compact, .fit-tight) .hk-text { -webkit-line-clamp: 2; }
     padding: 0 var(--sp-4, 16px); border-radius: 12px; }
   html.fit-compact .home-tile { max-height: none; }
   .home-tile-head { display: contents; }
-  .home-tile-go { align-self: stretch; }   /* the line's height: the button is as tall as the tile */
-  .home-kpi { order: 1; flex: none; flex-wrap: nowrap; }
+  .home-tile-go { flex-shrink: 0; align-self: stretch; }   /* the line's height: the button is as tall as the tile */
+  /* the title stays whole on a narrow tile: the number's unit gives way first, cut with an ellipsis */
+  .home-kpi { order: 1; flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; }
+  .home-kpi-unit { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .home-kpi-n { font-size: 20px; }
   .home-tile .chip { order: 2; }
   .home-tile-body { display: none; }

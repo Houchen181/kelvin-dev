@@ -13,6 +13,8 @@ from pathlib import Path
 import labharness
 
 STATIC = Path(labharness.__file__).parent / "web" / "static"
+PORTAL = Path(labharness.__file__).parent / "data" / "portal.md"   # the agent's map of the page
+DOCS = Path(labharness.__file__).parents[2] / "docs"
 SCRIPTS = ("app.js", "seq.js", "home.js", "welcome.js")
 STYLES = ("app.css", "home.css", "seq.css", "welcome.css")
 TIERS = ("fit-roomy", "fit-compact", "fit-tight")
@@ -365,8 +367,10 @@ def test_a_target_is_never_under_24_window_px():
     left = [(n, line.strip()[:60]) for n, s in css.items() for line in s.split("\n") if floor.search(line)]
     assert all(".logo {" in line or ".seq-grip {" in line for _, line in left), left
     used = sum(s.count("var(--target)") for s in css.values())
-    assert used >= 26, used
-    for sel in (".seq-act {", ".hk-btn {", ".assess-more {", ".rv-fold {", ".switch {", ".attach-x {"):
+    assert used >= 29, used
+    # also a control that reached 28 px by its content: the scan editor's lists and its loops' tick boxes (their label)
+    for sel in (".seq-act {", ".hk-btn {", ".assess-more {", ".rv-fold {", ".switch {", ".attach-x {", "select.ed-in {",
+                ".ed-loop .ed-waits > .ed-check {"):
         rules = [line for s in css.values() for line in s.split("\n") if line.startswith(sel)]
         assert any("var(--target)" in rule for rule in rules), sel
     # the floor in window px at each page size: 24 or more
@@ -384,7 +388,8 @@ def test_page_size_never_leaves_the_layout_under_its_least_height():
     least = int(re.search(r"const PAGE_LEAST = (\d+);", js).group(1))
     app = [d for s, d in _rules(css) if s == ".app"]
     assert len(app) == 1 and "min-height: %dpx;" % least in app[0]
-    assert "const sizeFits = (z) => window.innerHeight / z >= PAGE_LEAST;" in js
+    assert "const fitsTall = (z) => window.innerHeight / z >= PAGE_LEAST;" in js
+    assert "const sizeFits = (z) => fitsTall(z) && fitsWide(z);" in js
     size = _function(js, "pageSize")
     assert "return SIZES.filter((s) => s <= want && sizeFits(s)).pop() || SIZES[0];" in size
     fit = _function(js, "fitTiers")   # weighed at every resize, also when neither the size nor the tier changes
@@ -395,8 +400,9 @@ def test_page_size_never_leaves_the_layout_under_its_least_height():
     assert '"At " + pct(next) + " the page would be under its least height of " + PAGE_LEAST + " px on this window"' in show
     assert 'const why = !next ? pct(z) + " is the largest"' in show   # + at the largest step says so too
     assert 'if ($("zoom-in").title !== why) $("zoom-in").title = why;' in show
-    # the choice held smaller is said where everyone sees it (not in a tip), and kept
-    assert 'pct(chosen) + " chosen: a taller window shows it"' in show
+    # the choice held smaller is said where everyone sees it (not in a tip), and kept; else why the window greys +
+    assert 'pct(chosen) + " chosen: a " + bigger + " window shows it" : cramped ? why : "";' in show
+    assert 'const bigger = !fitsWide(chosen) ? (fitsTall(chosen) ? "wider" : "bigger") : "taller";' in show
     assert '$("zoom-held").textContent = held;' in show and '$("zoom-held").hidden = !held;' in show
     assert '$("zoom-now").title' not in show
     page = _read("index.html")
@@ -416,6 +422,67 @@ def test_page_size_never_leaves_the_layout_under_its_least_height():
     assert 'store("lh.pageSize") === null' in _function(js, "appZoomOff")
     for name in SCRIPTS[1:]:
         assert "lh.pageSize" not in _read(name) and 'setProperty("--zoom"' not in _read(name)
+
+
+def test_page_size_never_leaves_the_layout_under_its_least_width():
+    """The page's least width is 360 page px: narrower, the top bar's controls run into each other (a phone at 110 %,
+    390 / 1.1 = 355 px, has the mark over Incognito, and at 150 % the Lab's button leaves the window). So a size fits
+    only where the layout keeps both its least height and its least width; on a 390 px phone + is greyed at 100 %, a
+    stored 125 or 150 % is held at 100 %, and the tip and the line under the buttons say which limit holds it. A
+    computer's window never meets the width before the height."""
+    js = _read("app.js")
+    assert int(re.search(r"const PAGE_LEAST_W = (\d+);", js).group(1)) == 360
+    assert "const fitsWide = (z) => window.innerWidth / z >= PAGE_LEAST_W;" in js
+    show = _function(js, "showPage")
+    assert ('!fitsWide(next) ? "At " + pct(next) + " the page would be narrower than its least width of " + PAGE_LEAST_W'
+            ' + " px on this window"') in show
+    assert '"At " + pct(next) + " the page would be under its least height of " + PAGE_LEAST + " px on this window"' in show
+    fits = lambda w, h, z: h / z >= 560 and w / z >= 360   # noqa: E731
+    sizes = (0.85, 0.9, 1, 1.1, 1.25, 1.5)
+    assert [z for z in sizes if fits(390, 844, z)] == [0.85, 0.9, 1]          # V11: up to 100 %
+    assert [z for z in sizes if fits(1366, 768, z)] == [0.85, 0.9, 1, 1.1, 1.25]   # V2: its height decides
+    assert all(fits(w, h, z) == (h / z >= 560) for w, h in ((1280, 720), (1920, 1080), (2560, 1440), (1180, 820))
+               for z in sizes)
+    for doc in (DOCS / "portal.md", PORTAL):
+        assert "360 px" in doc.read_text(encoding="utf-8"), doc
+
+
+def test_page_size_keeps_the_focus_in_its_row():
+    """The press that greys + or − (or hides Auto) must not throw the focus out of Settings: a disabled button lets the
+    focus go to the page. showPage notes the focused button before it greys the row, and moves the focus to another of
+    the row's buttons that can still be pressed; after a mouse or finger press k-pointer keeps that move ringless."""
+    show = _function(_read("app.js"), "showPage")
+    assert 'const row = [$("zoom-in"), $("zoom-out"), $("zoom-reset")], had = document.activeElement;' in show
+    assert "if (row.includes(had) && (had.disabled || had.hidden)) {" in show
+    assert "const to = row.find((b) => b !== had && !b.disabled && !b.hidden);" in show and "if (to) to.focus();" in show
+    assert show.index("had = document.activeElement") < show.index('$("zoom-out").disabled =') < show.index("to.focus()")
+    assert show.index('$("zoom-reset").hidden = !chosen;') < show.index("to.focus()")
+
+
+def test_the_scan_editors_plan_box_holds_its_copy_button():
+    """Plan text on a new scan has no plan yet: the box is still as tall as Copy (top and right 4 px, a finger's 40 px
+    on touch), says why it is empty, and Copy is greyed until there is a plan; the text keeps clear of Copy. A List
+    loop's values box fills its label, a grid in a loop, where width 0 would leave it only its padding."""
+    css = _uncommented_css("app.css")
+    assert ".ed-plan .btn { position: absolute; top: 4px; right: 4px;" in css
+    pre = [d for sel, d in _rules(css) if sel == ".ed-plan pre"]
+    assert any("min-height: calc(var(--target) + 8px);" in d and "padding-right: 88px;" in d for d in pre), pre
+    assert not any("min-height: 0;" in d for d in pre)
+    assert '.ed-plan pre:empty::before { content: "No plan yet: choose what it changes.";' in css
+    assert "@media (pointer: coarse) { .ed-plan pre { min-height: 48px; } }" in css and 4 + 40 + 4 <= 48
+    assert '$("ed-copy").disabled = !c.text;' in _function(_read("app.js"), "renderEdCheck")
+    assert ".ed-loop .ed-vals > .ed-f > .ed-values { width: 100%; }" in css
+
+
+def test_a_one_line_tile_keeps_its_title_whole():
+    """Panes beside Home with the notice row over it leave one-line tiles 245 px wide: the title (Lab) stays whole and
+    the number's unit gives way, cut with an ellipsis."""
+    css = _uncommented_css("home.css")
+    block = css[css.index("@container home (max-width: 699px) or (max-height: 719px) {"):]
+    block = block[:block.index("\n}")]
+    assert ".home-tile-go { flex-shrink: 0; align-self: stretch; }" in block
+    assert ".home-kpi { order: 1; flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; }" in block
+    assert ".home-kpi-unit { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }" in block
 
 
 def test_home_fitted_holds_five_columns_of_blocks():
