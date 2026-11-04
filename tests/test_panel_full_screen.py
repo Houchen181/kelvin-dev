@@ -204,6 +204,14 @@ def test_a_panel_in_full_screen_keeps_its_content_in_homes_column():
             "  margin-inline: max(0px, calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2)); }") in css
     foot = css[css.index("#app.full:not(.full-term) .full-on > :is(.ed-foot, .team-form, .team-name-form)"):]
     assert "margin-inline: 0;" in foot[:foot.index("}")]
-    assert "padding-inline: max(var(--side), calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2 + var(--side)));" in foot
+    assert ("padding-inline: max(var(--foot-x), calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2 + var(--foot-x)));"
+            in foot[:foot.index("}")])
+    # each band's side padding is said once, on its own rule, and the full-screen rule only adds to it
+    assert "--foot-x:" not in foot[:foot.index("}")]
+    team = re.search(r"\n\.team-form, \.team-name-form \{([^}]*)\}", css).group(1)
+    assert "--foot-x: var(--sp-3, 12px);" in team and "padding: var(--sp-2, 8px) var(--foot-x) var(--sp-3, 12px);" in team
+    eds = re.findall(r"\n\.ed-foot \{([^}]*)\}", css)
+    assert "--foot-x: 14px;" in eds[0] and "padding: 8px var(--foot-x) 12px;" in eds[0]
+    assert len(eds) == 2 and all("padding: 8px var(--foot-x)" in e for e in eds)
     home = (STATIC / "home.css").read_text(encoding="utf-8")
     assert "max-width: calc(1440px + 2 * var(--pad-page, 24px))" in home   # the same column as Home's

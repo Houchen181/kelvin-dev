@@ -252,6 +252,7 @@
     }
     redraw("files");
     redraw("scripts");   // its count of scripts is the list's now
+    fitColumn();
   }
   function filesCount() {   // the Import row's value: what Next imports, or what came in
     const f = W.files, list = f.list || [];
@@ -582,10 +583,26 @@
     W.els.group.setAttribute("aria-label", title);
     W.els.group.replaceChildren(...ORDER[id].map((key) => BLOCKS[key]()));
     footer();
+    fitColumn();
     if (id === "model") {
       if (W.gpt.signed === null) gptStatus();
       if (W.boot && W.boot.claude_code && !W.cc) ccStatus();
     }
+  }
+  // the column has one height on every step (welcome.css, --wl-h), so the head, the dots and Skip stand still from step
+  // to step. A lab whose scripts need more room than that (two folders, thirty scripts) makes it taller on the first
+  // step, as its list comes in, so the list shows whole where the window has the room: never shorter, never on a later
+  // step. Rects are the screen's pixels, divided by the page size
+  function fitColumn() {
+    const col = W.els.root && W.els.root.querySelector(".wl-col"), region = col && col.querySelector(".wl-list");
+    if (W.step !== 0 || !region || !region.clientHeight) return;
+    const over = region.scrollHeight - region.clientHeight;
+    if (over <= 1) return;
+    const z = Number(K.zoom && K.zoom()) || 1, cs = getComputedStyle(col);
+    const px = region.getBoundingClientRect().height / z / region.clientHeight;   // one of the list's pixels, in the page's
+    // the list whole, and the most room the column keeps above its head (welcome.css: 48 px)
+    const need = col.getBoundingClientRect().height / z + over * px + 48 - parseFloat(cs.paddingTop);
+    if (need > parseFloat(cs.getPropertyValue("--wl-h"))) col.style.setProperty("--wl-h", Math.ceil(need) + "px");
   }
   // what a step asks for, done: the ticked scripts imported, what was typed saved, the ticked instruments added.
   // false: stay (a refusal on its row)

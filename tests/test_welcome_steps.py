@@ -107,5 +107,25 @@ def test_the_card_is_centred_on_a_tall_window_and_nothing_moves_from_step_to_ste
     # with the scripts in one column (a phone) the tallest step is taller: the phone keeps its whole height for it
     narrow = css[css.index("@media (max-width: 639.98px)"):]
     assert int(re.search(r"\.wl-col \{ --wl-h: (\d+)px; \}", narrow[:narrow.index("\n}")]).group(1)) >= 1000
+    # a tablet's 40 px dots, Skip and Next need a little more; never the phone's (its own query comes first)
+    touch = css[css.index("@media (pointer: coarse) and (min-width: 640px)"):]
+    assert int(re.search(r"\.wl-col \{ --wl-h: (\d+)px; \}", touch[:touch.index("\n}")]).group(1)) >= 776
     # nothing in the steps sets the column's height, so no step moves it
     assert "wl-col" not in _code(_function(JS, "render")) and ".style.height" not in _code(JS)
+
+
+def test_a_lab_with_more_scripts_makes_the_column_taller_once_on_the_first_step():
+    """--wl-h fits 15 scripts; a lab with more (thirty, two folders) would see its list cut on a tall window. The
+    first step makes the column as tall as its list needs when the list comes in: only there, and never shorter, so the
+    head, the dots and Skip still stand in one place from step to step."""
+    fit = _code(_function(JS, "fitColumn"))
+    assert 'if (W.step !== 0 || !region || !region.clientHeight) return;' in fit
+    assert "const over = region.scrollHeight - region.clientHeight;" in fit and "if (over <= 1) return;" in fit
+    assert "const z = Number(K.zoom && K.zoom()) || 1" in fit   # the screen's pixels, divided by the page size
+    assert 'if (need > parseFloat(cs.getPropertyValue("--wl-h"))) col.style.setProperty("--wl-h",' in fit
+    assert "48 - parseFloat(cs.paddingTop)" in fit and "clamp(12px, 4 * var(--vh), 48px)" in _read("welcome.css")
+    # the list alone gives way when the column is short, so what it lacks is all the column lacks
+    assert ".wl-block > .wl-row { flex: none; }" in _read("welcome.css")
+    # measured when a step is drawn and when the scripts come in; nothing else sets it
+    assert "fitColumn();" in _code(_function(JS, "render")) and "fitColumn();" in _code(_function(JS, "loadFiles"))
+    assert _code(JS).count("--wl-h") == 2 and _code(JS).count("fitColumn()") == 3

@@ -695,8 +695,10 @@ body:not(.incognito) #empty-sub { display: none; }
 .field label, .field-label { font-weight: 550; font-size: 14px; }
 .field input, .field select, .field textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 7px 10px;
   background: var(--raised); color: var(--text); font-size: 14px; }
-.field input:focus, .field textarea:focus, .add-row input:focus, .pane-filter:focus,
-.inst-tools input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* a field typed in glows while it has the focus; a box or a round choice (checkbox, radio) pressed does not: it has the
+   keyboard's ring alone (:focus-visible), which a press takes away (k-pointer) */
+:is(.field, .add-row, .inst-tools) input:where(:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"])):focus,
+.field textarea:focus, .pane-filter:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 /* a list (select) rings for the keyboard only: pressed with the mouse or a finger it keeps its own border (k-pointer) */
 .field select:focus, .add-row select:focus, .mount-select:focus { outline: none; }
 :where(html:not(.k-pointer)) :is(.field select, .add-row select, .mount-select):focus-visible {
@@ -944,12 +946,17 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .alert-body .alert-when { color: var(--muted); font-size: 12px; }
 /* the alarms after the newest, counted on one row that opens Lab → Watches: the whole row is its button */
 .alert-more { min-height: 30px; font: inherit; color: var(--text); text-align: left; cursor: pointer; }
-.alert-more:hover { box-shadow: inset 0 0 0 1px var(--danger); }
+@media (hover: hover) {   /* a pointer over it; a touch screen keeps :hover on what was tapped, and the ring would stay */
+  .alert-more:hover { box-shadow: inset 0 0 0 1px var(--danger); }
+}
 .alert.alert-more > svg:last-child { width: 16px; height: 16px; color: var(--text-2); }
 .alarm-history { margin: 0 0 8px; font-size: 13px; }
-/* Alarm history: a disclosure (its button) over its list, which opens by height (.k-fold, foldOpen in app.js) */
+/* Alarm history: a disclosure (its button) over its list, which opens by height (.k-fold, foldOpen in app.js); each
+   alarm nobody has answered has its Got it at the right */
 .alarm-history .k-fold-in > ul { margin: 4px 0 0; }
-.alarm-history li { display: grid; gap: 1px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.alarm-history li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.alarm-history li > div { flex: 1 1 auto; min-width: 0; display: grid; gap: 1px; }
+.alarm-history li > .btn { flex: none; }
 .alarm-history li span { color: var(--muted); font-size: 12px; }
 .watch-list { list-style: none; margin: 0 0 6px; padding: 0; display: grid; gap: 2px; }
 .watch { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 8px; font-size: 13px; }
@@ -1314,10 +1321,9 @@ body.resizing .plot-svg { pointer-events: none; }
 #app.full:not(.full-term) .full-on > :not(header) {
   margin-inline: max(0px, calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2)); }
 /* a band at the panel's foot (the editor's Run and Add to sequence, Team chat's message box) keeps its line and its
-   fill across, and centres what it holds in the same column */
-#app.full:not(.full-term) .full-on > :is(.ed-foot, .team-form, .team-name-form) { --side: var(--sp-3, 12px); margin-inline: 0;
-  padding-inline: max(var(--side), calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2 + var(--side))); }
-#app.full:not(.full-term) .full-on > .ed-foot { --side: 14px; }
+   fill across, and centres what it holds in the same column, its own side padding (--foot-x) kept */
+#app.full:not(.full-term) .full-on > :is(.ed-foot, .team-form, .team-name-form) { margin-inline: 0;
+  padding-inline: max(var(--foot-x), calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2 + var(--foot-x))); }
 
 /* Settings, Instruments: the lab's scripts folders, and what Kelvin installed for instruments */
 .env-list { list-style: none; padding: 0; margin: 4px 0 6px; }
@@ -1436,7 +1442,8 @@ body.resizing .plot-svg { pointer-events: none; }
 .tm-text { padding: 6px 11px; border-radius: 14px; background: var(--surface-1); border: 1px solid var(--card-line); font-size: var(--fs-body, 15px);
   line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tm.mine .tm-text { background: var(--accent-soft); border-color: transparent; }
-.team-form, .team-name-form { display: flex; align-items: flex-end; gap: 8px; padding: var(--sp-2, 8px) var(--sp-3, 12px) var(--sp-3, 12px);
+.team-form, .team-name-form { --foot-x: var(--sp-3, 12px); display: flex; align-items: flex-end; gap: 8px;
+  padding: var(--sp-2, 8px) var(--foot-x) var(--sp-3, 12px);
   border-top: 1px solid var(--line); background: var(--panel); flex: none; }
 .team-form textarea, .team-name-form input { flex: 1; min-width: 0; border: 1px solid var(--line-strong); border-radius: 14px;
   padding: 7px 12px; background: var(--raised); color: var(--text); font: inherit; font-size: var(--fs-body, 15px); resize: none; max-height: 160px;
@@ -1541,7 +1548,8 @@ body.resizing .plot-svg { pointer-events: none; }
 .ed-plan .btn svg { width: 14px; height: 14px; }
 .ed-problems { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; color: var(--danger); font-size: 12.5px; overflow-wrap: anywhere; }
 .ed-problems:empty { display: none; }
-.ed-foot { flex: none; display: grid; gap: 6px; padding: 8px 14px 12px; border-top: 1px solid var(--line); background: var(--panel); }
+.ed-foot { --foot-x: 14px; flex: none; display: grid; gap: 6px; padding: 8px var(--foot-x) 12px; border-top: 1px solid var(--line);
+  background: var(--panel); }
 .ed-state { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-height: 18px; font-size: 13px; }
 .ed-status { font-weight: 600; font-variant-numeric: tabular-nums; }
 .ed-msg { color: var(--muted); overflow-wrap: anywhere; }
@@ -2170,7 +2178,7 @@ select.ed-in { padding: 4px 6px; text-overflow: ellipsis; }
 .ed-set > .ed-unit { flex: 0 0 44px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }   /* values in a column */
 .ed-adds { display: flex; flex-wrap: wrap; gap: 6px; }
 /* the footer: the points and time (and what the last action said) at the left of the buttons, on one row */
-.ed-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 14px; }
+.ed-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px var(--foot-x); }
 .ed-foot > .ed-problems { flex: 1 1 100%; }
 .ed-state { flex: 1 1 90px; min-width: 0; display: grid; gap: 0; line-height: 1.35; }
 .ed-actions { flex: none; gap: 6px; }

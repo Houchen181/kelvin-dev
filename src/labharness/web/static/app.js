@@ -12,9 +12,13 @@
   const liveHere = () => S.live.get(S.chatId);
   // the focus ring is the keyboard's: a press of the mouse or a finger marks <html> (k-pointer) until the next key, so
   // what it pressed, and what the page gives the focus after it, draws no ring (app.css); a key brings the rings back
-  // before the focus moves
+  // before the focus moves. Shift, Ctrl, Alt or the Windows key, alone or held (Alt+Tab to another window and back), is
+  // not the keyboard moving about the page, and leaves the mark
   document.addEventListener("pointerdown", () => document.documentElement.classList.add("k-pointer"), true);
-  document.addEventListener("keydown", () => document.documentElement.classList.remove("k-pointer"), true);
+  document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey || /^(Shift|Control|Alt|AltGraph|Meta|OS|CapsLock)$/.test(e.key)) return;
+    document.documentElement.classList.remove("k-pointer");
+  }, true);
 
   // ------------------------------------------------------------------ helpers
   function h(tag, attrs, ...kids) {
@@ -619,7 +623,7 @@
   let toastTimer = null;
   function toast(text, onClick) {   // onClick: what a click on it does (open the chat it is about)
     let t = document.querySelector(".toast");
-    if (!t) { t = h("div", { class: "toast", role: "status" }); document.body.append(t); }
+    if (!t) { t = h("div", { class: "toast", role: "status" }); document.body.append(t); watchToast(); }
     t.textContent = text;
     t.classList.toggle("link", !!onClick);
     try { placeToast(t); } catch (e) { t.removeAttribute("style"); }   // else where app.css puts it: the window's foot
@@ -628,9 +632,10 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove("show"), onClick ? 8000 : 4000);
   }
-  // where a toast stands: just above the message box (the wake bar, when it shows over it), centred on the main column;
-  // on Home, or with a pane alone on the screen, above the bottom of what shows there. Never over a control of the
-  // composer. Rects are the screen's pixels, so each length is divided by the page size before it is written
+  // where a toast stands: just above the message box, or above what opens over it (the wake bar, the slash or Compare
+  // menu), centred on the main column; on Home above the main column's foot (the terminal's top, when it shows there);
+  // with a pane alone on the screen above its foot, or above the band there (the editor's Run, Team chat's box). Never
+  // over a control of the composer. Rects are the screen's pixels, so each length is divided by the page size
   function placeToast(t) {
     const z = pageZoom(), box = (el) => {
       const r = el && el.getClientRects().length ? el.getBoundingClientRect() : null;
@@ -639,11 +644,30 @@
     const main = box(document.querySelector("#app .main")), app = box($("app"));
     const area = main && main.height > 80 ? main : app;
     if (!area) { t.removeAttribute("style"); return; }
-    const over = main ? box($("wake-bar")) || box($("composer")) : null;
-    const bottom = over ? window.innerHeight - over.top + 10 : window.innerHeight - area.bottom + 24;
+    const tops = (sel) => [...document.querySelectorAll(sel)].map(box).filter(Boolean).map((r) => r.top);
+    const over = area === main ? tops("#composer, #wake-bar, #composer :is(.slash-menu, .pane-menu)")
+      : tops("#app :is(.ed-foot, .team-form, .team-name-form)");
+    const term = area === main ? box($("termpane")) : null;
+    const foot = term && term.top - area.top > 80 ? term.top : area.bottom;
+    const top = over.length ? Math.min(...over) - 10 : foot - 24;
     t.style.left = (area.left + area.width / 2) / z + "px";
-    t.style.bottom = bottom / z + "px";
+    t.style.bottom = (window.innerHeight - top) / z + "px";
     t.style.maxWidth = Math.max(160, area.width / z - 32) + "px";
+  }
+  // while a toast shows it is placed again whenever what it stands over moves: a panel shown or put away, full screen,
+  // Chat | Home, the window, the message box growing (a file added, a long message) or a menu opening over it
+  function watchToast() {
+    const again = () => {
+      const t = document.querySelector(".toast.show");
+      if (t) { try { placeToast(t); } catch (e) { /* stays where it was */ } }
+    };
+    document.addEventListener("kelvin:layout", again);
+    window.addEventListener("resize", again);
+    if (!("ResizeObserver" in window)) return;
+    const seen = new ResizeObserver(again);
+    for (const el of [document.querySelector("#app .main"), $("composer"), $("wake-bar"), $("slash-menu"), $("compare-menu")]) {
+      if (el) seen.observe(el);
+    }
   }
 
   // ------------------------------------------------------------------ markdown (safe subset)
@@ -3903,13 +3927,15 @@
   // text files: scripts, notebooks, notes and settings, given to the model as text (agent.py TEXT_FILES)
   const TEXT_FILE = /\.(pyw?|ipynb|m|jl|r|c|h|cpp|hpp|cs|java|js|ts|sh|ps1|bat|cmd|vb|bas|ino|pro|ipf|tex|bib|md|rst|log|json|ya?ml|toml|ini|cfg|conf|xml|html?)$/i;
   const isText = (f) => TEXT_FILE.test(f.name || "");
-  function addFiles(list) {
+  function addFiles(list) {   // the files taken show first, then why one was not: the toast stands above them
+    let refused = "";
     for (const f of list) {
-      if (!isData(f) && !isText(f) && !/^image\//.test(f.type) && f.type !== "application/pdf") { toast((f.name || "That file") + ": Kelvin takes pictures, PDFs, data files (CSV, Excel, NumPy, TIFF…) and text files (scripts, notebooks, notes)."); continue; }
-      if (ATT.items.length >= 10) { toast("Up to 10 files with one message."); break; }
+      if (!isData(f) && !isText(f) && !/^image\//.test(f.type) && f.type !== "application/pdf") { refused = (f.name || "That file") + ": Kelvin takes pictures, PDFs, data files (CSV, Excel, NumPy, TIFF…) and text files (scripts, notebooks, notes)."; continue; }
+      if (ATT.items.length >= 10) { refused = "Up to 10 files with one message."; break; }
       ATT.items.push(f);
     }
     renderAttachments();
+    if (refused) toast(refused);
   }
   function renderAttachments() {
     $("attach-list").replaceChildren(...ATT.items.map((f, i) => {
@@ -5010,12 +5036,13 @@
   // ------------------------------------------------------------------ alarms, watches, notifications
   function incidentCard(i) {   // what the last stop left behind: outputs on, runs or a queue cut short (runtime.py)
     const act = (label, action, primary) => {
-      const b = h("button", { class: "btn small" + (primary ? " primary" : ""), type: "button" }, label);
-      b.addEventListener("click", async () => {
+      const b = h("button", { class: "btn small" + (primary ? " primary" : ""), type: "button", "data-k": action }, label);
+      b.addEventListener("click", async () => {   // waits until the lab's state is back (the card may then be gone)
         b.disabled = true;
         try { const r = await api("/api/incident", { body: { action } }); if (r.lines) toast(r.lines.join("; ")); }
         catch (e) { toast(e.message); }
-        pollState();
+        await pollState();
+        b.disabled = false;
       });
       return b;
     };
@@ -5032,43 +5059,62 @@
     return (a.count > 1 ? a.count + " times, last " + hhmm(a.last) : hhmm(a.raised))
       + (a.cleared ? " · cleared " + hhmm(a.cleared) + (a.cleared_text ? ": " + a.cleared_text : "") : "");
   }
+  function gotIt(a) {   // an alarm's Got it: a person has seen it (it ends when it clears)
+    const ok = h("button", { class: "btn small", type: "button", "data-k": "ok" }, "Got it");
+    ok.addEventListener("click", async () => { try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ } pollState(); });
+    return ok;
+  }
+  // a list drawn again in place: the keyboard's place on it (the control with the same data-k, else the first one) kept
+  function keepPlace(box, draw) {
+    const a = document.activeElement, had = a && box.contains(a) ? a.getAttribute("data-k") || "" : null;
+    draw();
+    if (had === null) return;
+    const to = box.querySelector('[data-k="' + had + '"]:not(:disabled)') || box.querySelector("[data-k]:not(:disabled)");
+    if (to) to.focus({ preventScroll: true });
+  }
   function renderAlerts(alarms, incident) {
     // every alarm until a person says Got it: one that cleared while nobody looked (overnight) stays, marked cleared.
-    // The notice row holds the newest with its Got it, and counts the rest on one row that opens Lab → Watches, where
-    // Alarm history lists them all: however many come, it never pushes a control out of the window
+    // The notice row holds one with its Got it, the newest still on (else the newest cleared), and counts the rest on
+    // one row that opens Lab → Watches, where Alarm history lists them all, each with its Got it: however many come, it
+    // never pushes a control out of the window. Drawn again only when what it says changed
     const open = (alarms || []).filter((a) => !a.acknowledged);   // newest first (runtime.alarms_view)
+    const first = open.find((a) => !a.cleared) || open[0], more = open.length - 1;
     const box = $("alerts");
     box.hidden = !open.length && !incident;
-    const rows = open.slice(0, 1).map((a) => {
-      const ok = h("button", { class: "btn small", type: "button" }, "Got it");
-      ok.addEventListener("click", async () => { try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ } pollState(); });
-      return h("div", { class: "alert" + (a.cleared ? " cleared" : "") }, icon("warn"), h("div", { class: "alert-body" }, h("b", {}, a.text),
-        a.actions.length ? h("span", {}, "Kelvin " + a.actions.join("; ")) : null, h("span", { class: "alert-when" }, alarmWhen(a))), ok);
-    });
-    const more = open.length - 1;
+    document.title = (open.length || incident ? "(!) " : "") + document.title.replace(/^\(!\) /, "");
+    renderAlarmHistory(alarms || []);
+    const sig = JSON.stringify([incident || null, first || null, more]);
+    if (sig === S.alertsShown) return;
+    S.alertsShown = sig;
+    const rows = first ? [h("div", { class: "alert" + (first.cleared ? " cleared" : "") }, icon("warn"), h("div", { class: "alert-body" },
+      h("b", {}, first.text), first.actions.length ? h("span", {}, "Kelvin " + first.actions.join("; ")) : null,
+      h("span", { class: "alert-when" }, alarmWhen(first))), gotIt(first))] : [];
     if (more > 0) {
-      const b = h("button", { class: "alert alert-more", type: "button", title: "Lab → Watches lists every alarm" }, icon("warn"),
+      const b = h("button", { class: "alert alert-more", type: "button", "data-k": "more", title: "Lab → Watches lists every alarm" }, icon("warn"),
         h("span", { class: "alert-body" }, h("b", {}, more + (more === 1 ? " more alarm" : " more alarms"))), icon("chev"));
       b.addEventListener("click", showAlarms);
       rows.push(b);
     }
-    box.replaceChildren(...(incident ? [incidentCard(incident)] : []), ...rows);
-    document.title = (open.length || incident ? "(!) " : "") + document.title.replace(/^\(!\) /, "");
-    renderAlarmHistory(alarms || []);
+    keepPlace(box, () => box.replaceChildren(...(incident ? [incidentCard(incident)] : []), ...rows));
   }
-  function showAlarms() {   // the notice row's "n more": the Lab on Watches, its Alarm history open
+  // the notice row's "n more": the Lab on Watches, its Alarm history open at once (a link shows its place, it does not
+  // unfold under the eyes) and scrolled to the top of the part, so the list is in view below the watches
+  function showAlarms() {
     paneShow("labpanel", "watches");
-    const box = $("alarm-history");
-    if (!box.hidden && !box.classList.contains("open")) foldOpen(box, $("alarm-history-btn"), $("alarm-history-fold"), true);
+    const box = $("alarm-history"), btn = $("alarm-history-btn"), region = btn.closest("[data-region]");
+    if (box.hidden) return;
+    if (!box.classList.contains("open")) foldOpen(box, btn, $("alarm-history-fold"), true, { detail: 0 });
+    if (region) region.scrollTop += (btn.getBoundingClientRect().top - region.getBoundingClientRect().top) / pageZoom() - 4;
   }
   function renderAlarmHistory(alarms) {   // the Lab panel: each alarm with when it went up, cleared, and who said Got it
     $("alarm-history").hidden = !alarms.length;
     const sig = JSON.stringify(alarms.map((a) => [a.id, a.count, a.cleared, a.acknowledged]));
     if (sig === S.alarmsShown) return;   // redrawn only when it changes
     S.alarmsShown = sig;
-    $("alarm-history-list").replaceChildren(...alarms.map((a) => h("li", {}, h("b", {}, a.text),
-      h("span", {}, alarmWhen(a) + " · " + (a.acknowledged ? "Got it: " + (a.acknowledged_by || "a person")
-        + (a.acknowledged_at ? " " + hhmm(a.acknowledged_at) : "") : "nobody has said Got it yet")))));
+    keepPlace($("alarm-history-list"), () => $("alarm-history-list").replaceChildren(...alarms.map((a) => h("li", {},
+      h("div", {}, h("b", {}, a.text), h("span", {}, alarmWhen(a) + " · " + (a.acknowledged ? "Got it: " + (a.acknowledged_by || "a person")
+        + (a.acknowledged_at ? " " + hhmm(a.acknowledged_at) : "") : "nobody has said Got it yet"))),
+      a.acknowledged ? null : gotIt(a)))));
   }
   function notifySystem(notices) {
     if (!notices || !notices.length) return;

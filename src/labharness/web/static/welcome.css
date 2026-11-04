@@ -5,9 +5,10 @@
    computer's. */
 .welcome { position: fixed; inset: 0; z-index: 45; display: flex; flex-direction: column; overflow-y: auto;
   overscroll-behavior: contain; background: var(--page); color: var(--text); }
-/* the column has one height on every step (--wl-h: what the tallest step needs, the scripts' with 15 of them), so the
-   head, the dots and Skip stand in one place from step to step. A window taller than that centres it (the auto
-   margins); a shorter one makes it the window's height, from the top, and never scrolls the page */
+/* the column has one height on every step (--wl-h: what the tallest step needs, the scripts' with 15 of them; a lab
+   with more makes it taller on the first step, welcome.js fitColumn), so the head, the dots and Skip stand in one place
+   from step to step. A window taller than that centres it (the auto margins); a shorter one makes it the window's
+   height, from the top, and never scrolls the page */
 .wl-col { --wl-h: 760px; flex: none; width: min(640px, calc(100% - 32px)); height: min(100%, var(--wl-h)); min-height: 420px;
   margin: auto; padding-top: clamp(12px, 4 * var(--vh), 48px); display: flex; flex-direction: column; }
 .wl-col > * { flex: none; }
@@ -40,6 +41,7 @@
   border: 1px solid var(--card-line); border-radius: var(--radius); box-shadow: var(--card-shadow); overflow: hidden; }
 .wl-group > .wl-block { flex: none; }
 .wl-group > .wl-block:has(> .wl-list) { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.wl-block > .wl-row { flex: none; }   /* the list alone gives way: its row above keeps its height and its words */
 .wl-group > .wl-block:not([hidden]) ~ .wl-block:not([hidden]),
 .wl-block > .wl-row + .wl-row, .wl-list > .wl-row { border-top: 1px solid var(--line); }
 .wl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-height: 48px; padding: 8px 16px; }
@@ -82,6 +84,10 @@
 /* narrower, the scripts stand in one column and the tallest step needs about 1080 px: a phone keeps all its height */
 @media (max-width: 639.98px) {
   .wl-col { --wl-h: 1080px; }
+}
+/* a touch screen as wide (a tablet): the dots, Skip and Next are 40 px, and the tallest step needs about 16 px more */
+@media (pointer: coarse) and (min-width: 640px) {
+  .wl-col { --wl-h: 776px; }
 }
 /* a touch screen: every target 40 px or more (the welcome is not a .dialog, so fit F's rule does not reach it) */
 @media (pointer: coarse) {
