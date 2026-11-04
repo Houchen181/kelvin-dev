@@ -432,6 +432,25 @@ class Library:
             self._write(found)
             return entry
 
+    def retext(self, change: Callable[[str], str]) -> List[str]:
+        """Each scan's plan text (and the summary it shows) through change, as an instrument renamed changes its
+        keys: the names of the scans it changed. Each keeps its id, its name and its runs (which keep the plan they
+        ran)."""
+        with _LOCK:
+            found = self._read()
+            changed = []
+            for e in found.values():
+                if e.get("kind") == "plan" and isinstance(e.get("text"), str):
+                    text = change(e["text"])
+                    if isinstance(e.get("summary"), str):
+                        e["summary"] = change(e["summary"])
+                    if text != e["text"]:
+                        e["text"] = text
+                        changed.append(str(e.get("name") or e["id"]))
+            if changed:
+                self._write(found)
+            return changed
+
     def remove(self, entry_id: str) -> Dict[str, Any]:
         """Out of the library (its runs stay). A script a person imported may no longer run from outside the scripts
         folder."""

@@ -65,7 +65,7 @@ def test_the_top_bar_buttons_never_move_and_say_their_names():
 def test_what_comes_in_and_what_moves():
     motion = CSS[CSS.index("/* motion, as labMaster moves"):]
     for text in (":is(#runpane, #edpane, #anpane, #termpane, #labpanel, #teampanel) { animation: k-pane-in",
-                 ":is(#seq-view, #history-view, .run-view, #homeview, #scroller, .seq-fns) { animation: k-view-in",
+                 ":is(#seq-view, #scan-view, .run-view, #homeview, #scroller, .seq-fns) { animation: k-view-in",
                  "dialog[open] { animation: k-pop-in", ".k-in, .seq-ed.seq-ed-in { animation: k-reveal",
                  ".seq-card.seq-in { animation: k-card-in"):
         assert text in motion, text
@@ -97,7 +97,7 @@ def test_none_of_it_when_the_person_asks_for_less_motion():
     assert "dialog[open]" in calm and "animation: none" in calm and ".seq-card" in calm
     # nothing slides, pulses, spins or grows; colours fade over .15 s or less (reduced motion)
     for text in (".toast { transform: translate(-50%, 0); transition: opacity .15s; }",
-                 ".live-dot, #open-history.live::after { animation: none; }", ".spinner { animation: none;",
+                 ".live-dot, #open-scan.live::after { animation: none; }", ".spinner { animation: none;",
                  ".bar i, .setup-wait-bar span { transition: none; }", "button.link { transition-duration: .15s; }"):
         assert text in calm, text
     assert 'matchMedia("(prefers-reduced-motion: reduce)")' in SEQ

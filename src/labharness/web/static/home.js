@@ -104,11 +104,11 @@
   const ownPause = (q) => q.state === "pausing" && /^paused by human/.test(q.reason || "");
 
   // ------------------------------------------------------------------ the page: the hello, the tiles, the blocks
-  // a tile's place: its pane, the view of it the tile shows (Runs: the Sequence, or History's list of all runs), and the
+  // a tile's place: its pane, the view of it the tile shows (the Sequence; the runs are the Analysis pane's), and the
   // page's own toggle for it, for a page without the panes' click model
   const PLACES = {
     seq: ["runpane", "schedule", () => K.toggleSeq(true)],
-    runs: ["runpane", "history", () => K.openRunList()],
+    runs: ["anpane", null, () => K.openRunList()],
     lab: ["labpanel", null, () => K.toggleLab(true)],
     analysis: ["anpane", null, () => K.toggleAnalysis(true)],
   };

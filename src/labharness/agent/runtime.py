@@ -4368,23 +4368,41 @@ class LabRuntime:
 
     def _scan_choices(self) -> Dict[str, List[Dict[str, Any]]]:
         """What a scan in the editor can step or set (set: the lab's settings, and its cards' actions for a setup) and
-        record (read), each with its unit: from the lab's cards, nothing is read."""
+        record (read), each with its unit: from the lab's cards, nothing is read. instruments: the same by instrument,
+        for the editor's two menus (an instrument, then its parameter): each by its name, with its model, kind and
+        address (two of one model told apart), off (switched off, or not connected), its headline reading, and its
+        set and read: {param, label, unit} (drive, action; name: the lab's own name for it; choices: what a switch or
+        a list setting takes, its words)."""
         settable: List[Dict[str, Any]] = []
         readable: List[Dict[str, Any]] = []
+        instruments: List[Dict[str, Any]] = []
         named: Dict[str, str] = {}   # the lab's own name for a key (names:), shown beside it
         for alias, key in sorted(self.lab.config.names.items()):
             named.setdefault(key, alias)
         for name in sorted(self.lab.instruments):
-            card = self.lab.instruments[name].card
+            inst = self.lab.instruments[name]
+            card = inst.card
+            mine: Dict[str, Any] = {"name": name, "model": card.model, "kind": card.kind,
+                                    "address": inst.config.address, "off": not inst.enabled or bool(inst.unavailable),
+                                    "headline": card.headline if card.headline in card.params else None,
+                                    "set": [], "read": []}
             for p in card.params.values():
                 key = "%s.%s" % (name, p.name)
                 alias = {"name": named[key]} if key in named else {}
                 if p.set_cmd is not None and p.type not in ("trace", "image"):
                     settable.append(dict({"key": key, "unit": p.unit, "drive": p.is_drive}, **alias))
+                    choices = list(p.words or ("on", "off")) if p.type == "bool" else \
+                        list(p.values or {}) if p.type == "enum" else None
+                    mine["set"].append(dict({"param": p.name, "label": p.title, "unit": p.unit,
+                                             "drive": p.is_drive}, **alias, **({"choices": choices} if choices else {})))
                 if p.get_cmd is not None:
                     readable.append(dict({"key": key, "unit": p.unit}, **alias))
+                    mine["read"].append(dict({"param": p.name, "label": p.title, "unit": p.unit}, **alias))
             settable += [{"key": "%s.%s" % (name, a), "unit": "", "action": True} for a in card.actions]
-        return {"set": settable, "read": readable}
+            mine["set"] += [{"param": a, "label": act.label or a.replace("_", " "), "unit": "", "action": True}
+                            for a, act in card.actions.items()]
+            instruments.append(mine)
+        return {"set": settable, "read": readable, "instruments": instruments}
 
     def _unit_of(self, key: str) -> str:
         spec = self._spec(key)
@@ -5360,13 +5378,15 @@ class LabRuntime:
             card = inst.card
             if inst.unavailable:   # it could not be connected: why, and the install that would fix it
                 from .. import envs
-                out.append({"name": name, "model": card.model, "kind": card.kind, "state": "unavailable",
+                out.append({"name": name, "model": card.model, "kind": card.kind, "address": inst.config.address,
+                            "state": "unavailable",
                             "enabled": False, "why": envs.for_people(inst.unavailable),
                             "install": envs.needed(inst.unavailable), "active": 0, "headline": None, "readings": [],
                             "drives": [], "settings": []})
                 continue
             if not inst.enabled:
-                out.append({"name": name, "model": card.model, "kind": card.kind, "state": "off", "enabled": False,
+                out.append({"name": name, "model": card.model, "kind": card.kind, "address": inst.config.address,
+                            "state": "off", "enabled": False,
                             "active": 0, "headline": None, "readings": [], "drives": [], "settings": []})
                 continue
             values = status.get(name, {})
@@ -5398,11 +5418,127 @@ class LabRuntime:
                     settings.append(item)
             headline = card.headline if card.headline in values else (readings[0]["name"] if readings else None)
             readings.sort(key=lambda r: r["name"] != headline)
-            out.append({"name": name, "model": card.model, "kind": card.kind, "enabled": True,
+            out.append({"name": name, "model": card.model, "kind": card.kind, "address": inst.config.address,
+                        "enabled": True,
                         "state": "error" if errors else "active" if away else "safe", "active": away,
                         "headline": headline, "readings": readings, "drives": drives, "settings": settings,
                         "in_use": self._status_held.get(name)})   # not read now (a run uses it): its latest values
         return out
+
+    # ------------------------------------------------------------------ an instrument renamed (Lab panel)
+
+    def _renamed_here(self, old: str, new: str) -> None:
+        """An instrument renamed, as the lab switches to its new name (switch_lab renamed): what holds as soon as the
+        lab is in use takes the new name before it holds again: the mounted sample's protection (its limits, gates
+        and caps, which a rename must never lift) and this lab's kept watches (which _restore_watches would drop as
+        naming nothing)."""
+        from ..discovery import renamed_keys
+        if self.mounted:
+            moved = renamed_keys(self.mounted, old, new)
+            if moved != self.mounted:
+                self.mounted = moved
+                try:
+                    (self.data_dir / "mounted.json").write_text(json.dumps(self.mounted, indent=1), encoding="utf-8")
+                except OSError:   # in force all the same; mounting it again writes it
+                    pass
+        labs = self._saved_watches()
+        kept = labs.get(self.lab.config.name)
+        if kept:
+            moved = renamed_keys(kept, old, new)
+            if moved != kept:
+                labs[self.lab.config.name] = moved
+                try:
+                    _write_json(self.data_dir / self.WATCHES, {"labs": labs})
+                except OSError:
+                    pass
+
+    def instrument_renamed(self, old: str, new: str, by: str = "human") -> List[str]:
+        """After a person renamed one of the lab's instruments (its lab config and the lab say new now), what Kelvin
+        keeps of it follows, so every scan, block and note goes on with it: the scans in the library, the sequence's
+        waiting items and its saved sequences, Home's blocks, the measurement chains, the time estimates, the lab's
+        memory and its folder (its manual, calibration and certificates). Past runs keep the name they were measured
+        with. The lab's experiments are code a person approved, never edited here: those that name it are said, to
+        give a new version the new name. Lines saying what followed, for the person."""
+        from .. import profiles
+        from ..discovery import instrument_token, renamed_keys, renamed_plan_text
+        from ..labmemory import path_for
+
+        def change(text: str) -> str:
+            return renamed_plan_text(text, old, new)
+        followed: List[str] = []
+        scans = self.library.retext(change)
+        if scans:
+            followed.append("%d scan%s" % (len(scans), "s" if len(scans) > 1 else ""))
+        waiting = self.queue.retext(change)
+        if waiting:
+            followed.append("%d waiting in the sequence" % len(waiting))
+        saved = 0
+        for path in sorted((self.data_dir / "queues").glob("*.yaml")):   # sequences saved to load again
+            try:
+                text = path.read_text(encoding="utf-8")
+                if change(text) != text:
+                    path.write_text(change(text), encoding="utf-8")
+                    saved += 1
+            except OSError:
+                continue
+        if saved:
+            followed.append("%d saved sequence%s" % (saved, "s" if saved > 1 else ""))
+        memory_dir = getattr(self, "lab_memory_dir", None) or self.data_dir
+        files = [(self.data_dir / "chains.json", "the measurement chains"), (memory_dir / "timing.json", ""),
+                 (path_for(memory_dir), "the lab's memory")]
+        board = getattr(self, "home_board", None)
+        if board is not None:
+            files.append((board.path, "Home's blocks"))
+        for path, what in files:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            moved = renamed_keys(data, old, new)
+            if isinstance(moved, dict) and isinstance(moved.get("notes"), list):   # a note tied to it by its name
+                for note in moved["notes"]:
+                    if isinstance(note, dict) and isinstance(note.get("instruments"), list):
+                        note["instruments"] = [new if n == old else n for n in note["instruments"]]
+            if moved != data:
+                try:
+                    _write_json(path, moved)
+                except OSError:
+                    continue
+                if what:
+                    followed.append(what)
+        if self.home is not None:   # its folder: the manual, the calibration and certificates kept for it
+            try:
+                there, here = profiles.folder(self.home, old), profiles.folder(self.home, new)
+                if there.is_dir() and not here.exists():
+                    there.rename(here)
+                    profile = here / "instrument.json"
+                    data = json.loads(profile.read_text(encoding="utf-8")) if profile.exists() else None
+                    if isinstance(data, dict):
+                        data["name"] = new
+                        _write_json(profile, data)
+                    followed.append("its folder (manual, calibration)")
+            except (KeyError, OSError, ValueError):
+                pass
+        lines = []
+        if followed:
+            lines.append("%s is %s now, in %s." % (old, new, ", ".join(followed)))
+        else:
+            lines.append("%s is %s now." % (old, new))
+        token, bare = instrument_token(old), re.compile(r"""["']%s["']""" % re.escape(old))
+        named = []
+        for name in self.experiments.names():
+            try:
+                code = self.experiments.get(name).path.read_bytes().decode("utf-8")
+            except (KeyError, OSError, UnicodeDecodeError):
+                continue
+            if token.search(code) or bare.search(code):
+                named.append(name)
+        if named:
+            lines.append("The lab experiment%s %s still name%s %s: a new version with %s runs again." % (
+                "s" if len(named) > 1 else "", ", ".join(named), "" if len(named) > 1 else "s", old, new))
+        self.gate.log.write("instrument_renamed", by=by, instrument=new, was=old, followed=followed or None,
+                            experiments=named or None)
+        return lines
 
     def switch_instrument(self, name: str, on: bool, by: str) -> None:
         """A person switches an instrument on or off for this lab (Lab panel). Off: Kelvin sends it nothing at all
@@ -9398,7 +9534,7 @@ class LabRuntime:
             return names
 
     def switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str = "human",
-                   idle: Optional[Callable[[], bool]] = None) -> List[str]:
+                   idle: Optional[Callable[[], bool]] = None, renamed: Optional[Dict[str, str]] = None) -> List[str]:
         """Control another lab (the person's lab config, saved or changed). Refused while a plan runs. The approval
         mode goes back to asking, and the new lab is health-checked right away.
         A lab opened before connecting (build_lab later=True) takes over the connections of the instruments it has
@@ -9406,10 +9542,11 @@ class LabRuntime:
         any of the new lab's is opened: a camera or a maker's SDK takes one connection at a time (a pylon camera was
         "exclusively opened by another client", an Andor SDK shut down under the new connection). idle: the switch
         waits for the next moment Kelvin is idle (it says so, and no queue runs), so the lab never changes under an
-        answer in progress (the first-run setup's switch once raced the person's first message)."""
+        answer in progress (the first-run setup's switch once raced the person's first message). renamed: an
+        instrument a person renamed (its new name: its old), whose connection moves over as an unchanged one's does."""
         held = self._until_idle(idle) if idle is not None else False
         try:
-            return self._switch_lab(lab, envelope, info, by)
+            return self._switch_lab(lab, envelope, info, by, renamed or {})
         finally:
             if held:
                 self.lock.release()
@@ -9427,14 +9564,15 @@ class LabRuntime:
             time.sleep(0.5)
 
     @staticmethod
-    def _carry_over(old: Lab, new: Lab) -> List[str]:
+    def _carry_over(old: Lab, new: Lab, renamed: Optional[Dict[str, str]] = None) -> List[str]:
         """The instruments a lab opened before connecting has unchanged from the lab in use: their connections move
-        to it, unclosed, with what Kelvin set on them. Returns their names."""
+        to it, unclosed, with what Kelvin set on them (renamed: new name -> old, one a person renamed). Returns their
+        names."""
         from ..instrument import Unavailable
         from ..lab import CONNECTING
         kept = []
         for name, inst in new.instruments.items():
-            was = old.instruments.get(name)
+            was = old.instruments.get((renamed or {}).get(name, name))
             if inst.unavailable != CONNECTING or was is None or not was.enabled or was.simulated:
                 continue
             a, b = was.config, inst.config
@@ -9445,12 +9583,13 @@ class LabRuntime:
             kept.append(name)
         return kept
 
-    def _switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str) -> List[str]:
+    def _switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str,
+                    renamed: Optional[Dict[str, str]] = None) -> List[str]:
         with self.lock:
             if self.live and self.live.get("status") == "running":
                 raise RuntimeError("a plan is running; wait for it to finish or stop it first")
             old = self.lab
-            kept = self._carry_over(old, lab) if old is not lab else []
+            kept = self._carry_over(old, lab, renamed) if old is not lab else []
             if old is not lab:
                 old.close()   # the old lab's own connections, before the new lab opens its own
             for name in lab.connecting:   # one that can't be connected is set aside, with why
@@ -9461,6 +9600,8 @@ class LabRuntime:
             self.lab = lab
             lab.timing = self.timing   # its own times, under its name
             self._follow_lab_folder(lab, info, by)
+            for new, was in (renamed or {}).items():   # before the sample's protection and the watches hold again
+                self._renamed_here(was, new)
             self.gate = SafetyGate(lab, self.approver, self._new_log(lab.clock), envelope, operator="agent")
             self.engine = RunEngine(self.gate, self._store())
             self.engine.progress = self._on_progress

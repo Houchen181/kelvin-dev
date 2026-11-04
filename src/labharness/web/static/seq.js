@@ -1,16 +1,22 @@
 "use strict";
-// The Sequence: Kelvin's queue drawn as blocks (seq.css), the Runs pane's first view (#seq-view). It hears the page
+// The Sequence: Kelvin's queue drawn as blocks (seq.css), the Runs pane's second view (#seq-view). It hears the page
 // through kelvin:* events (ready, state, seq, queue) and draws in #seq-body; every change goes through POST /api/queue.
-// Its functions are the person's library and the lab's experiments (/api/library, /api/experiments): a click appends
-// one, a drag puts it where it is dropped; and a step typed in the step row, or any item pasted as written (app.js
-// keeps both: index.html's #seq-step, put here with the functions). The page lends what it uses on window.Kelvin.
+// Its functions are the person's library and the lab's experiments (/api/library, /api/experiments), drawn in the
+// Runs pane's Scan (#scan-fns) under the measurement now: ▶ runs one now, ＋ puts it last in the sequence (a script's
+// settings and an experiment's action typed there first), New scan and Import a script or VI… above them. Under the
+// blocks, a step typed in the step row, or any item pasted as written (app.js keeps both: index.html's #seq-step, put
+// here). The page lends what it uses on window.Kelvin.
 (() => {
   let K = null;   // window.Kelvin, once the page is ready
   const SEQ = {
     q: null,                  // the queue as the server last said (GET /api/queue, state.queue, an op's answer)
     live: null,               // state.live: the run in progress
     sig: "",                  // changed|state|reason|name of the queue last drawn
-    open: false, wide: false, adding: false,
+    open: false,              // the Sequence in sight
+    scan: false,              // the Scan in sight: its functions are drawn and kept fresh
+    fnOpen: new Set(),        // the functions whose settings (or action) are open under them
+    typed: new Map(),         // a function's key: its settings as typed ({name: text}), an experiment's action
+    going: new Set(),         // the functions whose ▶ or ＋ is on its way
     lib: { scripts: [], scans: [] }, exps: [], libAt: 0,
     drafts: [],               // the VI translations nobody kept yet (GET /api/experiments), each a press from its review
     vis: new Map(),           // a VI's path: its translation asked on this page, while it goes on or after it failed
@@ -371,12 +377,17 @@
     }
     SEQ.q = q;
     badge(q);
-    if (!SEQ.open && inSight()) { onSeq({ open: true }); return; }   // its opening was missed
-    if (!SEQ.open) return;
+    if ((!SEQ.open && inSight()) || (!SEQ.scan && scanInSight())) {   // its opening was missed
+      onSeq({ open: inSight(), scan: scanInSight() });
+      return;
+    }
+    if (!SEQ.open) { if (SEQ.scan) keptScans(); return; }
     if (!SEQ.el.list || !SEQ.el.list.isConnected) { render(); return; }   // a first drawing that failed: again
     if (sigOf(q) !== SEQ.sig || SEQ.pending) render();
     else tick();
-    // a block that ended may have left a scan in the library (each scan run is kept there)
+    keptScans();
+  }
+  function keptScans() {   // a block that ended may have left a scan in the library (each scan run is kept there)
     const ended = items().filter((i) => FINISHED.has(i.status)).map((i) => i.id).join(",");
     if (ended !== SEQ.finished) {
       const more = ended.length > SEQ.finished.length;
@@ -385,20 +396,23 @@
     }
   }
   function onSeq(d) {
-    const was = SEQ.open;
+    const was = SEQ.open, wasScan = SEQ.scan;
     SEQ.open = !!d.open;
+    SEQ.scan = !!d.scan;
     if (SEQ.open && !was) {
       SEQ.drawn = false;   // drawn as it is, without motion
       render();
       loadQueue();
-      loadLib();
     }
-    if (!SEQ.open) closePop();
+    if ((SEQ.open && !was) || (SEQ.scan && !wasScan)) loadLib();
+    if (!SEQ.open && !SEQ.scan) closePop();
     if (d.message) say(d.message);
   }
-  // in sight: the Runs pane open on the Sequence
+  // in sight: the Runs pane open on the Sequence; on the Scan (its functions)
   const inSight = () => !K.$("runpane").hidden && !K.$("seq-view").hidden;
-  function say(text) {   // in the state's place in the bar, for a few seconds
+  const scanInSight = () => !K.$("runpane").hidden && !!K.$("scan-view") && !K.$("scan-view").hidden;
+  function say(text) {   // in the state's place in the bar, for a few seconds; on the Scan, over its functions
+    if (SEQ.scan && SEQ.el.scanMsg) { sayScan(text); return; }
     const m = SEQ.el.msg;
     if (!m) return;
     const line = firstLine(text);
@@ -409,6 +423,15 @@
     SEQ.msgTimer = setTimeout(() => { m.textContent = ""; m.title = ""; SEQ.el.head.classList.remove("saying"); }, 6000);
   }
 
+  function sayScan(text, bad) {
+    const m = SEQ.el.scanMsg;
+    m.textContent = firstLine(text);
+    m.title = String(text || "");
+    m.classList.toggle("bad", !!bad);
+    clearTimeout(SEQ.scanTimer);
+    SEQ.scanTimer = setTimeout(() => { m.textContent = ""; m.title = ""; }, 8000);
+  }
+
   // ------------------------------------------------------------------ building the pane once
   function init() {
     K = window.Kelvin;
@@ -416,6 +439,7 @@
     build();
     document.addEventListener("kelvin:state", (e) => guard(onState, e.detail));
     document.addEventListener("kelvin:seq", (e) => guard(onSeq, e.detail || {}));
+    document.addEventListener("kelvin:renamed", () => guard(() => { loadLib(); loadQueue(); }));   // an instrument's new name
     document.addEventListener("kelvin:queue", (e) => guard(() => {   // the step row's or a pasted item's answer
       const d = e.detail || {};
       if (d.queue) accept(d.queue);
@@ -433,10 +457,11 @@
       renderFns();
     }));
     // opened before this file started (a click while the page was still loading): drawn now
-    if (inSight()) guard(onSeq, { open: true });
-    if (window.ResizeObserver) new ResizeObserver(() => guard(fit)).observe(SEQ.el.pane);
+    if (inSight() || scanInSight()) guard(onSeq, { open: inSight(), scan: scanInSight() });
     SEQ.el.pane.addEventListener("focusout", () => setTimeout(() => guard(() => {
       if (SEQ.pending && !fieldIn(SEQ.el.list) && !(SEQ.drag && SEQ.drag.active)) render();
+    }), 0));
+    SEQ.el.fns.addEventListener("focusout", () => setTimeout(() => guard(() => {
       if (SEQ.fnsPending && !fieldIn(SEQ.el.groups)) renderFns();
     }), 0));
     document.addEventListener("click", (e) => {   // the click that ends a drag is not a click
@@ -450,9 +475,10 @@
       if (SEQ.open && running() && !fast && document.visibilityState === "visible") K.pollState();
     }, 1500);
     SEQ.open = inSight();
-    fit();
+    SEQ.scan = scanInSight();
     if (K.S && K.S.last) onState(K.S.last);
-    if (SEQ.open) { render(); loadQueue(); loadLib(); }
+    if (SEQ.open) { render(); loadQueue(); }
+    if (SEQ.open || SEQ.scan) loadLib();
   }
   function build() {
     const h = K.h;
@@ -487,10 +513,12 @@
     more.addEventListener("click", (e) => { e.stopPropagation(); guard(moreMenu, more); });
 
     const search = h("input", { class: "kfield seq-search", type: "search", placeholder: "Search", spellcheck: "false",
-                                autocomplete: "off", "aria-label": "Search functions" });
+                                autocomplete: "off", "aria-label": "Search scans, scripts and experiments" });
     const groups = h("div", { class: "seq-groups" });
-    const newFn = h("button", { class: "btn small primary", type: "button" }, "＋ New function");   // as the portal's map names it
-    const newScan = h("button", { class: "btn small", type: "button" }, "New scan");
+    const newScan = h("button", { class: "btn small primary", type: "button", title: "Loops, what each changes and what it records" }, "New scan");
+    const newFn = h("button", { class: "btn small", type: "button",
+      title: "A Python script or notebook, kept here to run with its settings; or a LabVIEW VI, translated into Python" }, "Import script or VI…");
+    const scanMsg = h("p", { class: "seq-scan-msg", role: "status" });
     // a step typed (Set, Wait, Wait until settled) and any item as written: app.js's step row and paste form. The step
     // is one line (Step, Set | Wait | Settle) until it is used
     const stepRow = K.$("step-row"), paste = K.$("queue-paste"), pasteOpen = K.$("queue-paste-open");
@@ -498,8 +526,9 @@
       h("div", { class: "seq-step-head" }, h("span", { class: "seq-step-name" }, "Step"), stepKinds(),
         stepRow.querySelector(".step-go")), stepRow, K.$("step-msg")) : null;
     const step = stepCard ? h("div", { class: "seq-step-part" }, stepCard) : null;
-    const fns = h("section", { id: "seq-fns", class: "seq-fns", "aria-label": "Functions", "data-region": "seq-fns", hidden: true },
-      h("div", { class: "seq-find" }, search), groups, step, h("div", { class: "seq-fns-foot" }, newFn, newScan, pasteOpen), paste);
+    const fns = h("section", { id: "seq-fns", class: "seq-fns", "aria-label": "Scans, scripts and experiments", "data-region": "seq-fns" },
+      h("div", { class: "seq-find" }, newScan, newFn, search), scanMsg, groups);
+    if (K.$("scan-fns")) K.$("scan-fns").replaceChildren(fns);
     const holder = K.$("seq-step");
     if (holder && stepRow) holder.remove();   // its parts are the functions' now
     if (stepCard) {
@@ -526,21 +555,16 @@
     newScan.addEventListener("click", () => guard(() => K.openEditor()));
 
     const list = h("ol", { class: "seq-list", "aria-label": "Sequence", "data-region": "seq-blocks" });
-    // ＋ Add: in a narrow pane the functions open under the blocks (both in sight, each scrolling on its own), and it
-    // closes them again; beside the blocks (wide) they are always there, and it goes to their search
-    const add = h("button", { class: "seq-add", type: "button", "aria-expanded": "false", "aria-controls": "seq-fns" }, "＋ Add");
-    add.addEventListener("click", () => guard(() => {
-      if (SEQ.wide) { search.focus(); return; }
-      SEQ.adding = !SEQ.adding;
-      showFns();
-      if (SEQ.adding) loadLib();
-    }));
-    const main = h("div", { class: "seq-main" }, list, add);
-    const cols = h("div", { class: "seq-cols" }, fns, main);
+    // ＋ Add: the Scan, where the scans, scripts and experiments are (each one's ＋ puts it last here)
+    const add = h("button", { class: "seq-add", type: "button", title: "A scan, a script or an experiment, from the Scan" }, "＋ Add");
+    add.addEventListener("click", () => guard(() => { K.showView("scan"); search.focus(); }));
+    const main = h("div", { class: "seq-main" }, list, add, h("div", { class: "seq-extra" }, step,
+      h("div", { class: "seq-fns-foot" }, pasteOpen), paste));
+    const cols = h("div", { class: "seq-cols" }, main);
     const body = K.$("seq-body");
     body.replaceChildren(bar, cols);
     Object.assign(SEQ.el, { pane: K.$("seq-view"), body, name, chip, msg, head, start, pause, stop, more, bar, fns, search, groups,
-                            newFn, list, add, main, cols, stepCard });
+                            newFn, list, add, main, cols, stepCard, scanMsg });
   }
   // the step's card: open while it has the keyboard, a value typed, or a queued step in it to edit; else one line
   function syncStep() {
@@ -590,29 +614,6 @@
     if (window.CSS && CSS.supports && CSS.supports("field-sizing", "content")) return;
     n.size = Math.max(6, Math.min(48, (n.value || n.placeholder).length + 1));
   }
-  // from 600 px of pane (in the page's own pixels) the functions are a column of their own beside the blocks; from
-  // 1100 (full screen) a wider one, their rows in two columns
-  function fit() {
-    const w = SEQ.el.pane.getBoundingClientRect().width / zoom();
-    if (!w) return;   // out of sight: as it was
-    const wide = w >= 600, roomy = w >= 1100;
-    if (wide === SEQ.wide && roomy === SEQ.roomy && SEQ.fitted) return;
-    SEQ.fitted = true;
-    SEQ.wide = wide;
-    SEQ.roomy = roomy;
-    SEQ.el.pane.classList.toggle("seq-wide", wide);
-    SEQ.el.pane.classList.toggle("seq-roomy", roomy);
-    showFns();
-  }
-  function showFns() {
-    const on = SEQ.wide || SEQ.adding;
-    SEQ.el.fns.hidden = !on;
-    SEQ.el.pane.classList.toggle("seq-adding", !SEQ.wide && SEQ.adding);
-    SEQ.el.add.setAttribute("aria-expanded", String(!SEQ.wide && SEQ.adding));
-    SEQ.el.add.classList.toggle("on", !SEQ.wide && SEQ.adding);
-    if (on) renderFns();
-  }
-
   // ------------------------------------------------------------------ drawing
   function render() {
     if (!SEQ.el.list || !SEQ.q) return;
@@ -1153,7 +1154,7 @@
   }
   function renderFns() {
     const g = SEQ.el.groups;
-    if (!g || SEQ.el.fns.hidden) return;
+    if (!g) return;
     if (fieldIn(g) || (SEQ.drag && SEQ.drag.active)) { SEQ.fnsPending = true; return; }
     SEQ.fnsPending = false;
     const h = K.h;
@@ -1246,26 +1247,106 @@
       nameEl.addEventListener("blur", () => guard(finish, true));
       nameEl.addEventListener("click", (e) => e.stopPropagation());
     } else nameEl = h("span", { class: "seq-fn-name" }, fn.name);
-    // one line: its name, then its file (or what it is) while there is room; the whole of it, its path too, in its tip
+    // one line: its name, then its file (or what it is) while there is room (the whole of it, its path too, in its tip), ▶, ＋ and ⋯. A click on
+    // a scan opens it in the editor; on a script or an experiment, its settings (its action) under it
     const tip = [fn.name, fn.path || fn.sub, fn.entry && fn.entry.note].filter(Boolean).join("\n");
-    const card = h("div", { class: "kcard seq-fn " + fn.kind + (SEQ.fresh === fn.key ? " fresh" : "") + (fn.missing ? " missing" : ""),
-                            tabindex: "0", role: "button", "aria-label": fn.name, title: tip },
-      nameEl, fn.sub ? h("span", { class: "seq-fn-sub" }, fn.sub) : null, tail);
+    const inputs = fnInputs(fn), open = !!inputs && SEQ.fnOpen.has(fn.key), busy = SEQ.going.has(fn.key);
+    const go = h("button", { class: "icon-btn seq-fn-go seq-fn-run", type: "button", title: "Run now", "aria-label": "Run now: " + fn.name,
+                             disabled: busy || fn.missing }, ico("play", true));
+    const later = h("button", { class: "icon-btn seq-fn-go", type: "button", title: "Last in the sequence",
+                                "aria-label": "Add to the sequence: " + fn.name, disabled: busy || fn.missing }, K.icon("plus"));
+    go.addEventListener("click", (e) => { e.stopPropagation(); guard(runFn, fn, false, card); });
+    later.addEventListener("click", (e) => { e.stopPropagation(); guard(runFn, fn, true, card); });
+    const card = h("div", { class: "kcard seq-fn " + fn.kind + (SEQ.fresh === fn.key ? " fresh" : "") + (fn.missing ? " missing" : "")
+                            + (open ? " open" : ""), tabindex: "0", role: "button", "aria-label": fn.name, title: tip,
+                            "aria-expanded": inputs ? String(open) : null },
+      nameEl, fn.sub ? h("span", { class: "seq-fn-sub" }, fn.sub) : null, go, later, tail);
     card.dataset.key = fn.key;
     if (fn.color) card.style.setProperty("--kind", fn.color);
+    const opened = () => {
+      if (fn.type === "scan") { K.openEditor(fn.entry.id); return; }
+      if (!inputs) return;
+      if (open) SEQ.fnOpen.delete(fn.key); else SEQ.fnOpen.add(fn.key);
+      renderFns();
+      const back = SEQ.el.groups.querySelector('.seq-fn[data-key="' + CSS.escape(fn.key) + '"]');
+      if (back) back.focus();
+    };
     card.addEventListener("click", (e) => guard(() => {
-      if (SEQ.dragged || SEQ.renaming === fn.key || e.target.closest("button, input")) return;
-      appendFn(fn, card);
+      if (SEQ.renaming === fn.key || e.target.closest("button, input")) return;
+      opened();
     }));
     card.addEventListener("keydown", (e) => guard(() => {
       if (e.target !== card) return;
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); appendFn(fn, card); }
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); opened(); }
     }));
-    card.addEventListener("pointerdown", (e) => guard(() => {
-      if (e.target.closest("button, input") || SEQ.renaming === fn.key) return;
-      armDrag(e, { kind: "fn", fn, el: card });
-    }));
-    return card;
+    return open ? h("div", { class: "seq-fn-wrap" }, card, inputs) : card;
+  }
+  // what a function takes before it runs, under it while it is open: a script's settings (as it last ran, else as
+  // its file has them; typed, they go with its ▶ and ＋), an experiment's action
+  function fnInputs(fn) {
+    const h = K.h;
+    if (fn.type === "script") {
+      const fields = scriptFields(fn.entry);
+      if (!fields.length) return null;
+      const typed = SEQ.typed.get(fn.key) || {};
+      return h("div", { class: "seq-fn-inputs", role: "group", "aria-label": fn.name + ": its settings" }, ...fields.map((x) => {
+        const was = typeof x.value === "string" ? x.value : JSON.stringify(x.value);   // exactly, never rounded
+        const keep = (v) => {
+          const t = SEQ.typed.get(fn.key) || {};
+          if (v === was || v === x.value) delete t[x.name]; else t[x.name] = v;
+          SEQ.typed.set(fn.key, t);
+        };
+        let box;
+        if (typeof x.value === "boolean") {
+          box = h("input", { type: "checkbox", "aria-label": x.name });
+          box.checked = x.name in typed ? !!typed[x.name] : x.value;
+          box.addEventListener("change", () => keep(box.checked));
+        } else {
+          box = h("input", { class: "kfield seq-in", value: x.name in typed ? typed[x.name] : was, spellcheck: "false", autocomplete: "off",
+                             inputmode: typeof x.value === "number" ? "decimal" : null, "aria-label": x.name });
+          box.addEventListener("input", () => keep(box.value));
+          box.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); guard(runFn, fn, false); } });
+        }
+        return h("label", { class: "seq-in-row", title: x.note || null }, h("span", {}, x.name), box);
+      }));
+    }
+    if (fn.type === "exp") {
+      const acts = (fn.exp.actions || []).map((a) => a.name);
+      if (acts.length < 2) return null;
+      const main = ((fn.exp.actions || []).find((a) => a.main) || {}).name || acts[0];
+      const sel = h("select", { class: "kfield seq-in", "aria-label": fn.name + ": action" }, ...acts.map((a) => h("option", { value: a }, a)));
+      sel.value = SEQ.typed.get(fn.key) || main;
+      sel.addEventListener("change", () => { SEQ.typed.set(fn.key, sel.value); });
+      return h("div", { class: "seq-fn-inputs", role: "group", "aria-label": fn.name + ": its action" },
+        h("label", { class: "seq-in-row" }, h("span", {}, "Action"), sel));
+    }
+    return null;
+  }
+  // a script's settings as fields: the values it last ran with, else its file's (with the file unreadable, those
+  // last used); note: the comment beside it in the file
+  function scriptFields(e) {
+    const params = e.params || {}, notes = e.notes || {};
+    const unread = e.exists === false || !!e.problem;
+    return Object.entries(unread ? params : e.settable || {}).map(([name, value]) =>
+      ({ name, value: name in params ? params[name] : value, note: notes[name] || "" }));
+  }
+  function paramValue(base, raw) {   // what was typed, as the kind of value the script has there
+    if (typeof base === "boolean" || typeof base === "string" || typeof raw !== "string") return raw;
+    if (typeof base === "number") return raw.trim() !== "" && isFinite(Number(raw)) ? Number(raw) : raw;
+    try { return JSON.parse(raw); } catch (err) { return raw; }
+  }
+  // what ▶ and ＋ send with a script: nothing while no setting was typed (it runs as it last ran); else the values
+  // typed, or as it last ran, that differ from its file as it is now
+  function fnParams(fn) {
+    const e = fn.entry, typed = SEQ.typed.get(fn.key) || {}, fields = scriptFields(e);
+    if (!fields.some((x) => x.name in typed)) return null;   // typed only for a setting it no longer has
+    const file = e.exists === false || e.problem ? {} : e.settable || {};
+    const out = {};
+    for (const x of fields) {
+      const v = x.name in typed ? paramValue(x.value, typed[x.name]) : (e.params || {})[x.name];
+      if (v !== undefined && !(x.name in file && JSON.stringify(v) === JSON.stringify(file[x.name]))) out[x.name] = v;
+    }
+    return out;
   }
   function yq(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
   function fnText(fn) {   // the item a function makes, as op add takes it
@@ -1274,12 +1355,30 @@
     const e = fn.entry, params = e.params && typeof e.params === "object" && Object.keys(e.params).length ? e.params : null;
     return "script: " + yq(e.path) + (params ? "\nparams: " + JSON.stringify(params) : "");
   }
-  async function appendFn(fn, card) {
+  // ▶: now, first in the queue (its approval first), and the Scan shows it as it runs; ＋: last in the sequence
+  async function runFn(fn, queue, card) {
+    if (SEQ.going.has(fn.key)) return;
     if (card) { card.classList.add("sent"); setTimeout(() => card.classList.remove("sent"), 400); }
+    let call;
     if (fn.type === "exp") {
-      return viaQueue(() => K.api("/api/experiments/" + encodeURIComponent(fn.exp.name) + "/run", { body: { queue: true } }));
+      const body = { queue };
+      if (SEQ.typed.get(fn.key)) body.action = SEQ.typed.get(fn.key);
+      call = () => K.api("/api/experiments/" + encodeURIComponent(fn.exp.name) + "/run", { body });
+    } else {
+      const body = { op: "run", id: fn.entry.id, queue };
+      const params = fn.type === "script" ? fnParams(fn) : null;
+      if (params) body.params = params;
+      call = () => K.api("/api/library", { body });
     }
-    return viaQueue(() => K.api("/api/library", { body: { op: "run", id: fn.entry.id, queue: true } }));
+    SEQ.going.add(fn.key);
+    renderFns();
+    if (!queue) sayScan("Starting…");   // the queue's approval is asked first
+    let r = null;
+    try { r = await viaQueue(call); } finally { SEQ.going.delete(fn.key); renderFns(); }
+    if (!r) { if (!queue) sayScan(""); return; }
+    const said = firstLine(r.message);
+    if (queue) sayScan(said || "Added to the sequence.");
+    else { K.showScan(said); K.pollState(); }
   }
   function fnMenu(anchor, fn) {
     const menu = [];
@@ -1406,7 +1505,7 @@
   function dragTarget(d) {
     clearMarks();
     // over the blocks (a little beyond them, except where the functions lie just under them)
-    const list = SEQ.el.list, mr = SEQ.el.main.getBoundingClientRect(), under = SEQ.wide || SEQ.el.fns.hidden ? 24 : 0;
+    const list = SEQ.el.list, mr = SEQ.el.main.getBoundingClientRect(), under = 24;
     const over = d.x >= mr.left && d.x <= mr.right && d.y >= mr.top - 24 && d.y <= mr.bottom + under;
     if (d.src.kind === "fn" && !over) { d.to = null; return; }
     const cards = [...list.children].filter((c) => c !== d.src.el);
@@ -1487,7 +1586,7 @@
     dragCancel();
   }
 
-  // ------------------------------------------------------------------ dialogs: New function, Sweep, Save as
+  // ------------------------------------------------------------------ dialogs: Import a script or VI, Sweep, Save as
   // its head and its buttons stay; what is between them scrolls when the window is short (app.css .dialog-body)
   function dialog(title, body, foot, submit) {
     const h = K.h;
@@ -1519,7 +1618,7 @@
     return room;
   }
 
-  // ---------- New function: one of the lab's scripts (or any file) into the library, named and coloured; the scripts
+  // ---------- Import a script or VI: one of the lab's scripts (or any file) into the library, named and coloured; the scripts
   // of several folders each under their folder's name
   function newFunction() {
     const h = K.h;
@@ -1647,7 +1746,6 @@
           }, 2000);
         }
         if (dlg) dlg.close();
-        if (!SEQ.wide) { SEQ.adding = true; showFns(); }
         await loadLib();
         const c = entry && SEQ.el.groups.querySelector('.seq-fn[data-key="' + CSS.escape(entry.id) + '"]');
         if (c) c.scrollIntoView({ block: "nearest" });
@@ -1656,7 +1754,7 @@
         add.disabled = false;
       } finally { st.busy = false; }
     };
-    dlg = dialog("New function", [
+    dlg = dialog("Import a script or VI", [
       filesBox,
       h("div", { class: "seq-line" }, path, choose),
       found,

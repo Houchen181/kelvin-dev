@@ -479,6 +479,21 @@ class ScanQueue:
             self.save()
             return item
 
+    def retext(self, change: Callable[[str], str]) -> List[str]:
+        """Each waiting item's text through change, as an instrument renamed changes its keys: the names of the items
+        it changed. The running item, and those that ran, stay as they were."""
+        with self.lock:
+            changed = []
+            for item in self.items:
+                if item.status == "waiting":
+                    text = change(item.text)
+                    if text != item.text:
+                        item.text = text
+                        changed.append(item.name)
+            if changed:
+                self.save()
+            return changed
+
     def remove(self, ref: Any) -> Item:
         with self.lock:
             item = self.find(ref)

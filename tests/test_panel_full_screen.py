@@ -116,7 +116,7 @@ def test_one_click_model_for_every_way_of_opening_a_panel():
     show = _js("paneShow")
     assert 'if (paneVisible(id) && there) { ring($(id).querySelector(":scope > header")); return true; }' in show
     assert "TOGGLE[id](true)" in show and "fullShow(id);" in show and "(false)" not in show   # never closes it
-    assert 'view === "schedule") toggleSeq(true);' in show and 'view === "history") openRunList();' in show
+    assert 'view === "schedule") toggleSeq(true);' in show and 'view === "scan") showScan();' in show
     assert "if (TOGGLE[id] && isOpen(id)) TOGGLE[id](false);" in _js("paneHide")
     ring = _js("ring")
     assert 'el.classList.add("k-ring");' in ring and 'setTimeout(() => el.classList.remove("k-ring"), 650)' in ring

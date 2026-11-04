@@ -65,7 +65,8 @@ def test_rows_of_outlined_text_buttons_have_room_and_stay_together():
     assert re.search(r'<label for="lab-yaml">Lab config</label>\s*<div class="field-actions"><button id="lab-history"'
                      r'[^>]*>History…</button>\s*<div id="lab-view" class="seg"', PAGE)
     assert "justify-content: space-between" in _rule(".field-row")
-    # the scan editor's + Loop and + Add, and the step row: no text-link padding cramping an outlined button
+    # the scan editor's + Add, and the step row: no text-link padding cramping an outlined button; its loops' count a
+    # stepper of two round icon buttons
     assert ".ed-sec-head .link" not in CSS and ".step-foot .link" not in CSS
-    assert 'id="ed-add-loop" class="link soft"' in PAGE
+    assert 'id="ed-add-loop" class="icon-btn"' in PAGE and 'id="ed-add-sets" class="link soft"' in PAGE
     assert "padding: 4px 10px" in _rule("button.link")

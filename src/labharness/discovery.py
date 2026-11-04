@@ -748,6 +748,57 @@ def instrument_text(text: str, name: str) -> str:
     return "\n".join(lines[at:end])
 
 
+def instrument_token(name: str) -> "re.Pattern[str]":
+    """An instrument's name as the start of an instrument.parameter (lockin.X, in YAML or a condition), never inside
+    another word or an address (TCPIP0::lockin.lab::INSTR, sim://lockin.x): what a rename changes."""
+    return re.compile(r"(?<![\w.:/\\-])%s\.(?=[A-Za-z_])" % re.escape(name))
+
+
+def rename_in_config(text: str, old: str, new: str) -> str:
+    """The lab config text with an instrument renamed: its entry's key, and every instrument.parameter of it (the
+    lab's names:, interlocks, safe_actions, watches, another instrument's guard reading it), the rest of the text and
+    its comments kept. An address or a card line never changes. KeyError: no such instrument."""
+    lines = text.split("\n")
+    at, _ = _instrument_lines(lines, old)
+    lines[at] = re.sub(r"^(\s+)%s(\s*:)" % re.escape(old), lambda m: m.group(1) + new + m.group(2), lines[at], count=1)
+    token = instrument_token(old)
+    return "\n".join(line if re.match(r"^\s*(address|card)\s*:", line) else token.sub(new + ".", line) for line in lines)
+
+
+def renamed_keys(data: Any, old: str, new: str) -> Any:
+    """JSON-like data (a store Kelvin keeps: watches, the mounted sample's protection, Home's blocks...) with every
+    instrument.parameter of an instrument renamed, as a string or as a mapping's key."""
+    token = instrument_token(old)
+
+    def walk(x: Any) -> Any:
+        if isinstance(x, str):   # a plan kept in a store (a Home block's action) names it alone in requires: too
+            return renamed_plan_text(x, old, new) if "requires" in x else token.sub(new + ".", x)
+        if isinstance(x, list):
+            return [walk(v) for v in x]
+        if isinstance(x, dict):
+            return {(walk(k) if isinstance(k, str) else k): walk(v) for k, v in x.items()}
+        return x
+    return walk(data)
+
+
+def renamed_plan_text(text: str, old: str, new: str) -> str:
+    """A plan's or a queue item's text (YAML, as written) with an instrument renamed: its instrument.parameter keys,
+    and the instrument itself where the plan names it alone (requires: [lockin], or a list under requires:)."""
+    out = instrument_token(old).sub(new + ".", text)
+    bare = re.compile(r"(?<![\w.:/\\-])%s(?![\w.])" % re.escape(old))
+    lines = out.split("\n")
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\s*)requires\s*:(.*)$", line)
+        if not m:
+            continue
+        lines[i] = line[:m.start(2)] + bare.sub(new, m.group(2))
+        j = i + 1
+        while not m.group(2).strip() and j < len(lines) and re.match(r"^\s*-\s", lines[j]):   # a list under it
+            lines[j] = bare.sub(new, lines[j])
+            j += 1
+    return "\n".join(lines)
+
+
 def set_limits(text: str, name: str, limits: Dict[str, Optional[Sequence[float]]], reviewed: bool = False) -> str:
     """The lab config text with one instrument's limits changed (None takes a limit out), the rest of the text and
     its comments kept; reviewed: without the instrument's added_by: kelvin mark (a person checked its limits)."""
