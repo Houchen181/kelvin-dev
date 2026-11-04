@@ -758,12 +758,13 @@
         h("span", { class: "key" }, h("i", { style: "background:var(--series-1)" }), "measured"),
         h("span", { class: "key" }, h("i", { style: "background:var(--fit)" }), fit.label)));
     }
-    // drawn at the real pixel width so its text keeps its size; with opts.fill as tall as its place too (never under 140)
+    // drawn at the real pixel width so its text keeps its size; with opts.fill as tall as its place too, never under the
+    // least app.css gives that place (120 in a run's view, 140 elsewhere), so it is drawn inside its card
     if (opts.fill) box.classList.add("fill");
     let drawn = "";
     const draw = () => {
       const W = Math.max(240, Math.round(holder.clientWidth));
-      const H = opts.fill ? Math.max(140, Math.round(holder.clientHeight)) : opts.height || 200;
+      const H = opts.fill ? Math.max(120, Math.round(holder.clientHeight)) : opts.height || 200;
       if (W + "x" + H === drawn) return;
       drawn = W + "x" + H;
       holder.replaceChildren(build(W, H));
@@ -1038,12 +1039,17 @@
     if (!tab) return;
     clearTimeout(tab.timer);
     RUNS.dismissed.add(runId);  // closing a running run's tab must not bring it back
+    const had = tab.el.contains(document.activeElement);   // Delete on it: the keyboard goes on to the tab now shown
     tab.el.remove(); tab.body.remove();
     RUNS.tabs.delete(runId);
     tabsRow();
     if (RUNS.active === runId) {
       RUNS.active = [...RUNS.tabs.keys()].pop() || null;
       if (RUNS.view === "history") { if (RUNS.active) selectRun(RUNS.active); else showView("history"); }
+    }
+    if (had) {   // the last one closed: the strip goes, All runs with it, and History's own tab has the keyboard
+      const next = RUNS.active ? RUNS.tabs.get(RUNS.active).btn : $("run-tabs").hidden ? $("open-history") : $("runs-all");
+      if (next) next.focus({ preventScroll: true });
     }
     liveDots();
   }
@@ -1069,6 +1075,7 @@
       t.body.hidden = !on;
     }
     $("runs-list").hidden = !!active;
+    if (active) keysOnce(active);   // its key results, if it finished out of sight
     const all = allRunsTab();   // the tab bar's first tab: the list of every run
     all.classList.toggle("on", !active);
     all.setAttribute("aria-selected", String(!active));
@@ -1451,10 +1458,8 @@
       v.analysis.replaceChildren(...(a ? [a.box] : []));
       v.results.replaceChildren(...(a && a.table ? [a.table] : []));
       v.keys.hidden = !(a && a.table);
-      // the key results open by themselves only where there is room for them: beside the plots (the view 900 px or
-      // wider), a window not short (tight), and 14 rows or fewer
-      const wide = tab.body.getBoundingClientRect().width / ((Kelvin.zoom && Number(Kelvin.zoom())) || 1) >= 900;
-      if (a && a.table && a.rows <= 14 && wide && !document.documentElement.classList.contains("fit-tight")) rvOpen(v.keys, true, null, true);
+      if (a && a.table) { v.keysPending = true; v.keysRows = a.rows; }
+      keysOnce(tab);
       v.charts.replaceChildren(runCharts(tab.final));
       v.plan.hidden = !tab.final.plan_text;
       v.planBox.querySelector("pre").textContent = tab.final.plan_text || "";
@@ -1472,6 +1477,18 @@
       }, 300);
     }
   }
+  // a finished run's key results open by themselves only where there is room for them: beside the plots (the view
+  // 900 px or wider), a window not short (tight), and 14 rows or fewer. Judged once, when its view first has a width: a
+  // run that finished out of sight (another tab, the Sequence, Runs closed) is judged when it is first shown
+  function keysOnce(tab) {
+    const v = tab && tab.view;
+    if (!v || !v.keysPending) return;
+    const w = tab.body.getBoundingClientRect().width / ((Kelvin.zoom && Number(Kelvin.zoom())) || 1);
+    if (!w) return;
+    v.keysPending = false;
+    if (v.keysRows <= 14 && w >= 900 && !document.documentElement.classList.contains("fit-tight")) rvOpen(v.keys, true, null, true);
+  }
+  document.addEventListener("kelvin:layout", () => keysOnce(RUNS.tabs.get(RUNS.active)));   // shown, or full screen
 
   // The side panels each open and close on their own, and each keeps the width it was left at (drag its left edge).
   // Beside the main column (the chat or Home), which keeps at least CHAT_MIN pixels, they stand side by side in the
@@ -1487,13 +1504,15 @@
   // A least width is the narrowest each pane's head and rows hold at, at 85, 90 and 100 %: Runs' is its head on History
   // (Sequence | History with a two-digit count, Report…, ⤢, ×), 362 on a touch screen, whose head buttons are 40 px.
   // So Runs stands beside Lab or Analysis at 1280×720 (90 %: 1422 page px) with the list shown, and on an iPad's 1180
-  // with the list hidden. The scan editor does not fit beside Runs there (it holds down to 318) and takes its place
+  // with the list hidden. The scan editor does not fit beside Runs there (it holds down to 318) and takes its place.
+  // On a touch screen the editor's fields are 40 px, and its body fits whole only with its two-column rows (a pane of
+  // 790 or more): it needs 800 there, so on an iPad it takes the content area alone rather than scroll inside
   const CHAT_MIN = 520, SIDEBAR_W = 264;
   const PANES = {   // id: [open?, its column, its least width, where its width is kept, its least on a touch screen]
     teampanel: [() => TEAM.open, "workcol", 280, "lh.teamWidth"],
     anpane: [() => ANA.open, "workcol", 292, "lh.anWidth"],
     runpane: [() => RUNS.open, "workcol", 346, "lh.runsWidth", 362],
-    edpane: [() => ED.open, "workcol", 360, "lh.edWidth"],
+    edpane: [() => ED.open, "workcol", 360, "lh.edWidth", 800],
     labpanel: [() => S.labOpen, "sidecol", 292, "lh.labWidth"],
   };
   const COARSE = window.matchMedia("(pointer: coarse)");   // a touch screen
@@ -1501,7 +1520,7 @@
   const sum = (xs) => xs.reduce((a, b) => a + b, 0);
   const openPanes = () => Object.keys(PANES).filter((id) => PANES[id][0]());
   const least = (id) => (COARSE.matches && PANES[id][4]) || PANES[id][2];
-  const paneWant = (id) => PANE_W[id] || least(id);
+  const paneWant = (id) => Math.max(PANE_W[id] || 0, least(id));   // as left, never under its least (a touch screen's)
   // when each pane was last looked at (opened, or a press or the focus inside it), as a count that only grows; the
   // panes open at the last layout; whether the window is still changing size (wait); and whether the pane opening now
   // was asked for by the person or a waiting request (asked: paneShow)
@@ -1974,7 +1993,7 @@
     out.eln = runButton("Lab notebook", "The run's record as Markdown with its plots, for a lab notebook (ELN)", "download",
       () => fetchDownload("/api/runs/" + encodeURIComponent(runId) + "/eln", runId + ".zip", "lab notebook record"));
     out.analyze = runButton("Analyze", "Open this run in the Analysis pane", null,
-      () => openAnalysis({ runs: [runId] }, null, { x: true, y: true, group: true }));
+      () => openAnalysis({ runs: [runId] }, null, { x: true, y: true, group: true }, true));
     return out;
   }
   // a file Kelvin's code writes, downloaded with the access key (its name from its Content-Disposition)
@@ -2504,7 +2523,7 @@
   // the card itself, what is approved and the record stay as Kelvin wrote them, and English is one click away
   const CARD_UI = { "zh-Hans": { "Approve": "批准", "Decline": "拒绝", "Approved": "已批准", "Declined": "已拒绝",
     "Already closed": "已关闭", "Closed": "已关闭", "Auto-approved": "自动批准", english: "English", shown: "中文",
-    declines: (n) => n + " 秒后自动拒绝" } };
+    declines: (n) => (n < 90 ? n + " 秒" : Math.round(n / 60) + " 分钟") + "后自动拒绝" } };
   function cardWords() { return CARD_UI[(S.settings && S.settings.card_language) || ""] || null; }
   function cardSay(text) { const w = cardWords(); return (w && typeof w[text] === "string") ? w[text] : text; }
   async function localizeCard(ev, parts) {
@@ -2586,7 +2605,12 @@
     localizeCard(ev, { title: text, list, where });
     let left = ev.seconds_left;
     const words = cardWords();
-    const tick = () => { count.textContent = left > 0 ? (words ? words.declines(left) : "Declines itself in " + left + " s") : ""; left -= 1; };
+    // its time left in seconds under 90, else in whole minutes (inTime): a request escalated to a phone waits an hour
+    const tick = () => {
+      const t = left > 0 ? (words ? words.declines(left) : "Declines itself in " + inTime(left)) : "";
+      if (count.textContent !== t) count.textContent = t;
+      left -= 1;
+    };
     tick();
     const timer = setInterval(tick, 1000);
     const card = {
@@ -4649,10 +4673,14 @@
 
   // ------------------------------------------------------------------ lab panel
   // switching: an instrument's switch on its way to the server (name -> the state asked for), drawn busy in that state;
-  // refused: why, shown under its row until it is switched again. everyone: Activity's Mine | Everyone (lh.labEveryone)
+  // refused: why, shown under its row until it is switched again. everyone: Activity's Mine | Everyone (lh.labEveryone).
+  // switchedAt: when each switch's answer came (a poll sent before that says what was before). rows: each instrument's
+  // row as drawn, by name, with what it draws (rowSig); order: the names in the list. pressed: when a pointer went down
+  // on the list (0: none), later: a redraw waiting for it to be let go
   const OPEN = new Set(), SHOW_SETTINGS = new Set();
   const PANEL = { filter: "", activeOnly: store("lh.activeOnly") === "1", instruments: [], loose: new Map(),
-                  everyone: store("lh.labEveryone") === "1", switching: new Map(), refused: new Map(), eventsShown: "" };
+                  everyone: store("lh.labEveryone") === "1", switching: new Map(), refused: new Map(), eventsShown: "",
+                  switchedAt: new Map(), rows: new Map(), order: "", pressed: 0, later: false };
   const instId = (name) => "inst-" + String(name).replace(/[^\w-]/g, "_");
   // a choice of two as a radio group (.seg): the chosen side raised, checked and the one tab stop
   function segMark(seg, v) {
@@ -4689,20 +4717,33 @@
       h("span", { class: "k" }, item.label),
       h("span", { class: "v" }, item.armed ? h("span", { class: "tag-armed" }, "armed") : null, item.value));
   }
-  function instrumentRow(inst) {
-    const open = OPEN.has(inst.name);
+  // an instrument's headline reading (its value and unit) and its row's tip, which repeats it: the part of a row that
+  // moves at every poll, written in place (renderInstruments)
+  function instHead(inst) {
     const head = inst.readings.find((r) => r.name === inst.headline);
     const [hv, hu] = head ? splitValue(head.value) : ["", ""];
+    const state = inst.state === "unavailable" ? "not connected" : inst.enabled === false ? "switched off"
+      : inst.state === "error" ? "not responding" : inst.state === "active" ? inst.active + " active" : "safe";
+    return { hv, hu, tip: inst.model + " · " + state + (head ? " · " + head.label + " " + head.value : "") };
+  }
+  // everything else a row draws: it is drawn again only when this changes, so a press on it is not lost to a redraw
+  function rowSig(inst) {
+    const open = OPEN.has(inst.name);
+    return JSON.stringify([open, SHOW_SETTINGS.has(inst.name), inst.enabled, PANEL.switching.get(inst.name), inst.state,
+      inst.active, PANEL.refused.get(inst.name) || "", inst.why || "", inst.install || null, inst.model, inst.kind, inst.headline,
+      open ? [inst.readings.filter((r) => r.name !== inst.headline), inst.drives, inst.settings] : inst.drives.filter((d) => d.away)]);
+  }
+  function instrumentRow(inst) {
+    const open = OPEN.has(inst.name);
+    const { hv, hu, tip } = instHead(inst);
     const off = inst.enabled === false;
     const missing = inst.state === "unavailable";   // could not be connected (its package, the instrument itself)
-    const stateText = missing ? "not connected" : off ? "switched off" : inst.state === "error" ? "not responding"
-      : inst.state === "active" ? inst.active + " active" : "safe";
     const chev = icon("chev"); chev.classList.add("chev");
     const count = inst.state === "active" ? h("span", { class: "inst-count" }, String(inst.active))
       : inst.state === "error" || missing ? h("span", { class: "inst-count err" }, "!") : h("span", { class: "inst-count none" });
     const id = instId(inst.name);
     const row = h("button", { class: "inst-row", type: "button", "aria-expanded": String(open), "aria-controls": open ? id + "-body" : null,
-      "data-k": "row " + inst.name, title: inst.model + " · " + stateText + (head ? " · " + head.label + " " + head.value : "") },
+      "data-k": "row " + inst.name, title: tip },
       h("span", { class: "inst-icon" }, icon(ICONS[inst.kind] ? inst.kind : "instrument")),
       h("span", { class: "inst-id" }, inst.name),
       h("span", { class: "inst-model" }, inst.model),
@@ -4764,6 +4805,7 @@
     try {
       const r = await api("/api/instruments/" + encodeURIComponent(name) + "/switch", { body: { on } });
       PANEL.instruments = r.instruments;
+      PANEL.switchedAt.set(name, Date.now());
     } catch (e) {
       PANEL.refused.set(name, e.message);
       setTimeout(() => { if (PANEL.refused.get(name) === e.message) { PANEL.refused.delete(name); renderInstruments(); } }, 15000);
@@ -4785,12 +4827,59 @@
       + (unconnected ? " · " + unconnected + " not connected" : "") + (off ? " · " + off + " off" : "");
     $("seg-active").textContent = "Active" + (active + errors ? " (" + (active + errors) + ")" : "");
     segMark($("inst-seg"), PANEL.activeOnly ? "active" : "all");
-    // redrawn at every poll (the readings move): the row, switch or Settings that had the focus keeps it
-    const list = $("lab-status"), had = list.contains(document.activeElement) ? document.activeElement.dataset.k : null;
-    list.replaceChildren(...(shown.length ? shown.map(instrumentRow)
-      : [h("div", { class: "inst-empty" }, !all.length ? "None yet." : PANEL.activeOnly && !q ? "Nothing is active." : "No instrument matches.")]));
-    const back = had && [...list.querySelectorAll("[data-k]")].find((el) => el.dataset.k === had);
+    // a pointer down on the list: nothing in it is replaced until it is let go (holdInstruments), or its click is lost
+    if (PANEL.pressed && Date.now() - PANEL.pressed < 5000) { PANEL.later = true; return; }
+    const list = $("lab-status");
+    if (!shown.length) {
+      const text = !all.length ? "None yet." : PANEL.activeOnly && !q ? "Nothing is active." : "No instrument matches.";
+      if (PANEL.order !== "\n" + text) list.replaceChildren(h("div", { class: "inst-empty" }, text));
+      PANEL.order = "\n" + text;
+      return;
+    }
+    // at every poll the readings move: a row's headline and tip are written in place, and a row is drawn again only when
+    // something else in it changed; the row, switch or Settings that had the focus keeps it
+    const had = list.contains(document.activeElement) ? document.activeElement.dataset.k : null;
+    const names = new Set(all.map((i) => i.name));
+    for (const name of PANEL.rows.keys()) if (!names.has(name)) PANEL.rows.delete(name);
+    const rows = shown.map((inst) => {
+      const sig = rowSig(inst), kept = PANEL.rows.get(inst.name);
+      if (!kept || kept.sig !== sig) {
+        const el = instrumentRow(inst);
+        PANEL.rows.set(inst.name, { el, sig });
+        return el;
+      }
+      const { hv, hu, tip } = instHead(inst), btn = kept.el.querySelector(".inst-row"), line = btn.querySelector(".inst-headline");
+      if (btn.title !== tip) btn.title = tip;
+      if (line.textContent !== hv + hu) line.replaceChildren(hv, ...(hu ? [h("span", { class: "hu" }, hu)] : []));
+      return kept.el;
+    });
+    const order = shown.map((i) => i.name).join("\n");
+    if (order !== PANEL.order) { PANEL.order = order; list.replaceChildren(...rows); }
+    else rows.forEach((el, i) => { if (list.children[i] !== el) list.children[i].replaceWith(el); });
+    const back = had && !list.contains(document.activeElement) && [...list.querySelectorAll("[data-k]")].find((el) => el.dataset.k === had);
     if (back) back.focus({ preventScroll: true });
+  }
+  // a press on the instrument list holds its redraws until the click that follows (a tap's comes a moment after its
+  // pointerup), or 400 ms after it is let go; then the list is drawn as it is now
+  function holdInstruments() {
+    const list = $("lab-status");
+    let letGo = 0;
+    const release = () => {
+      clearTimeout(letGo);
+      PANEL.pressed = 0;
+      if (PANEL.later) { PANEL.later = false; renderInstruments(); }
+    };
+    list.addEventListener("pointerdown", () => { clearTimeout(letGo); PANEL.pressed = Date.now(); });
+    document.addEventListener("pointerup", () => { if (PANEL.pressed) letGo = setTimeout(release, 400); }, true);
+    document.addEventListener("pointercancel", () => { if (PANEL.pressed) release(); }, true);
+    list.addEventListener("click", () => { if (PANEL.pressed) setTimeout(release, 0); });
+  }
+  // a poll sent before an instrument's switch was answered says what it was before: that instrument keeps the switch's
+  // answer (its on or off, its state) until a poll sent after it
+  function freshInstruments(list, sent) {
+    const was = new Map(PANEL.instruments.map((i) => [i.name, i]));
+    return list.map((i) => (PANEL.switchedAt.get(i.name) > sent && was.has(i.name)
+      ? { ...i, enabled: was.get(i.name).enabled, state: was.get(i.name).state } : i));
   }
 
   // ------------------------------------------------------------------ chats Kelvin continues later (wake_me)
@@ -4826,10 +4915,11 @@
   }
   async function pollState() {
     let s;
+    const sent = Date.now();
     try { s = await api("/api/state"); } catch (e) { return; }
     $("agent-state").textContent = s.busy ? String(s.busy).charAt(0).toUpperCase() + String(s.busy).slice(1) : "Idle";
     $("agent-state").classList.toggle("busy", !!s.busy);
-    PANEL.instruments = s.instruments;
+    s.instruments = PANEL.instruments = freshInstruments(s.instruments, sent);   // Home reads the same
     renderInstruments();
     let lines = s.events.map((e) => ({ text: e, user: "" }));
     if (PANEL.everyone && !$("activity-who").hidden) { try { lines = (await api("/api/lab-log?n=25")).events; } catch (e) { /* keep this person's */ } }
@@ -4863,7 +4953,10 @@
       if (!card.decided) card.close("Closed", false);
       PANEL.loose.delete(id);
     }
-    $("lab-pending").replaceChildren(...[...PANEL.loose.values()].map((c) => c.el));
+    // changed in place, only as a request comes or goes: one not touched keeps its place, and a focused Approve its focus
+    const pend = $("lab-pending"), cards = new Set([...PANEL.loose.values()].map((c) => c.el));
+    for (const el of [...pend.children]) if (!cards.has(el)) el.remove();
+    for (const el of cards) if (el.parentNode !== pend) pend.append(el);
     const badge = $("lab-badge");
     badge.textContent = String(s.pending.length);
     badge.hidden = !s.pending.length;
@@ -5027,6 +5120,8 @@
   // Watches' and Memory's Add…: a disclosure for the form at the top of the part (its tab chosen to show it)
   function partForm(id, open) {
     const form = $(id), btn = document.querySelector('#labpanel [aria-controls="' + id + '"]');
+    // shut from inside (Watch, Keep, Cancel, Enter): the focus goes back to its Add…, not to the page
+    if (!open && btn && form.contains(document.activeElement)) btn.focus({ preventScroll: true });
     form.hidden = !open;
     if (btn) btn.setAttribute("aria-expanded", String(open));
     if (!open) return;
@@ -5769,22 +5864,36 @@
     if (!$("exp-dialog").open) $("exp-dialog").showModal();
     return $("exp-body");
   }
-  // a VI translated (minutes): its draft shown to read and keep, or, when the person closed the dialog meanwhile or
-  // opened another thing in it, a note that opens the draft when clicked. Whether it was translated.
-  async function openTranslate(v) {
+  // a VI translated (minutes) under v.as, the name given (else the VI's): its draft shown to read and keep, or, when the
+  // person closed the dialog meanwhile or opened another thing in it, a note that opens the draft when clicked. The
+  // Sequence's experiments list it meanwhile (kelvin:translate), and why after a failure, and its draft once done
+  // (kelvin:library) with its Review, so it is a press away there however long it took and after a reload.
+  // from: the dialog it was asked in (New function): a refusal within a second (a mistyped path) goes back to it, still
+  // open, as its words; else whether it was translated
+  async function openTranslate(v, from) {
+    const asked = api("/api/labview/translate", { body: v.as ? { path: v.path, name: v.as } : { path: v.path } });
+    if (from) {
+      const early = await Promise.race([asked.then(() => null, (e) => e), new Promise((r) => setTimeout(() => r(null), 1000))]);
+      if (early && from.open) return early.message;
+      if (from.open) from.close();
+    }
     const body = expDialog("Translate " + v.name), mine = EXP.shown;
     body.replaceChildren(h("div", { class: "review pending" }, h("span", { class: "spinner" }),
       "Translating " + v.name + ": the AI writes it, and Kelvin checks each attempt on the simulated lab (a few minutes). " +
-      "You can close this: the translation goes on, and Kelvin says when its draft is ready."));
+      "You can close this: the translation goes on, and its draft waits in Sequence → Experiments."));
     EXP.open = null;
+    emit("translate", { path: v.path, name: v.as || v.name, state: "running" });
     const here = () => EXP.shown === mine && $("exp-dialog").open;
     let d;
-    try { d = await api("/api/labview/translate", { body: { path: v.path } }); }
+    try { d = await asked; }
     catch (e) {
+      emit("translate", { path: v.path, name: v.as || v.name, state: "failed", message: e.message });
       if (here()) body.replaceChildren(h("p", { class: "bad" }, e.message));
       else toast(v.name + " wasn't translated: " + e.message);
       return false;
     }
+    emit("translate", { path: v.path, state: "done" });
+    emit("library");   // its draft among the Sequence's experiments
     if (RUNS.view === "schedule") loadExperiments();   // its draft is listed there, kept or not
     if (here()) showDraft(d);
     else toast(v.name + " is translated: click to review it", () => { expDialog("Translate " + v.name); showDraft(d); });
@@ -5846,6 +5955,7 @@
         $("exp-msg").textContent = "Kept as " + r.name + ", version " + r.version + ", in Sequence → Experiments.";
         $("exp-keep").hidden = true;
         EXP.open = null;
+        emit("library");   // the Sequence's experiments with it now, its draft gone
         if (RUNS.view === "schedule") loadExperiments();
       } catch (e) {
         if (e.status === 409 && e.data && e.data.diff) {   // a name kept already: what changed, read before the yes
@@ -5889,6 +5999,7 @@
         const r = await api("/api/experiments/" + encodeURIComponent(EXP.open.name) + "/approve", { body: { version: EXP.open.version } });
         $("exp-msg").textContent = "Version " + r.version + " approved by " + r.approved_by + ".";
         $("exp-approve").hidden = true;
+        emit("library");   // the Sequence's experiments as they stand now
         if (RUNS.view === "schedule") loadExperiments();
       } catch (e) { $("exp-msg").textContent = e.message; }
     });
@@ -6200,13 +6311,17 @@
   }
   const unquoted = (path) => String(path).trim().replace(/^"(.*)"$/, "$1").trim();   // as Windows' Copy as path gives it
   function isVI(path) { return /\.vi$/i.test(unquoted(path)); }
-  async function importVI(path) {
+  // as: the name given for it (New function's Name); from: the dialog it was asked in, which a refusal at once goes back
+  // to (openTranslate): its words are returned, as whether it was translated is
+  async function importVI(path, as, from) {
     const vi = unquoted(path);
     scansSay("");
-    if (!(await openTranslate({ name: vi.replace(/^.*[\\/]/, ""), path: vi }))) return;   // a typed path stays to fix
+    const done = await openTranslate({ name: vi.replace(/^.*[\\/]/, ""), path: vi, as: String(as || "").trim() }, from);
+    if (done !== true) return done;   // a typed path stays to fix
     store("lh.scriptFolder", vi.replace(/[\\/][^\\/]*$/, ""));
     $("scans-path").hidden = true;
     $("scans-path-input").value = "";
+    return true;
   }
   async function importPath(path) {
     if (isVI(path)) return importVI(path);
@@ -6668,7 +6783,8 @@
     const c = ED.check || {}, loops = Array.isArray(ED.parts.loops) ? ED.parts.loops : [];
     const bits = (c.loads && c.points != null ? [(c.estimate ? "~" : "") + c.points + (c.points === 1 ? " point" : " points")] : [])
       .concat(c.loads && c.time ? [c.time] : []);
-    $("ed-status").textContent = bits.join(" · ");
+    // each bit whole ("~5.8 min" never split): a narrow footer breaks only after the dot
+    $("ed-status").textContent = bits.map((b) => b.replace(/ /g, " ")).join(" · ");
     const mine = loops.map(() => []), rest = [];
     for (const problem of c.problems || []) {
       const at = loopOf(problem, loops);
@@ -8301,6 +8417,9 @@
       const src = keys[hint.dataset.hint];
       hint.textContent = src ? "Set (from " + src + ")" : "Not set";
       hint.classList.toggle("set", !!src);
+      // its Remove only where there is a key to remove: greyed (the row keeps its width), the reason its tip
+      const clr = document.querySelector('[data-clear="' + hint.dataset.hint + '"]');
+      if (clr) { clr.disabled = !src; clr.title = src ? "" : "No key set"; }
     }
     for (const input of document.querySelectorAll("#settings-form input:not([type=checkbox])")) { input.value = ""; keyKept(input); }
     $("local-url").value = (S.settings && S.settings.local_base_url) || "";
@@ -8383,10 +8502,17 @@
         (it.files && it.files.length ? " · " + it.files.length + (it.files.length === 1 ? " file" : " files") : "");
       const on = h("button", { class: "switch", type: "button", role: "switch", "aria-checked": String(it.enabled !== false),
         "aria-label": "Kelvin uses " + it.name, title: "Kelvin sees it (off: kept, but not offered)" }, h("span"));
-      swFlip(on, async (v) => {   // at once; a refusal turns it back, the reason under the list
+      swFlip(on, async (v) => {   // at once; a refusal turns it back, its reason under the skill's own line until it turns
+        const note = on.closest(".memory-note");
+        let why = note.querySelector(".memory-meta.bad");
         try { await api("/api/know/" + it.kind + "/" + it.scope + "/" + encodeURIComponent(it.name), { body: { enabled: v } }); it.enabled = v; }
-        catch (e) { msg.textContent = e.message; throw e; }
-        on.closest(".memory-note").classList.toggle("off", !v);
+        catch (e) {
+          if (!why) note.querySelector(".memory-meta").after(why = h("span", { class: "memory-meta bad", role: "status" }));
+          why.textContent = e.message;
+          throw e;
+        }
+        if (why) why.remove();
+        note.classList.toggle("off", !v);
       });
       const acts = h("div", { class: "field-actions" }, show);   // its buttons on one line under what it is
       if (it.kind === "skill") {
@@ -9095,7 +9221,7 @@
     abs: ["|y|", []],
     log10: ["log₁₀ |y|", []],
   };
-  const anWhen = (r) => r.run_id.slice(9, 11) + ":" + r.run_id.slice(11, 13) + " " + r.run_id.slice(4, 6) + "/" + r.run_id.slice(6, 8);
+  const anWhen = (r) => startedText(r);   // a run's time in the History's words (this computer's time and day)
   const anRunLabel = (r) => r.plan + " · " + anWhen(r) + (r.status && r.status !== "done" ? " · " + r.status : "")
     + (r.unshared ? " · unshared" : "");
 
@@ -9143,8 +9269,10 @@
     renderAnalysisForm();
     computeAnalysis(true);
   }
-  // Kelvin's analyze tool: its spec in the form, its result drawn (a run's Analyze: that run, its defaults)
-  async function openAnalysis(spec, result, auto) {
+  // Kelvin's analyze tool: its spec in the form, its result drawn (a run's Analyze: that run, its defaults). asked: the
+  // person's own Analyze, which brings the pane to the screen even in full screen or under the list; Kelvin's result
+  // opens it where it stands, and under full screen or the list it waits, as Runs does when a run starts
+  async function openAnalysis(spec, result, auto, asked) {
     spec = spec || {};
     const runs = result && result.curves.length ? [...new Set(result.curves.map((c) => c.run))] : (spec.runs || []);
     ANA.spec = { runs, x: spec.x || "", y: spec.y || "", where: spec.where || "", group: spec.group || "", row: spec.row,
@@ -9162,7 +9290,7 @@
       fitLayout();
     }
     if (seen) { look("anpane"); ring($("anpane").querySelector(":scope > header")); }   // asked for: looked at
-    else fullShow("anpane");   // to the screen, even in full screen or under the list
+    else if (asked) fullShow("anpane");   // to the screen, even in full screen or under the list
     await loadAnalysisRuns();
     if (runs.length) await anColumns(runs[0]);
     renderAnalysisForm();
@@ -9583,6 +9711,8 @@
     $("mode-seg").addEventListener("keydown", (e) => {   // a tab list: the arrows, Home and End move along it
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
       e.preventDefault();
+      const t = $("mode-seg").querySelector(":scope > .seg-thumb");   // the keyboard's change: the thumb jumps (still)
+      if (t) { t.classList.add("still"); setTimeout(() => t.classList.remove("still"), 80); }
       setMode(e.key === "ArrowLeft" || e.key === "Home" ? "chat" : "home");
       $(S.mode === "home" ? "mode-home" : "mode-chat").focus();
     });
@@ -9781,7 +9911,7 @@
     setMode, ask, sendMessage, newChat, openChat, pollState,
     toggleSeq, toggleRuns, toggleLab, toggleAnalysis, openRun, openRunList, fitLayout, exitFull, thumb,
     openEditor, openVersions, openLabSetup, openSettings, settingsPage, openCards,
-    pickFolder, hasPicker, hasFilePicker, isVI, importVI, folderLabels, popMenu, closeMenu, lineChart, getRun, runCharts,
+    pickFolder, hasPicker, hasFilePicker, isVI, importVI, openReview, folderLabels, popMenu, closeMenu, lineChart, getRun, runCharts,
     zoom: pageZoom, askYes, askText, fitTiers,   // the fit's contract (the page size, the in-page question)
   };
 
@@ -9989,6 +10119,10 @@
     $("make-report").addEventListener("click", makeReport);
     $("watch-add-toggle").addEventListener("click", () => partForm("watch-form", $("watch-form").hidden));
     $("watch-form").addEventListener("submit", addWatch);
+    $("alarm-history-btn").addEventListener("click", (e) => {   // a disclosure: a second press closes it
+      const box = $("alarm-history");
+      foldOpen(box, e.currentTarget, $("alarm-history-fold"), !box.classList.contains("open"), e);
+    });
     // a second press closes the form, also while it changes a note (its pencil opened it)
     $("labmem-add").addEventListener("click", () => { if ($("labmem-form").hidden) editLabNote(null); else closeLabNote(); });
     $("labmem-form").addEventListener("submit", keepLabNote);
@@ -10042,6 +10176,7 @@
     };
     for (const b of document.querySelectorAll("#inst-seg button")) b.addEventListener("click", () => instShown(b.dataset.v));
     segKeys($("inst-seg"), instShown);
+    holdInstruments();
     $("close-lab").addEventListener("click", () => toggleLab(false));
     $("open-settings").addEventListener("click", openSettings);
     for (const b of document.querySelectorAll(".set-nav button")) {   // each section's name, with its dot while it holds a change

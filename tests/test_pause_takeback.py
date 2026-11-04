@@ -444,6 +444,11 @@ def test_the_sequences_pause_is_an_armed_action():
     # the state chip says Running while the person's own pause waits (the button says Pausing…), else Pausing
     assert 'if (q.state === "running" || ownPause(q)) {' in js
     assert 'if (q.state === "pausing") return ["Pausing", "warn", q.reason || ""];' in js
+    # Home's Sequence tile and its state line say it as the bar does: Running while the person's own pause waits
+    home = (STATIC / "home.js").read_text(encoding="utf-8")
+    assert 'const ownPause = (q) => q.state === "pausing" && /^paused by human/.test(q.reason || "");' in home
+    assert 'st === "running" || own ? ["blue", "Running"] : st === "pausing" ? ["warn", "Pausing"]' in home
+    assert 'run = n.q.state === "running" || ownPause(n.q);' in home and 'tone: run ? "ok" : "warn"' in home
     # the keyboard on Pause as it went: ⋯ holds it (never Stop), then Resume or Retry once offered
     assert "if (held && pause.hidden) pauseFocus = true;" in js
     assert "start.focus({ preventScroll: true })" in js and "more.focus({ preventScroll: true })" in js
@@ -458,8 +463,39 @@ def test_the_sequences_pause_is_an_armed_action():
     part = css[css.index("/* ===== fit P"):css.index("/* ===== end fit P ===== */")]
     armed = re.search(r"\.seq-hold\.armed \{([^}]*)\}", part).group(1)
     assert "var(--warn-bg)" in armed and "var(--warn)" in armed and "#" not in armed   # colours through tokens
-    # a refusal's words are read whole: the name gives way first while the bar says something (not while renamed)
-    assert ".seq-head-main.saying .seq-name:not(:focus) { flex-shrink: 1000; }" in part
+    # the state chip and a refusal's words are read whole: the name always gives way first (not while renamed)
+    assert ".seq-head-main .seq-name:not(:focus) { flex-shrink: 1000; }" in part
     # a narrow pane shows Pause by its icon, but Pausing… by its word too (not by colour alone)
     narrow = part[part.index("@container seqview (max-width: 460px)"):]
     assert ".seq-bar .btn.seq-hold.armed > span { display: inline; }" in narrow
+
+
+def test_a_refused_pause_after_turns_its_switch_back():
+    """Pause after acts at once: a refusal (op answers null) turns the switch back to what it was, as the server still
+    has it, since the block's own look has not changed and so it is not drawn again; and any refused op draws every
+    block again from the server's state."""
+    js = (STATIC / "seq.js").read_text(encoding="utf-8")
+    start = js.index('const sw = h("button", { class: "switch"')
+    handler = js[start:js.index('box.append(h("label", { class: "seq-switch" }', start)]
+    assert 'sw.setAttribute("aria-checked", String(want));' in handler and 'sw.setAttribute("aria-busy", "true");' in handler
+    assert 'op({ op: "then_pause", item: it.id, value: want })' in handler
+    assert '.then((r) => { if (!r) sw.setAttribute("aria-checked", String(!want)); })' in handler
+    assert '.finally(() => sw.removeAttribute("aria-busy"))' in handler
+    refused = _fn(js, "op")
+    refused = refused[refused.index("catch (e)"):]
+    assert 'for (const c of SEQ.cards.values()) c.sig = "";' in refused and "render()" in refused and "return null;" in refused
+
+
+def test_retry_follows_the_pause_its_failed_block_made():
+    """Retry runs a failed block again only when its failure made the pause (the loop writes that reason as
+    "<block>: …"); a pause for anything else (a declined change after an earlier failure went on, a person's) offers
+    Resume."""
+    js = (STATIC / "seq.js").read_text(encoding="utf-8")
+    start = js.index("function startKind(q) {")
+    kind = js[start:js.index("\n  }\n", start)]
+    assert 'last.status === "failed" && (q.reason || "").startsWith(last.name + ":")) return { label: "Retry", item: last };' in kind
+    assert "paused by|stopped by" not in kind
+    from labharness.agent import runtime
+    src = Path(runtime.__file__).read_text(encoding="utf-8")
+    assert 'q.state, q.reason = "pausing", "%s: %s%s" % (item.name, message,' in src   # the failure's reason
+    assert "(added or changed after the queue was approved)" in src   # a declined change's: not "<block>: …"

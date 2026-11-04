@@ -87,8 +87,6 @@
 <div id="welcome" class="welcome" hidden></div>
 
 <div id="app" class="app" hidden>
-  <div id="scrim" class="scrim" hidden></div>
-
   <!-- the chrome: the top bar and the notice row, across the whole window above the sidebar, the chat and the panes
        (app.css .chrome): nothing in it moves when the sidebar hides, a pane opens or one goes full screen -->
   <div id="chrome" class="chrome">
@@ -102,7 +100,7 @@
       </div>
       <div id="mode-seg" class="mode-seg" role="tablist" aria-label="Chat or Home"><button id="mode-chat" class="on" type="button" role="tab" aria-selected="true">Chat</button><button id="mode-home" type="button" role="tab" aria-selected="false" tabindex="-1">Home</button></div>
       <div class="topbar-right">
-      <button id="toggle-incognito" class="pill icon-only" type="button" aria-label="Incognito chat" aria-pressed="false" title="Incognito chat: no memory is used or kept, and the chat is not saved">
+      <button id="toggle-incognito" class="pill icon-only" type="button" aria-label="Incognito chat" aria-pressed="false" title="Incognito chat">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/></svg>
       </button>
       <button id="toggle-term" class="pill icon-only" type="button" aria-label="Terminal" aria-pressed="false" title="Terminal (Ctrl+`)">
@@ -273,7 +271,7 @@
     <header class="pane-head">
       <h2 class="pane-title">Analysis</h2>
       <div class="spacer"></div>
-      <button id="an-ask" class="btn small ghost" type="button" title="Ask Kelvin about this analysis">Ask Kelvin</button>
+      <button id="an-ask" class="btn small" type="button" title="Ask Kelvin about this analysis">Ask Kelvin</button>
       <button class="icon-btn full-btn" type="button" data-pane="anpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
       </button>
@@ -313,7 +311,7 @@
       <div id="an-fit" class="an-fit"></div>
       <div class="an-row an-actions">
         <button id="an-keep" class="btn small" type="button" disabled title="Keep the fit with its run: in its run.h5 and its report">Keep fit</button>
-        <button id="an-csv" class="btn small ghost" type="button" disabled title="Every point, as CSV">CSV</button>
+        <button id="an-csv" class="btn small" type="button" disabled title="Every point, as CSV">CSV</button>
       </div>
     </div>
   </section>
@@ -324,7 +322,7 @@
       <div id="runs-seg" class="seg runs-seg" role="tablist" aria-label="Sequence and history">
         <button id="open-schedule" class="on" type="button" role="tab" aria-selected="true" aria-controls="seq-view">Sequence<span id="queue-count" class="badge q-badge" hidden></span></button><button id="open-history" type="button" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1">History</button>
       </div>
-      <button id="open-report" class="btn small ghost" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
+      <button id="open-report" class="btn small" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
       <button class="icon-btn full-btn" type="button" data-pane="runpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
       </button>
@@ -515,7 +513,7 @@
         <button id="ed-run" class="btn small" type="button" title="First in the sequence, then a pause">Run</button>
         <button id="ed-save" class="btn small" type="button" title="A new scan in your library; the one it came from stays">Save</button>
         <button id="ed-save-as" class="btn small" type="button" title="A new scan in your library; the queue item stays as it was" hidden>Save as scan</button>
-        <button id="ed-revert" class="btn small ghost" type="button">Revert</button>
+        <button id="ed-revert" class="btn small" type="button">Revert</button>
       </div>
     </footer>
   </section>
@@ -601,7 +599,10 @@
             <label id="watch-sample-row" class="check watch-sample" hidden><input id="watch-sample" type="checkbox" checked> <span id="watch-sample-name">This sample only</span></label>
           </form>
           <ul id="watch-list" class="watch-list"></ul>
-          <details id="alarm-history" class="alarm-history" hidden><summary>Alarm history</summary><ul id="alarm-history-list" class="watch-list"></ul></details>
+          <div id="alarm-history" class="alarm-history" hidden>
+            <button id="alarm-history-btn" class="link disclose" type="button" aria-expanded="false" aria-controls="alarm-history-fold">Alarm history<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+            <div id="alarm-history-fold" class="k-fold" inert><div class="k-fold-in"><ul id="alarm-history-list" class="watch-list"></ul></div></div>
+          </div>
         </div>
       </section>
       <section class="lab-part" data-part="memory" aria-labelledby="lab-h-memory">

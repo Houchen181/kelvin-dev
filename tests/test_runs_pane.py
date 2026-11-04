@@ -116,7 +116,7 @@ def test_the_scan_editor_is_a_side_panel_of_its_own():
     assert work.index('<section id="anpane"') < work.index('<section id="runpane"') < work.index('<section id="edpane"')
     pane = PAGE[PAGE.index('<section id="edpane"'):PAGE.index('<div id="sidecol"')]
     assert 'id="edpane-resize"' in pane and 'id="close-editor"' in pane and 'aria-labelledby="ed-title"' in pane
-    assert re.search(r'edpane: \[\(\) => ED\.open, "workcol", \d+, "lh\.edWidth"\]', JS)
+    assert re.search(r'edpane: \[\(\) => ED\.open, "workcol", \d+, "lh\.edWidth"(, \d+)?\]', JS)   # its touch least
     assert "PANE_W.edpane" in _js("initPanes")
     toggle = _js("toggleEditor")
     assert '$("edpane").hidden = !ED.open' in toggle and "fitLayout()" in toggle
@@ -229,6 +229,8 @@ def test_the_scan_editor_follows_the_contract():
     assert 'copyText($("ed-plan-text").textContent' in _js("initEditor")
     count = _js("rangeCount")   # as plans.py counts a range: its steps, and `to` itself when they miss it
     assert "Math.floor(Math.abs(b - a) / Math.abs(step) + 1e-9)" in count and "1e-12" in count
+    # the footer's estimate: each bit whole ("~5.8 min" never split), so a narrow footer breaks only after the dot
+    assert '$("ed-status").textContent = bits.map((b) => b.replace(/ /g, " ")).join(" · ");' in _js("renderEdCheck")
 
 
 def test_the_recent_runs_list_opens_a_run_and_a_run_view_goes_back_to_it():
@@ -483,3 +485,38 @@ def test_a_run_that_starts_while_the_sequence_is_shown_only_gets_its_tab():
     dots = _js("liveDots")
     assert '$("runs-dot").hidden = !live;' in dots and '$("open-history").classList.toggle("live", live);' in dots
     assert "#open-history.live::after" in CSS and "#open-history.live.on::after { display: none; }" in CSS
+
+
+def test_a_closed_run_tab_hands_the_keyboard_on_and_key_results_wait_for_a_width():
+    """Delete on a run tab closes it and the focus goes to the tab shown next (or All runs; with the last one closed the
+    strip goes, so History's own tab), never to the page; a run that finished out of sight has its key results judged
+    when its view first has a width; All runs (a <button>) takes the strip's colour, not the browser's grey; the
+    Analysis picker gives a run's time in the History's words."""
+    close = _js("closeRunTab")
+    assert close.index("const had = tab.el.contains(document.activeElement);") < close.index("tab.el.remove()")
+    assert 'RUNS.active ? RUNS.tabs.get(RUNS.active).btn : $("run-tabs").hidden ? $("open-history") : $("runs-all")' in close
+    assert "next.focus({ preventScroll: true })" in close
+    keys = _js("keysOnce")
+    assert keys.index("if (!w) return;") < keys.index("v.keysPending = false;")
+    assert "if (active) keysOnce(active);" in _js("showView")
+    assert 'document.addEventListener("kelvin:layout", () => keysOnce(RUNS.tabs.get(RUNS.active)));' in JS
+    assert "background: none;" in re.search(r"\n\.run-tab \{([^}]*)\}", CSS).group(1)
+    assert "const anWhen = (r) => startedText(r);" in JS
+    for bid in ("open-report", "an-ask", "an-csv", "ed-revert"):   # buttons look like buttons: outlined, not ghosts
+        assert re.search(r'<button id="%s" class="btn small" ' % bid, PAGE), bid
+
+
+def test_save_as_offers_the_sequences_name_as_a_file_name_may_hold_it():
+    """Save as… suggests the sequence's name, what a file name can't hold made a space: "Gate scan, cold" is offered
+    as "Gate scan cold", never "Gate scan- cold". The page's own replacements are applied here, in order."""
+    seq = (STATIC / "seq.js").read_text(encoding="utf-8")
+    save = seq[seq.index("function openSave() {"):]
+    line = save[save.index("const fit = (s) =>"):save.index(".slice(0, 61).trim();")]
+    steps = re.findall(r'\.replace\(/((?:[^/\\]|\\.)+)/(g?), "([^"]*)"\)', line)
+    assert len(steps) == 3
+
+    def fit(s):
+        for pattern, every, by in steps:
+            s = re.sub(pattern, by, s, count=0 if every else 1)
+        return s[:61].strip()
+    assert fit("Gate scan, cold") == "Gate scan cold" and fit("  ,Hello/world  ") == "Hello world"

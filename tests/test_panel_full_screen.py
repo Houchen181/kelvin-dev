@@ -123,13 +123,40 @@ def test_one_click_model_for_every_way_of_opening_a_panel():
     assert "requestAnimationFrame" not in ring + show + pill
     assert "@keyframes k-ring" in CSS and ".k-ring { animation: k-ring" in CSS
     assert "Object.assign(window.Kelvin, { paneShow, paneHide, paneVisible, ring });" in _js("initPanes")
-    opened = _js("openAnalysis")   # Analyze, and Kelvin's analyze: to the screen even in full screen, rung when there
+    # the person's Analyze: to the screen even in full screen or under the list, rung when there; Kelvin's analyze
+    # opens the pane where it stands and, under full screen or the list, waits there as a run that starts does
+    opened = _js("openAnalysis")
+    assert "function openAnalysis(spec, result, auto, asked) {" in opened
     assert 'const seen = paneVisible("anpane");' in opened
     assert 'if (seen) { look("anpane"); ring($("anpane").querySelector(":scope > header")); }' in opened
-    assert 'else fullShow("anpane");' in opened
+    assert 'else if (asked) fullShow("anpane");' in opened and 'else fullShow("anpane");' not in opened
     assert "ANA.follow = false;" in opened
+    assert "openAnalysis({ runs: [runId] }, null, { x: true, y: true, group: true }, true));" in JS   # a run's Analyze
+    assert 'case "analysis": if (here) openAnalysis(ev.spec, ev.result); break;' in JS   # Kelvin's: not asked
     assert re.search(r'(fullShow|paneShow)\("edpane"\)', _js("openEditor"))   # Edit on a scan, New scan
     assert "fullShow" not in _js("noticeRun") + _js("openRun") + _js("showQueue")   # a run that starts doesn't take it
+
+
+def test_home_links_follow_the_click_model():
+    """Home's tiles, a block's link to a place, Add to sequence and Open on an approval waiting are links to a place
+    (brief 1.3): Kelvin.paneShow shows the pane, or rings it when it is there, and never hides it. The page's own
+    toggles are only the fallback for a page without the click model."""
+    home = (STATIC / "home.js").read_text(encoding="utf-8")
+
+    def fn(name):
+        start = re.search(r"(async )?function %s\(" % name, home).start()
+        return home[start:home.index("\n  }\n", start)]
+
+    assert "if (K.paneShow) K.paneShow(pane, view); else open();" in fn("goTo")
+    assert 't.go.addEventListener("click", safe(() => goTo(name)));' in fn("tile")
+    act = fn("act")
+    assert act.index('op: "add"') < act.index('goTo("seq");')   # the sequence shown once the block's scan is in it
+    assert "if (name) goTo(name);" in act[act.index('a.do === "pane"'):]
+    assert fn("openApproval").rstrip().endswith('else goTo("lab");')
+    start = home.index("const PLACES = {")
+    places = home[start:home.index("\n  };\n", start)]
+    for toggle in ("K.toggleSeq(", "K.toggleLab(", "K.toggleAnalysis(", "K.openRunList("):
+        assert home.count(toggle) == places.count(toggle) == 1, toggle   # only as the fallbacks
 
 
 def test_chat_or_home_ends_full_screen_from_either_side_even_the_one_chosen():

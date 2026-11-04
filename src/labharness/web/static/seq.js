@@ -12,6 +12,8 @@
     sig: "",                  // changed|state|reason|name of the queue last drawn
     open: false, wide: false, adding: false,
     lib: { scripts: [], scans: [] }, exps: [], libAt: 0,
+    drafts: [],               // the VI translations nobody kept yet (GET /api/experiments), each a press from its review
+    vis: new Map(),           // a VI's path: its translation asked on this page, while it goes on or after it failed
     filter: "",
     edit: new Set(),          // the blocks whose editor is open
     confirm: new Map(),       // block id: its timer, while × asks "Remove?"
@@ -302,7 +304,9 @@
       return r;
     } catch (e) {
       K.toast(e.message);
-      if (SEQ.open) render();   // what the person changed in place goes back to what is so
+      // what the person changed in place goes back to what is so: every block drawn again from the server's state
+      for (const c of SEQ.cards.values()) c.sig = "";
+      if (SEQ.open) render();
       return null;
     }
   }
@@ -328,6 +332,7 @@
     ]);
     if (lib && Array.isArray(lib.scripts)) SEQ.lib = lib;
     SEQ.exps = exps && Array.isArray(exps.experiments) ? exps.experiments : [];
+    SEQ.drafts = exps && Array.isArray(exps.drafts) ? exps.drafts : [];
     renderFns();
     if (SEQ.open) redraw();
   }
@@ -413,6 +418,17 @@
       const d = e.detail || {};
       if (d.queue) accept(d.queue);
       if (d.message) say(d.message);
+    }));
+    // an experiment kept or approved, or a VI's draft ready (app.js): the functions read again
+    document.addEventListener("kelvin:library", () => guard(loadLib));
+    // a VI's translation asked on this page: a row among the experiments while it goes on, and after it failed (why,
+    // till its × lets it go); once done its draft is there instead
+    document.addEventListener("kelvin:translate", (e) => guard(() => {
+      const d = e.detail || {};
+      if (!d.path) return;
+      if (d.state === "done") SEQ.vis.delete(d.path);
+      else SEQ.vis.set(d.path, { name: d.name || base(d.path), state: d.state, message: d.message || "" });
+      renderFns();
     }));
     // opened before this file started (a click while the page was still loading): drawn now
     if (inSight()) guard(onSeq, { open: true });
@@ -629,14 +645,15 @@
     if (chip.textContent !== label) chip.textContent = label;
     chip.title = title;
   }
-  // what Start does now, offered only when it can act: Start; Resume after a pause; Retry after a pause at a failed
-  // block (that block again, then on). Its name stays while it works (a turning mark instead of ▶)
+  // what Start does now, offered only when it can act: Start; Resume after a pause; Retry after a pause its failed block
+  // made (that block again, then on). The pause's own reason says which: the loop writes a failure's as "<block>: …"
+  // (runtime.py _queue_loop); any other (a person's or Kelvin's pause, a declined change, a restart) offers Resume,
+  // even when an earlier block failed and the queue went on past it. Its name stays while it works (a turning mark)
   function startKind(q) {
     const all = q.items || [];
     if (q.state !== "paused" || !all.length) return { label: "Start" };
     const last = all.filter((i) => FINISHED.has(i.status) && i.finished).sort((a, b) => a.finished - b.finished).pop();
-    const asked = /^(paused by|stopped by|paused after|Kelvin restarted)/.test(q.reason || "");   // a person's pause, or a restart
-    if (last && last.status === "failed" && !asked) return { label: "Retry", item: last };
+    if (last && last.status === "failed" && (q.reason || "").startsWith(last.name + ":")) return { label: "Retry", item: last };
     return { label: "Resume" };
   }
   function renderBar() {
@@ -1023,8 +1040,8 @@
       b.addEventListener("click", (e) => { e.stopPropagation(); guard(() => K.openEditor(null, it.id)); });
       box.append(b);
     } else box.append(h("pre", { class: "seq-yaml", "data-region": "seq-blocks" }, String(it.text || "").trim()));
-    // Pause after: the one switch (app.css .switch). It turns at once, busy while the server answers; a refusal puts
-    // it back as the server has it (op draws the blocks again) and says why
+    // Pause after: the one switch (app.css .switch). It turns at once, busy while the server answers; a refusal turns
+    // it back here (the block's own look has not changed, so nothing else would) and op's toast says why
     const sw = h("button", { class: "switch", type: "button", role: "switch", "aria-checked": String(!!it.then_pause),
                              "aria-label": "Pause after", "data-k": "then-pause" }, h("span", { "aria-hidden": "true" }));
     sw.addEventListener("click", (e) => {
@@ -1033,7 +1050,9 @@
       const want = sw.getAttribute("aria-checked") !== "true";
       sw.setAttribute("aria-checked", String(want));
       sw.setAttribute("aria-busy", "true");
-      guard(() => op({ op: "then_pause", item: it.id, value: want }).finally(() => sw.removeAttribute("aria-busy")));
+      guard(() => op({ op: "then_pause", item: it.id, value: want })
+        .then((r) => { if (!r) sw.setAttribute("aria-checked", String(!want)); })
+        .finally(() => sw.removeAttribute("aria-busy")));
     });
     box.append(h("label", { class: "seq-switch" }, sw, h("span", {}, "Pause after")));
     return box;
@@ -1105,12 +1124,17 @@
   // ------------------------------------------------------------------ the functions: what can go into the sequence
   function fnGroups() {
     const lib = SEQ.lib || {}, f = SEQ.filter.trim().toLowerCase();
-    const scriptSub = (p) => String(p || "").split(/[\\/]/).slice(-2).join("/");
+    // a script's own file name (its folder is the same on every row, and tells none apart); the whole path in its tip
     const groups = [
-      ["Scripts", (lib.scripts || []).map((e) => ({ type: "script", key: e.id, entry: e, name: e.name, sub: scriptSub(e.path),
-                                                   kind: "k-script", color: e.color, missing: e.exists === false }))],
+      ["Scripts", (lib.scripts || []).map((e) => ({ type: "script", key: e.id, entry: e, name: e.name, sub: base(e.path),
+                                                   path: e.path, kind: "k-script", color: e.color, missing: e.exists === false }))],
       ["Experiments", (SEQ.exps || []).map((x) => ({ type: "exp", key: "exp:" + x.name, exp: x, name: x.name,
-                                                    sub: "v" + x.version, kind: "k-exp" }))],
+                                                    sub: "v" + x.version, kind: "k-exp" }))
+        // a VI being translated here, or not translated (why); then the drafts nobody kept yet, each to review
+        .concat([...SEQ.vis].map(([path, v]) => ({ type: "vi", key: "vi:" + path, path, vi: v, name: v.name,
+                                                    sub: v.state === "failed" ? "not translated" : "translating…", kind: "k-exp" })))
+        .concat((SEQ.drafts || []).map((d) => ({ type: "draft", key: "draft:" + d.id, draft: d, name: d.name || base(d.vi) || d.id,
+                                                  sub: "draft", path: d.vi, kind: "k-exp" })))],
       ["Scans", (lib.scans || []).map((e) => ({ type: "scan", key: e.id, entry: e, name: e.name, sub: e.summary || "",
                                                kind: "k-scan", color: e.color }))],
     ];
@@ -1124,7 +1148,30 @@
     SEQ.fnsPending = false;
     const h = K.h;
     g.replaceChildren(...fnGroups().map(([title, fns]) =>
-      h("div", { class: "seq-grp", role: "group", "aria-label": title }, h("div", { class: "seq-gh" }, title), ...fns.map(fnCard))));
+      h("div", { class: "seq-grp", role: "group", "aria-label": title }, h("div", { class: "seq-gh" }, title),
+        ...fns.map((fn) => fn.type === "draft" || fn.type === "vi" ? draftCard(fn) : fnCard(fn)))));
+  }
+  // a VI's translation, which goes into the sequence only once kept: its draft opens its review (Keep is there); one
+  // translating, or not translated, says so, and the latter's × lets it go
+  function draftCard(fn) {
+    const h = K.h, failed = fn.type === "vi" && fn.vi.state === "failed";
+    const why = fn.type === "vi" ? fn.vi.message : fn.draft.ok_to_keep === false ? "Something blocks keeping it" : "";
+    const tip = [fn.name, fn.path, why].filter(Boolean).join("\n");
+    let tail = null;
+    if (fn.type === "draft") {
+      tail = h("button", { class: "btn small seq-review", type: "button", title: "Read it, then keep it or not",
+                           "aria-label": "Review " + fn.name }, "Review");
+      tail.addEventListener("click", (e) => { e.stopPropagation(); guard(() => K.openReview(fn.draft.id)); });
+    } else if (failed) {
+      tail = h("button", { class: "icon-btn seq-fn-more", type: "button", title: "Let it go", "aria-label": "Let go: " + fn.name }, K.icon("x"));
+      tail.addEventListener("click", (e) => { e.stopPropagation(); SEQ.vis.delete(fn.path); guard(renderFns); });
+    }
+    const card = h("div", { class: "kcard seq-fn seq-draft " + fn.kind + (failed ? " failed" : ""), title: tip },
+      h("span", { class: "seq-fn-name" }, fn.name),
+      fn.type === "vi" && !failed ? h("span", { class: "seq-spin", "aria-hidden": "true" }) : null,
+      h("span", { class: "seq-fn-sub" + (failed ? " seq-bad" : "") }, fn.sub), tail);
+    card.dataset.key = fn.key;
+    return card;
   }
   function fnCard(fn) {
     const h = K.h;
@@ -1160,8 +1207,8 @@
       nameEl.addEventListener("blur", () => guard(finish, true));
       nameEl.addEventListener("click", (e) => e.stopPropagation());
     } else nameEl = h("span", { class: "seq-fn-name" }, fn.name);
-    // one line: its name, then where it is while there is room; the whole of it in its tip
-    const tip = [fn.name, fn.sub, fn.entry && fn.entry.note].filter(Boolean).join("\n");
+    // one line: its name, then its file (or what it is) while there is room; the whole of it, its path too, in its tip
+    const tip = [fn.name, fn.path || fn.sub, fn.entry && fn.entry.note].filter(Boolean).join("\n");
     const card = h("div", { class: "kcard seq-fn " + fn.kind + (SEQ.fresh === fn.key ? " fresh" : "") + (fn.missing ? " missing" : ""),
                             tabindex: "0", role: "button", "aria-label": fn.name, title: tip },
       nameEl, fn.sub ? h("span", { class: "seq-fn-sub" }, fn.sub) : null, tail);
@@ -1446,6 +1493,7 @@
     const choose = K.hasFilePicker() ? h("button", { class: "btn", type: "button" }, "Choose…") : null;
     const found = h("div", { class: "seq-found", "aria-live": "polite" });
     const name = h("input", { class: "kfield", type: "text", maxlength: "80", spellcheck: "false", autocomplete: "off", "aria-label": "Name" });
+    const colour = h("div", { class: "seq-lab" }, h("span", {}, "Colour"), swatchRow("", (c) => { st.color = c; }));
     const add = h("button", { class: "btn primary", type: "submit", disabled: true }, "Add");
     let dlg = null;
     const drawFiles = () => {
@@ -1479,6 +1527,7 @@
       if (!st.path) return;
       if (!st.touched) name.value = base(st.path).replace(/\.(py|ipynb|vi)$/i, "");
       const ask = ++st.seq;
+      colour.hidden = K.isVI(st.path);   // an experiment has no colour among the functions
       if (K.isVI(st.path)) {   // a LabVIEW VI: Add translates it into one of the lab's experiments, a draft to read and keep
         found.replaceChildren(h("span", {}, "A LabVIEW VI: Add translates it into Python, one of the lab's experiments (a few minutes)."));
         return;
@@ -1512,7 +1561,19 @@
       if (st.busy) return;
       if (path.value.trim() !== st.path) await choosePath(path.value);
       if (!st.path || add.disabled) return;
-      if (K.isVI(st.path)) { if (dlg) dlg.close(); K.importVI(st.path); return; }
+      if (K.isVI(st.path)) {   // translated under the name given; a refusal at once (a mistyped path) is said here, the
+        st.busy = true;        // dialog still open and the path still typed, else the translation's own dialog takes over
+        add.disabled = true;
+        try {
+          const said = await K.importVI(st.path, name.value.trim(), dlg);
+          if (typeof said === "string" && dlg.open) {
+            found.replaceChildren(h("span", { class: "seq-bad" }, said));
+            add.disabled = false;
+            path.focus();
+          }
+        } finally { st.busy = false; }
+        return;
+      }
       st.busy = true;
       add.disabled = true;
       try {
@@ -1552,7 +1613,7 @@
       h("div", { class: "seq-line" }, path, choose),
       found,
       h("label", { class: "seq-lab" }, h("span", {}, "Name"), name),
-      h("div", { class: "seq-lab" }, h("span", {}, "Colour"), swatchRow("", (c) => { st.color = c; })),
+      colour,
     ], [h("span"), cancelButton(() => dlg), add], submit);
     (async () => {
       try {
@@ -1656,7 +1717,9 @@
   // ---------- Save as…: the sequence kept under a name, to Load again (it appends)
   function openSave() {
     const h = K.h;
-    const fit = (s) => String(s || "").replace(/[^A-Za-z0-9 _.-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 61).trim();
+    // the name as a file name may have it: what it can't hold becomes a space ("Gate scan, cold": "Gate scan cold")
+    const fit = (s) => String(s || "").replace(/[^A-Za-z0-9 _.-]+/g, " ").replace(/\s+/g, " ").replace(/^[^A-Za-z0-9]+/, "")
+      .slice(0, 61).trim();
     const name = h("input", { class: "kfield", type: "text", maxlength: "61", spellcheck: "false", autocomplete: "off",
                               value: fit(SEQ.q && SEQ.q.name) || "sequence", "aria-label": "Name" });
     const save = h("button", { class: "btn primary", type: "submit" }, "Save");

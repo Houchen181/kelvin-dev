@@ -179,7 +179,13 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
 .seq-fn.fresh { box-shadow: 0 0 0 2px var(--accent), var(--card-shadow); }
 .seq-fn.sent { box-shadow: 0 0 0 2px var(--accent-soft), var(--card-shadow); }
 .seq-fn.missing .seq-fn-name { text-decoration: line-through; color: var(--muted); }
+/* a VI's translation among the experiments: not pressed as a whole (it goes into the sequence only once kept); a
+   draft's Review, one translating its turning mark, one not translated its why and × */
+.seq-fn.seq-draft { cursor: default; }
+.seq-draft > .seq-spin { flex: none; color: var(--muted); }
+.seq-fn > .seq-review { flex: none; margin-left: auto; margin-right: 2px; }
 .seq-fns-foot { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.seq-fns-foot .btn { flex: 1 1 auto; }   /* wrapped, they fill their rows: no short button left alone on one */
 
 /* a step, typed: a card of the step's colour with the functions (app.js's step row), one line (Step, Set | Wait |
    Settle) until it is used: then its fields under that line; a pasted item under them */
@@ -207,7 +213,7 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
 .seq-pop { position: fixed; z-index: 70; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius);
   background: var(--panel); box-shadow: var(--shadow); }
 .seq-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
-.seq-swatch { width: 24px; height: 24px; padding: 0; border: 2px solid var(--panel); border-radius: 50%; cursor: pointer;
+.seq-swatch { width: 30px; height: 30px; padding: 0; border: 2px solid var(--panel); border-radius: 50%; cursor: pointer;
   box-shadow: 0 0 0 1px var(--line-strong); }
 .seq-swatch.on { box-shadow: 0 0 0 2px var(--text); }
 .seq-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -267,8 +273,10 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
   .seq-fn > .ask { height: 40px; }
   .seq-add { min-height: 44px; }
   .seq-name, .seq-bar .btn { min-height: 40px; }
+  .seq-bar .seq-hold, .seq-bar .seq-stop { min-width: 40px; justify-content: center; }   /* by their icons alone: 40 wide */
   .seq-more { min-width: 40px; min-height: 40px; }
-  .seq-step-head .seq-kinds button { min-height: 40px; }
+  .seq-step-head .seq-kinds button { min-height: 40px; min-width: 40px; }
+  .seq-search, .seq-fns-foot .btn, .seq-fn > .seq-review { min-height: 40px; }   /* ＋ New function, New scan, Paste a plan */
   .seq-file, .seq-tick { min-height: 40px; }   /* the dialogs' rows: a file, a block to sweep */
   .seq-swatch { width: 40px; height: 40px; }
 }

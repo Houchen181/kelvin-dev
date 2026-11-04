@@ -8,8 +8,8 @@
    greeting on a line of its own, the 2 + 1 large tiles and three columns of blocks in a column of 1040 px. */
 
 /* the conversation's place (as .scroller: from a zero basis, so the top bar keeps its own height when it wraps), and the
-   container Home's parts are sized by: its width (one-line tiles under 700 px) and its height (one-line tiles when it
-   is short, the large tiles when it is big). It scrolls only if even that cannot fit: it never clips */
+   container Home's parts are sized by: its width (one-line tiles under 700 px) and its height (one-line tiles under
+   720 px, the large tiles when it is big). It scrolls only if even that cannot fit: it never clips */
 .homeview { flex: 1 1 0%; min-height: 0; overflow-y: auto; background: var(--page); container: home / size;
   --home-shadow: 0 1px 2px rgba(20, 32, 44, 0.04), 0 12px 28px -18px rgba(20, 32, 44, 0.24); }   /* softer than a card's */
 @media (prefers-color-scheme: dark) {
@@ -113,6 +113,7 @@ html.fit-tight .home-spark { height: 28px; }
 .hk-name { flex: 1 1 auto; min-width: 0; line-height: 22px; overflow-wrap: anywhere; }   /* the title, and how long ago after it */
 .hk-title { display: inline; margin: 0; font-size: 15px; font-weight: 600; line-height: inherit; color: var(--text); }
 .hk-ago { margin-left: 2px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.hk-ago[hidden] { display: none; }   /* alone on a line of its own it gives way (home.js fitAgo) */
 .hk-tools { flex: none; display: flex; gap: 2px; margin: -2px -2px -2px 0; }
 /* a block's tools: faint (35 %) until the pointer or the focus is on the block, so they are there to find, touch too */
 .hk-btn { display: grid; place-items: center; min-width: 28px; height: 28px; padding: 0 6px; border: 0; border-radius: var(--radius-s);
@@ -163,9 +164,9 @@ html:is(.fit-compact, .fit-tight) .hk-text { -webkit-line-clamp: 2; }
 }
 
 /* ---------- one-line tiles: each tile one line (its title, its number, its chip), one under the other in a narrow main
-   column (a phone, or panes beside Home), side by side when Home is short (the terminal or the notices under the top
-   bar take its height), so the blocks keep theirs ---------- */
-@container home (max-width: 699px) or (max-height: 559px) {
+   column (a phone, or panes beside Home), side by side when Home is under 720 px tall (a small window, or the terminal or
+   the notices under the top bar taking its height), so the blocks keep theirs ---------- */
+@container home (max-width: 699px) or (max-height: 719px) {
   .home-tile { flex-direction: row; align-items: center; gap: var(--sp-3, 12px); height: 40px; max-height: none;
     padding: 0 var(--sp-4, 16px); border-radius: 12px; }
   html.fit-compact .home-tile, html.fit-tight .home-tile { max-height: none; }

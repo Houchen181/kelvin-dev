@@ -13,15 +13,16 @@
 .wl-head .logo { width: 48px; height: 48px; border-radius: 12px; box-shadow: var(--card-shadow); }
 .wl-titles { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
 .wl-h1 { margin: 0; font-size: var(--fs-display, 26px); line-height: 1.2; }
-.wl-skip { align-self: flex-start; margin-left: auto; padding: 4px 2px; border: 0; background: none; cursor: pointer;
+.wl-skip { align-self: flex-start; min-height: 30px; margin-left: auto; padding: 4px 2px; border: 0; background: none; cursor: pointer;
   font: inherit; font-size: 13px; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
 .wl-skip:hover { color: var(--text); }
 .wl-skip:disabled { cursor: default; opacity: .5; }
 
-/* the steps: a dot each (the chosen one in the accent), then where this is */
-.wl-steps { display: flex; align-items: center; margin: 0 0 12px -6px; }
+/* the steps: a dot each (the chosen one in the accent), then where this is; each dot is a 30 px target (24 px or more
+   at every page size), the row pulled left so the drawn dots stay at the column's edge */
+.wl-steps { display: flex; align-items: center; margin: 0 0 12px -11px; }
 .wl-dots { display: flex; align-items: center; }
-.wl-dot { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer;
+.wl-dot { width: 30px; height: 30px; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer;
   display: grid; place-items: center; }
 .wl-dot::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); }
 .wl-dot:hover:not(:disabled)::before { background: var(--muted); }
@@ -72,5 +73,12 @@
 
 @media (min-width: 640px) {
   .wl-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .wl-list > .wl-row:nth-child(odd) { border-right: 1px solid var(--line); }
+  .wl-list > .wl-row:nth-child(odd):not(:last-child) { border-right: 1px solid var(--line); }   /* none beside a lone last */
+}
+/* a touch screen: every target 40 px or more (the welcome is not a .dialog, so fit F's rule does not reach it) */
+@media (pointer: coarse) {
+  .wl-skip, .welcome :is(.btn, button.link, .kfield, select) { min-height: 40px; }
+  .wl-skip { min-width: 40px; }
+  .wl-dot { width: 40px; height: 40px; }
+  .wl-steps { margin-left: -16px; }
 }

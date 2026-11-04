@@ -302,3 +302,57 @@ def test_import_a_script_or_vi_starts_a_vis_translation():
     for text in ("function isVI(", "function importVI(", "if (isVI(path)) return importVI(path);",
                  "openTranslate({ name:", "the translation goes on"):
         assert text in js, text
+
+
+def _fn(js, name):
+    """One function of a page script, by its name: from its declaration to its closing brace (two spaces in)."""
+    start = js.index("function %s(" % name)
+    return js[start:js.index("\n  }\n", start)]
+
+
+def test_the_sequences_new_function_translates_a_vi_under_its_name_and_keeps_a_mistyped_path():
+    """＋ New function (seq.js) takes a VI: it is not inspected as a script and has no colour, and Add sends it to
+    Kelvin.importVI with the name given and the dialog, which stays open, the path still typed, when Kelvin refuses the
+    path at once (openTranslate waits a second for that); else the translation's own dialog takes over."""
+    seq = (STATIC / "seq.js").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    new = _fn(seq, "newFunction")
+    choose = new[new.index("async function choosePath("):new.index('path.addEventListener("change"')]
+    assert choose.index("if (K.isVI(st.path)) {") < choose.index('K.api("/api/library", { body: { op: "inspect"')
+    assert "colour.hidden = K.isVI(st.path);" in choose
+    submit = new[new.index("const submit = async () => {"):]
+    vi = submit[submit.index("if (K.isVI(st.path)) {"):]
+    vi = vi[:vi.index("return;\n      }")]
+    assert "await K.importVI(st.path, name.value.trim(), dlg)" in vi and "dlg.close()" not in vi
+    assert 'if (typeof said === "string" && dlg.open)' in vi and '{ class: "seq-bad" }, said' in vi
+    # the page's side: the name and the dialog handed on, the name in the request, a refusal within a second sent back
+    assert "async function importVI(path, as, from)" in js and "if (done !== true) return done;" in _fn(js, "importVI")
+    tr = _fn(js, "openTranslate")
+    assert "body: v.as ? { path: v.path, name: v.as } : { path: v.path }" in tr
+    assert "setTimeout(() => r(null), 1000)" in tr and "if (early && from.open) return early.message;" in tr
+    assert tr.index("if (from.open) from.close();") < tr.index('expDialog("Translate "')
+
+
+def test_a_vis_translation_is_a_press_away_in_the_sequence_however_long_it_took():
+    """A translation takes minutes and its dialog may be closed: the Sequence's experiments list it while it goes on and
+    why after a failure (kelvin:translate), then its draft (GET /api/experiments' drafts, read again on
+    kelvin:library) with Review opening it (Kelvin.openReview), after a reload too. Keep and Approve read the
+    functions again, so a kept experiment is there at once."""
+    seq = (STATIC / "seq.js").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "SEQ.drafts = exps && Array.isArray(exps.drafts) ? exps.drafts : [];" in _fn(seq, "loadLib")
+    assert 'document.addEventListener("kelvin:library", () => guard(loadLib));' in seq
+    assert 'document.addEventListener("kelvin:translate", (e) => guard(() => {' in seq
+    groups = _fn(seq, "fnGroups")
+    assert '(SEQ.drafts || []).map((d) => ({ type: "draft"' in groups and "[...SEQ.vis].map(" in groups
+    assert 'fn.type === "draft" || fn.type === "vi" ? draftCard(fn) : fnCard(fn)' in _fn(seq, "renderFns")
+    card = _fn(seq, "draftCard")
+    assert "K.openReview(fn.draft.id)" in card and '"Review")' in card and 'class: "btn small seq-review"' in card
+    assert "isVI, importVI, openReview," in js   # on window.Kelvin
+    tr = _fn(js, "openTranslate")
+    assert 'emit("translate", { path: v.path, name: v.as || v.name, state: "running" });' in tr
+    assert 'state: "failed", message: e.message });' in tr and 'emit("translate", { path: v.path, state: "done" });' in tr
+    assert 'toast(v.name + " is translated: click to review it"' in tr   # the note as well
+    for name in ("openTranslate", "keepDraft", "approveVersion"):
+        assert 'emit("library");' in _fn(js, name), name
+    assert 'function emit(name, detail) { document.dispatchEvent(new CustomEvent("kelvin:" + name, { detail })); }' in js

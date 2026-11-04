@@ -99,6 +99,9 @@
   }
   // the alarms on now (a Got it does not end one: its reading is still out of range until it clears)
   const alarmsOn = (s) => ((s && s.alarms) || []).filter((a) => a && !a.cleared);
+  // the person's own pause (the Sequence's Pause), not yet in effect: still running, as the Sequence's bar has it
+  // (seq.js ownPause, runtime.py _own_pause)
+  const ownPause = (q) => q.state === "pausing" && /^paused by human/.test(q.reason || "");
 
   // ------------------------------------------------------------------ the page: the hello, the tiles, the blocks
   // a tile's place: its pane, the view of it the tile shows (Runs: the Sequence, or History's list of all runs), and the
@@ -167,6 +170,8 @@
     p.labt.body.append(p.watchList);
     // the blocks: the rest of the height, the one part of Home that scrolls (brief 1.7: a region)
     p.blocks = h("div", { class: "home-blocks", "data-region": "home-blocks", hidden: true });
+    // a width of their own (the window, a pane, Home shown again): each block's "how long ago" measured again
+    if (window.ResizeObserver) new ResizeObserver(() => guard(fitAgo)).observe(p.blocks);
     $("homeview").replaceChildren(h("div", { class: "home-col" },
       h("header", { class: "home-hello" }, p.greet, p.state, p.lab),
       h("div", { class: "home-tiles" }, p.seq.el, p.runs.el, p.labt.el),
@@ -213,9 +218,8 @@
     if (pending) return { tone: "warn", words: pending === 1 ? "Approval waiting" : pending + " approvals waiting", open: true };
     const n = sequence(s);
     if (n.q.state === "running" || n.q.state === "pausing") {
-      const it = n.item || (n.next >= 0 ? n.items[n.next] : null);
-      return { tone: n.q.state === "running" ? "ok" : "warn",
-               words: it ? it.name + " · " + n.at + " of " + n.total : n.q.state === "running" ? "Running" : "Pausing" };
+      const it = n.item || (n.next >= 0 ? n.items[n.next] : null), run = n.q.state === "running" || ownPause(n.q);
+      return { tone: run ? "ok" : "warn", words: it ? it.name + " · " + n.at + " of " + n.total : run ? "Running" : "Pausing" };
     }
     if (n.q.state === "paused") return { tone: "warn", words: "Paused" };
     const live = s.live;
@@ -243,12 +247,15 @@
 
   // ------------------------------------------------------------------ the tiles
   function renderSeq(s) {
-    const n = sequence(s), t = H.parts.seq, st = n.q.state;
-    // states are tinted pills; the running one the accent's soft fill (brief 1.6.3)
-    const [kind, words] = st === "running" ? ["blue", "Running"] : st === "pausing" ? ["warn", "Pausing"]
+    const n = sequence(s), t = H.parts.seq, st = n.q.state, own = ownPause(n.q);
+    // states are tinted pills; the running one the accent's soft fill (brief 1.6.3). The person's own pause still runs,
+    // as the Sequence's bar says it (why is the tip); Kelvin's, a failure's, a guard's or Stop's says Pausing
+    const [kind, words] = st === "running" || own ? ["blue", "Running"] : st === "pausing" ? ["warn", "Pausing"]
       : st === "paused" ? ["warn", "Paused"] : !n.total || n.next >= 0 ? ["line", "Idle"]
       : n.items.some((i) => i.status === "failed") ? ["bad", "Failed"] : ["ok", "Done"];
     chip(t, kind, words);
+    const why = own ? String(n.q.reason) : "";
+    if (t.chip.title !== why) t.chip.title = why;
     put(t.kpi, n.at + " / " + n.total);
     const frac = n.total ? clamp((n.ended + (n.prog ? n.prog.frac : 0)) / n.total) : 0;
     const width = (frac * 100).toFixed(1) + "%";
@@ -527,6 +534,7 @@
     box.hidden = !want.length;
     H.known = known;
     guard(() => liveValues(K.S.last));
+    guard(fitAgo);
     refocus(keep);
   }
   function flash(el) {
@@ -544,7 +552,26 @@
         el.classList.toggle("alarm", alarmed.has(key));
       }
     }
-    for (const el of box.querySelectorAll(".hk-ago")) put(el, ago(Number(el.dataset.t)));
+    let moved = false;
+    for (const el of box.querySelectorAll(".hk-ago")) {
+      const words = ago(Number(el.dataset.t));
+      if (el.textContent !== words) { el.textContent = words; moved = true; }
+    }
+    if (moved) fitAgo();   // "5 min ago" is wider than "just now"
+  }
+  // a block's "how long ago" sits on its title's last line, or gives way as a minor line does: alone on a line of its own
+  // it would push the block's value below its neighbours'. Its time stays its tip. Shown first, then measured: all of
+  // them in one layout
+  function fitAgo() {
+    const box = H.parts.blocks;
+    if (box.hidden) return;
+    const rows = [...box.children].map((el) => [el.querySelector(".hk-ago"), el.querySelector(".hk-title")]).filter((r) => r[0] && r[1]);
+    for (const [when] of rows) when.hidden = false;
+    const alone = rows.map(([when, title]) => {
+      const at = when.getClientRects(), lines = title.getClientRects();   // none: the tier or a finger leaves it out
+      return at.length > 0 && lines.length > 0 && at[0].top >= lines[lines.length - 1].bottom - 2;
+    });
+    rows.forEach(([when], i) => { if (alone[i]) when.hidden = true; });
   }
 
   // ------------------------------------------------------------------ asking the server, when something moved

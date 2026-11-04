@@ -139,17 +139,29 @@ def test_the_pane_looked_at_least_recently_makes_room():
 def test_least_widths_are_what_the_heads_hold_at():
     """A pane is never narrower than its head holds whole (brief 1.1.3: nothing clipped). Runs' head on History is the
     widest: Sequence | History with a two-digit count, Report…, ⤢ and ×, 346 page px at 85, 90 and 100 % (measured);
-    on a touch screen its head buttons are 40 px (app.css "fit B2"), and it needs 362. Lab and Analysis hold at 292."""
+    on a touch screen its head buttons are 40 px (app.css "fit B2"), and it needs 362. Lab and Analysis hold at 292.
+    On a touch screen the scan editor's 40 px fields fit whole only with its two-column rows (a pane of 790 or more):
+    it needs 800 there, so on an iPad (1180, with the list or without) it takes the content area alone, and a width
+    kept from a desktop never puts it under that (paneWant)."""
     least, touch = _least(), _least(touch=True)
     assert least["runpane"] >= 346 and touch["runpane"] >= 362
     assert least["labpanel"] >= 292 and least["anpane"] >= 292 and least["edpane"] >= 318
     assert 'runpane: [() => RUNS.open, "workcol", 346, "lh.runsWidth", 362],' in JS
+    assert touch["edpane"] >= 790 and touch["edpane"] > 1180 - 520 and least["edpane"] == 360
     assert 'const COARSE = window.matchMedia("(pointer: coarse)");' in JS
     assert "const least = (id) => (COARSE.matches && PANES[id][4]) || PANES[id][2];" in JS
-    assert "const paneWant = (id) => PANE_W[id] || least(id);" in JS
+    assert "const paneWant = (id) => Math.max(PANE_W[id] || 0, least(id));" in JS
     assert "PANES[id][2]" not in JS.replace("const least = (id) => (COARSE.matches && PANES[id][4]) || PANES[id][2];", "")
     b2 = CSS[CSS.index("/* ===== fit B2"):CSS.index("/* ===== end fit B2")]   # the touch heads' 40 px buttons
     assert "@media (pointer: coarse) {\n  :is(.pane-head, .term-head) > .icon-btn { min-width: 40px; min-height: 40px; }" in b2
+    # the Analysis pane's controls and the terminal's input are 40 px on touch too (brief 1.1.9)
+    assert ("#anpane .pane-head > .btn.small, #anpane .an-actions > .btn,\n"
+            '  #anpane .an-body :is(select, input:not([type="checkbox"])) { min-height: 40px; }') in b2
+    assert "#an-more-run { min-width: 40px; min-height: 40px; }" in b2
+    assert ".term-in { padding-block: 0 2px; }" in b2 and ".term-in input { min-height: 40px; }" in b2
+    # with a mouse the terminal's input is 28 px, the authored floor (brief 1.1.9), its row as tall as before
+    assert ".term-in { padding-block: 1px 5px; }\n.term-in input { min-height: 28px; }\n" in b2
+    assert b2.index(".term-in input { min-height: 28px; }") < b2.index("@media (pointer: coarse)")   # touch wins
 
 
 def test_the_pane_being_typed_in_is_not_put_away_for_a_pane_that_came_by_itself():
