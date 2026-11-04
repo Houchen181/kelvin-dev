@@ -763,11 +763,10 @@
             <span id="owner-pin-state" class="hint"></span>
           </div>
           <div id="roles-box" class="field" hidden>
-            <div class="field-row"><span class="field-label">Lab roles</span>
-              <button id="roles-edit" class="btn small" type="button">Give roles…</button></div>
+            <div class="field-row"><span class="field-label">Lab roles</span></div>
             <span id="roles-state" class="hint"></span>
-            <!-- the roles picked: they wait for Save, as every field does (settingsBody sends them to the roles' own
-                 endpoint); a refusal is said under them -->
+            <!-- a role to pick for each person, shown as saved (rolesFill): the picks wait for Save as every field does
+                 (settingsBody gives them; saveSettings sends them to /api/roles first); a refusal is said under them -->
             <fieldset id="roles-list" name="roles" class="roles-list" aria-label="Lab roles" hidden></fieldset>
             <span id="roles-msg" class="hint bad" role="status"></span>
             <span class="hint">No role: trainee. An operator or the owner confirms a trainee's yes. Only the owner changes roles (with the PIN).</span>
@@ -968,6 +967,7 @@
               <button id="zoom-in" class="btn small" type="button" aria-label="Bigger">+</button>
               <button id="zoom-reset" class="btn small" type="button" title="As the window suits (Ctrl 0 in the app)" hidden>Auto</button>
             </div>
+            <span id="zoom-held" class="hint" role="status" hidden></span>
             <span id="zoom-hint" class="hint" hidden>Ctrl + / Ctrl − / Ctrl 0</span>
           </div>
           <div class="field">

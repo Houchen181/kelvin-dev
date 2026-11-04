@@ -190,43 +190,33 @@
     try { r = await api("/api/roles"); } catch (e) { $("roles-state").textContent = e.message; return; }
     ROLESUI.data = r;
     $("roles-box").hidden = !r.accounts;   // roles are people's: they need accounts
-    $("roles-state").textContent = r.on
-      ? "On" + (r.my_role ? ": you are " + AN[r.my_role] : "") + ". " + r.people.map((p) => p.name + ": " + p.role
-          + (p.given ? "" : " (no role given)")).join("; ") + "."
-      : "Off: everyone at this computer is equal." + (r.pin ? "" : " Roles need the lab owner's PIN.");
-    $("roles-edit").textContent = r.on ? "Change…" : "Give roles…";
-    rolesButton();
+    $("roles-state").textContent = (r.on ? "On" + (r.my_role ? ": you are " + AN[r.my_role] : "") + "."
+      : "Off: everyone at this computer is equal.") + (r.pin ? "" : " Roles need the lab owner's PIN.");
+    if (!$("roles-list").children.length) rolesFill();
+    $("roles-list").disabled = !r.pin;   // greyed without a PIN, the reason its tip
+    $("roles-list").title = r.pin ? "" : "Roles need the lab owner's PIN";
     $("owner-notify-state").textContent = r.owner_notify.length
       ? "To " + r.owner_notify.join(" and ") + ", and the list in the app."
       : "Only to the list in the app.";
     $("owner-notify-off").hidden = !r.owner_notify.length;
   }
-  // Give roles… shows a role to pick for each person. It is greyed while they show (until Settings closes) and while
-  // no PIN is set, the reason its tip
-  function rolesButton() {
-    const r = ROLESUI.data, b = $("roles-edit"), shown = !$("roles-list").hidden;
-    b.disabled = !r || !r.pin || shown;
-    b.title = shown ? "Picked below: Save keeps them" : r && !r.pin ? "Roles need the lab owner's PIN" : "";
-  }
-  function editRoles() {
-    const r = ROLESUI.data;
-    if (!r || !$("roles-list").hidden) return;
-    $("roles-list").replaceChildren(...r.people.map((p) => {
+  // a role to pick for each person, shown as saved. Filled once per opening of Settings (openSettings empties it), so a
+  // pick waiting for Save is never let go while the dialog is open
+  function rolesFill() {
+    const r = ROLESUI.data, people = r && r.accounts ? r.people : [];
+    $("roles-list").replaceChildren(...people.map((p) => {
       const sel = h("select", { "aria-label": "Role of " + p.name, "data-person": p.name }, h("option", { value: "" }, "no role"),
         ...r.roles_list.map((x) => h("option", { value: x }, x)));
       sel.value = r.roles[p.name] || "";
       return h("div", { class: "role-row" }, h("span", {}, p.name), sel);
     }));
-    $("roles-list").hidden = false;
-    settingsFilled(["roles"]);   // shown as they are saved: nothing waits until a pick changes
-    rolesButton();
-    const first = $("roles-list").querySelector("select");
-    if (first) first.focus();
+    $("roles-list").hidden = !people.length;
+    settingsFilled(["roles"]);   // as saved: nothing waits until a pick changes
   }
-  // the roles picked, as Save sends them ({name: role}, a person with no role left out); none while not shown
+  // the roles picked, as Save sends them ({name: role}, a person with no role left out); none without people to pick for
   function rolesPicked() {
     const picks = [...$("roles-list").querySelectorAll("select[data-person]")];
-    if ($("roles-list").hidden || !picks.length) return undefined;
+    if (!picks.length) return undefined;
     const roles = {};
     for (const sel of picks) if (sel.value) roles[sel.dataset.person] = sel.value;
     return roles;
@@ -8604,11 +8594,10 @@
     loadScriptFolders();   // as they are now: Set up or the first setup may have added one meanwhile
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
     ownerPinState();
-    rolesState();
-    $("roles-list").replaceChildren();   // folded at each opening: Give roles… shows them again as they are saved
+    $("roles-list").replaceChildren();   // filled again as saved (rolesState): picks not saved were let go with the rest
     $("roles-list").hidden = true;
     $("roles-msg").textContent = "";
-    rolesButton();
+    rolesState();
     const idle = S.settings && S.settings.idle_off !== undefined ? S.settings.idle_off : 60, idleSel = $("idle-off");
     const idleValue = idle ? String(idle) : "off";
     if (![...idleSel.options].some((o) => o.value === idleValue)) idleSel.append(h("option", { value: idleValue }, "After " + idle + " minutes"));
@@ -8824,7 +8813,7 @@
 
   // Settings keep Save and Cancel. What acts at once is kept already: a switch (each in a card of its
   // own at the top of its page, .set-now, or in its row, as a skill's), Page size, and every other button. Everything
-  // else (the lab's roles picked under Give roles… too) waits for Save, and what waits is what Save would send now
+  // else (the lab's roles picked for each person too) waits for Save, and what waits is what Save would send now
   // (settingsBody) that differs from what it would have sent
   // as the dialog opened (SETS.start). Save is offered only then, the other button reads Cancel (else Close), and each
   // section holding a change has a dot in the list on the left. Cancel lets go of what waits (the fields are filled from
@@ -8868,7 +8857,7 @@
     body.approval_wait = $("approval-wait").value;
     if (S.claudeCode) { body.claude_code = $("cc-on").checked ? "on" : "off"; body.claude_code_path = $("cc-path").value.trim(); }
     body.updates = $("updates").value;
-    body.roles = rolesPicked();   // the lab's roles, while Give roles… shows them: Save sends them to /api/roles
+    body.roles = rolesPicked();   // the lab's roles picked: saveSettings sends them to /api/roles
     return body;
   }
   function settingField(name) { return document.querySelector('#settings-form [name="' + name + '"]'); }
@@ -8949,7 +8938,9 @@
   }
   // Save: as before (Settings saved., the dialog closes); a refusal keeps the dialog open, says why, and keeps what waits.
   // The roles picked go first, to the roles' own endpoint, which asks for the owner's PIN: refused, nothing else is sent,
-  // and the reason shows under them, their page shown. Kept, they no longer wait, whatever the settings' answer
+  // and the reason shows under them, their page shown. Kept, they no longer wait, whatever the settings' answer, and a
+  // refusal of the settings then says the roles were saved. Focus, lost to the greyed Save while the PIN was asked, goes
+  // to what the refusal is about: the first role, or Save
   async function saveSettings() {
     const sent = settingsBody(), { roles, ...body } = sent, withRoles = settingsDiff().includes("roles");
     SETS.saving = true;
@@ -8976,10 +8967,15 @@
         $("roles-msg").textContent = e.message;
         if ($("set-pages").querySelector('.set-page[data-page="instruments"]').hidden) settingsPage("instruments");
         $("roles-box").scrollIntoView({ block: "nearest" });
-      } else $("settings-msg").textContent = e.message;
+      } else $("settings-msg").textContent = (withRoles ? "Roles saved. " : "") + e.message;
     } finally {
       SETS.saving = false;
       settingsPending();
+      const lost = !document.activeElement || document.activeElement === document.body;
+      if ($("settings-dialog").open && lost) {
+        const to = $("roles-msg").textContent ? $("roles-list").querySelector("select:enabled") : $("save-settings");
+        if (to && !to.disabled) to.focus();
+      }
     }
   }
 
@@ -8997,7 +8993,7 @@
   const FIT = { zoom: 1, tier: "", timer: 0, still: 0, wheel: 0, native: false };
   try { localStorage.removeItem("lh.v"); } catch (e) { /* kept nowhere */ }   // a layout choice an earlier version kept
   const inApp = () => !!(window.pywebview && window.pywebview.api && window.pywebview.api.set_zoom);
-  // the size chosen on this browser, 0 for Auto; one under the smallest step (80 % was offered once) reads as that step
+  // the size chosen on this browser, 0 for Auto; a stored size under the smallest step reads as that step
   function pageChoice() {
     const z = Number(store("lh.pageSize"));
     return z > 0 && z < SIZES[0] ? SIZES[0] : SIZES.includes(z) ? z : 0;
@@ -9009,11 +9005,12 @@
   }
   // a size fits this window when the layout keeps its least height at it
   const sizeFits = (z) => window.innerHeight / z >= PAGE_LEAST;
-  // the size applied: Auto, or the choice held at the largest size that fits (the smallest when none does)
+  // the size applied: the choice, or Auto, held at the largest size that fits (the smallest when none does). Auto on a
+  // touch screen keeps 100 %, for its 40 px targets
   function pageSize() {
-    const chosen = pageChoice();
-    if (!chosen) return autoZoom();
-    return SIZES.filter((s) => s <= chosen && sizeFits(s)).pop() || SIZES[0];
+    const chosen = pageChoice(), want = chosen || autoZoom();
+    if (!chosen && window.matchMedia("(pointer: coarse)").matches) return want;
+    return SIZES.filter((s) => s <= want && sizeFits(s)).pop() || SIZES[0];
   }
   const pageZoom = () => FIT.zoom;   // Kelvin.zoom(): divide pointer and rect lengths by it before writing them to CSS
   // the page size and the tier: on loading, 50 ms after the window changes size, and when a size is chosen. Never
@@ -9039,18 +9036,22 @@
     if (zoomed && !first) window.dispatchEvent(new Event("resize"));
     emit("fit", { zoom: z, tier });
   }
-  // Settings → Display → Page size: the size applied; + greyed at the largest step and where the next would not fit the
-  // window (the reason its tip); a choice held smaller says so in its tip
+  // Settings → Display → Page size: the size applied; − and + greyed at the ends, + also where the next size would not
+  // fit the window, the reason their tip; a choice held smaller is said on the line under them
   function showPage() {
     if (!$("zoom-now")) return;
     const z = FIT.zoom, chosen = pageChoice(), pct = (s) => Math.round(s * 100) + "%";
     const next = SIZES.find((s) => s > z + 0.001), cramped = !!next && !sizeFits(next);
     const now = chosen ? pct(z) : "Auto · " + pct(z), held = chosen > z + 0.001 ? pct(chosen) + " chosen: a taller window shows it" : "";
     if ($("zoom-now").textContent !== now) $("zoom-now").textContent = now;
-    if ($("zoom-now").title !== held) $("zoom-now").title = held;
+    if ($("zoom-held").textContent !== held) $("zoom-held").textContent = held;
+    $("zoom-held").hidden = !held;
     $("zoom-out").disabled = z <= SIZES[0];
+    const least = z <= SIZES[0] ? pct(SIZES[0]) + " is the smallest" : "";
+    if ($("zoom-out").title !== least) $("zoom-out").title = least;
     $("zoom-in").disabled = !next || cramped;
-    const why = cramped ? "At " + pct(next) + " the page would be under its least height of " + PAGE_LEAST + " px on this window" : "";
+    const why = !next ? pct(z) + " is the largest"
+      : cramped ? "At " + pct(next) + " the page would be under its least height of " + PAGE_LEAST + " px on this window" : "";
     if ($("zoom-in").title !== why) $("zoom-in").title = why;
     $("zoom-reset").hidden = !chosen;
     $("zoom-hint").hidden = !inApp();
@@ -9939,7 +9940,6 @@
       ($("eln-day").value || "today") + "-lab-record.zip", "day's lab notebook record"));
     $("owner-pin-set").addEventListener("click", () => ownerPinChange(false));
     $("owner-pin-remove").addEventListener("click", () => ownerPinChange(true));
-    $("roles-edit").addEventListener("click", editRoles);
     $("owner-notify-mine").addEventListener("click", () => ownerNotify("mine"));
     $("owner-notify-off").addEventListener("click", () => ownerNotify("off"));
     for (const id of ["history-open", "lab-history"]) $(id).addEventListener("click", openHistory);

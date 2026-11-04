@@ -5,8 +5,8 @@ something does, and a dot on a section's name says where the change is. What act
 at the top of its page (.set-now): the phone through the hub on Account, Compare models on Models, the skills on
 Memory, Phone access, Page size. On the Settings pages a switch acts at once and a tick box waits for Save (or for the
 button of its own row); in a row, a skill's switch and a service's Pictures (a choice of three) act at once, and no list
-does. The lab's roles picked under Give roles… wait for Save like any field, which sends them to their own endpoint. The head's × and
-Esc ask first while something waits, and do nothing while a Save is on its way; Enter in a box never closes the
+does. The lab's roles picked for each person wait for Save like any field, which sends them to their own endpoint. The
+head's × and Esc ask first while something waits, and do nothing while a Save is on its way; Enter in a box never closes the
 dialog."""
 import re
 from pathlib import Path
@@ -114,10 +114,16 @@ def test_what_acts_at_once_stands_in_a_card_at_the_top_of_its_page():
         assert part in skills, part
     for part in ('id="learn"', 'id="global-instructions"', 'id="global-notes"'):
         assert part not in skills and memory.index(skills) + len(skills) < memory.index(part), part
-    # the card keeps its own label (Skills); the field under it is the page's one, its label said by the page's title
+    # Memory is no section of one field: the card keeps its label (Skills) and the field under it keeps its own
+    # (Memory), as Your account under Account's card; only a page's first field, not a card, gives its label to the title
     css = re.sub(r"/\*.*?\*/", "", _read("app.css"), flags=re.S)
-    assert (":is(.field:first-of-type:not(.set-now), .set-now:first-of-type + .field) > .field-row:first-child > "
-            ".field-label { visibility: hidden; }") in css
+    hidden = re.findall(r"([^{}]*?) > \.field-row:first-child > \.field-label \{ visibility: hidden; \}", css)
+    one = [s for s in hidden if '[data-page="memory"]' in s]
+    assert len(one) == 1 and one[0].strip().endswith("> .field:first-of-type:not(.set-now)"), one
+    assert ".set-now:first-of-type + .field" not in css
+    assert memory.index('id="skills-field" class="field set-now"') < memory.index('<div class="field">')
+    # in their card the skills are its rows, without a frame of their own
+    assert ".set-now > #global-know { border: 0; border-radius: 0; background: none; }" in css
     # drawn as the kit's cards are, from its tokens alone (light and dark)
     css = re.sub(r"/\*.*?\*/", "", _read("app.css"), flags=re.S)
     card = re.search(r"\.set-page > \.set-now \{([^}]*)\}", css).group(1)
@@ -239,10 +245,11 @@ def test_a_reload_from_settings_says_what_it_lets_go():
     assert link.index("const lost") < link.index("location.reload();")
     where = _function(js, "settingsWhere")
     assert "settingsPages(settingsDiff())" in where and 'querySelectorAll(".set-nav button")' in where
-    # the roles Give roles… shows start folded at each opening, shown again as they are saved: picks not saved are
-    # let go with the rest of what waited
+    # the roles are emptied at each opening and filled again as they are saved: picks not saved are let go with the
+    # rest of what waited
     opening = _function(js, "openSettings")
     assert '$("roles-list").replaceChildren();' in opening and '$("roles-list").hidden = true;' in opening
+    assert opening.index('$("roles-list").replaceChildren();') < opening.index("rolesState();")
 
 
 def test_a_services_pictures_is_a_choice_that_acts_at_once():
@@ -275,13 +282,21 @@ def test_saving_closes_and_a_refusal_keeps_what_waits():
     refused = save[save.index("} catch (e) {"):save.index("} finally {")]
     assert 'await api("/api/settings", { body });' in ok and "SETS.start = sent;" in ok
     assert '$("settings-dialog").close();' in ok and 'toast(!withRoles ? "Settings saved." :' in ok
-    assert '$("settings-msg").textContent = e.message;' in refused and "close()" not in refused and "SETS.start" not in refused
-    assert "SETS.saving = false;" in save[save.index("} finally {"):]
+    assert '$("settings-msg").textContent = (withRoles ? "Roles saved. " : "") + e.message;' in refused
+    assert "close()" not in refused and "SETS.start" not in refused
+    after = save[save.index("} finally {"):]
+    assert "SETS.saving = false;" in after
+    # focus lost to the greyed Save (a PIN asked on the way) goes to what the refusal is about: a role, or Save
+    assert "const lost = !document.activeElement || document.activeElement === document.body;" in after
+    assert 'if ($("settings-dialog").open && lost) {' in after
+    assert ('const to = $("roles-msg").textContent ? $("roles-list").querySelector("select:enabled") : '
+            '$("save-settings");') in after
+    assert after.index("settingsPending();") < after.index("to.focus();")   # once Save is offered again
 
 
 def test_the_roles_picked_wait_for_save_like_any_field():
-    """Lab roles (Instruments, with accounts and the owner's PIN): Give roles… only shows a role to pick for each
-    person. The picks are fields of the dialog: a change puts the dot on Instruments, Close reads Cancel, × and Esc
+    """Lab roles (Instruments, with accounts): a role to pick for each person, shown as saved and greyed until the
+    owner's PIN is set. The picks are fields of the dialog: a change puts the dot on Instruments, Close reads Cancel, × and Esc
     ask, and the dialog's Save sends them to the roles' own endpoint before the rest (the PIN asked there, by api());
     refused, nothing else is sent, the reason shows under the roles and their page is shown."""
     js, dlg, page = _read("app.js"), _dialog(), _page("instruments")
@@ -290,19 +305,27 @@ def test_the_roles_picked_wait_for_save_like_any_field():
     assert "roles-save" not in js and "roles-cancel" not in js and "roles-actions" not in js
     # the picks sit in a fieldset named after what Save sends, so settingsPages finds their page (the dot)
     assert re.search(r'<fieldset id="roles-list" name="roles"[^>]*\bhidden></fieldset>', page)
+    # shown at once, as every field is: no button to show them first
+    assert 'id="roles-edit"' not in dlg and "roles-edit" not in js and "Give roles" not in js + dlg
+    assert "function editRoles" not in js and "function rolesButton" not in js
     assert re.search(r'<span id="roles-msg" class="hint bad" role="status"></span>', page)
     body = _function(js, "settingsBody")
     assert "body.roles = rolesPicked();" in body
     picked = _function(js, "rolesPicked")
-    assert 'if ($("roles-list").hidden || !picks.length) return undefined;' in picked   # not shown: nothing waits
+    assert "if (!picks.length) return undefined;" in picked   # no one to pick for: nothing waits
     assert "if (sel.value) roles[sel.dataset.person] = sel.value;" in picked   # no role: left out (a trainee)
-    # shown as they are saved: nothing waits until a pick changes; Give roles… greyed while they show, its tip why
-    edit = _function(js, "editRoles")
-    assert 'sel.value = r.roles[p.name] || "";' in edit and '"data-person": p.name' in edit
-    assert edit.index('$("roles-list").hidden = false;') < edit.index('settingsFilled(["roles"]);')
-    button = _function(js, "rolesButton")
-    assert "b.disabled = !r || !r.pin || shown;" in button and '"Picked below: Save keeps them"' in button
-    assert "rolesButton();" in _function(js, "rolesState")
+    # shown as they are saved: nothing waits until a pick changes
+    fill = _function(js, "rolesFill")
+    assert 'sel.value = r.roles[p.name] || "";' in fill and '"data-person": p.name' in fill
+    assert "people = r && r.accounts ? r.people : [];" in fill and '$("roles-list").hidden = !people.length;' in fill
+    assert fill.index("replaceChildren(") < fill.index('settingsFilled(["roles"]);')
+    # filled only while empty (once per opening): a later look at the roles (a PIN set, Where my notifications go,
+    # the roles kept by Save) never lets go of a pick that waits; greyed without a PIN, the reason its tip
+    state = _function(js, "rolesState")
+    assert 'if (!$("roles-list").children.length) rolesFill();' in state
+    assert '$("roles-list").disabled = !r.pin;' in state
+    assert '$("roles-list").title = r.pin ? "" : "Roles need the lab owner\'s PIN";' in state
+    assert js.count("rolesFill();") == 1   # called from rolesState alone
     # a pick is a change in the form like any other: weighed at its change event, found on Instruments
     assert '$("settings-form").addEventListener("change", settingsChanged);' in js
     assert '<section class="set-page" data-page="instruments"' in dlg and '<fieldset id="roles-list"' in page
