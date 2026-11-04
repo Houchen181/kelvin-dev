@@ -1,7 +1,7 @@
 /* Home (home.js): the lab at a glance, labMaster's Home in Kelvin's colours. One line of hello (the greeting, what goes
    on now, the lab's name); three tiles on one row, each the link to its pane; under them, in the rest of the height, the
-   blocks Kelvin keeps, in a region of their own that scrolls when there are more than fit. Home fits by construction
-   (brief 1.1): the page never scrolls. Drawn with the kit at the end of app.css (its tokens, .kcard, .chip) and the fit
+   blocks Kelvin keeps, in a region of their own that scrolls when there are more than fit. Home fits by construction:
+   the page never scrolls. Drawn with the kit at the end of app.css (its tokens, .kcard, .chip) and the fit
    tokens of the density tier (the value after each comma is the roomy tier's, for a page without them); light and dark
    come from the tokens alone. That is Home on a laptop, a 1080p screen, a tablet, beside panes and on a phone. Where
    Home is big (1040 px wide and 1200 tall: the 1440p monitor), the rule at the end draws the big monitor's Home: the
@@ -36,13 +36,13 @@
 .home-labname { font-size: 15px; color: var(--muted); }
 
 /* ---------- the tiles: one row of three, each the link to its pane (the whole card is its button), a ring under the
-   pointer and no lift; as tall as what they hold, up to the tier's cap ---------- */
+   pointer and no lift; as tall as what they hold, up to the tier's cap (the tight tier's tiles are always one line:
+   Home is then under 720 px tall) ---------- */
 .home-tiles { flex: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-4, 16px); }
 .home-tile { position: relative; display: flex; flex-direction: column; gap: var(--sp-2, 8px); min-width: 0; max-height: 300px;
   overflow: hidden; padding: var(--pad-card, 18px 20px); background: var(--card); border: 1px solid var(--card-line);
   border-radius: 16px; box-shadow: var(--home-shadow); cursor: pointer; transition: border-color .15s, box-shadow .15s; }
 html.fit-compact .home-tile { max-height: 220px; }
-html.fit-tight .home-tile { max-height: 150px; }
 .home-tile:hover, .home-tile:has(.home-tile-go:focus-visible) {
   border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--home-shadow); }
 .home-tile.live { border-color: var(--accent); }
@@ -89,7 +89,6 @@ html.fit-tight .home-tile { max-height: 150px; }
 .home-spark-row { padding: 2px 0 4px; }
 .home-spark { display: block; width: 100%; height: 48px; overflow: visible; }
 html.fit-compact .home-spark { height: 36px; }
-html.fit-tight .home-spark { height: 28px; }
 .home-spark-fill { fill: var(--accent-soft); stroke: none; }
 .home-spark-line { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
 .home-spark-row.alarm .home-spark-fill { fill: var(--danger-soft); }
@@ -147,7 +146,7 @@ html:is(.fit-compact, .fit-tight) .hk-text { -webkit-line-clamp: 2; }
 .hk-check li.done span { color: var(--muted); text-decoration: line-through; }
 .hk-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }   /* at the card's foot, in line along a row */
 
-/* a finger's targets are 40 px (brief 1.1.9). For their room, minor lines give way sooner: how long ago a block came
+/* a finger's targets are 40 px. For their room, minor lines give way sooner: how long ago a block came
    (its title keeps the head to one line beside the wider tools), and a tile's third run in the compact tier */
 @media (pointer: coarse) {
   .hk-btn { min-width: 40px; height: 40px; }
@@ -169,7 +168,7 @@ html:is(.fit-compact, .fit-tight) .hk-text { -webkit-line-clamp: 2; }
 @container home (max-width: 699px) or (max-height: 719px) {
   .home-tile { flex-direction: row; align-items: center; gap: var(--sp-3, 12px); height: 40px; max-height: none;
     padding: 0 var(--sp-4, 16px); border-radius: 12px; }
-  html.fit-compact .home-tile, html.fit-tight .home-tile { max-height: none; }
+  html.fit-compact .home-tile { max-height: none; }
   .home-tile-head { display: contents; }
   .home-tile-go { align-self: stretch; }   /* the line's height: the button is as tall as the tile */
   .home-kpi { order: 1; flex: none; flex-wrap: nowrap; }

@@ -230,7 +230,7 @@ def test_the_scan_editor_follows_the_contract():
     count = _js("rangeCount")   # as plans.py counts a range: its steps, and `to` itself when they miss it
     assert "Math.floor(Math.abs(b - a) / Math.abs(step) + 1e-9)" in count and "1e-12" in count
     # the footer's estimate: each bit whole ("~5.8 min" never split), so a narrow footer breaks only after the dot
-    assert '$("ed-status").textContent = bits.map((b) => b.replace(/ /g, " ")).join(" · ");' in _js("renderEdCheck")
+    assert r'$("ed-status").textContent = bits.map((b) => b.replace(/ /g, "\u00a0")).join(" · ");' in _js("renderEdCheck")
 
 
 def test_the_recent_runs_list_opens_a_run_and_a_run_view_goes_back_to_it():
@@ -498,6 +498,9 @@ def test_a_closed_run_tab_hands_the_keyboard_on_and_key_results_wait_for_a_width
     assert "next.focus({ preventScroll: true })" in close
     keys = _js("keysOnce")
     assert keys.index("if (!w) return;") < keys.index("v.keysPending = false;")
+    # open by themselves only with room: 14 rows or fewer, a view 900 page px wide or more, a window not short
+    assert "Kelvin.zoom()" in keys   # the width in the page's pixels
+    assert 'v.keysRows <= 14 && w >= 900 && !document.documentElement.classList.contains("fit-tight")' in keys
     assert "if (active) keysOnce(active);" in _js("showView")
     assert 'document.addEventListener("kelvin:layout", () => keysOnce(RUNS.tabs.get(RUNS.active)));' in JS
     assert "background: none;" in re.search(r"\n\.run-tab \{([^}]*)\}", CSS).group(1)

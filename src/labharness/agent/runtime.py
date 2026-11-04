@@ -6706,6 +6706,15 @@ class LabRuntime:
         v, said = self._keep_now(draft, name, translation, by)
         return {"name": name, "version": v.number, "approved_by": v.approved_by, "said": said}
 
+    def let_draft_go(self, draft: str, by: str) -> None:
+        """A person lets a draft go in the portal (its × among the Sequence's experiments): it is deleted, and the
+        record says so once it is. KeyError: no such draft; ValueError: not a draft's id, or it could not be deleted."""
+        try:
+            self.experiments.discard(draft)
+        except OSError as e:
+            raise ValueError("Kelvin couldn't delete the draft %s: %s" % (draft, e.strerror or e)) from None
+        self.gate.log.write("experiment", by=by, change="let go", draft=draft)
+
     def keep_experiment(self, draft: str, name: str) -> str:
         """A person keeps a translation (a draft from translate_vi or save_experiment) in the lab's experiments: a card
         shows it, and their yes makes it version 1 (the next version, under a name kept already), approved by them.

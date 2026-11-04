@@ -1,4 +1,4 @@
-"""The chat column's controls follow one rule per kind of control (the design brief of 2-3 Nov 2026, 1.3), checked in
+"""The chat column's controls follow one rule per kind of control, checked in
 the page's own files. Incognito is a mode of the chat, a toggle button: on, even from Home, it shows the chat; off, or
 another chat opened meanwhile, forgets the incognito chat, asking "Forget this chat?" first once it holds messages,
 and off goes back to the chat before; nothing of it is remembered. popMenu draws a checkable item in both states and

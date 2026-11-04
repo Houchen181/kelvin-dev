@@ -1,4 +1,4 @@
-"""Full screen for each panel, and the one click model for opening panels (brief 1.2.2, 1.2.3 and 1.2.5). A button
+"""Full screen for each panel, and the one click model for opening panels. A button
 beside a panel's close button gives that one panel the window below the top bar and the notice row (FULL in app.js,
 #app.full in app.css); the button again, Esc, or closing the panel ends it and the layout under it comes back. Another
 panel's top-bar button, or a panel opened by code (Analyze, Edit on a scan, a waiting request), takes the screen in its
@@ -138,8 +138,8 @@ def test_one_click_model_for_every_way_of_opening_a_panel():
 
 
 def test_home_links_follow_the_click_model():
-    """Home's tiles, a block's link to a place, Add to sequence and Open on an approval waiting are links to a place
-    (brief 1.3): Kelvin.paneShow shows the pane, or rings it when it is there, and never hides it. The page's own
+    """Home's tiles, a block's link to a place, Add to sequence and Open on an approval waiting are links to a place:
+    Kelvin.paneShow shows the pane, or rings it when it is there, and never hides it. The page's own
     toggles are only the fallback for a page without the click model."""
     home = (STATIC / "home.js").read_text(encoding="utf-8")
 

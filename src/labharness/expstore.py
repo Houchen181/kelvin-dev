@@ -250,6 +250,11 @@ class Store:
             return {}
         return data if isinstance(data, dict) else {}
 
+    def discard(self, draft_id: str) -> None:
+        """A draft a person lets go, deleted. KeyError: there is no such draft; ValueError: not a draft's id; OSError:
+        it could not be deleted (a file in it held open, say)."""
+        shutil.rmtree(self._draft_folder(draft_id))
+
     def keep(self, draft_id: str, name: str, by: str) -> Version:
         """A person keeps a draft: v1 of a new experiment, or the next version of a kept one, approved by them."""
         folder = self._draft_folder(draft_id)

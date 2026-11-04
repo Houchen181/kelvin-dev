@@ -85,6 +85,8 @@ def test_one_function_says_what_save_sends_and_what_waits():
     clear = js[js.index('for (const b of document.querySelectorAll("[data-clear]"))'):]
     clear = clear[:clear.index("\n    }\n")]
     assert 'input.dataset.clear = "1"' in clear and "settingsPending();" in clear
+    # a row's Remove is greyed where nothing is set (a key, the webhook's URL, the mail's password), the reason its tip
+    assert 'if (clr) { clr.disabled = !src; clr.title = src ? "" : "Nothing to remove"; }' in opening
     # a load that fills the model lists again (a service added or removed) is no change of the person's
     refresh = _function(js, "refreshModels")
     assert "settingsFilled(Object.keys(picked));" in refresh and "settingsPending();" in refresh
@@ -123,6 +125,11 @@ def test_a_switch_acts_at_once_and_a_tick_box_waits_for_save():
         assert 'swFlip($("%s"), ' % re.search(r'\bid="([\w-]+)"', sw).group(1) in js
     know = _function(js, "renderKnow")   # a skill's switch, in its row on Memory, acts at once too
     assert 'class: "switch"' in know and "swFlip(on, async (v) =>" in know
+    # refused, it turns back (swFlip) and says why under the skill's own line, until it turns
+    flip = _function(js, "swFlip")
+    assert "try { await save(on); } catch (e) { swSet(sw, !on); }" in flip
+    assert 'note.querySelector(".memory-meta").after(why = h("span", { class: "memory-meta bad", role: "status" }));' in know
+    assert know.index("why.textContent = e.message;") < know.index("throw e;") < know.index("if (why) why.remove();")
     # every tick box waits for Save (Save sends it), or for the button of its own row, which reads it
     body = _function(js, "settingsBody")
     sent = set(re.findall(r"\bbody\.(\w+) =", body))

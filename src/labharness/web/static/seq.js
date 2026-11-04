@@ -16,6 +16,7 @@
     vis: new Map(),           // a VI's path: its translation asked on this page, while it goes on or after it failed
     filter: "",
     edit: new Set(),          // the blocks whose editor is open
+    refused: new Map(),       // block id: why its Pause after was not switched, said under the switch until pressed again
     confirm: new Map(),       // block id: its timer, while × asks "Remove?"
     fnConfirm: null,          // a function's key while its ⋯ asks "Remove?"
     renaming: null,           // a function's key while its name is a field
@@ -297,13 +298,14 @@
     badge(q);
     if (SEQ.open) render();
   }
-  async function op(body) {
+  // o.refused(why): a refusal said where it was asked, kept before the blocks are drawn again; else a note at the bottom
+  async function op(body, o) {
     try {
       const r = await K.api("/api/queue", { body });
       accept(r);
       return r;
     } catch (e) {
-      K.toast(e.message);
+      if (o && o.refused) o.refused(e.message); else K.toast(e.message);
       // what the person changed in place goes back to what is so: every block drawn again from the server's state
       for (const c of SEQ.cards.values()) c.sig = "";
       if (SEQ.open) render();
@@ -765,6 +767,7 @@
       while (list.children.length > all.length) list.lastElementChild.remove();
     } else if (list.children.length !== all.length) whole = false;
     for (const id of [...SEQ.edit]) if (!keep.has(id)) SEQ.edit.delete(id);
+    for (const id of [...SEQ.refused.keys()]) if (!keep.has(id)) SEQ.refused.delete(id);
     list.hidden = !all.length;
     SEQ.el.add.classList.toggle("empty", !all.length);
     if (focusId && !typing) {   // the block that had the keyboard keeps it, wherever it went
@@ -892,7 +895,7 @@
   }
   function toggleEd(id, on) {
     const now = on === undefined ? !SEQ.edit.has(id) : on;
-    if (now) SEQ.edit.add(id); else SEQ.edit.delete(id);
+    if (now) SEQ.edit.add(id); else { SEQ.edit.delete(id); SEQ.refused.delete(id); }
     SEQ.opening = now ? id : null;
     redraw();
   }
@@ -1040,8 +1043,10 @@
       b.addEventListener("click", (e) => { e.stopPropagation(); guard(() => K.openEditor(null, it.id)); });
       box.append(b);
     } else box.append(h("pre", { class: "seq-yaml", "data-region": "seq-blocks" }, String(it.text || "").trim()));
-    // Pause after: the one switch (app.css .switch). It turns at once, busy while the server answers; a refusal turns
-    // it back here (the block's own look has not changed, so nothing else would) and op's toast says why
+    // Pause after: the one switch (app.css .switch). It turns at once, busy while the server answers. Refused, its why
+    // is kept for the block (SEQ.refused) and op draws every block again from the server's state, this switch with it
+    // and the why under it; the turn back here is for a block not drawn again yet (the Sequence out of sight, a drag,
+    // a field in it being typed in), which shows the why when it is drawn. A press takes the last why away
     const sw = h("button", { class: "switch", type: "button", role: "switch", "aria-checked": String(!!it.then_pause),
                              "aria-label": "Pause after", "data-k": "then-pause" }, h("span", { "aria-hidden": "true" }));
     sw.addEventListener("click", (e) => {
@@ -1050,11 +1055,16 @@
       const want = sw.getAttribute("aria-checked") !== "true";
       sw.setAttribute("aria-checked", String(want));
       sw.setAttribute("aria-busy", "true");
-      guard(() => op({ op: "then_pause", item: it.id, value: want })
+      SEQ.refused.delete(it.id);
+      const was = box.querySelector(".seq-switch + .seq-bad");
+      if (was) was.remove();
+      guard(() => op({ op: "then_pause", item: it.id, value: want }, { refused: (why) => SEQ.refused.set(it.id, why) })
         .then((r) => { if (!r) sw.setAttribute("aria-checked", String(!want)); })
         .finally(() => sw.removeAttribute("aria-busy")));
     });
     box.append(h("label", { class: "seq-switch" }, sw, h("span", {}, "Pause after")));
+    const no = SEQ.refused.get(it.id);
+    if (no) box.append(h("span", { class: "seq-bad", role: "status" }, "Not switched: " + no));
     return box;
   }
 
@@ -1151,27 +1161,56 @@
       h("div", { class: "seq-grp", role: "group", "aria-label": title }, h("div", { class: "seq-gh" }, title),
         ...fns.map((fn) => fn.type === "draft" || fn.type === "vi" ? draftCard(fn) : fnCard(fn)))));
   }
-  // a VI's translation, which goes into the sequence only once kept: its draft opens its review (Keep is there); one
-  // translating, or not translated, says so, and the latter's × lets it go
+  // a VI's translation, which goes into the sequence only once kept: its draft opens its review (Keep is there, or why
+  // it can't be kept) and its × lets the draft go; one translating, or not translated, says so, and the latter's × lets
+  // it go
   function draftCard(fn) {
     const h = K.h, failed = fn.type === "vi" && fn.vi.state === "failed";
     const why = fn.type === "vi" ? fn.vi.message : fn.draft.ok_to_keep === false ? "Something blocks keeping it" : "";
     const tip = [fn.name, fn.path, why].filter(Boolean).join("\n");
-    let tail = null;
+    const letGo = (act) => {   // its ×
+      const b = h("button", { class: "icon-btn seq-fn-more", type: "button", title: "Let it go", "aria-label": "Let go: " + fn.name }, K.icon("x"));
+      b.addEventListener("click", (e) => { e.stopPropagation(); guard(act); });
+      return b;
+    };
+    let tail = [];
     if (fn.type === "draft") {
-      tail = h("button", { class: "btn small seq-review", type: "button", title: "Read it, then keep it or not",
-                           "aria-label": "Review " + fn.name }, "Review");
-      tail.addEventListener("click", (e) => { e.stopPropagation(); guard(() => K.openReview(fn.draft.id)); });
-    } else if (failed) {
-      tail = h("button", { class: "icon-btn seq-fn-more", type: "button", title: "Let it go", "aria-label": "Let go: " + fn.name }, K.icon("x"));
-      tail.addEventListener("click", (e) => { e.stopPropagation(); SEQ.vis.delete(fn.path); guard(renderFns); });
-    }
+      const review = h("button", { class: "btn small seq-review", type: "button", title: "Read it, then keep it or not",
+                                   "aria-label": "Review " + fn.name }, "Review");
+      review.addEventListener("click", (e) => { e.stopPropagation(); guard(() => K.openReview(fn.draft.id)); });
+      tail = [review, letGo(() => dropDraft(fn))];
+    } else if (failed) tail = [letGo(() => { const at = fnHeld(); SEQ.vis.delete(fn.path); renderFns(); fnRefocus(at); })];
     const card = h("div", { class: "kcard seq-fn seq-draft " + fn.kind + (failed ? " failed" : ""), title: tip },
       h("span", { class: "seq-fn-name" }, fn.name),
       fn.type === "vi" && !failed ? h("span", { class: "seq-spin", "aria-hidden": "true" }) : null,
-      h("span", { class: "seq-fn-sub" + (failed ? " seq-bad" : "") }, fn.sub), tail);
+      h("span", { class: "seq-fn-sub" + (failed ? " seq-bad" : "") }, fn.sub), ...tail);
     card.dataset.key = fn.key;
     return card;
+  }
+  // a draft let go, after a yes: its translation deleted on the server, and the functions read again without it
+  async function dropDraft(fn) {
+    if (!(await K.askYes("Let go of the draft " + fn.name + "?\nIts translation is deleted. Translating the VI again makes a new one.",
+      { ok: "Let go", danger: true }))) return;
+    const at = fnHeld();
+    try { await K.api("/api/experiments/drafts/" + encodeURIComponent(fn.draft.id), { method: "DELETE" }); }
+    catch (e) { K.toast(e.message); }
+    await loadLib();
+    fnRefocus(at);
+  }
+  // where the row with the keyboard stands among the functions (-1: none has it), so that once the list is drawn again
+  // without it the one now in its place takes the keyboard: a function's card, or a draft's first button; ＋ New
+  // function when no row is left
+  function fnHeld() {
+    const g = SEQ.el.groups, a = document.activeElement, row = g && a && g.contains(a) ? a.closest(".seq-fn") : null;
+    return row ? [...g.querySelectorAll(".seq-fn")].indexOf(row) : -1;
+  }
+  function fnRefocus(at) {
+    if (at < 0 || (document.activeElement && document.activeElement !== document.body)) return;
+    const rows = [...SEQ.el.groups.querySelectorAll(".seq-fn")]
+      .map((r) => (r.getAttribute("tabindex") === "0" ? r : r.querySelector("button")));
+    const i = Math.min(at, rows.length - 1);
+    const next = rows.slice(i).concat(rows.slice(0, Math.max(i, 0)).reverse()).find(Boolean) || SEQ.el.newFn;
+    if (next) next.focus({ preventScroll: true });
   }
   function fnCard(fn) {
     const h = K.h;
@@ -1268,7 +1307,9 @@
   async function removeFn(fn) {
     clearTimeout(SEQ.fnConfirmTimer);
     SEQ.fnConfirm = null;
+    const at = fnHeld();
     await libOp({ op: "remove", id: fn.entry.id });
+    fnRefocus(at);
   }
   async function libMeta(id, patch) {
     const r = await libOp(Object.assign({ op: "meta", id }, patch));
@@ -1519,6 +1560,7 @@
         ...xs.slice(0, room[i]).map(option))));
     };
     async function choosePath(p) {
+      if (st.busy) return;   // Add's request is out: the path it sent stays
       st.path = String(p || "").trim();
       path.value = st.path;
       drawFiles();
@@ -1562,8 +1604,10 @@
       if (path.value.trim() !== st.path) await choosePath(path.value);
       if (!st.path || add.disabled) return;
       if (K.isVI(st.path)) {   // translated under the name given; a refusal at once (a mistyped path) is said here, the
-        st.busy = true;        // dialog still open and the path still typed, else the translation's own dialog takes over
-        add.disabled = true;
+        st.busy = true;        // dialog still open and the path still typed, else the translation's own dialog takes over;
+        add.disabled = true;   // Cancel or Esc meanwhile lets it go on with no dialog (openTranslate)
+        path.readOnly = name.readOnly = true;   // what was sent stays as it is shown
+        if (choose) choose.disabled = true;
         try {
           const said = await K.importVI(st.path, name.value.trim(), dlg);
           if (typeof said === "string" && dlg.open) {
@@ -1571,7 +1615,11 @@
             add.disabled = false;
             path.focus();
           }
-        } finally { st.busy = false; }
+        } finally {
+          st.busy = false;
+          path.readOnly = name.readOnly = false;
+          if (choose) choose.disabled = false;
+        }
         return;
       }
       st.busy = true;

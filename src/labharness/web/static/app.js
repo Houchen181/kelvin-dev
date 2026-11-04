@@ -1371,7 +1371,7 @@
     });
     const key = "again:" + encodeURIComponent(tab.runId);
     const run = h("button", { class: "btn small primary", type: "button", "data-busy": "start " + key }, "Run again");
-    const later = h("button", { class: "btn small ghost", type: "button", "data-busy": key }, "Add to sequence");
+    const later = h("button", { class: "btn small", type: "button", "data-busy": key }, "Add to sequence");
     run.addEventListener("click", () => go(false, ["start", key]));
     later.addEventListener("click", () => go(true, [key]));
     if (cannot) { msg.textContent = cannot; parts.push(msg); return parts; }
@@ -2523,7 +2523,7 @@
   // the card itself, what is approved and the record stay as Kelvin wrote them, and English is one click away
   const CARD_UI = { "zh-Hans": { "Approve": "批准", "Decline": "拒绝", "Approved": "已批准", "Declined": "已拒绝",
     "Already closed": "已关闭", "Closed": "已关闭", "Auto-approved": "自动批准", english: "English", shown: "中文",
-    declines: (n) => (n < 90 ? n + " 秒" : Math.round(n / 60) + " 分钟") + "后自动拒绝" } };
+    declines: (n) => (n < 90 ? n + " 秒" : n < 5400 ? Math.round(n / 60) + " 分钟" : (n / 3600).toFixed(1) + " 小时") + "后自动拒绝" } };
   function cardWords() { return CARD_UI[(S.settings && S.settings.card_language) || ""] || null; }
   function cardSay(text) { const w = cardWords(); return (w && typeof w[text] === "string") ? w[text] : text; }
   async function localizeCard(ev, parts) {
@@ -2605,7 +2605,8 @@
     localizeCard(ev, { title: text, list, where });
     let left = ev.seconds_left;
     const words = cardWords();
-    // its time left in seconds under 90, else in whole minutes (inTime): a request escalated to a phone waits an hour
+    // its time left in seconds under 90, in whole minutes under 90 min, else in hours (inTime), in either language: a
+    // request escalated to a phone may wait up to 12 hours
     const tick = () => {
       const t = left > 0 ? (words ? words.declines(left) : "Declines itself in " + inTime(left)) : "";
       if (count.textContent !== t) count.textContent = t;
@@ -5869,21 +5870,27 @@
   // Sequence's experiments list it meanwhile (kelvin:translate), and why after a failure, and its draft once done
   // (kelvin:library) with its Review, so it is a press away there however long it took and after a reload.
   // from: the dialog it was asked in (New function): a refusal within a second (a mistyped path) goes back to it, still
-  // open, as its words; else whether it was translated
+  // open, as its words; closed in that second (Cancel, Esc), the translation goes on quietly, with no dialog of its own:
+  // its row among the experiments and a note when it ends. Else whether it was translated
   async function openTranslate(v, from) {
     const asked = api("/api/labview/translate", { body: v.as ? { path: v.path, name: v.as } : { path: v.path } });
+    let quiet = false;
     if (from) {
       const early = await Promise.race([asked.then(() => null, (e) => e), new Promise((r) => setTimeout(() => r(null), 1000))]);
       if (early && from.open) return early.message;
-      if (from.open) from.close();
+      if (from.open) from.close(); else quiet = true;
     }
-    const body = expDialog("Translate " + v.name), mine = EXP.shown;
-    body.replaceChildren(h("div", { class: "review pending" }, h("span", { class: "spinner" }),
-      "Translating " + v.name + ": the AI writes it, and Kelvin checks each attempt on the simulated lab (a few minutes). " +
-      "You can close this: the translation goes on, and its draft waits in Sequence → Experiments."));
-    EXP.open = null;
+    let body = null, mine = -1;
+    if (!quiet) {
+      body = expDialog("Translate " + v.name);
+      mine = EXP.shown;
+      body.replaceChildren(h("div", { class: "review pending" }, h("span", { class: "spinner" }),
+        "Translating " + v.name + ": the AI writes it, and Kelvin checks each attempt on the simulated lab (a few minutes). " +
+        "You can close this: the translation goes on, and its draft waits in Sequence → Experiments."));
+      EXP.open = null;
+    }
     emit("translate", { path: v.path, name: v.as || v.name, state: "running" });
-    const here = () => EXP.shown === mine && $("exp-dialog").open;
+    const here = () => !quiet && EXP.shown === mine && $("exp-dialog").open;
     let d;
     try { d = await asked; }
     catch (e) {
@@ -5894,7 +5901,6 @@
     }
     emit("translate", { path: v.path, state: "done" });
     emit("library");   // its draft among the Sequence's experiments
-    if (RUNS.view === "schedule") loadExperiments();   // its draft is listed there, kept or not
     if (here()) showDraft(d);
     else toast(v.name + " is translated: click to review it", () => { expDialog("Translate " + v.name); showDraft(d); });
     return true;
@@ -5920,7 +5926,7 @@
         h("ul", {}, ...warns.map((f) => h("li", {}, f.text)))) : null];
   }
   function codeBlock(code) {
-    const copy = h("button", { type: "button", class: "btn small ghost" }, "Copy");
+    const copy = h("button", { type: "button", class: "btn small" }, "Copy");
     copy.addEventListener("click", () => copyText(code, copy));
     return h("details", { open: true }, h("summary", {}, "The experiment ", copy), h("pre", { class: "exp-code" }, code));
   }
@@ -5956,7 +5962,6 @@
         $("exp-keep").hidden = true;
         EXP.open = null;
         emit("library");   // the Sequence's experiments with it now, its draft gone
-        if (RUNS.view === "schedule") loadExperiments();
       } catch (e) {
         if (e.status === 409 && e.data && e.data.diff) {   // a name kept already: what changed, read before the yes
           open.newVersion = name;
@@ -6000,7 +6005,6 @@
         $("exp-msg").textContent = "Version " + r.version + " approved by " + r.approved_by + ".";
         $("exp-approve").hidden = true;
         emit("library");   // the Sequence's experiments as they stand now
-        if (RUNS.view === "schedule") loadExperiments();
       } catch (e) { $("exp-msg").textContent = e.message; }
     });
   }
@@ -6784,7 +6788,7 @@
     const bits = (c.loads && c.points != null ? [(c.estimate ? "~" : "") + c.points + (c.points === 1 ? " point" : " points")] : [])
       .concat(c.loads && c.time ? [c.time] : []);
     // each bit whole ("~5.8 min" never split): a narrow footer breaks only after the dot
-    $("ed-status").textContent = bits.map((b) => b.replace(/ /g, " ")).join(" · ");
+    $("ed-status").textContent = bits.map((b) => b.replace(/ /g, "\u00a0")).join(" · ");
     const mine = loops.map(() => []), rest = [];
     for (const problem of c.problems || []) {
       const at = loopOf(problem, loops);
@@ -8417,9 +8421,10 @@
       const src = keys[hint.dataset.hint];
       hint.textContent = src ? "Set (from " + src + ")" : "Not set";
       hint.classList.toggle("set", !!src);
-      // its Remove only where there is a key to remove: greyed (the row keeps its width), the reason its tip
+      // its Remove only where there is something to remove (a key, a URL, a password): greyed (the row keeps its
+      // width), the reason its tip
       const clr = document.querySelector('[data-clear="' + hint.dataset.hint + '"]');
-      if (clr) { clr.disabled = !src; clr.title = src ? "" : "No key set"; }
+      if (clr) { clr.disabled = !src; clr.title = src ? "" : "Nothing to remove"; }
     }
     for (const input of document.querySelectorAll("#settings-form input:not([type=checkbox])")) { input.value = ""; keyKept(input); }
     $("local-url").value = (S.settings && S.settings.local_base_url) || "";

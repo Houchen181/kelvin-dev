@@ -1,4 +1,4 @@
-"""The rules that keep every view of the page fitting its window (the design brief of 2-3 Nov 2026, 1.1 and 1.7),
+"""The rules that keep every view of the page fitting its window,
 checked in the page's own files. Questions are asked in the page (Kelvin.askYes, Kelvin.askText), never by the
 browser's confirm() or prompt(). Nothing is offset by the old top bar's 57 px: the bar measures itself (--topbar-h).
 A length taken from the window is in the page's pixels, calc(N * var(--vh)) or var(--vw), since the page size is a CSS
@@ -36,7 +36,7 @@ SCROLLS_IN_PLACE = {
     ".menu": "popMenu",
     ".slash-menu": "the skills offered after /",
     ".pane-menu": "a pane's own menu (compare, the run picker, a second opinion's models)",
-    # the frame's own last resort below the floor (brief 1.1.4): at the promised sizes they never scroll
+    # the frame's own last resort below its floor, scrolling rather than clipping: at the promised sizes they never scroll
     ".homeview": "Home scrolls only if even its one-line tiles cannot fit: it never clips",
     ".welcome": "the welcome page, over the whole window, below the floor",
     ".dialog form:not(:has(> .dialog-body, > .set-body))": "a dialog made without a body scrolls as a whole",
@@ -216,6 +216,25 @@ def test_there_is_one_switch():
             assert "role=switch" not in sel.replace('"', "") or ".switch" in sel, (name, sel)
 
 
+def test_buttons_look_like_buttons():
+    """Every action button is outlined (.btn, with .small, .primary or .danger): never .ghost, which has no border and
+    reads as text. Only a disclosure that shows a part in place (aria-expanded) may be quiet, as links that are links
+    (.link) are."""
+    page = _read("index.html")
+    for tag, attrs in re.findall(r'<(\w+)\s([^>]*)>', page):
+        cls = (re.search(r'\bclass="([^"]*)"', attrs) or [None, ""])[1].split()
+        assert "ghost" not in cls or "aria-expanded=" in attrs, attrs
+    for name in SCRIPTS:   # no class written in a script is a ghost: h()'s, welcome's btn(label, class), classList
+        for s in re.findall(r'"([^"\n]*)"', _read(name)):
+            assert "ghost" not in s.split(), (name, s)
+    for bid in ("queue-paste-cancel", "ed-copy", "summary-write"):
+        assert re.search(r'<button id="%s" class="btn small" ' % bid, page), bid
+    assert '<button id="protect-clear" class="btn" type="button">' in page
+    js = _read("app.js")
+    assert 'h("button", { class: "btn small", type: "button", "data-busy": key }, "Add to sequence")' in js
+    assert 'h("button", { type: "button", class: "btn small" }, "Copy")' in _function(js, "codeBlock")
+
+
 def test_only_a_named_region_scrolls():
     elements = _elements()
     names = {m for m in re.findall(r'data-region(?:="|": ")([\w-]+)"', "".join(_read(n) for n in SCRIPTS + ("index.html",)))}
@@ -331,6 +350,25 @@ def test_home_fitted_holds_five_columns_of_blocks():
     assert int(grid.group(2)) == gaps[0]   # the fallback is the roomy tier's
     for gap in gaps:
         assert (1440 + gap) // (least + gap) == 5, gap
+
+
+def test_a_blocks_age_gives_way_and_its_time_stays_a_tip():
+    """A Home block's "how long ago" sits on its title's last line, or gives way (fitAgo) where it would stand alone
+    on a line of its own: measured again when Home's blocks change width and when an age's words grow. Its date and
+    time are the tip of the whole title line, so they are there however the age gives way. In the tight tier Home is
+    under 720 px tall, so its tiles are always one line: no tier rule caps a tile or its spark line there."""
+    js = _read("home.js")
+    fit = _function(js, "fitAgo")
+    assert "for (const [when] of rows) when.hidden = false;" in fit
+    assert "rows.forEach(([when], i) => { if (alone[i]) when.hidden = true; });" in fit
+    assert fit.index("when.hidden = false") < fit.index("getClientRects()") < fit.index("if (alone[i])")
+    assert "new ResizeObserver(() => guard(fitAgo)).observe(p.blocks)" in js and "if (moved) fitAgo();" in js
+    node = _function(js, "blockNode")
+    assert "tip = t ? new Date(t * 1000).toLocaleString() : null;" in node
+    assert "title: tip }, ago(t));" in node and 'h("div", { class: "hk-name", title: tip }' in node
+    css = _uncommented_css("home.css")
+    assert "html.fit-tight .home-tile" not in css and "html.fit-tight .home-spark" not in css
+    assert "@container home (max-width: 699px) or (max-height: 719px) {" in css
 
 
 def test_home_on_a_big_screen():

@@ -217,19 +217,37 @@ def test_a_poll_keeps_a_press_the_focus_and_what_was_switched():
     assert "rowSig(inst)" in draw and "PANEL.rows.get(inst.name)" in draw and "instHead(inst)" in draw
     assert "if (PANEL.pressed && Date.now() - PANEL.pressed < 5000) { PANEL.later = true; return; }" in draw
     assert "shown.map(instrumentRow)" not in js and "holdInstruments();" in js
-    # a poll sent before a switch was answered does not turn the switch back
+    assert "inst.enabled, PANEL.switching.get(inst.name), inst.state" in _function(js, "rowSig")
+    # a press holds the list's redraws until its click (a tap's comes a moment after pointerup), or 400 ms after it is
+    # let go; a cancelled press lets go at once
+    hold = _function(js, "holdInstruments")
+    for text in ('list.addEventListener("pointerdown", () => { clearTimeout(letGo); PANEL.pressed = Date.now(); });',
+                 'document.addEventListener("pointerup", () => { if (PANEL.pressed) letGo = setTimeout(release, 400); }, true);',
+                 'document.addEventListener("pointercancel", () => { if (PANEL.pressed) release(); }, true);',
+                 'list.addEventListener("click", () => { if (PANEL.pressed) setTimeout(release, 0); });',
+                 "if (PANEL.later) { PANEL.later = false; renderInstruments(); }"):
+        assert text in hold, text
+    # a poll sent before a switch was answered does not turn the switch back: that instrument keeps what the page had
     poll = _function(js, "pollState")
     assert poll.index("const sent = Date.now();") < poll.index('api("/api/state")')
     assert "freshInstruments(s.instruments, sent)" in poll
     assert "PANEL.switchedAt.set(name, Date.now());" in _function(js, "switchInstrument")
+    fresh = _function(js, "freshInstruments")
+    assert "PANEL.switchedAt.get(i.name) > sent && was.has(i.name)" in fresh
+    assert "{ ...i, enabled: was.get(i.name).enabled, state: was.get(i.name).state }" in fresh
     # the requests waiting are changed in place, so a focused Approve or Decline keeps its focus
     assert '$("lab-pending").replaceChildren' not in js
     # Add…'s form shut from inside (Watch, Keep, Cancel) gives the focus back to its Add…
     assert "if (!open && btn && form.contains(document.activeElement)) btn.focus({ preventScroll: true });" \
         in _function(js, "partForm")
-    # a request's countdown in minutes from 90 s (one escalated to a phone waits an hour), in both languages
+    # a request's countdown in minutes from 90 s and in hours from 90 min (one escalated to a phone may wait 12 hours),
+    # changing unit at the same points in both languages
     assert '"Declines itself in " + inTime(left)' in _function(js, "makeApproval")
-    assert '(n < 90 ? n + " 秒" : Math.round(n / 60) + " 分钟") + "后自动拒绝"' in js
+    assert 'function inTime(s) { return s < 90 ? s + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(1) + " h"; }' in js
+    assert ('(n < 90 ? n + " 秒" : n < 5400 ? Math.round(n / 60) + " 分钟" : (n / 3600).toFixed(1) + " 小时")'
+            ' + "后自动拒绝"') in js
+    # an instrument's "!" badge: 12 px words on the danger fill, in its own ink (white is 3.5:1 in dark)
+    assert ".inst-count.err { background: var(--danger); color: var(--danger-ink); }" in css
     # the Sample select, cut, says so
     rule = css[css.index(".mount-select {"):]
     assert "text-overflow: ellipsis;" in rule[:rule.index("}")]

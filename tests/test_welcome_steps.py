@@ -79,7 +79,7 @@ def test_skip_sits_in_the_head_and_ends_the_page():
     head = build[build.index('h("header", { class: "wl-head" }'):build.index('h("div", { class: "wl-steps" }')]
     assert re.search(r"\bskip\)", head), "Skip stands in the head"
     assert "onclick: () => safe(goTo, i)" in build   # a dot goes to its step by goTo, its rules
-    assert 'btn("Back", "ghost", () => goTo(W.step - 1)' in build
+    assert 'btn("Back", "", () => goTo(W.step - 1)' in build   # outlined, as every action
     assert 'btn("Next", "primary", () => forward()' in build
 
 

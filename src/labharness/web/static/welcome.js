@@ -545,7 +545,7 @@
     const group = h("div", { class: "wl-group", role: "group" });
     const skip = h("button", { class: "wl-skip", type: "button", "data-f": "skip", title: "Settings has all of this",
                                onclick: () => safe(finish) }, "Skip");
-    const back = btn("Back", "ghost", () => goTo(W.step - 1), { f: "back" });
+    const back = btn("Back", "", () => goTo(W.step - 1), { f: "back" });
     const next = btn("Next", "primary", () => forward(), { f: "next" });
     const spin = spinner();
     spin.hidden = true;

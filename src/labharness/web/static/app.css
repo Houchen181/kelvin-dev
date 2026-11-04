@@ -445,8 +445,9 @@ body:not(.incognito) #empty-sub { display: none; }
 .verdict { font-weight: 600; font-size: 14px; }
 .verdict.yes { color: var(--ok); } .verdict.no { color: var(--muted); }
 
-/* buttons: one system. .btn (.small, .primary, .ghost, .danger); .link a quiet text button (.danger when it removes);
-   .pill the top bar's; .icon-btn an icon alone */
+/* buttons: one system. .btn (.small, .primary, .danger) is outlined, as every action is; .ghost only for a disclosure
+   that shows a part in place (Plan text); .link a quiet text button (.danger when it removes); .pill the top bar's;
+   .icon-btn an icon alone */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--line-strong);
   background: var(--raised); color: var(--text); border-radius: 10px; padding: 7px 14px; cursor: pointer;
   font-size: 14px; font-weight: 550; line-height: 1.35; vertical-align: middle; }
@@ -641,7 +642,7 @@ body:not(.incognito) #empty-sub { display: none; }
 .inst-headline .hu { font-weight: 400; font-size: 12px; color: var(--muted); margin-left: 3px; }
 .inst-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: grid; place-items: center;
   font-size: 12px; font-weight: 700; background: var(--warn); color: var(--panel); }
-.inst-count.err { background: var(--danger); color: #fff; }
+.inst-count.err { background: var(--danger); color: var(--danger-ink); }
 .inst-count.none { background: none; }
 .inst-row .chev { width: 12px; height: 12px; color: var(--muted); transition: transform .15s; }
 .inst.open .inst-row .chev { transform: rotate(90deg); }
@@ -2329,16 +2330,19 @@ body.incognito .composer { background: color-mix(in srgb, var(--text) 4%, var(--
 /* ===== end fit I ===== */
 
 /* ===== fit B2: panes make room, solo panes, the sidebar as a pane ===== */
-/* the terminal's input is the row's target itself: 28 px, in a row as tall as before (34) */
+/* the terminal's input is the row's target itself: 28 px, its row 34 px. Analysis's "hold" (a tick box and its word)
+   is a 28 px target, as tall as the number field beside it leaves its row */
 .term-in { padding-block: 1px 5px; }
 .term-in input { min-height: 28px; }
+#anpane .an-hold { min-height: 28px; }
 /* a touch screen: a pane head's own buttons (full screen, close, the terminal's clear) 40 px, as every target; the
    Lab's and Team chat's heads have theirs ("fit D"). So are the Analysis pane's (Ask Kelvin, its fields and lists,
-   Keep fit, CSV, + to compare) and the terminal's input itself, its row as tall as it */
+   its hold, Keep fit, CSV, + to compare) and the terminal's input itself, its row as tall as it */
 @media (pointer: coarse) {
   :is(.pane-head, .term-head) > .icon-btn { min-width: 40px; min-height: 40px; }
   #anpane .pane-head > .btn.small, #anpane .an-actions > .btn,
   #anpane .an-body :is(select, input:not([type="checkbox"])) { min-height: 40px; }
+  #anpane .an-hold { min-width: 40px; min-height: 40px; }
   #an-more-run { min-width: 40px; min-height: 40px; }
   .term-in { padding-block: 0 2px; }
   .term-in input { min-height: 40px; }
@@ -2353,8 +2357,7 @@ body.incognito .composer { background: color-mix(in srgb, var(--text) 4%, var(--
 .seq-bar .btn.seq-hold.armed:hover { border-color: var(--warn); }
 .seq-bar .btn.seq-hold[aria-busy="true"] { cursor: progress; }
 /* the name gives way first, down to its least width (4ch), so the state chip ("Paused") and what the bar says in its
-   place (seq.js say: a refused press's why, in a few words) are read whole; the two shrank alike, and a long name cut
-   them. Not while the person is renaming */
+   place (seq.js say: a refused press's why, in a few words) are read whole. Not while the person is renaming */
 .seq-head-main .seq-name:not(:focus) { flex-shrink: 1000; }
 /* a narrow pane shows Pause by its icon alone (seq.css), but Pausing… keeps its word: the promise is read, not only
    coloured, and a second press is not made by someone who thought the first did nothing */

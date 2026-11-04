@@ -372,7 +372,7 @@
             <textarea id="queue-text" class="mono" spellcheck="false" aria-label="A plan, a step or a script item, as written"></textarea>
             <div class="q-paste-foot">
               <button id="queue-add" class="btn small" type="submit">Add</button>
-              <button id="queue-paste-cancel" class="btn small ghost" type="button">Cancel</button>
+              <button id="queue-paste-cancel" class="btn small" type="button">Cancel</button>
             </div>
           </form>
         </div>
@@ -454,7 +454,7 @@
     <div id="ed-body" class="pane-body ed-body" data-region="editor">
       <div id="ed-plan" class="ed-plan" hidden>
         <pre id="ed-plan-text"></pre>
-        <button id="ed-copy" class="btn small ghost" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg><span>Copy</span></button>
+        <button id="ed-copy" class="btn small" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg><span>Copy</span></button>
       </div>
       <div class="ed-line">
         <label class="ed-f ed-name"><span>Name</span><input id="ed-name" class="ed-in" maxlength="80" spellcheck="false" autocomplete="off"></label>
@@ -1317,7 +1317,7 @@
     <div class="field">
       <div class="field-row"><label class="field-label" for="project-summary">Master report</label><span id="master-files" class="hint"></span></div>
       <textarea id="project-summary" rows="4" maxlength="6000" spellcheck="true" placeholder="Its opening (empty: Kelvin's summary from the data)"></textarea>
-      <div class="field-actions"><button id="master-open" class="btn small" type="button">Open</button><button id="summary-write" class="btn small ghost" type="button" title="Write the opening with Kelvin">Write with Kelvin</button><button id="master-update" class="link soft" type="button">Update now</button></div>
+      <div class="field-actions"><button id="master-open" class="btn small" type="button">Open</button><button id="summary-write" class="btn small" type="button" title="Write the opening with Kelvin">Write with Kelvin</button><button id="master-update" class="link soft" type="button">Update now</button></div>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Reading list</span><span id="papers-count" class="hint"></span></div>
@@ -1356,7 +1356,7 @@
     </div>
     </div>
     <footer class="dialog-foot">
-      <button id="protect-clear" class="btn ghost" type="button">Remove protection</button>
+      <button id="protect-clear" class="btn" type="button">Remove protection</button>
       <span id="protect-msg" class="muted small"></span>
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Cancel</button>

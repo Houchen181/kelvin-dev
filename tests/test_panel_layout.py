@@ -1,4 +1,4 @@
-"""Where the side panels stand, and the sidebar's button (brief 1.2.4-1.2.7). The panels stand side by side in the order
+"""Where the side panels stand, and the sidebar's button. The panels stand side by side in the order
 of the top bar's buttons, left to right: Team chat, Analysis, Runs (with the scan editor, which has no button, right
 after it), then Lab; the terminal is the split under the chat. Short of room they shrink alike to their least widths;
 when one more will not fit even so, the pane looked at least recently (opened, pressed, focused) is put away, its
@@ -92,7 +92,7 @@ def _least(touch=False):
 
 
 def test_nothing_stands_over_or_under_another_pane():
-    """No floating, no stacking, no Lab under the others, no scrim (brief 1.2.4): the classes and the rules that did
+    """No floating, no stacking, no Lab under the others, no scrim: the classes and the rules that did
     it are gone, and no pane's column or the sidebar is placed over the page."""
     for gone in ('"floating"', '"stacked"', '"lab-under"', '"float-two"', "--float-top", "FLOAT_W", '"side-floats"',
                  "side-above", "sideFloats", "syncScrim", '$("scrim")', "colWant", "colLeast"):
@@ -137,7 +137,7 @@ def test_the_pane_looked_at_least_recently_makes_room():
 
 
 def test_least_widths_are_what_the_heads_hold_at():
-    """A pane is never narrower than its head holds whole (brief 1.1.3: nothing clipped). Runs' head on History is the
+    """A pane is never narrower than its head holds whole (nothing clipped). Runs' head on History is the
     widest: Sequence | History with a two-digit count, Report…, ⤢ and ×, 346 page px at 85, 90 and 100 % (measured);
     on a touch screen its head buttons are 40 px (app.css "fit B2"), and it needs 362. Lab and Analysis hold at 292.
     On a touch screen the scan editor's 40 px fields fit whole only with its two-column rows (a pane of 790 or more):
@@ -154,14 +154,17 @@ def test_least_widths_are_what_the_heads_hold_at():
     assert "PANES[id][2]" not in JS.replace("const least = (id) => (COARSE.matches && PANES[id][4]) || PANES[id][2];", "")
     b2 = CSS[CSS.index("/* ===== fit B2"):CSS.index("/* ===== end fit B2")]   # the touch heads' 40 px buttons
     assert "@media (pointer: coarse) {\n  :is(.pane-head, .term-head) > .icon-btn { min-width: 40px; min-height: 40px; }" in b2
-    # the Analysis pane's controls and the terminal's input are 40 px on touch too (brief 1.1.9)
+    # the Analysis pane's controls (its hold too) and the terminal's input are 40 px on touch, as every target
     assert ("#anpane .pane-head > .btn.small, #anpane .an-actions > .btn,\n"
             '  #anpane .an-body :is(select, input:not([type="checkbox"])) { min-height: 40px; }') in b2
     assert "#an-more-run { min-width: 40px; min-height: 40px; }" in b2
+    assert "#anpane .an-hold { min-width: 40px; min-height: 40px; }" in b2   # a tick box and its word
     assert ".term-in { padding-block: 0 2px; }" in b2 and ".term-in input { min-height: 40px; }" in b2
-    # with a mouse the terminal's input is 28 px, the authored floor (brief 1.1.9), its row as tall as before
+    # with a mouse the terminal's input and Analysis's hold are 28 px, the floor for a target; the input's row 34 px
     assert ".term-in { padding-block: 1px 5px; }\n.term-in input { min-height: 28px; }\n" in b2
-    assert b2.index(".term-in input { min-height: 28px; }") < b2.index("@media (pointer: coarse)")   # touch wins
+    assert "\n#anpane .an-hold { min-height: 28px; }\n" in b2
+    for mouse in (".term-in input { min-height: 28px; }", "#anpane .an-hold { min-height: 28px; }"):
+        assert b2.index(mouse) < b2.index("@media (pointer: coarse)"), mouse   # touch wins
 
 
 def test_the_pane_being_typed_in_is_not_put_away_for_a_pane_that_came_by_itself():
@@ -180,7 +183,7 @@ def test_the_pane_being_typed_in_is_not_put_away_for_a_pane_that_came_by_itself(
 
 
 def test_a_pane_that_cannot_stand_beside_the_main_column_takes_the_content_area_alone():
-    """Solo (brief 1.2.4): the one open pane that cannot stand beside the 520 px main column takes the content area,
+    """Solo: the one open pane that cannot stand beside the 520 px main column takes the content area,
     beside the sidebar where that stands, and the main column (chat, Home, the terminal) waits out of sight, so a
     phone never shows the chat's suggestions under a pane. Chat or Home brings it back: the pane is put away."""
     assert "return open.length === 1 && paneRoom() < least(open[0]) ? open[0] : null;" in _js("soloPane")
@@ -264,7 +267,7 @@ def test_only_its_button_hides_the_sidebar_and_the_panels_take_the_room_it_leave
 
 def test_widths_are_the_pages_own_pixels_at_any_page_size():
     """CSS zoom (the page size) leaves the window's size and the pointer in the screen's pixels: every width taken from
-    them is divided by Kelvin.zoom() before it lays out a panel (brief 1.1.8)."""
+    them is divided by Kelvin.zoom() before it lays out a panel."""
     zoom = _js("layoutZoom")
     assert 'typeof k.zoom === "function" ? Number(k.zoom()) : 1' in zoom and "z > 0 && isFinite(z) ? z : 1" in zoom
     assert "const layoutW = () => window.innerWidth / layoutZoom();" in JS
@@ -287,9 +290,9 @@ def test_widths_are_the_pages_own_pixels_at_any_page_size():
 
 
 def test_the_layout_is_kept_per_browser():
-    """The panels open (in the order they were looked at), full screen and Sequence | History (brief 1.2.7), never in
+    """The panels open (in the order they were looked at), full screen and Sequence | History, never in
     the link; back once the page is ready, the ones looked at last first while they stand beside the main column at
-    their least widths. Never a pane that cannot stand there even alone (K11: on a phone a pane alone is not brought
+    their least widths. Never a pane that cannot stand there even alone (on a phone a pane alone is not brought
     back), nor the scan editor. Every change is told to the parts kept apart (kelvin:layout)."""
     said = _js("layoutSaid")
     for text in ("if (LAYOUT.back && kept !== LAYOUT.kept) {", "if (said === LAYOUT.said) return;", 'emit("layout", now);',
@@ -333,7 +336,7 @@ def test_it_slides_on_the_motion_curve_and_never_for_less_motion():
 def test_a_pane_comes_in_once_and_never_again_when_it_is_in_sight_again():
     """The panes' fade-in (k-pane-in) plays when one opens, not again when full screen ends or a pane alone or the
     list goes and it is in sight again: once it has played the pane keeps animation: none until it closes. It is a fade
-    of .15 s on the curve for what comes in (brief 1.5.1-1.5.3): content never waits, and nothing moves, so the same
+    of .15 s on the curve for what comes in: content never waits, and nothing moves, so the same
     from the keyboard (Ctrl+`, Esc)."""
     init = _js("initPanes")
     assert 'for (const id of ["termpane", ...Object.keys(PANES)]) {' in init
@@ -349,7 +352,7 @@ def test_a_pane_comes_in_once_and_never_again_when_it_is_in_sight_again():
 
 def test_the_chat_and_home_never_come_in_again_when_the_main_column_is_back():
     """The chat or Home in sight again after full screen, a pane alone or the list in its place (a resize, Esc, a chat
-    chosen) is just there: nothing moves when the layout re-fits (brief 1.5.3). Only a real switch of Chat | Home lets
+    chosen) is just there: nothing moves when the layout re-fits. Only a real switch of Chat | Home lets
     the view come in."""
     assert 'const mainOut = (app) => ["full", "solo", "side-solo"].some((c) => app.classList.contains(c));' in JS
     fit = _js("fitLayout")
