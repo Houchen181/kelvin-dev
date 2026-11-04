@@ -1,15 +1,15 @@
 /* Home (home.js): the lab at a glance, labMaster's Home in Kelvin's colours. One line of hello (the greeting, what goes
    on now, the lab's name); three tiles on one row, each the link to its pane; under them, in the rest of the height, the
-   blocks Kelvin keeps, in a region of their own that scrolls when there are more than fit. Home fits by construction
-   (brief 1.1): the page never scrolls. Drawn with the kit at the end of app.css (its tokens, .kcard, .chip) and the fit
+   blocks Kelvin keeps, in a region of their own that scrolls when there are more than fit. Home fits by construction:
+   the page never scrolls. Drawn with the kit at the end of app.css (its tokens, .kcard, .chip) and the fit
    tokens of the density tier (the value after each comma is the roomy tier's, for a page without them); light and dark
    come from the tokens alone. That is Home on a laptop, a 1080p screen, a tablet, beside panes and on a phone. Where
    Home is big (1040 px wide and 1200 tall: the 1440p monitor), the rule at the end draws the big monitor's Home: the
    greeting on a line of its own, the 2 + 1 large tiles and three columns of blocks in a column of 1040 px. */
 
 /* the conversation's place (as .scroller: from a zero basis, so the top bar keeps its own height when it wraps), and the
-   container Home's parts are sized by: its width (one-line tiles under 700 px) and its height (one-line tiles when it
-   is short, the large tiles when it is big). It scrolls only if even that cannot fit: it never clips */
+   container Home's parts are sized by: its width (one-line tiles under 700 px) and its height (one-line tiles under
+   720 px, the large tiles when it is big). It scrolls only if even that cannot fit: it never clips */
 .homeview { flex: 1 1 0%; min-height: 0; overflow-y: auto; background: var(--page); container: home / size;
   --home-shadow: 0 1px 2px rgba(20, 32, 44, 0.04), 0 12px 28px -18px rgba(20, 32, 44, 0.24); }   /* softer than a card's */
 @media (prefers-color-scheme: dark) {
@@ -36,15 +36,19 @@
 .home-labname { font-size: 15px; color: var(--muted); }
 
 /* ---------- the tiles: one row of three, each the link to its pane (the whole card is its button), a ring under the
-   pointer and no lift; as tall as what they hold, up to the tier's cap ---------- */
+   pointer and no lift; as tall as what they hold, up to the tier's cap (the tight tier's tiles are always one line:
+   Home is then under 720 px tall) ---------- */
 .home-tiles { flex: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-4, 16px); }
 .home-tile { position: relative; display: flex; flex-direction: column; gap: var(--sp-2, 8px); min-width: 0; max-height: 300px;
   overflow: hidden; padding: var(--pad-card, 18px 20px); background: var(--card); border: 1px solid var(--card-line);
   border-radius: 16px; box-shadow: var(--home-shadow); cursor: pointer; transition: border-color .15s, box-shadow .15s; }
 html.fit-compact .home-tile { max-height: 220px; }
-html.fit-tight .home-tile { max-height: 150px; }
-.home-tile:hover, .home-tile:has(.home-tile-go:focus-visible) {
+/* its ring: under a pointer that hovers (a touch screen keeps :hover on what was tapped), or for the keyboard */
+:where(html:not(.k-pointer)) .home-tile:has(.home-tile-go:focus-visible) {
   border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--home-shadow); }
+@media (hover: hover) {
+  .home-tile:hover { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--home-shadow); }
+}
 .home-tile.live { border-color: var(--accent); }
 .home-tile-head { display: flex; align-items: center; gap: var(--sp-2, 8px); min-width: 0; }
 .home-tile-go { flex: 1 1 auto; min-width: 0; margin: 0; padding: 0; border: 0; background: none; cursor: pointer; text-align: left;
@@ -89,7 +93,6 @@ html.fit-tight .home-tile { max-height: 150px; }
 .home-spark-row { padding: 2px 0 4px; }
 .home-spark { display: block; width: 100%; height: 48px; overflow: visible; }
 html.fit-compact .home-spark { height: 36px; }
-html.fit-tight .home-spark { height: 28px; }
 .home-spark-fill { fill: var(--accent-soft); stroke: none; }
 .home-spark-line { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
 .home-spark-row.alarm .home-spark-fill { fill: var(--danger-soft); }
@@ -113,9 +116,10 @@ html.fit-tight .home-spark { height: 28px; }
 .hk-name { flex: 1 1 auto; min-width: 0; line-height: 22px; overflow-wrap: anywhere; }   /* the title, and how long ago after it */
 .hk-title { display: inline; margin: 0; font-size: 15px; font-weight: 600; line-height: inherit; color: var(--text); }
 .hk-ago { margin-left: 2px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.hk-ago[hidden] { display: none; }   /* alone on a line of its own it gives way (home.js fitAgo) */
 .hk-tools { flex: none; display: flex; gap: 2px; margin: -2px -2px -2px 0; }
 /* a block's tools: faint (35 %) until the pointer or the focus is on the block, so they are there to find, touch too */
-.hk-btn { display: grid; place-items: center; min-width: 28px; height: 28px; padding: 0 6px; border: 0; border-radius: var(--radius-s);
+.hk-btn { display: grid; place-items: center; min-width: var(--target); height: var(--target); padding: 0 6px; border: 0; border-radius: var(--radius-s);
   background: none; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; opacity: .35;
   transition: opacity .12s; }
 .hk-btn svg { width: 16px; height: 16px; }
@@ -146,7 +150,7 @@ html:is(.fit-compact, .fit-tight) .hk-text { -webkit-line-clamp: 2; }
 .hk-check li.done span { color: var(--muted); text-decoration: line-through; }
 .hk-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }   /* at the card's foot, in line along a row */
 
-/* a finger's targets are 40 px (brief 1.1.9). For their room, minor lines give way sooner: how long ago a block came
+/* a finger's targets are 40 px. For their room, minor lines give way sooner: how long ago a block came
    (its title keeps the head to one line beside the wider tools), and a tile's third run in the compact tier */
 @media (pointer: coarse) {
   .hk-btn { min-width: 40px; height: 40px; }
@@ -163,15 +167,17 @@ html:is(.fit-compact, .fit-tight) .hk-text { -webkit-line-clamp: 2; }
 }
 
 /* ---------- one-line tiles: each tile one line (its title, its number, its chip), one under the other in a narrow main
-   column (a phone, or panes beside Home), side by side when Home is short (the terminal or the notices under the top
-   bar take its height), so the blocks keep theirs ---------- */
-@container home (max-width: 699px) or (max-height: 559px) {
+   column (a phone, or panes beside Home), side by side when Home is under 720 px tall (a small window, or the terminal or
+   the notices under the top bar taking its height), so the blocks keep theirs ---------- */
+@container home (max-width: 699px) or (max-height: 719px) {
   .home-tile { flex-direction: row; align-items: center; gap: var(--sp-3, 12px); height: 40px; max-height: none;
     padding: 0 var(--sp-4, 16px); border-radius: 12px; }
-  html.fit-compact .home-tile, html.fit-tight .home-tile { max-height: none; }
+  html.fit-compact .home-tile { max-height: none; }
   .home-tile-head { display: contents; }
-  .home-tile-go { align-self: stretch; }   /* the line's height: the button is as tall as the tile */
-  .home-kpi { order: 1; flex: none; flex-wrap: nowrap; }
+  .home-tile-go { flex-shrink: 0; align-self: stretch; }   /* the line's height: the button is as tall as the tile */
+  /* the title stays whole on a narrow tile: the number's unit gives way first, cut with an ellipsis */
+  .home-kpi { order: 1; flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; }
+  .home-kpi-unit { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .home-kpi-n { font-size: 20px; }
   .home-tile .chip { order: 2; }
   .home-tile-body { display: none; }

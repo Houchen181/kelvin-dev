@@ -109,10 +109,12 @@
     lab: ["labpanel", null, () => K.toggleLab(true)],
     analysis: ["anpane", null, () => K.toggleAnalysis(true)],
   };
-  // a tile is a link to its place (brief 1.3): Kelvin.paneShow shows the pane when it is not on the screen (in full
-  // screen too), and when it is, leaves it there and rings its head; a tile never hides it
+  // a tile is a link to its place: Kelvin.paneShow shows the pane when it is not on the screen (in full
+  // screen too), and when it is, leaves it there and rings its head; a tile never hides it. The Lab's place is Watches
+  // while an alarm is on (its chip counts them), else the part chosen last
   function goTo(name) {
-    const [pane, view, open] = PLACES[name];
+    const [pane, place, open] = PLACES[name];
+    const view = name === "lab" ? (alarmsOn(K.S.last).length ? "watches" : "kept") : place;
     if (K.paneShow) K.paneShow(pane, view); else open();
   }
   function tile(name, title) {   // a card that is its pane's link: its title, its number, what it holds
@@ -165,8 +167,10 @@
     p.spark = sparkline();
     p.sparkRow = h("li", { class: "home-spark-row", hidden: true }, p.spark.svg);   // under the first watched reading
     p.labt.body.append(p.watchList);
-    // the blocks: the rest of the height, the one part of Home that scrolls (brief 1.7: a region)
+    // the blocks: the rest of the height, the one part of Home that scrolls (a region)
     p.blocks = h("div", { class: "home-blocks", "data-region": "home-blocks", hidden: true });
+    // a width of their own (the window, a pane, Home shown again): each block's "how long ago" measured again
+    if (window.ResizeObserver) new ResizeObserver(() => guard(fitAgo)).observe(p.blocks);
     $("homeview").replaceChildren(h("div", { class: "home-col" },
       h("header", { class: "home-hello" }, p.greet, p.state, p.lab),
       h("div", { class: "home-tiles" }, p.seq.el, p.runs.el, p.labt.el),
@@ -212,10 +216,9 @@
     const pending = (s.pending || []).length;
     if (pending) return { tone: "warn", words: pending === 1 ? "Approval waiting" : pending + " approvals waiting", open: true };
     const n = sequence(s);
-    if (n.q.state === "running" || n.q.state === "pausing") {
-      const it = n.item || (n.next >= 0 ? n.items[n.next] : null);
-      return { tone: n.q.state === "running" ? "ok" : "warn",
-               words: it ? it.name + " · " + n.at + " of " + n.total : n.q.state === "running" ? "Running" : "Pausing" };
+    if (n.q.state === "running" || n.q.state === "pausing") {   // any pause waiting for the running block: amber
+      const it = n.item || (n.next >= 0 ? n.items[n.next] : null), run = n.q.state === "running";
+      return { tone: run ? "ok" : "warn", words: it ? it.name + " · " + n.at + " of " + n.total : run ? "Running" : "Pausing" };
     }
     if (n.q.state === "paused") return { tone: "warn", words: "Paused" };
     const live = s.live;
@@ -244,11 +247,16 @@
   // ------------------------------------------------------------------ the tiles
   function renderSeq(s) {
     const n = sequence(s), t = H.parts.seq, st = n.q.state;
-    // states are tinted pills; the running one the accent's soft fill (brief 1.6.3)
+    // states are tinted pills; the running one the accent's soft fill. Any pause waiting for the running block (the
+    // person's own too) says Pausing, as the Sequence's bar does. As on the bar, why is the tip: of any pause, and of a
+    // finished sequence that ended for a reason
     const [kind, words] = st === "running" ? ["blue", "Running"] : st === "pausing" ? ["warn", "Pausing"]
       : st === "paused" ? ["warn", "Paused"] : !n.total || n.next >= 0 ? ["line", "Idle"]
       : n.items.some((i) => i.status === "failed") ? ["bad", "Failed"] : ["ok", "Done"];
     chip(t, kind, words);
+    const said = String(n.q.reason || "");
+    const why = st === "pausing" || st === "paused" ? said : (kind === "ok" || kind === "bad") && said !== "finished" ? said : "";
+    if (t.chip.title !== why) t.chip.title = why;
     put(t.kpi, n.at + " / " + n.total);
     const frac = n.total ? clamp((n.ended + (n.prog ? n.prog.frac : 0)) / n.total) : 0;
     const width = (frac * 100).toFixed(1) + "%";
@@ -376,12 +384,14 @@
     const del = h("button", { class: "hk-btn hk-del", type: "button", "data-f": "del", title: "Remove", "aria-label": "Remove" },
       K.icon("x"));
     del.addEventListener("click", safe(() => removeBlock(b, del)));
-    const t = b.updated || b.created || 0;   // how long ago: after the title, a minor line (the tight tier leaves it out)
+    // how long ago: after the title, a minor line (the tight tier leaves it out, and fitAgo when it would sit alone); its
+    // date and time are the tip of the whole title line, so they are there however the age gives way
+    const t = b.updated || b.created || 0, tip = t ? new Date(t * 1000).toLocaleString() : null;
     const when = h("time", { class: "hk-ago k-minor", "data-t": String(t), datetime: t ? new Date(t * 1000).toISOString() : null,
-      title: t ? new Date(t * 1000).toLocaleString() : null }, ago(t));
+      title: tip }, ago(t));
     const el = h("article", { class: "kcard home-block " + kind.cls + (b.pinned ? " pinned" : ""), "data-id": b.id },
       h("div", { class: "hk-head" }, h("span", { class: "hk-kind", title: kind.name }, svg(kind.icon)),
-        h("div", { class: "hk-name" }, h("h2", { class: "hk-title" }, b.title || ""), " ", when),
+        h("div", { class: "hk-name", title: tip }, h("h2", { class: "hk-title" }, b.title || ""), " ", when),
         h("span", { class: "hk-tools" }, pin, del)));
     const tone = ["ok", "warn", "bad"].includes(b.tone) ? " " + b.tone : "";
     if (b.kind === "result" && b.value != null && b.value !== "") {
@@ -411,7 +421,7 @@
       return h("li", { class: it.done ? "done" : null }, h("label", {}, box, h("span", {}, it.text)));
     }));
   }
-  function actions(b) {   // its buttons, the first one primary; a result's run after them (a button too: brief 1.6.2)
+  function actions(b) {   // its buttons, the first one primary; a result's run after them (a button too: buttons look like buttons)
     const list = (Array.isArray(b.actions) ? b.actions : []).slice();
     const runOwn = b.run_id && !list.some((a) => a && a.do === "run" && a.run_id === b.run_id);
     if (!list.length && !runOwn) return null;
@@ -527,6 +537,7 @@
     box.hidden = !want.length;
     H.known = known;
     guard(() => liveValues(K.S.last));
+    guard(fitAgo);
     refocus(keep);
   }
   function flash(el) {
@@ -544,7 +555,26 @@
         el.classList.toggle("alarm", alarmed.has(key));
       }
     }
-    for (const el of box.querySelectorAll(".hk-ago")) put(el, ago(Number(el.dataset.t)));
+    let moved = false;
+    for (const el of box.querySelectorAll(".hk-ago")) {
+      const words = ago(Number(el.dataset.t));
+      if (el.textContent !== words) { el.textContent = words; moved = true; }
+    }
+    if (moved) fitAgo();   // "5 min ago" is wider than "just now"
+  }
+  // a block's "how long ago" sits on its title's last line, or gives way as a minor line does: alone on a line of its own
+  // it would push the block's value below its neighbours'. Its date and time stay the title line's tip. Shown first,
+  // then measured: all of them in one layout
+  function fitAgo() {
+    const box = H.parts.blocks;
+    if (box.hidden) return;
+    const rows = [...box.children].map((el) => [el.querySelector(".hk-ago"), el.querySelector(".hk-title")]).filter((r) => r[0] && r[1]);
+    for (const [when] of rows) when.hidden = false;
+    const alone = rows.map(([when, title]) => {
+      const at = when.getClientRects(), lines = title.getClientRects();   // none: the tier or a finger leaves it out
+      return at.length > 0 && lines.length > 0 && at[0].top >= lines[lines.length - 1].bottom - 2;
+    });
+    rows.forEach(([when], i) => { if (alone[i]) when.hidden = true; });
   }
 
   // ------------------------------------------------------------------ asking the server, when something moved

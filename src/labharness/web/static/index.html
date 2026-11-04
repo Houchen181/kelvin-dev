@@ -87,8 +87,6 @@
 <div id="welcome" class="welcome" hidden></div>
 
 <div id="app" class="app" hidden>
-  <div id="scrim" class="scrim" hidden></div>
-
   <!-- the chrome: the top bar and the notice row, across the whole window above the sidebar, the chat and the panes
        (app.css .chrome): nothing in it moves when the sidebar hides, a pane opens or one goes full screen -->
   <div id="chrome" class="chrome">
@@ -102,7 +100,7 @@
       </div>
       <div id="mode-seg" class="mode-seg" role="tablist" aria-label="Chat or Home"><button id="mode-chat" class="on" type="button" role="tab" aria-selected="true">Chat</button><button id="mode-home" type="button" role="tab" aria-selected="false" tabindex="-1">Home</button></div>
       <div class="topbar-right">
-      <button id="toggle-incognito" class="pill icon-only" type="button" aria-label="Incognito chat" aria-pressed="false" title="Incognito chat: no memory is used or kept, and the chat is not saved">
+      <button id="toggle-incognito" class="pill icon-only" type="button" aria-label="Incognito chat" aria-pressed="false" title="Incognito chat">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/></svg>
       </button>
       <button id="toggle-term" class="pill icon-only" type="button" aria-label="Terminal" aria-pressed="false" title="Terminal (Ctrl+`)">
@@ -274,7 +272,7 @@
     <header class="pane-head">
       <h2 class="pane-title">Analysis</h2>
       <div class="spacer"></div>
-      <button id="open-report" class="btn small ghost" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
+      <button id="open-report" class="btn small" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
       <button id="an-again" class="icon-btn" type="button" aria-label="Analyze again" title="Analyze again" disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/></svg>
       </button>
@@ -358,7 +356,7 @@
             <textarea id="queue-text" class="mono" spellcheck="false" aria-label="A plan, a step or a script item, as written"></textarea>
             <div class="q-paste-foot">
               <button id="queue-add" class="btn small" type="submit">Add</button>
-              <button id="queue-paste-cancel" class="btn small ghost" type="button">Cancel</button>
+              <button id="queue-paste-cancel" class="btn small" type="button">Cancel</button>
             </div>
           </form>
         </div>
@@ -434,7 +432,7 @@
     <div id="ed-body" class="pane-body ed-body" data-region="editor">
       <div id="ed-plan" class="ed-plan" hidden>
         <pre id="ed-plan-text"></pre>
-        <button id="ed-copy" class="btn small ghost" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg><span>Copy</span></button>
+        <button id="ed-copy" class="btn small" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg><span>Copy</span></button>
       </div>
       <div class="ed-line">
         <label class="ed-f ed-name"><span>Name</span><input id="ed-name" class="ed-in" maxlength="80" spellcheck="false" autocomplete="off"></label>
@@ -490,7 +488,7 @@
         <button id="ed-run" class="btn small" type="button" title="First in the sequence, then a pause">Run</button>
         <button id="ed-save" class="btn small" type="button" title="A new scan in your library; the one it came from stays">Save</button>
         <button id="ed-save-as" class="btn small" type="button" title="A new scan in your library; the queue item stays as it was" hidden>Save as scan</button>
-        <button id="ed-revert" class="btn small ghost" type="button">Revert</button>
+        <button id="ed-revert" class="btn small" type="button">Revert</button>
       </div>
     </footer>
   </section>
@@ -576,7 +574,10 @@
             <label id="watch-sample-row" class="check watch-sample" hidden><input id="watch-sample" type="checkbox" checked> <span id="watch-sample-name">This sample only</span></label>
           </form>
           <ul id="watch-list" class="watch-list"></ul>
-          <details id="alarm-history" class="alarm-history" hidden><summary>Alarm history</summary><ul id="alarm-history-list" class="watch-list"></ul></details>
+          <div id="alarm-history" class="alarm-history" hidden>
+            <button id="alarm-history-btn" class="link disclose" type="button" aria-expanded="false" aria-controls="alarm-history-fold">Alarm history<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+            <div id="alarm-history-fold" class="k-fold" inert><div class="k-fold-in"><ul id="alarm-history-list" class="watch-list"></ul></div></div>
+          </div>
         </div>
       </section>
       <section class="lab-part" data-part="memory" aria-labelledby="lab-h-memory">
@@ -762,13 +763,12 @@
             <span id="owner-pin-state" class="hint"></span>
           </div>
           <div id="roles-box" class="field" hidden>
-            <div class="field-row"><span class="field-label">Lab roles</span>
-              <button id="roles-edit" class="btn small" type="button">Give roles…</button></div>
+            <div class="field-row"><span class="field-label">Lab roles</span></div>
             <span id="roles-state" class="hint"></span>
-            <ul id="roles-list" class="roles-list" hidden></ul>
-            <div id="roles-actions" class="field-actions" hidden>
-              <button id="roles-save" class="btn small primary" type="button">Save roles</button>
-              <button id="roles-cancel" class="link soft" type="button">Cancel</button></div>
+            <!-- a role to pick for each person, shown as saved (rolesFill): the picks wait for Save as every field does
+                 (settingsBody gives them; saveSettings sends them to /api/roles first); a refusal is said under them -->
+            <fieldset id="roles-list" name="roles" class="roles-list" aria-label="Lab roles" hidden></fieldset>
+            <span id="roles-msg" class="hint bad" role="status"></span>
             <span class="hint">No role: trainee. An operator or the owner confirms a trainee's yes. Only the owner changes roles (with the PIN).</span>
           </div>
           <div class="field">
@@ -843,6 +843,14 @@
         </section>
         <section class="set-page" data-page="memory" hidden>
           <h3 class="set-title">Memory</h3>
+          <!-- what acts at once, in a card of its own at the top (.set-now): the skills, each with its switch, Show and
+               Download, and Add a skill… -->
+          <div id="skills-field" class="field set-now">
+            <div class="field-row"><span class="field-label" title="Skills and recipes for every project; type / in the message box to start one">Skills</span><span id="global-know-count" class="hint"></span><button id="global-know-add" class="link" type="button">Add a skill…</button></div>
+            <input id="global-know-file" type="file" accept=".zip,.skill,.md" hidden>
+            <ul id="global-know" class="memory-notes" data-region="settings-page"></ul>
+            <span class="hint">Add only skills from people you trust.</span>
+          </div>
           <div class="field">
             <div class="field-row"><span class="field-label">Memory</span>
               <label class="check"><input id="learn" name="learn" type="checkbox"> Learn from conversations</label></div>
@@ -851,10 +859,6 @@
             <div class="field-row"><span class="field-label small">About you</span><span id="global-notes-count" class="hint"></span></div>
             <ul id="global-notes" class="memory-notes" data-region="settings-page"></ul>
             <span class="hint" hidden>What everyone knows about the lab itself is in the Lab panel → Lab memory.</span>
-            <div class="field-row"><span class="field-label small" title="Skills and recipes for every project; type / in the message box to start one">Skills</span><span id="global-know-count" class="hint"></span><button id="global-know-add" class="link" type="button">Add a skill…</button></div>
-            <input id="global-know-file" type="file" accept=".zip,.skill,.md" hidden>
-            <ul id="global-know" class="memory-notes" data-region="settings-page"></ul>
-            <span class="hint">Add only skills from people you trust.</span>
           </div>
         </section>
         <section class="set-page" data-page="literature" hidden>
@@ -963,6 +967,7 @@
               <button id="zoom-in" class="btn small" type="button" aria-label="Bigger">+</button>
               <button id="zoom-reset" class="btn small" type="button" title="As the window suits (Ctrl 0 in the app)" hidden>Auto</button>
             </div>
+            <span id="zoom-held" class="hint" role="status" hidden></span>
             <span id="zoom-hint" class="hint" hidden>Ctrl + / Ctrl − / Ctrl 0</span>
           </div>
           <div class="field">
@@ -1297,7 +1302,7 @@
     <div class="field">
       <div class="field-row"><label class="field-label" for="project-summary">Master report</label><span id="master-files" class="hint"></span></div>
       <textarea id="project-summary" rows="4" maxlength="6000" spellcheck="true" placeholder="Its opening (empty: Kelvin's summary from the data)"></textarea>
-      <div class="field-actions"><button id="master-open" class="btn small" type="button">Open</button><button id="summary-write" class="btn small ghost" type="button" title="Write the opening with Kelvin">Write with Kelvin</button><button id="master-update" class="link soft" type="button">Update now</button></div>
+      <div class="field-actions"><button id="master-open" class="btn small" type="button">Open</button><button id="summary-write" class="btn small" type="button" title="Write the opening with Kelvin">Write with Kelvin</button><button id="master-update" class="link soft" type="button">Update now</button></div>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Reading list</span><span id="papers-count" class="hint"></span></div>
@@ -1336,7 +1341,7 @@
     </div>
     </div>
     <footer class="dialog-foot">
-      <button id="protect-clear" class="btn ghost" type="button">Remove protection</button>
+      <button id="protect-clear" class="btn" type="button">Remove protection</button>
       <span id="protect-msg" class="muted small"></span>
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Cancel</button>

@@ -58,6 +58,45 @@ def test_translate_from_the_portal_gives_a_draft_to_review(portal):
     assert client.get("/api/experiments/drafts/" + d["draft"]).json()["code"] == d["code"]
 
 
+def test_a_draft_nobody_keeps_is_let_go_by_the_person(portal):
+    """A draft, one that can be kept or one that can't, is let go from the portal (DELETE): it is deleted and no longer
+    listed, the record says who let it go, and a second try, a bad id or a trainee is refused."""
+    rt, client, _ = portal
+    bad = rt.experiments.draft(GOOD, {"name": "iv-two", "report": {"ok_to_keep": False}}, "agent")
+    good = rt.experiments.draft(GOOD, {"name": "iv-three", "report": {"ok_to_keep": True}}, "agent")
+    r = client.delete("/api/experiments/drafts/" + bad)
+    assert r.status_code == 200, r.text
+    assert [x["id"] for x in client.get("/api/experiments").json()["drafts"]] == [good]
+    assert not (rt.experiments.root / ".drafts" / bad).exists()
+    (said,) = [e for e in rt.gate.log.events() if e.get("type") == "experiment" and e.get("change") == "let go"]
+    assert said["draft"] == bad and said["by"] == "human (portal)"
+    assert client.delete("/api/experiments/drafts/" + bad).status_code == 404       # gone already
+    assert client.delete("/api/experiments/drafts/not-a-draft").status_code == 400
+    from labharness.accounts import RoleRefused
+
+    def trainee(what):
+        raise RoleRefused("a trainee may not %s" % what)
+    rt.not_for_trainees = trainee
+    r = client.delete("/api/experiments/drafts/" + good)
+    assert r.status_code == 403 and "trainee" in r.json()["error"]
+    assert client.get("/api/experiments/drafts/" + good).status_code == 200          # reading it is not refused
+
+
+def test_a_draft_that_cannot_be_deleted_is_said_and_not_recorded_as_let_go(portal, monkeypatch):
+    """A draft whose folder can't be deleted (a file in it held open) is a 400 with the reason, still listed, and the
+    record does not say it was let go."""
+    rt, client, _ = portal
+    d = rt.experiments.draft(GOOD, {"name": "iv-held", "report": {"ok_to_keep": True}}, "agent")
+
+    def held(path, *a, **k):
+        raise PermissionError(13, "The process cannot access the file", str(path))
+    monkeypatch.setattr(expstore.shutil, "rmtree", held)
+    r = client.delete("/api/experiments/drafts/" + d)
+    assert r.status_code == 400 and "couldn't delete the draft" in r.json()["error"]
+    assert [x["id"] for x in client.get("/api/experiments").json()["drafts"]] == [d]
+    assert not [e for e in rt.gate.log.events() if e.get("type") == "experiment" and e.get("change") == "let go"]
+
+
 def test_keep_from_the_portal_is_the_persons_yes_and_refused_while_something_blocks(portal):
     rt, client, _ = portal
     d = client.post("/api/labview/translate", json={"path": str(VI)}).json()
@@ -302,3 +341,80 @@ def test_import_a_script_or_vi_starts_a_vis_translation():
     for text in ("function isVI(", "function importVI(", "if (isVI(path)) return importVI(path);",
                  "openTranslate({ name:", "the translation goes on"):
         assert text in js, text
+
+
+def _fn(js, name):
+    """One function of a page script, by its name: from its declaration to its closing brace (two spaces in)."""
+    start = js.index("function %s(" % name)
+    return js[start:js.index("\n  }\n", start)]
+
+
+def test_the_sequences_new_function_translates_a_vi_under_its_name_and_keeps_a_mistyped_path():
+    """＋ New function (seq.js) takes a VI: it is not inspected as a script and has no colour, and Add sends it to
+    Kelvin.importVI with the name given and the dialog, which stays open, the path still typed, when Kelvin refuses the
+    path at once (openTranslate waits a second for that); else the translation's own dialog takes over. The path and
+    the name sent stay as shown meanwhile, and a Cancel or Esc in that second lets the translation go on quietly, with
+    no dialog of its own: its row among the experiments, and a note when it ends."""
+    seq = (STATIC / "seq.js").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    new = _fn(seq, "newFunction")
+    choose = new[new.index("async function choosePath("):new.index('path.addEventListener("change"')]
+    assert choose.index("if (K.isVI(st.path)) {") < choose.index('K.api("/api/library", { body: { op: "inspect"')
+    assert "colour.hidden = K.isVI(st.path);" in choose
+    submit = new[new.index("const submit = async () => {"):]
+    vi = submit[submit.index("if (K.isVI(st.path)) {"):]
+    vi = vi[:vi.index("return;\n      }")]
+    assert "await K.importVI(st.path, name.value.trim(), dlg)" in vi and "dlg.close()" not in vi
+    assert 'if (typeof said === "string" && dlg.open)' in vi and '{ class: "seq-bad" }, said' in vi
+    # the page's side: the name and the dialog handed on, the name in the request, a refusal within a second sent back
+    assert "async function importVI(path, as, from)" in js and "if (done !== true) return done;" in _fn(js, "importVI")
+    tr = _fn(js, "openTranslate")
+    assert "body: v.as ? { path: v.path, name: v.as } : { path: v.path }" in tr
+    assert "setTimeout(() => r(null), 1000)" in tr and "if (early && from.open) return early.message;" in tr
+    assert tr.index("if (from.open) from.close();") < tr.index('expDialog("Translate "')
+    assert vi.index("path.readOnly = name.readOnly = true;") < vi.index("await K.importVI(")
+    assert "path.readOnly = name.readOnly = false;" in vi[vi.index("} finally {"):]
+    assert "if (st.busy) return;" in choose   # a file picked meanwhile changes nothing
+    # closed in that second: quiet, no dialog opened, its row and its note as for a dialog closed later
+    assert "if (from.open) from.close(); else quiet = true;" in tr
+    quiet = tr[tr.index("if (!quiet) {"):]
+    assert quiet.index('expDialog("Translate "') < quiet.index("EXP.open = null;") < quiet.index("\n    }")
+    assert "const here = () => !quiet && EXP.shown === mine && $(\"exp-dialog\").open;" in tr
+    assert tr.index("if (!quiet) {") < tr.index('emit("translate", { path: v.path, name: v.as || v.name, state: "running" });')
+
+
+def test_a_vis_translation_is_a_press_away_in_the_sequence_however_long_it_took():
+    """A translation takes minutes and its dialog may be closed: the Sequence's experiments list it while it goes on and
+    why after a failure (kelvin:translate), then its draft (GET /api/experiments' drafts, read again on
+    kelvin:library) with Review opening it (Kelvin.openReview), after a reload too. Keep and Approve read the
+    functions again, so a kept experiment is there at once."""
+    seq = (STATIC / "seq.js").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "SEQ.drafts = exps && Array.isArray(exps.drafts) ? exps.drafts : [];" in _fn(seq, "loadLib")
+    assert 'document.addEventListener("kelvin:library", () => guard(loadLib));' in seq
+    assert 'document.addEventListener("kelvin:translate", (e) => guard(() => {' in seq
+    groups = _fn(seq, "fnGroups")
+    assert '(SEQ.drafts || []).map((d) => ({ type: "draft"' in groups and "[...SEQ.vis].map(" in groups
+    assert 'fn.type === "draft" || fn.type === "vi" ? draftCard(fn) : fnCard(fn)' in _fn(seq, "renderFns")
+    card = _fn(seq, "draftCard")
+    assert "K.openReview(fn.draft.id)" in card and '"Review")' in card and 'class: "btn small seq-review"' in card
+    # a draft's × lets it go (one that can't be kept too, its Review still there to read why), after a yes
+    assert "tail = [review, letGo(() => dropDraft(fn))];" in card and "...tail);" in card
+    assert 'title: "Let it go", "aria-label": "Let go: " + fn.name' in card
+    drop = _fn(seq, "dropDraft")
+    assert 'K.askYes("Let go of the draft " + fn.name + "?' in drop and "danger: true" in drop
+    assert 'K.api("/api/experiments/drafts/" + encodeURIComponent(fn.draft.id), { method: "DELETE" })' in drop
+    assert drop.index("K.toast(e.message)") < drop.index("await loadLib();")
+    # the keyboard, on the × let go, goes to the row now in its place (＋ New function when none is left)
+    assert drop.index("const at = fnHeld();") < drop.index("K.api(")
+    assert drop.index("await loadLib();") < drop.index("fnRefocus(at);")
+    assert "fnRefocus(at);" in _fn(seq, "removeFn") and "SEQ.el.newFn" in _fn(seq, "fnRefocus")
+    assert 'r.getAttribute("tabindex") === "0" ? r : r.querySelector("button")' in _fn(seq, "fnRefocus")
+    assert "isVI, importVI, openReview," in js   # on window.Kelvin
+    tr = _fn(js, "openTranslate")
+    assert 'emit("translate", { path: v.path, name: v.as || v.name, state: "running" });' in tr
+    assert 'state: "failed", message: e.message });' in tr and 'emit("translate", { path: v.path, state: "done" });' in tr
+    assert 'toast(v.name + " is translated: click to review it"' in tr   # the note as well
+    for name in ("openTranslate", "keepDraft", "approveVersion"):   # the Sequence reads them again, once
+        assert 'emit("library");' in _fn(js, name) and "loadExperiments()" not in _fn(js, name), name
+    assert 'function emit(name, detail) { document.dispatchEvent(new CustomEvent("kelvin:" + name, { detail })); }' in js

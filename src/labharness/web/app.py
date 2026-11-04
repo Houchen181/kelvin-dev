@@ -4072,11 +4072,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(404, e.args[0] if e.args else str(e))
 
     async def experiment_draft(request: Request) -> Response:
-        """GET: a draft as the review shows it."""
-        refused = experiments_refused(request)
+        """GET: a draft as the review shows it. DELETE: the person lets it go, deleted (a trainee doesn't)."""
+        refused = experiments_refused(request, "let a translation go" if request.method == "DELETE" else "")
         if refused is not None:
             return refused
         try:
+            if request.method == "DELETE":
+                await asyncio.to_thread(as_person, runtime.let_draft_go, request.path_params["draft"], who(request))
+                return JSONResponse({"ok": True})
             return JSONResponse(await asyncio.to_thread(runtime.draft_data, request.path_params["draft"]))
         except KeyError as e:
             return error(404, e.args[0] if e.args else str(e))
@@ -4414,7 +4417,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/labview/translate", experiment_translate, methods=["POST"]),
         Route("/api/experiments", experiments_list),
         Route("/api/experiments/keep", experiment_keep, methods=["POST"]),
-        Route("/api/experiments/drafts/{draft}", experiment_draft),
+        Route("/api/experiments/drafts/{draft}", experiment_draft, methods=["GET", "DELETE"]),
         Route("/api/experiments/{name}", experiment_view),
         Route("/api/experiments/{name}/approve", experiment_approve, methods=["POST"]),
         Route("/api/experiments/{name}/run", experiment_run, methods=["POST"]),

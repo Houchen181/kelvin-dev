@@ -17,7 +17,7 @@ svg.seq-solid { fill: currentColor; stroke: none; }
 .seq-bar { flex: none; position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; min-width: 0;
   padding: var(--sp-2, 8px) var(--sp-3, 12px); background: var(--page); box-shadow: 0 1px 0 var(--line); }
 .seq-head-main { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; margin-left: -6px; }
-.seq-name { flex: 0 1 auto; min-width: 4ch; max-width: 100%; min-height: 28px; field-sizing: content; padding: 3px 7px; border: 1px solid transparent;
+.seq-name { flex: 0 1 auto; min-width: 4ch; max-width: 100%; min-height: var(--target); field-sizing: content; padding: 3px 7px; border: 1px solid transparent;
   border-radius: var(--radius-s); background: none; font-size: var(--fs-title, 16px); font-weight: 600; color: var(--text);
   text-overflow: ellipsis; }
 .seq-name::placeholder { color: var(--muted); font-weight: 500; }
@@ -85,7 +85,7 @@ svg.seq-solid { fill: currentColor; stroke: none; }
 
 .seq-acts { display: flex; align-items: center; gap: 2px; opacity: .35; transition: opacity .12s; }
 .seq-card:is(:hover, :focus-within, .confirming) .seq-acts { opacity: 1; }
-.seq-act { width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--radius-s); background: none; color: var(--text-2);
+.seq-act { width: var(--target); height: var(--target); padding: 0; border: 0; border-radius: var(--radius-s); background: none; color: var(--text-2);
   display: grid; place-items: center; cursor: pointer; }
 .seq-act:hover { background: var(--hover); color: var(--text); }
 .seq-act:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -171,7 +171,7 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
 .seq-fn-sub { flex: 1 1 0; min-width: 0; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .seq-fn > .seq-fn-more, .seq-fn > .ask { flex: none; }
 .seq-fn > .seq-fn-run { margin-left: auto; }
-.seq-fn-go { flex: none; width: 28px; height: 28px; padding: 0; color: var(--text-2); }
+.seq-fn-go { flex: none; width: var(--target); height: var(--target); padding: 0; color: var(--text-2); }
 .seq-fn-go svg { width: 14px; height: 14px; }
 .seq-fn-go:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
 .seq-fn-go:disabled { opacity: .4; }
@@ -184,15 +184,21 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
   font-family: ui-monospace, Consolas, monospace; }
 .seq-in { flex: 1 1 0; min-width: 0; padding: 3px 7px; font-size: 13px; }
 .seq-in-row input[type="checkbox"] { margin: 0; accent-color: var(--accent); }
-.seq-fn > .ask { height: 28px; }
-.seq-fn-more { width: 28px; height: 28px; padding: 0; opacity: .35; transition: opacity .12s; }
+.seq-fn > .ask { height: var(--target); }
+.seq-fn-more { width: var(--target); height: var(--target); padding: 0; opacity: .35; transition: opacity .12s; }
 .seq-fn-more svg { width: 16px; height: 16px; }
 .seq-fn:is(:hover, :focus-within) .seq-fn-more { opacity: 1; }
 .seq-fn-rename { flex: 1 1 auto; width: 100%; padding: 2px 6px; font-size: 14px; font-weight: 600; }
 .seq-fn.fresh { box-shadow: 0 0 0 2px var(--accent), var(--card-shadow); }
 .seq-fn.sent { box-shadow: 0 0 0 2px var(--accent-soft), var(--card-shadow); }
 .seq-fn.missing .seq-fn-name { text-decoration: line-through; color: var(--muted); }
+/* a VI's translation among the experiments: not pressed as a whole (it goes into the sequence only once kept); a
+   draft's Review, one translating its turning mark, one not translated its why and × */
+.seq-fn.seq-draft { cursor: default; }
+.seq-draft > .seq-spin { flex: none; color: var(--muted); }
+.seq-fn > .seq-review { flex: none; margin-left: auto; margin-right: 2px; }
 .seq-fns-foot { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.seq-fns-foot .btn { flex: 1 1 auto; }   /* wrapped, they fill their rows: no short button left alone on one */
 
 /* a step, typed: a card of the step's colour with the functions (app.js's step row), one line (Step, Set | Wait |
    Settle) until it is used: then its fields under that line; a pasted item under them */
@@ -201,7 +207,7 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
 .seq-stepcard.used { padding-bottom: 8px; }
 .seq-step-head { display: flex; align-items: center; gap: 8px; min-height: calc(var(--row-h, 36px) - 8px); cursor: default; }
 .seq-step-name { flex: none; font-size: 14px; font-weight: 600; }
-.seq-step-head .seq-kinds button { min-height: 28px; padding-inline: 9px; }   /* at least 28 px tall, as every control */
+.seq-step-head .seq-kinds button { min-height: var(--target); padding-inline: 9px; }   /* at least a target's floor tall, as every control */
 .seq-step-head { flex-wrap: wrap; row-gap: 4px; }
 .seq-stepcard:not(.used) > :not(.seq-step-head), .seq-stepcard:not(.used) .step-go { display: none; }
 .seq-step-head .step-go { margin-left: auto; }
@@ -219,7 +225,7 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
 .seq-pop { position: fixed; z-index: 70; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius);
   background: var(--panel); box-shadow: var(--shadow); }
 .seq-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
-.seq-swatch { width: 24px; height: 24px; padding: 0; border: 2px solid var(--panel); border-radius: 50%; cursor: pointer;
+.seq-swatch { width: 30px; height: 30px; padding: 0; border: 2px solid var(--panel); border-radius: 50%; cursor: pointer;
   box-shadow: 0 0 0 1px var(--line-strong); }
 .seq-swatch.on { box-shadow: 0 0 0 2px var(--text); }
 .seq-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -280,8 +286,10 @@ body.seq-dragging .seq-acts, body.seq-dragging .seq-fn-more { opacity: 0 !import
   .seq-fn > .ask { height: 40px; }
   .seq-add { min-height: 44px; }
   .seq-name, .seq-bar .btn { min-height: 40px; }
+  .seq-bar .seq-hold, .seq-bar .seq-stop { min-width: 40px; justify-content: center; }   /* by their icons alone: 40 wide */
   .seq-more { min-width: 40px; min-height: 40px; }
-  .seq-step-head .seq-kinds button { min-height: 40px; }
+  .seq-step-head .seq-kinds button { min-height: 40px; min-width: 40px; }
+  .seq-search, .seq-fns-foot .btn, .seq-fn > .seq-review { min-height: 40px; }   /* ＋ New function, New scan, Paste a plan */
   .seq-file, .seq-tick { min-height: 40px; }   /* the dialogs' rows: a file, a block to sweep */
   .seq-swatch { width: 40px; height: 40px; }
 }

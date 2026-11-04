@@ -33,6 +33,10 @@ def test_a_switch_thumb_slides_to_the_one_turned_on():
     assert "transition: transform .42s var(--ease-switch), width .42s var(--ease-switch)" in motion
     assert ".seg-thumb.still { transition: none; }" in motion   # placed, not slid, when it comes into sight
     assert ":is(#mode-seg, #runs-seg, .seg).has-thumb > button.on { background: none;" in motion
+    # nothing moves for the keyboard: the arrows on Chat | Home move its thumb still, as segKeys does
+    keys = _fn(JS, "initMode")
+    keys = keys[keys.index('$("mode-seg").addEventListener("keydown"'):]
+    assert keys.index('t.classList.add("still")') < keys.index("setMode(")
 
 
 def test_the_top_bar_buttons_never_move_and_say_their_names():
@@ -49,7 +53,13 @@ def test_the_top_bar_buttons_never_move_and_say_their_names():
     assert "b.dataset.tip = say;" in _fn(JS, "syncSide")
     assert "#toggle-sidebar { position: relative; }" in motion
     assert "#toggle-sidebar[data-tip]::after { left: 0; transform: translate(0, -4px); }" in motion
-    assert "#toggle-sidebar[data-tip]:is(:hover, :focus-visible)::after { opacity: 1; transform: none;" in motion
+    assert "#toggle-sidebar[data-tip]:focus-visible::after { opacity: 1; transform: none;" in motion
+    # on hover only where a pointer hovers: a touch screen keeps :hover on what was tapped, and the name would stay
+    hover = motion[motion.index("@media (hover: hover) {"):]
+    hover = hover[:hover.index("\n}\n")]
+    for text in (".topbar-right .pill[data-tip]:hover::after { opacity: 1;", "#toggle-sidebar[data-tip]:hover::after { opacity: 1;"):
+        assert text in hover, text
+    assert ":is(:hover, :focus-visible)::after" not in motion
 
 
 def test_what_comes_in_and_what_moves():
@@ -59,6 +69,10 @@ def test_what_comes_in_and_what_moves():
                  "dialog[open] { animation: k-pop-in", ".k-in, .seq-ed.seq-ed-in { animation: k-reveal",
                  ".seq-card.seq-in { animation: k-card-in"):
         assert text in motion, text
+    # a view swaps at once and only fades in (.15 s); what comes in takes .2 s or less, with no scale
+    assert "@keyframes k-view-in { from { opacity: 0; } }" in motion and "scale(" not in motion
+    assert "k-view-in .15s" in motion and "k-pop-in .2s" in motion and "k-card-in .2s" in motion
+    assert "scroll-behavior: smooth" not in CSS   # a scroll the page asks for (the chat to its end) lands at once
     ease = _fn(JS, "easeIn")
     assert 'el.classList.add("k-in")' in ease and 'el.classList.remove("k-in")' in ease and "e.target !== el" in ease
     assert "if (!folded) easeIn(part);" in JS   # Settings' folds
@@ -81,6 +95,11 @@ def test_none_of_it_when_the_person_asks_for_less_motion():
     assert ".seg-thumb, .topbar-right .pill[data-tip]::after, #toggle-sidebar[data-tip]::after" in calm
     assert "transition: none" in calm
     assert "dialog[open]" in calm and "animation: none" in calm and ".seq-card" in calm
+    # nothing slides, pulses, spins or grows; colours fade over .15 s or less (reduced motion)
+    for text in (".toast { transform: translate(-50%, 0); transition: opacity .15s; }",
+                 ".live-dot, #open-scan.live::after { animation: none; }", ".spinner { animation: none;",
+                 ".bar i, .setup-wait-bar span { transition: none; }", "button.link { transition-duration: .15s; }"):
+        assert text in calm, text
     assert 'matchMedia("(prefers-reduced-motion: reduce)")' in SEQ
     for src, names in ((JS, ("thumb", "easeIn", "initMotion")), (SEQ, ("flipFrom", "flipTo", "rise", "stepKinds"))):
         for name in names:

@@ -334,7 +334,7 @@ def test_the_pane_has_a_dataset_picker_and_what_the_subagent_made_of_it():
     opened = _js("openAnalysis")
     assert "analyzeRun(run)" in opened and "steps: ev.steps || []" in opened
     assert 'case "analysis": if (here) openAnalysis(ev); break;' in JS
-    assert "openAnalysis({ run: runId })" in JS   # a run's Analyze
+    assert "openAnalysis({ run: runId, asked: true })" in JS   # a run's Analyze, to the screen even in full screen
     css = (STATIC / "app.css").read_text(encoding="utf-8")
     for rule in (".an-figure {", ".an-taken {", ".an-status {", ".an-summary {"):
         assert rule in css, rule

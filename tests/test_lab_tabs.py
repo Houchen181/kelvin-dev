@@ -44,7 +44,10 @@ def test_the_strip_is_the_lab_and_nothing_folds():
         assert gone not in js.replace(_function(js, "initSettingFolds"), ""), gone   # Settings' folds are theirs
     assert "lab-tabs" not in css and not re.search(r"/\* /?v3[A-C] \*/", css) and not re.search(r"// /?v3[A-C]", js)
     lab = page[page.index('<aside id="labpanel"'):page.index("</aside>", page.index('<aside id="labpanel"'))]
-    assert "3C" not in lab and "fold" not in lab
+    # no part folds; the one fold is Alarm history's disclosure over its list (as an approval's details)
+    rest = lab.replace(' aria-controls="alarm-history-fold"', "").replace(
+        '<div id="alarm-history-fold" class="k-fold" inert><div class="k-fold-in">', "")
+    assert "3C" not in lab and "fold" not in rest
     build = _function(js, "initLabTabs")
     assert "strip.hidden" not in build and '"open"' not in build
     # what an earlier Lab's folds kept on this browser, by part (lh.labFold.<part>) or by heading (lh.fold.<heading>),
@@ -66,9 +69,10 @@ def test_every_way_into_a_part_chooses_its_tab():
     assert 'chooseLabPart(form.closest(".lab-part").dataset.part);' in _function(js, "partForm")   # Add…, a note's pencil
     assert "partForm(\"labmem-form\", true);" in _function(js, "editLabNote")
     # nothing else chooses a part: every reveal goes through partForm, the strip or its keys (and, wide or narrowing,
-    # the part pressed or holding the focus)
+    # the part pressed or holding the focus), or a link to the Lab on one part (paneShow: an alarm's)
     callers = [m.start() for m in re.finditer(r"chooseLabPart\(", js)]
-    allowed = [_function(js, n) for n in ("partForm", "initLabTabs", "labTabKeys", "chooseLabPart", "labTabRoles")]
+    allowed = [_function(js, n) for n in ("partForm", "initLabTabs", "labTabKeys", "chooseLabPart", "labTabRoles",
+                                          "paneShow")]
     for at in callers:
         assert any(js.index(body) <= at < js.index(body) + len(body) for body in allowed), js[at - 80:at + 40]
     # a request waiting is asked above every part, so it shows whichever part is chosen
@@ -129,8 +133,8 @@ def test_the_chosen_part_is_kept_and_a_part_that_shows_nothing_is_never_chosen()
     assert 'const labTabShown = (id) => LAB_TABS.tabs.has(id) && !$("lab-sec-" + id).hidden;' in js
     assert 'const kept = store("lh.labPart");' in build
     assert "chooseLabPart(labTabShown(kept) ? kept : [...LAB_TABS.tabs.keys()].find(labTabShown));" in build
-    assert choose.startswith("function chooseLabPart(id) {\n    if (!labTabShown(id)) return;")
-    assert 'store("lh.labPart", id);' in choose and 'tab.hidden = $("lab-sec-" + k).hidden;' in choose
+    assert choose.startswith("function chooseLabPart(id, keep = true) {\n    if (!labTabShown(id)) return;")
+    assert 'if (keep) store("lh.labPart", id);' in choose and 'tab.hidden = $("lab-sec-" + k).hidden;' in choose
     assert ".filter((t) => !t.hidden)" in _function(js, "labTabKeys")   # the keys step over a part not shown
 
 
@@ -187,10 +191,16 @@ def test_the_lab_small_fixes_hold():
     # New device… on one line; the strip's tabs, All | Active and Mine | Everyone 30 px tall (24 px or more at 85 %)
     assert "#labpanel .lab-sample > .btn { flex: none; white-space: nowrap; }" in mouse
     assert "#labpanel .seg > button { min-height: 30px; }" in mouse
-    # on touch: those, a row's buttons (a watch's ×, a note's pencil and bin) and Alarm history 40 px
+    # on touch: those, a row's buttons (a watch's ×, a note's pencil and bin), Alarm history (a button.link) and a
+    # waiting request's Approve and Decline 40 px
     touch = touch[:touch.index("\n}\n")]
     assert "#labpanel .seg > button { min-height: 40px; }" in touch
-    assert "#labpanel .row-btn { min-width: 40px; }" in touch and "#labpanel .alarm-history summary { min-height: 40px;" in touch
+    assert "#labpanel .row-btn { min-width: 40px; }" in touch
+    assert "#labpanel :is(.btn.small, button.link, .approval-actions .btn, .row-btn, .inst-tools input, .mount-select) " \
+        "{ min-height: 40px; }" in touch
+    page = _read("index.html")
+    assert '<button id="alarm-history-btn" class="link disclose" type="button" aria-expanded="false" ' \
+        'aria-controls="alarm-history-fold">' in page and "<summary>Alarm history" not in page
     # a narrow Lab's marks sit wholly above their tabs' names, and the strip leaves them room under Hands on the sample
     narrow = fit_d[fit_d.index("@container lab (max-width: 371px)"):]
     narrow = narrow[:narrow.index("\n}\n")]
@@ -198,6 +208,50 @@ def test_the_lab_small_fixes_hold():
     assert "top: calc(50% - 27px); right: -4px; min-width: 16px; height: 16px;" in narrow
     assert "#labpanel .lab-tab-mark.dot { top: calc(50% - 19px); right: -1px; min-width: 8px; height: 8px; padding: 0; }" in narrow
     assert "Number(mark) === 1" in _function(js, "labTabMark")
+
+
+def test_a_poll_keeps_a_press_the_focus_and_what_was_switched():
+    js, css = _read("app.js"), _read("app.css")
+    # the instrument rows are kept by name and drawn again only when what they draw changed (rowSig); the readings that
+    # move at every poll are written in place; nothing is replaced while a pointer is down on the list
+    draw = _function(js, "renderInstruments")
+    assert "rowSig(inst)" in draw and "PANEL.rows.get(inst.name)" in draw and "instHead(inst)" in draw
+    assert "if (PANEL.pressed && Date.now() - PANEL.pressed < 5000) { PANEL.later = true; return; }" in draw
+    assert "shown.map(instrumentRow)" not in js and "holdInstruments();" in js
+    assert "inst.enabled, PANEL.switching.get(inst.name), inst.state" in _function(js, "rowSig")
+    # a press holds the list's redraws until its click (a tap's comes a moment after pointerup), or 400 ms after it is
+    # let go; a cancelled press lets go at once
+    hold = _function(js, "holdInstruments")
+    for text in ('list.addEventListener("pointerdown", () => { clearTimeout(letGo); PANEL.pressed = Date.now(); });',
+                 'document.addEventListener("pointerup", () => { if (PANEL.pressed) letGo = setTimeout(release, 400); }, true);',
+                 'document.addEventListener("pointercancel", () => { if (PANEL.pressed) release(); }, true);',
+                 'list.addEventListener("click", () => { if (PANEL.pressed) setTimeout(release, 0); });',
+                 "if (PANEL.later) { PANEL.later = false; renderInstruments(); }"):
+        assert text in hold, text
+    # a poll sent before a switch was answered does not turn the switch back: that instrument keeps what the page had
+    poll = _function(js, "pollState")
+    assert poll.index("const sent = Date.now();") < poll.index('api("/api/state")')
+    assert "freshInstruments(s.instruments, sent)" in poll
+    assert "PANEL.switchedAt.set(name, Date.now());" in _function(js, "switchInstrument")
+    fresh = _function(js, "freshInstruments")
+    assert "PANEL.switchedAt.get(i.name) > sent && was.has(i.name)" in fresh
+    assert "{ ...i, enabled: was.get(i.name).enabled, state: was.get(i.name).state }" in fresh
+    # the requests waiting are changed in place, so a focused Approve or Decline keeps its focus
+    assert '$("lab-pending").replaceChildren' not in js
+    # Add…'s form shut from inside (Watch, Keep, Cancel) gives the focus back to its Add…
+    assert "if (!open && btn && form.contains(document.activeElement)) btn.focus({ preventScroll: true });" \
+        in _function(js, "partForm")
+    # a request's countdown in minutes from 90 s and in hours from 90 min (one escalated to a phone may wait 12 hours),
+    # changing unit at the same points in both languages
+    assert '"Declines itself in " + inTime(left)' in _function(js, "makeApproval")
+    assert 'function inTime(s) { return s < 90 ? s + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(1) + " h"; }' in js
+    assert ('(n < 90 ? n + " 秒" : n < 5400 ? Math.round(n / 60) + " 分钟" : (n / 3600).toFixed(1) + " 小时")'
+            ' + "后自动拒绝"') in js
+    # an instrument's "!" badge: 12 px words on the danger fill, in its own ink (white is 3.5:1 in dark)
+    assert ".inst-count.err { background: var(--danger); color: var(--danger-ink); }" in css
+    # the Sample select, cut, says so
+    rule = css[css.index(".mount-select {"):]
+    assert "text-overflow: ellipsis;" in rule[:rule.index("}")]
 
 
 def test_the_strip_fits_every_lab_and_keeps_the_rules():

@@ -1,4 +1,4 @@
-"""The chat column's controls follow one rule per kind of control (the design brief of 2-3 Nov 2026, 1.3), checked in
+"""The chat column's controls follow one rule per kind of control, checked in
 the page's own files. Incognito is a mode of the chat, a toggle button: on, even from Home, it shows the chat; off, or
 another chat opened meanwhile, forgets the incognito chat, asking "Forget this chat?" first once it holds messages,
 and off goes back to the chat before; nothing of it is remembered. popMenu draws a checkable item in both states and
@@ -198,8 +198,8 @@ def test_the_chat_column_fits_and_its_targets_are_big_enough():
     assert re.search(r"\.suggestion \{[^}]*min-height: 48px", mine)
     assert ".sidebar .row-btn { min-width: 30px; min-height: 30px; }" in mine   # 24 px or more at 85 %
     assert ".composer textarea { min-height: 30px; padding-block: 4px; }" in mine   # the message box, a target too (was 26.5)
-    assert ".sidebar button.link { min-height: 28px; }" in mine and ".composer-row :is(select, .compare-btn) { min-height: 30px; }" in mine
-    assert ".attach-x { display: inline-grid; place-items: center; min-width: 28px; min-height: 28px;" in mine   # an attachment's ×
+    assert ".sidebar button.link { min-height: var(--target); }" in mine and ".composer-row :is(select, .compare-btn) { min-height: 30px; }" in mine
+    assert ".attach-x { display: inline-grid; place-items: center; min-width: var(--target); min-height: var(--target);" in mine   # an attachment's ×
     touch = mine[mine.index("@media (pointer: coarse)"):]
     touch = touch[:touch.index("\n}\n")]
     for rule in (".sidebar .row-btn { min-width: 40px; min-height: 40px; }", ".menu-item { min-height: 44px; }",

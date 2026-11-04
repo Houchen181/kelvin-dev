@@ -10,6 +10,15 @@
     live: new Map(), answering: new Set(), unread: new Set(), asking: new Set() };
   Object.defineProperty(S, "streaming", { get: () => !!S.chatId && S.live.has(S.chatId) });   // this chat is answering
   const liveHere = () => S.live.get(S.chatId);
+  // the focus ring is the keyboard's: a press of the mouse or a finger marks <html> (k-pointer) until the next key, so
+  // what it pressed, and what the page gives the focus after it, draws no ring (app.css); a key brings the rings back
+  // before the focus moves. Shift, Ctrl, Alt or the Windows key, alone or held (Alt+Tab to another window and back), is
+  // not the keyboard moving about the page, and leaves the mark
+  document.addEventListener("pointerdown", () => document.documentElement.classList.add("k-pointer"), true);
+  document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey || /^(Shift|Control|Alt|AltGraph|Meta|OS|CapsLock)$/.test(e.key)) return;
+    document.documentElement.classList.remove("k-pointer");
+  }, true);
 
   // ------------------------------------------------------------------ helpers
   function h(tag, attrs, ...kids) {
@@ -190,38 +199,36 @@
     try { r = await api("/api/roles"); } catch (e) { $("roles-state").textContent = e.message; return; }
     ROLESUI.data = r;
     $("roles-box").hidden = !r.accounts;   // roles are people's: they need accounts
-    $("roles-state").textContent = r.on
-      ? "On" + (r.my_role ? ": you are " + AN[r.my_role] : "") + ". " + r.people.map((p) => p.name + ": " + p.role
-          + (p.given ? "" : " (no role given)")).join("; ") + "."
-      : "Off: everyone at this computer is equal." + (r.pin ? "" : " Roles need the lab owner's PIN.");
-    $("roles-edit").textContent = r.on ? "Change…" : "Give roles…";
-    $("roles-edit").disabled = !r.pin;
+    $("roles-state").textContent = (r.on ? "On" + (r.my_role ? ": you are " + AN[r.my_role] : "") + "."
+      : "Off: everyone at this computer is equal.") + (r.pin ? "" : " Roles need the lab owner's PIN.");
+    if (!$("roles-list").children.length) rolesFill();
+    $("roles-list").disabled = !r.pin;   // greyed without a PIN, the reason its tip
+    $("roles-list").title = r.pin ? "" : "Roles need the lab owner's PIN";
     $("owner-notify-state").textContent = r.owner_notify.length
       ? "To " + r.owner_notify.join(" and ") + ", and the list in the app."
       : "Only to the list in the app.";
     $("owner-notify-off").hidden = !r.owner_notify.length;
   }
-  function editRoles() {
-    const r = ROLESUI.data;
-    if (!r) return;
-    const rows = r.people.map((p) => {
-      const sel = h("select", { "aria-label": "Role of " + p.name }, h("option", { value: "" }, "no role"),
+  // a role to pick for each person, shown as saved. Filled once per opening of Settings (openSettings empties it), so a
+  // pick waiting for Save is never let go while the dialog is open
+  function rolesFill() {
+    const r = ROLESUI.data, people = r && r.accounts ? r.people : [];
+    $("roles-list").replaceChildren(...people.map((p) => {
+      const sel = h("select", { "aria-label": "Role of " + p.name, "data-person": p.name }, h("option", { value: "" }, "no role"),
         ...r.roles_list.map((x) => h("option", { value: x }, x)));
       sel.value = r.roles[p.name] || "";
-      return { name: p.name, sel, el: h("li", { class: "role-row" }, h("span", {}, p.name), sel) };
-    });
-    $("roles-list").replaceChildren(...rows.map((x) => x.el));
-    $("roles-list").hidden = $("roles-actions").hidden = false;
-    $("roles-save").onclick = async () => {
-      const roles = {};
-      for (const x of rows) if (x.sel.value) roles[x.name] = x.sel.value;
-      try {
-        await api("/api/roles", { body: { roles } });
-        toast(Object.keys(roles).length ? "Roles saved: anyone without one is a trainee." : "Roles off: everyone is equal again.");
-        $("roles-list").hidden = $("roles-actions").hidden = true;
-      } catch (e) { toast(e.message); }
-      rolesState();
-    };
+      return h("div", { class: "role-row" }, h("span", {}, p.name), sel);
+    }));
+    $("roles-list").hidden = !people.length;
+    settingsFilled(["roles"]);   // as saved: nothing waits until a pick changes
+  }
+  // the roles picked, as Save sends them ({name: role}, a person with no role left out); none without people to pick for
+  function rolesPicked() {
+    const picks = [...$("roles-list").querySelectorAll("select[data-person]")];
+    if (!picks.length) return undefined;
+    const roles = {};
+    for (const sel of picks) if (sel.value) roles[sel.dataset.person] = sel.value;
+    return roles;
   }
   async function ownerNotify(use) {
     try {
@@ -614,13 +621,51 @@
   let toastTimer = null;
   function toast(text, onClick) {   // onClick: what a click on it does (open the chat it is about)
     let t = document.querySelector(".toast");
-    if (!t) { t = h("div", { class: "toast", role: "status" }); document.body.append(t); }
+    if (!t) { t = h("div", { class: "toast", role: "status" }); document.body.append(t); watchToast(); }
     t.textContent = text;
     t.classList.toggle("link", !!onClick);
+    try { placeToast(t); } catch (e) { t.removeAttribute("style"); }   // else where app.css puts it: the window's foot
     t.onclick = onClick ? () => { t.classList.remove("show"); onClick(); } : null;
     t.classList.add("show");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove("show"), onClick ? 8000 : 4000);
+  }
+  // where a toast stands: just above the message box, or above what opens over it (the wake bar, the slash or Compare
+  // menu), centred on the main column; on Home above the main column's foot (the terminal's top, when it shows there);
+  // with a pane alone on the screen above its foot, or above the band there (the editor's Run, Team chat's box). Never
+  // over a control of the composer. Rects are the screen's pixels, so each length is divided by the page size
+  function placeToast(t) {
+    const z = pageZoom(), box = (el) => {
+      const r = el && el.getClientRects().length ? el.getBoundingClientRect() : null;
+      return r && r.width > 0 && r.height > 0 ? r : null;
+    };
+    const main = box(document.querySelector("#app .main")), app = box($("app"));
+    const area = main && main.height > 80 ? main : app;
+    if (!area) { t.removeAttribute("style"); return; }
+    const tops = (sel) => [...document.querySelectorAll(sel)].map(box).filter(Boolean).map((r) => r.top);
+    const over = area === main ? tops("#composer, #wake-bar, #composer :is(.slash-menu, .pane-menu)")
+      : tops("#app :is(.ed-foot, .team-form, .team-name-form)");
+    const term = area === main ? box($("termpane")) : null;
+    const foot = term && term.top - area.top > 80 ? term.top : area.bottom;
+    const top = over.length ? Math.min(...over) - 10 : foot - 24;
+    t.style.left = (area.left + area.width / 2) / z + "px";
+    t.style.bottom = (window.innerHeight - top) / z + "px";
+    t.style.maxWidth = Math.max(160, area.width / z - 32) + "px";
+  }
+  // while a toast shows it is placed again whenever what it stands over moves: a panel shown or put away, full screen,
+  // Chat | Home, the window, the message box growing (a file added, a long message) or a menu opening over it
+  function watchToast() {
+    const again = () => {
+      const t = document.querySelector(".toast.show");
+      if (t) { try { placeToast(t); } catch (e) { /* stays where it was */ } }
+    };
+    document.addEventListener("kelvin:layout", again);
+    window.addEventListener("resize", again);
+    if (!("ResizeObserver" in window)) return;
+    const seen = new ResizeObserver(again);
+    for (const el of [document.querySelector("#app .main"), $("composer"), $("wake-bar"), $("slash-menu"), $("compare-menu")]) {
+      if (el) seen.observe(el);
+    }
   }
 
   // ------------------------------------------------------------------ markdown (safe subset)
@@ -758,12 +803,13 @@
         h("span", { class: "key" }, h("i", { style: "background:var(--series-1)" }), "measured"),
         h("span", { class: "key" }, h("i", { style: "background:var(--fit)" }), fit.label)));
     }
-    // drawn at the real pixel width so its text keeps its size; with opts.fill as tall as its place too (never under 140)
+    // drawn at the real pixel width so its text keeps its size; with opts.fill as tall as its place too, never under the
+    // least app.css gives that place (120 in a run's view, 140 elsewhere), so it is drawn inside its card
     if (opts.fill) box.classList.add("fill");
     let drawn = "";
     const draw = () => {
       const W = Math.max(240, Math.round(holder.clientWidth));
-      const H = opts.fill ? Math.max(140, Math.round(holder.clientHeight)) : opts.height || 200;
+      const H = opts.fill ? Math.max(120, Math.round(holder.clientHeight)) : opts.height || 200;
       if (W + "x" + H === drawn) return;
       drawn = W + "x" + H;
       holder.replaceChildren(build(W, H));
@@ -903,7 +949,8 @@
     monotonic: "monotonic", structured: "structure", value: "value", none: "too few points" };
 
   // a finished run's automatic analysis: {box: its assessment, two lines and the rest a press away (a disclosure: its
-  // chevron, or a click on it), table: its key results (or null), rows: how many}; the run view folds the table
+  // chevron, or a click on it), table: its key results (or null), rows: how many, whole(on): the whole assessment
+  // shown or folded without a press, when there is more than its two lines}; the run view folds the table
   function analysisBlock(a) {
     const box = h("div", { class: "analysis" });
     const ok = !a.issues.length;
@@ -913,11 +960,11 @@
     const more = h("button", { class: "assess-more", type: "button", "aria-expanded": "false", "aria-controls": body.id,
                                title: "The whole assessment", "aria-label": "The whole assessment", hidden: true }, icon("chev"));
     const as = h("div", { class: "assess" + (ok ? "" : " warn") }, h("span", { class: "assess-icon" }, icon(ok ? "check" : "warn")), body, more);
-    const flip = () => {
-      const on = more.getAttribute("aria-expanded") !== "true";
+    const show = (on) => {
       more.setAttribute("aria-expanded", String(on));
       as.classList.toggle("open", on);
     };
+    const flip = () => show(more.getAttribute("aria-expanded") !== "true");
     more.addEventListener("click", (e) => { e.stopPropagation(); flip(); });
     as.addEventListener("click", (e) => { if (!more.hidden && !e.target.closest("a, button") && !String(getSelection()).trim()) flip(); });
     // closed: the assessment's first two lines; the chevron is there while there is more (Next, an issue, a third line)
@@ -925,6 +972,11 @@
     const cut = () => { more.hidden = !as.classList.contains("open") && !more2 && text.scrollHeight <= text.clientHeight + 1; };
     if (window.ResizeObserver) new ResizeObserver(cut).observe(text);
     cut();
+    const whole = (on) => {
+      if (on && !more2 && text.scrollHeight <= text.clientHeight + 1) return;   // two lines say it all
+      show(on);
+      cut();
+    };
     box.append(as);
     const rows = [];
     for (const s of a.series.slice(0, 6)) {
@@ -936,7 +988,7 @@
       for (const r of s.results) rows.push(h("tr", {}, h("td", {}, r.name), h("td", {}, r.value)));
     }
     const table = rows.length ? h("div", { class: "results" }, h("table", {}, h("tbody", {}, ...rows))) : null;
-    return { box, table, rows: rows.length };
+    return { box, table, rows: rows.length, whole };
   }
   // a part of the run view a press away: a small button that keeps its name, its chevron turning while the part shows
   // under the row of these buttons (aria-expanded); onOpen each time it opens
@@ -1007,9 +1059,12 @@
     tab.status = status;
     liveDots();
   }
-  function liveDots() {   // a run running: a dot on the Runs button, and on Scan while the Sequence is shown
+  // a run running: a dot on the Runs button (its sequence's count in the accent instead, where it shows one), and on
+  // Scan while the Sequence is shown
+  function liveDots() {
     const live = [...RUNS.tabs.values()].some((t) => t.status === "running");
     $("runs-dot").hidden = !live;
+    $("toggle-runs").classList.toggle("run-live", live);
     $("open-scan").classList.toggle("live", live);
   }
   function selectRun(runId) {
@@ -1105,15 +1160,23 @@
     toggleRuns(true);
   }
 
-  // a run started (seen in the chat stream or in the lab state): its view, the Scan's from now on, shown and followed;
-  // while the pane shows the Sequence the Sequence stays, and Scan's dot says a run is on
+  // a run started (seen in the chat stream or in the lab state): its view, the Scan's from now on, shown and followed
   function noticeRun(runId, plan) {
     if (RUNS.tabs.has(runId) || RUNS.dismissed.has(runId)) return;
-    const tab = runTab(runId, plan);
-    setTabStatus(tab, "running");
-    RUNS.active = runId;
-    if (!scheduling()) openRun(runId, plan);
+    setTabStatus(runTab(runId, plan), "running");
+    showNewRun(runId, plan);
     pollLive();
+  }
+  // a run the page hears of by itself (it started, or it ended before the Runs pane saw it): the Scan's run from now
+  // on. While the pane shows the Sequence the Sequence stays, and Scan's dot says a run is on. Runs opens by itself only
+  // where it stands beside the panes open now (fitsBeside): it never puts one away, nor takes the chat's place. Else
+  // the screen stays as it is, the dot on Runs (its sequence's count in the accent, where it shows one) says a run is
+  // on, and Runs' button shows the run in the Scan
+  function showNewRun(runId, plan) {
+    RUNS.active = runId;
+    if (scheduling()) return;
+    if (fitsBeside("runpane")) openRun(runId, plan);
+    else selectRun(runId);
   }
   function scheduling() {
     return RUNS.open && RUNS.view === "schedule";
@@ -1291,7 +1354,7 @@
     });
     const key = "again:" + encodeURIComponent(tab.runId);
     const run = h("button", { class: "btn small primary", type: "button", "data-busy": "start " + key }, "Run again");
-    const later = h("button", { class: "btn small ghost", type: "button", "data-busy": key }, "Add to sequence");
+    const later = h("button", { class: "btn small", type: "button", "data-busy": key }, "Add to sequence");
     run.addEventListener("click", () => go(false, ["start", key]));
     later.addEventListener("click", () => go(true, [key]));
     if (cannot) { msg.textContent = cannot; parts.push(msg); return parts; }
@@ -1379,16 +1442,14 @@
       v.analysis.replaceChildren(...(a ? [a.box] : []));
       v.results.replaceChildren(...(a && a.table ? [a.table] : []));
       v.keys.hidden = !(a && a.table);
-      // the key results open by themselves only where there is room for them: beside the plots (the view 900 px or
-      // wider), a window not short (tight), and 14 rows or fewer
-      const wide = tab.body.getBoundingClientRect().width / ((Kelvin.zoom && Number(Kelvin.zoom())) || 1) >= 900;
-      if (a && a.table && a.rows <= 14 && wide && !document.documentElement.classList.contains("fit-tight")) rvOpen(v.keys, true, null, true);
+      if (a) { v.keysPending = true; v.keysRows = a.table ? a.rows : 0; v.whole = a.whole; }
       v.charts.replaceChildren(runCharts(tab.final));
       v.plan.hidden = !tab.final.plan_text;
       v.planBox.querySelector("pre").textContent = tab.final.plan_text || "";
       v.again.hidden = false;
       runFiles(tab, v.files, v.fileView);
       if (!v.table.hidden) v.table.replaceChildren(runTable(tab.final));
+      keysOnce(tab);   // drawn whole first: judged by what it takes
       return;
     }
     if (running && !tab.timer) {  // live plots: redraw at most a few times a second
@@ -1400,6 +1461,44 @@
       }, 300);
     }
   }
+  // a finished run's key results (14 rows or fewer) and its whole assessment (Next, the issues) open by themselves only
+  // where there is room for them. Judged once, when its view first has a size: a run that finished out of sight (the
+  // Sequence shown, Runs closed) is judged when it is first shown. Beside the plots (the view 900 px or wider, a window
+  // not short): the key results, and the whole assessment when the side then holds it without scrolling. Above the
+  // plots: both, or else the key results alone, when the plots keep at least 2/5 of their width in height (no flatter
+  // than 5:2) and stay above their least (so the view needs no scrolling). Each is opened, measured and folded again in
+  // one go, before anything is drawn: nothing moves. (A plot is drawn again at its new height a moment later, so its
+  // picture is not what is measured: its place is)
+  function keysOnce(tab) {
+    const v = tab && tab.view;
+    if (!v || !v.keysPending) return;
+    const w = tab.body.getBoundingClientRect().width / layoutZoom();
+    if (!w) return;
+    v.keysPending = false;
+    const keys = v.keysRows > 0 && v.keysRows <= 14;
+    const open = (k, all) => { if (keys) rvOpen(v.keys, k, null, true); v.whole(all); };
+    if (w >= 900) {
+      if (document.documentElement.classList.contains("fit-tight")) return;
+      open(true, true);
+      if (v.side.scrollHeight > v.side.clientHeight + 1) v.whole(false);
+      return;
+    }
+    const least = parseFloat(getComputedStyle(v.charts).minHeight) || 0;   // the page's pixels, as w
+    const room = () => {
+      const c = v.charts.getBoundingClientRect(), z = layoutZoom();
+      return c.height >= c.width * 0.4 && c.height / z > least + 1;
+    };
+    for (const all of [true, false]) {
+      open(true, all);
+      if (room()) return;
+    }
+    open(false, false);
+  }
+  // shown, full screen, or the Scan shown again: then once the layout that shows it is done (Runs opening lays out
+  // after it says what is in sight), still before anything is drawn
+  const keysNow = () => keysOnce(RUNS.tabs.get(RUNS.active));
+  document.addEventListener("kelvin:layout", keysNow);
+  document.addEventListener("kelvin:seq", () => queueMicrotask(keysNow));
 
   // The side panels each open and close on their own, and each keeps the width it was left at (drag its left edge).
   // Beside the main column (the chat or Home), which keeps at least CHAT_MIN pixels, they stand side by side in the
@@ -1415,13 +1514,15 @@
   // A least width is the narrowest each pane's head and rows hold at, at 85, 90 and 100 %: Runs' is its head on History
   // (Sequence | History with a two-digit count, Report…, ⤢, ×), 362 on a touch screen, whose head buttons are 40 px.
   // So Runs stands beside Lab or Analysis at 1280×720 (90 %: 1422 page px) with the list shown, and on an iPad's 1180
-  // with the list hidden. The scan editor does not fit beside Runs there (it holds down to 318) and takes its place
+  // with the list hidden. The scan editor does not fit beside Runs there (it holds down to 318) and takes its place.
+  // On a touch screen the editor's fields are 40 px, and its body fits whole only with its two-column rows (a pane of
+  // 790 or more): it needs 800 there, so on an iPad it takes the content area alone rather than scroll inside
   const CHAT_MIN = 520, SIDEBAR_W = 264;
   const PANES = {   // id: [open?, its column, its least width, where its width is kept, its least on a touch screen]
     teampanel: [() => TEAM.open, "workcol", 280, "lh.teamWidth"],
     anpane: [() => ANA.open, "workcol", 292, "lh.anWidth"],
     runpane: [() => RUNS.open, "workcol", 346, "lh.runsWidth", 362],
-    edpane: [() => ED.open, "workcol", 360, "lh.edWidth"],
+    edpane: [() => ED.open, "workcol", 360, "lh.edWidth", 800],
     labpanel: [() => S.labOpen, "sidecol", 292, "lh.labWidth"],
   };
   const COARSE = window.matchMedia("(pointer: coarse)");   // a touch screen
@@ -1429,7 +1530,7 @@
   const sum = (xs) => xs.reduce((a, b) => a + b, 0);
   const openPanes = () => Object.keys(PANES).filter((id) => PANES[id][0]());
   const least = (id) => (COARSE.matches && PANES[id][4]) || PANES[id][2];
-  const paneWant = (id) => PANE_W[id] || least(id);
+  const paneWant = (id) => Math.max(PANE_W[id] || 0, least(id));   // as left, never under its least (a touch screen's)
   // when each pane was last looked at (opened, or a press or the focus inside it), as a count that only grows; the
   // panes open at the last layout; whether the window is still changing size (wait); and whether the pane opening now
   // was asked for by the person or a waiting request (asked: paneShow)
@@ -1473,6 +1574,11 @@
     const open = openPanes();
     return open.length === 1 && paneRoom() < least(open[0]) ? open[0] : null;
   }
+  // a pane would stand beside the main column and the panes open now, all at their least widths: opening it puts
+  // none of them away and leaves the main column in its place (under full screen too, for when it ends)
+  function fitsBeside(id) {
+    return isOpen(id) || sum([...openPanes(), id].map(least)) <= paneRoom();
+  }
   // the layout for the panels open now, the sidebar and the window, after anything that opens, closes or sizes one
   // and on every resize; the classes say how app.css places them, in the page's own pixels (no media query: they
   // follow the page size)
@@ -1483,7 +1589,7 @@
     ROOM.shown = open;
     // One more will not fit beside the main column even at the least widths: the pane looked at least recently is put
     // away, and its toggle lays out again. Never the pane being typed in, unless the room is for one the person or a
-    // waiting request asked for (paneShow): a run that starts, or Kelvin's analyze, never takes it away mid-sentence
+    // waiting request asked for (paneShow): Kelvin's analyze never takes it away mid-sentence
     // (with no other to go, the newcomer goes, and waits for its button). Not while full screen covers them (they wait
     // under it), nor while the window is still changing size or out of sight: a window being sized, or minimized,
     // closes nothing
@@ -1619,13 +1725,14 @@
   // when it is on the screen, else brings it there (pillClick). Anything else that asks for a panel (a Home tile,
   // Analyze, Edit on a scan, a waiting request) only ever shows it (paneShow): closed, it opens; in full screen it takes
   // the screen; already on the screen it stays, and its head rings. view: Runs on its Scan ("scan") or its Sequence
-  // ("schedule")
+  // ("schedule"); the Lab on one of its parts ("watches"), or on the part chosen last on this browser ("kept")
   function pillClick(id, toggle) {
     if (paneVisible(id)) toggle(false);
     else paneShow(id);
   }
   function paneShow(id, view) {
     if (!TOGGLE[id]) return false;
+    if (id === "labpanel" && view) chooseLabPart(view === "kept" ? store("lh.labPart") : view, false);
     const there = id !== "runpane" || !view ? true : RUNS.view === view;
     if (isOpen(id)) look(id);   // asked for: looked at (one that opens is looked at as it opens)
     if (paneVisible(id) && there) { ring($(id).querySelector(":scope > header")); return true; }
@@ -1703,15 +1810,20 @@
   }
   function initPanes() {
     const kept = (key) => Number(store(key)) || 0;
-    PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(720, Math.max(420, layoutW() * 0.42)));
-    PANE_W.anpane = kept("lh.anWidth") || PANE_W.runpane;   // until it has its own: the one it shared with Runs
+    // the first time, Runs and Analysis open at 42 % of the window, never under 420: Runs up to 960 (on a big monitor
+    // a run's analysis then stands beside its plots), Analysis up to 720. A width dragged is kept, and Analysis takes
+    // Runs' kept width until it has its own
+    const wide = Math.max(420, layoutW() * 0.42);
+    PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(960, wide));
+    PANE_W.anpane = kept("lh.anWidth") || kept("lh.runsWidth") || Math.round(Math.min(720, wide));
     PANE_W.edpane = kept("lh.edWidth") || 460;
     PANE_W.labpanel = kept("lh.labWidth") || 380;
     PANE_W.teampanel = kept("lh.teamWidth") || PANE_W.labpanel;
     if (sideNarrow()) SIDE.hidden = true;   // a narrow window opens on the chat or Home, never on the list (not kept)
     for (const id of Object.keys(PANES)) {
+      // kept: the widths of the panes open (the one dragged, and those it read back), never a closed one's first width
       edgeResize($(id + "-resize"), $(id), (w) => sizePane(id, w), () => {
-        for (const p of Object.keys(PANES)) store(PANES[p][3], String(PANE_W[p]));
+        for (const p of openPanes()) store(PANES[p][3], String(PANE_W[p]));
       });
       // looking at a pane: a press or the focus inside it (opening it is one too: fitLayout); kept with the layout
       const looked = () => { look(id); layoutSaid(); };
@@ -1901,7 +2013,7 @@
     out.eln = runButton("Lab notebook", "The run's record as Markdown with its plots, for a lab notebook (ELN)", "download",
       () => fetchDownload("/api/runs/" + encodeURIComponent(runId) + "/eln", runId + ".zip", "lab notebook record"));
     out.analyze = runButton("Analyze", "Open this run in the Analysis pane", null,
-      () => openAnalysis({ run: runId }));   // Kelvin's analysis subagent works on it there
+      () => openAnalysis({ run: runId, asked: true }));   // Kelvin's analysis subagent works on it there
     return out;
   }
   // a file Kelvin's code writes, downloaded with the access key (its name from its Content-Disposition)
@@ -2431,7 +2543,7 @@
   // the card itself, what is approved and the record stay as Kelvin wrote them, and English is one click away
   const CARD_UI = { "zh-Hans": { "Approve": "批准", "Decline": "拒绝", "Approved": "已批准", "Declined": "已拒绝",
     "Already closed": "已关闭", "Closed": "已关闭", "Auto-approved": "自动批准", english: "English", shown: "中文",
-    declines: (n) => n + " 秒后自动拒绝" } };
+    declines: (n) => (n < 90 ? n + " 秒" : n < 5400 ? Math.round(n / 60) + " 分钟" : (n / 3600).toFixed(1) + " 小时") + "后自动拒绝" } };
   function cardWords() { return CARD_UI[(S.settings && S.settings.card_language) || ""] || null; }
   function cardSay(text) { const w = cardWords(); return (w && typeof w[text] === "string") ? w[text] : text; }
   async function localizeCard(ev, parts) {
@@ -2513,7 +2625,13 @@
     localizeCard(ev, { title: text, list, where });
     let left = ev.seconds_left;
     const words = cardWords();
-    const tick = () => { count.textContent = left > 0 ? (words ? words.declines(left) : "Declines itself in " + left + " s") : ""; left -= 1; };
+    // its time left in seconds under 90, in whole minutes under 90 min, else in hours (inTime), in either language: a
+    // request escalated to a phone may wait up to 12 hours
+    const tick = () => {
+      const t = left > 0 ? (words ? words.declines(left) : "Declines itself in " + inTime(left)) : "";
+      if (count.textContent !== t) count.textContent = t;
+      left -= 1;
+    };
     tick();
     const timer = setInterval(tick, 1000);
     const card = {
@@ -2635,7 +2753,7 @@
       const fresh = live && !RUNS.tabs.has(runId) && !RUNS.dismissed.has(runId);   // over before the Runs pane saw it
       const tab = fresh ? runTab(runId, step.card.plan || runId.replace(/^\d{8}-\d{6}-/, "")) : RUNS.tabs.get(runId);
       if (tab && !tab.final) { setTabStatus(tab, "finishing"); loadFinal(tab); }   // the Analysis pane hears of it
-      if (fresh) openRun(runId, tab.plan);
+      if (fresh) showNewRun(runId, tab.plan);
     }
     runProgress(ev) {  // the data go to the runs pane; the conversation keeps a compact card
       const step = this.steps.get(ev.call_id);
@@ -3860,13 +3978,15 @@
   // text files: scripts, notebooks, notes and settings, given to the model as text (agent.py TEXT_FILES)
   const TEXT_FILE = /\.(pyw?|ipynb|m|jl|r|c|h|cpp|hpp|cs|java|js|ts|sh|ps1|bat|cmd|vb|bas|ino|pro|ipf|tex|bib|md|rst|log|json|ya?ml|toml|ini|cfg|conf|xml|html?)$/i;
   const isText = (f) => TEXT_FILE.test(f.name || "");
-  function addFiles(list) {
+  function addFiles(list) {   // the files taken show first, then why one was not: the toast stands above them
+    let refused = "";
     for (const f of list) {
-      if (!isData(f) && !isText(f) && !/^image\//.test(f.type) && f.type !== "application/pdf") { toast((f.name || "That file") + ": Kelvin takes pictures, PDFs, data files (CSV, Excel, NumPy, TIFF…) and text files (scripts, notebooks, notes)."); continue; }
-      if (ATT.items.length >= 10) { toast("Up to 10 files with one message."); break; }
+      if (!isData(f) && !isText(f) && !/^image\//.test(f.type) && f.type !== "application/pdf") { refused = (f.name || "That file") + ": Kelvin takes pictures, PDFs, data files (CSV, Excel, NumPy, TIFF…) and text files (scripts, notebooks, notes)."; continue; }
+      if (ATT.items.length >= 10) { refused = "Up to 10 files with one message."; break; }
       ATT.items.push(f);
     }
     renderAttachments();
+    if (refused) toast(refused);
   }
   function renderAttachments() {
     $("attach-list").replaceChildren(...ATT.items.map((f, i) => {
@@ -4567,10 +4687,14 @@
   // ------------------------------------------------------------------ lab panel
   // switching: an instrument's switch on its way to the server (name -> the state asked for), drawn busy in that state;
   // refused: why, shown under its row until it is switched again. everyone: Activity's Mine | Everyone (lh.labEveryone).
+  // switchedAt: when each switch's answer came (a poll sent before that says what was before). rows: each instrument's
+  // row as drawn, by name, with what it draws (rowSig); order: the names in the list. pressed: when a pointer went down
+  // on the list (0: none), later: a redraw waiting for it to be let go
   // rename: the instrument whose name is being changed ({name, value typed, msg, bad, busy})
   const OPEN = new Set(), SHOW_SETTINGS = new Set();
   const PANEL = { filter: "", activeOnly: store("lh.activeOnly") === "1", instruments: [], loose: new Map(),
                   everyone: store("lh.labEveryone") === "1", switching: new Map(), refused: new Map(), eventsShown: "",
+                  switchedAt: new Map(), rows: new Map(), order: "", pressed: 0, later: false,
                   rename: null };
   const instId = (name) => "inst-" + String(name).replace(/[^\w-]/g, "_");
   // a choice of two as a radio group (.seg): the chosen side raised, checked and the one tab stop
@@ -4608,20 +4732,34 @@
       h("span", { class: "k" }, item.label),
       h("span", { class: "v" }, item.armed ? h("span", { class: "tag-armed" }, "armed") : null, item.value));
   }
-  function instrumentRow(inst) {
-    const open = OPEN.has(inst.name);
+  // an instrument's headline reading (its value and unit) and its row's tip, which repeats it: the part of a row that
+  // moves at every poll, written in place (renderInstruments)
+  function instHead(inst) {
     const head = inst.readings.find((r) => r.name === inst.headline);
     const [hv, hu] = head ? splitValue(head.value) : ["", ""];
+    const state = inst.state === "unavailable" ? "not connected" : inst.enabled === false ? "switched off"
+      : inst.state === "error" ? "not responding" : inst.state === "active" ? inst.active + " active" : "safe";
+    return { hv, hu, tip: inst.model + " · " + state + (head ? " · " + head.label + " " + head.value : "") };
+  }
+  // everything else a row draws: it is drawn again only when this changes, so a press on it is not lost to a redraw
+  function rowSig(inst) {
+    const open = OPEN.has(inst.name), rn = PANEL.rename && PANEL.rename.name === inst.name ? PANEL.rename : null;
+    return JSON.stringify([open, SHOW_SETTINGS.has(inst.name), inst.enabled, PANEL.switching.get(inst.name), inst.state,
+      inst.active, PANEL.refused.get(inst.name) || "", inst.why || "", inst.install || null, inst.model, inst.kind, inst.headline,
+      open ? [inst.readings.filter((r) => r.name !== inst.headline), inst.drives, inst.settings, inst.address || "", rn ? [rn.busy, rn.msg, rn.bad] : null]
+        : inst.drives.filter((d) => d.away)]);
+  }
+  function instrumentRow(inst) {
+    const open = OPEN.has(inst.name);
+    const { hv, hu, tip } = instHead(inst);
     const off = inst.enabled === false;
     const missing = inst.state === "unavailable";   // could not be connected (its package, the instrument itself)
-    const stateText = missing ? "not connected" : off ? "switched off" : inst.state === "error" ? "not responding"
-      : inst.state === "active" ? inst.active + " active" : "safe";
     const chev = icon("chev"); chev.classList.add("chev");
     const count = inst.state === "active" ? h("span", { class: "inst-count" }, String(inst.active))
       : inst.state === "error" || missing ? h("span", { class: "inst-count err" }, "!") : h("span", { class: "inst-count none" });
     const id = instId(inst.name);
     const row = h("button", { class: "inst-row", type: "button", "aria-expanded": String(open), "aria-controls": open ? id + "-body" : null,
-      "data-k": "row " + inst.name, title: inst.model + " · " + stateText + (head ? " · " + head.label + " " + head.value : "") },
+      "data-k": "row " + inst.name, title: tip },
       h("span", { class: "inst-icon" }, icon(ICONS[inst.kind] ? inst.kind : "instrument")),
       h("span", { class: "inst-id" }, inst.name),
       h("span", { class: "inst-model" }, inst.model),
@@ -4699,7 +4837,7 @@
     });
     const ok = h("button", { class: "btn small primary", type: "button", disabled: r.busy, "data-k": "rename-ok " + inst.name }, "Rename");
     ok.addEventListener("click", () => renameInstrument(inst.name));
-    const no = h("button", { class: "btn small ghost", type: "button", disabled: r.busy, "data-k": "rename-no " + inst.name }, "Cancel");
+    const no = h("button", { class: "btn small", type: "button", disabled: r.busy, "data-k": "rename-no " + inst.name }, "Cancel");
     no.addEventListener("click", () => { PANEL.rename = null; renderInstruments(); });
     for (const b of [ok, no]) b.addEventListener("mousedown", (e) => e.preventDefault());   // the box keeps the focus
     return h("div", { class: "inst-tools renaming" }, h("div", { class: "inst-rename-row" }, input, ok, no),
@@ -4743,6 +4881,7 @@
     try {
       const r = await api("/api/instruments/" + encodeURIComponent(name) + "/switch", { body: { on } });
       PANEL.instruments = r.instruments;
+      PANEL.switchedAt.set(name, Date.now());
     } catch (e) {
       PANEL.refused.set(name, e.message);
       setTimeout(() => { if (PANEL.refused.get(name) === e.message) { PANEL.refused.delete(name); renderInstruments(); } }, 15000);
@@ -4764,15 +4903,61 @@
       + (unconnected ? " · " + unconnected + " not connected" : "") + (off ? " · " + off + " off" : "");
     $("seg-active").textContent = "Active" + (active + errors ? " (" + (active + errors) + ")" : "");
     segMark($("inst-seg"), PANEL.activeOnly ? "active" : "all");
-    // redrawn at every poll (the readings move): the row, switch or Settings that had the focus keeps it; never under
-    // a new name being typed (drawn once the box lets go)
+    // a pointer down on the list: nothing in it is replaced until it is let go (holdInstruments), or its click is lost
+    if (PANEL.pressed && Date.now() - PANEL.pressed < 5000) { PANEL.later = true; return; }
     const list = $("lab-status"), had = list.contains(document.activeElement) ? document.activeElement.dataset.k : null;
+    // never under a new name being typed (drawn once the box lets go)
     PANEL.drawLater = !!had && had.startsWith("rename-field ") && !!PANEL.rename && !PANEL.rename.busy;
     if (PANEL.drawLater) return;
-    list.replaceChildren(...(shown.length ? shown.map(instrumentRow)
-      : [h("div", { class: "inst-empty" }, !all.length ? "None yet." : PANEL.activeOnly && !q ? "Nothing is active." : "No instrument matches.")]));
-    const back = had && [...list.querySelectorAll("[data-k]")].find((el) => el.dataset.k === had);
+    if (!shown.length) {
+      const text = !all.length ? "None yet." : PANEL.activeOnly && !q ? "Nothing is active." : "No instrument matches.";
+      if (PANEL.order !== "\n" + text) list.replaceChildren(h("div", { class: "inst-empty" }, text));
+      PANEL.order = "\n" + text;
+      return;
+    }
+    // at every poll the readings move: a row's headline and tip are written in place, and a row is drawn again only when
+    // something else in it changed; the row, switch or Settings that had the focus keeps it
+    const names = new Set(all.map((i) => i.name));
+    for (const name of PANEL.rows.keys()) if (!names.has(name)) PANEL.rows.delete(name);
+    const rows = shown.map((inst) => {
+      const sig = rowSig(inst), kept = PANEL.rows.get(inst.name);
+      if (!kept || kept.sig !== sig) {
+        const el = instrumentRow(inst);
+        PANEL.rows.set(inst.name, { el, sig });
+        return el;
+      }
+      const { hv, hu, tip } = instHead(inst), btn = kept.el.querySelector(".inst-row"), line = btn.querySelector(".inst-headline");
+      if (btn.title !== tip) btn.title = tip;
+      if (line.textContent !== hv + hu) line.replaceChildren(hv, ...(hu ? [h("span", { class: "hu" }, hu)] : []));
+      return kept.el;
+    });
+    const order = shown.map((i) => i.name).join("\n");
+    if (order !== PANEL.order) { PANEL.order = order; list.replaceChildren(...rows); }
+    else rows.forEach((el, i) => { if (list.children[i] !== el) list.children[i].replaceWith(el); });
+    const back = had && !list.contains(document.activeElement) && [...list.querySelectorAll("[data-k]")].find((el) => el.dataset.k === had);
     if (back) back.focus({ preventScroll: true });
+  }
+  // a press on the instrument list holds its redraws until the click that follows (a tap's comes a moment after its
+  // pointerup), or 400 ms after it is let go; then the list is drawn as it is now
+  function holdInstruments() {
+    const list = $("lab-status");
+    let letGo = 0;
+    const release = () => {
+      clearTimeout(letGo);
+      PANEL.pressed = 0;
+      if (PANEL.later) { PANEL.later = false; renderInstruments(); }
+    };
+    list.addEventListener("pointerdown", () => { clearTimeout(letGo); PANEL.pressed = Date.now(); });
+    document.addEventListener("pointerup", () => { if (PANEL.pressed) letGo = setTimeout(release, 400); }, true);
+    document.addEventListener("pointercancel", () => { if (PANEL.pressed) release(); }, true);
+    list.addEventListener("click", () => { if (PANEL.pressed) setTimeout(release, 0); });
+  }
+  // a poll sent before an instrument's switch was answered says what it was before: that instrument keeps the switch's
+  // answer (its on or off, its state) until a poll sent after it
+  function freshInstruments(list, sent) {
+    const was = new Map(PANEL.instruments.map((i) => [i.name, i]));
+    return list.map((i) => (PANEL.switchedAt.get(i.name) > sent && was.has(i.name)
+      ? { ...i, enabled: was.get(i.name).enabled, state: was.get(i.name).state } : i));
   }
 
   // ------------------------------------------------------------------ chats Kelvin continues later (wake_me)
@@ -4808,10 +4993,11 @@
   }
   async function pollState() {
     let s;
+    const sent = Date.now();
     try { s = await api("/api/state"); } catch (e) { return; }
     $("agent-state").textContent = s.busy ? String(s.busy).charAt(0).toUpperCase() + String(s.busy).slice(1) : "Idle";
     $("agent-state").classList.toggle("busy", !!s.busy);
-    PANEL.instruments = s.instruments;
+    s.instruments = PANEL.instruments = freshInstruments(s.instruments, sent);   // Home reads the same
     renderInstruments();
     let lines = s.events.map((e) => ({ text: e, user: "" }));
     if (PANEL.everyone && !$("activity-who").hidden) { try { lines = (await api("/api/lab-log?n=25")).events; } catch (e) { /* keep this person's */ } }
@@ -4845,7 +5031,10 @@
       if (!card.decided) card.close("Closed", false);
       PANEL.loose.delete(id);
     }
-    $("lab-pending").replaceChildren(...[...PANEL.loose.values()].map((c) => c.el));
+    // changed in place, only as a request comes or goes: one not touched keeps its place, and a focused Approve its focus
+    const pend = $("lab-pending"), cards = new Set([...PANEL.loose.values()].map((c) => c.el));
+    for (const el of [...pend.children]) if (!cards.has(el)) el.remove();
+    for (const el of cards) if (el.parentNode !== pend) pend.append(el);
     const badge = $("lab-badge");
     badge.textContent = String(s.pending.length);
     badge.hidden = !s.pending.length;
@@ -4898,12 +5087,13 @@
   // ------------------------------------------------------------------ alarms, watches, notifications
   function incidentCard(i) {   // what the last stop left behind: outputs on, runs or a queue cut short (runtime.py)
     const act = (label, action, primary) => {
-      const b = h("button", { class: "btn small" + (primary ? " primary" : ""), type: "button" }, label);
-      b.addEventListener("click", async () => {
+      const b = h("button", { class: "btn small" + (primary ? " primary" : ""), type: "button", "data-k": action }, label);
+      b.addEventListener("click", async () => {   // waits until the lab's state is back (the card may then be gone)
         b.disabled = true;
         try { const r = await api("/api/incident", { body: { action } }); if (r.lines) toast(r.lines.join("; ")); }
         catch (e) { toast(e.message); }
-        pollState();
+        await pollState();
+        b.disabled = false;
       });
       return b;
     };
@@ -4920,28 +5110,62 @@
     return (a.count > 1 ? a.count + " times, last " + hhmm(a.last) : hhmm(a.raised))
       + (a.cleared ? " · cleared " + hhmm(a.cleared) + (a.cleared_text ? ": " + a.cleared_text : "") : "");
   }
+  function gotIt(a) {   // an alarm's Got it: a person has seen it (it ends when it clears)
+    const ok = h("button", { class: "btn small", type: "button", "data-k": "ok" }, "Got it");
+    ok.addEventListener("click", async () => { try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ } pollState(); });
+    return ok;
+  }
+  // a list drawn again in place: the keyboard's place on it (the control with the same data-k, else the first one) kept
+  function keepPlace(box, draw) {
+    const a = document.activeElement, had = a && box.contains(a) ? a.getAttribute("data-k") || "" : null;
+    draw();
+    if (had === null) return;
+    const to = box.querySelector('[data-k="' + had + '"]:not(:disabled)') || box.querySelector("[data-k]:not(:disabled)");
+    if (to) to.focus({ preventScroll: true });
+  }
   function renderAlerts(alarms, incident) {
-    // every alarm until a person says Got it: one that cleared while nobody looked (overnight) stays, marked cleared
-    const open = (alarms || []).filter((a) => !a.acknowledged);
+    // every alarm until a person says Got it: one that cleared while nobody looked (overnight) stays, marked cleared.
+    // The notice row holds one with its Got it, the newest still on (else the newest cleared), and counts the rest on
+    // one row that opens Lab → Watches, where Alarm history lists them all, each with its Got it: however many come, it
+    // never pushes a control out of the window. Drawn again only when what it says changed
+    const open = (alarms || []).filter((a) => !a.acknowledged);   // newest first (runtime.alarms_view)
+    const first = open.find((a) => !a.cleared) || open[0], more = open.length - 1;
     const box = $("alerts");
     box.hidden = !open.length && !incident;
-    box.replaceChildren(...(incident ? [incidentCard(incident)] : []), ...open.map((a) => {
-      const ok = h("button", { class: "btn small", type: "button" }, "Got it");
-      ok.addEventListener("click", async () => { try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ } pollState(); });
-      return h("div", { class: "alert" + (a.cleared ? " cleared" : "") }, icon("warn"), h("div", { class: "alert-body" }, h("b", {}, a.text),
-        a.actions.length ? h("span", {}, "Kelvin " + a.actions.join("; ")) : null, h("span", { class: "alert-when" }, alarmWhen(a))), ok);
-    }));
     document.title = (open.length || incident ? "(!) " : "") + document.title.replace(/^\(!\) /, "");
     renderAlarmHistory(alarms || []);
+    const sig = JSON.stringify([incident || null, first || null, more]);
+    if (sig === S.alertsShown) return;
+    S.alertsShown = sig;
+    const rows = first ? [h("div", { class: "alert" + (first.cleared ? " cleared" : "") }, icon("warn"), h("div", { class: "alert-body" },
+      h("b", {}, first.text), first.actions.length ? h("span", {}, "Kelvin " + first.actions.join("; ")) : null,
+      h("span", { class: "alert-when" }, alarmWhen(first))), gotIt(first))] : [];
+    if (more > 0) {
+      const b = h("button", { class: "alert alert-more", type: "button", "data-k": "more", title: "Lab → Watches lists every alarm" }, icon("warn"),
+        h("span", { class: "alert-body" }, h("b", {}, more + (more === 1 ? " more alarm" : " more alarms"))), icon("chev"));
+      b.addEventListener("click", showAlarms);
+      rows.push(b);
+    }
+    keepPlace(box, () => box.replaceChildren(...(incident ? [incidentCard(incident)] : []), ...rows));
+  }
+  // the notice row's "n more": the Lab on Watches, its Alarm history open at once (a link shows its place, it does not
+  // unfold under the eyes) and scrolled to the top of the part, so the list is in view below the watches
+  function showAlarms() {
+    paneShow("labpanel", "watches");
+    const box = $("alarm-history"), btn = $("alarm-history-btn"), region = btn.closest("[data-region]");
+    if (box.hidden) return;
+    if (!box.classList.contains("open")) foldOpen(box, btn, $("alarm-history-fold"), true, { detail: 0 });
+    if (region) region.scrollTop += (btn.getBoundingClientRect().top - region.getBoundingClientRect().top) / pageZoom() - 4;
   }
   function renderAlarmHistory(alarms) {   // the Lab panel: each alarm with when it went up, cleared, and who said Got it
     $("alarm-history").hidden = !alarms.length;
     const sig = JSON.stringify(alarms.map((a) => [a.id, a.count, a.cleared, a.acknowledged]));
     if (sig === S.alarmsShown) return;   // redrawn only when it changes
     S.alarmsShown = sig;
-    $("alarm-history-list").replaceChildren(...alarms.map((a) => h("li", {}, h("b", {}, a.text),
-      h("span", {}, alarmWhen(a) + " · " + (a.acknowledged ? "Got it: " + (a.acknowledged_by || "a person")
-        + (a.acknowledged_at ? " " + hhmm(a.acknowledged_at) : "") : "nobody has said Got it yet")))));
+    keepPlace($("alarm-history-list"), () => $("alarm-history-list").replaceChildren(...alarms.map((a) => h("li", {},
+      h("div", {}, h("b", {}, a.text), h("span", {}, alarmWhen(a) + " · " + (a.acknowledged ? "Got it: " + (a.acknowledged_by || "a person")
+        + (a.acknowledged_at ? " " + hhmm(a.acknowledged_at) : "") : "nobody has said Got it yet"))),
+      a.acknowledged ? null : gotIt(a)))));
   }
   function notifySystem(notices) {
     if (!notices || !notices.length) return;
@@ -5009,6 +5233,8 @@
   // Watches' and Memory's Add…: a disclosure for the form at the top of the part (its tab chosen to show it)
   function partForm(id, open) {
     const form = $(id), btn = document.querySelector('#labpanel [aria-controls="' + id + '"]');
+    // shut from inside (Watch, Keep, Cancel, Enter): the focus goes back to its Add…, not to the page
+    if (!open && btn && form.contains(document.activeElement)) btn.focus({ preventScroll: true });
     form.hidden = !open;
     if (btn) btn.setAttribute("aria-expanded", String(open));
     if (!open) return;
@@ -5756,23 +5982,42 @@
     if (!$("exp-dialog").open) $("exp-dialog").showModal();
     return $("exp-body");
   }
-  // a VI translated (minutes): its draft shown to read and keep, or, when the person closed the dialog meanwhile or
-  // opened another thing in it, a note that opens the draft when clicked. Whether it was translated.
-  async function openTranslate(v) {
-    const body = expDialog("Translate " + v.name), mine = EXP.shown;
-    body.replaceChildren(h("div", { class: "review pending" }, h("span", { class: "spinner" }),
-      "Translating " + v.name + ": the AI writes it, and Kelvin checks each attempt on the simulated lab (a few minutes). " +
-      "You can close this: the translation goes on, and Kelvin says when its draft is ready."));
-    EXP.open = null;
-    const here = () => EXP.shown === mine && $("exp-dialog").open;
+  // a VI translated (minutes) under v.as, the name given (else the VI's): its draft shown to read and keep, or, when the
+  // person closed the dialog meanwhile or opened another thing in it, a note that opens the draft when clicked. The
+  // Sequence's experiments list it meanwhile (kelvin:translate), and why after a failure, and its draft once done
+  // (kelvin:library) with its Review, so it is a press away there however long it took and after a reload.
+  // from: the dialog it was asked in (New function): a refusal within a second (a mistyped path) goes back to it, still
+  // open, as its words; closed in that second (Cancel, Esc), the translation goes on quietly, with no dialog of its own:
+  // its row among the experiments and a note when it ends. Else whether it was translated
+  async function openTranslate(v, from) {
+    const asked = api("/api/labview/translate", { body: v.as ? { path: v.path, name: v.as } : { path: v.path } });
+    let quiet = false;
+    if (from) {
+      const early = await Promise.race([asked.then(() => null, (e) => e), new Promise((r) => setTimeout(() => r(null), 1000))]);
+      if (early && from.open) return early.message;
+      if (from.open) from.close(); else quiet = true;
+    }
+    let body = null, mine = -1;
+    if (!quiet) {
+      body = expDialog("Translate " + v.name);
+      mine = EXP.shown;
+      body.replaceChildren(h("div", { class: "review pending" }, h("span", { class: "spinner" }),
+        "Translating " + v.name + ": the AI writes it, and Kelvin checks each attempt on the simulated lab (a few minutes). " +
+        "You can close this: the translation goes on, and its draft waits in Sequence → Experiments."));
+      EXP.open = null;
+    }
+    emit("translate", { path: v.path, name: v.as || v.name, state: "running" });
+    const here = () => !quiet && EXP.shown === mine && $("exp-dialog").open;
     let d;
-    try { d = await api("/api/labview/translate", { body: { path: v.path } }); }
+    try { d = await asked; }
     catch (e) {
+      emit("translate", { path: v.path, name: v.as || v.name, state: "failed", message: e.message });
       if (here()) body.replaceChildren(h("p", { class: "bad" }, e.message));
       else toast(v.name + " wasn't translated: " + e.message);
       return false;
     }
-    if (RUNS.view === "schedule") loadExperiments();   // its draft is listed there, kept or not
+    emit("translate", { path: v.path, state: "done" });
+    emit("library");   // its draft among the Sequence's experiments
     if (here()) showDraft(d);
     else toast(v.name + " is translated: click to review it", () => { expDialog("Translate " + v.name); showDraft(d); });
     return true;
@@ -5798,7 +6043,7 @@
         h("ul", {}, ...warns.map((f) => h("li", {}, f.text)))) : null];
   }
   function codeBlock(code) {
-    const copy = h("button", { type: "button", class: "btn small ghost" }, "Copy");
+    const copy = h("button", { type: "button", class: "btn small" }, "Copy");
     copy.addEventListener("click", () => copyText(code, copy));
     return h("details", { open: true }, h("summary", {}, "The experiment ", copy), h("pre", { class: "exp-code" }, code));
   }
@@ -5833,7 +6078,7 @@
         $("exp-msg").textContent = "Kept as " + r.name + ", version " + r.version + ", in Sequence → Experiments.";
         $("exp-keep").hidden = true;
         EXP.open = null;
-        if (RUNS.view === "schedule") loadExperiments();
+        emit("library");   // the Sequence's experiments with it now, its draft gone
       } catch (e) {
         if (e.status === 409 && e.data && e.data.diff) {   // a name kept already: what changed, read before the yes
           open.newVersion = name;
@@ -5876,7 +6121,7 @@
         const r = await api("/api/experiments/" + encodeURIComponent(EXP.open.name) + "/approve", { body: { version: EXP.open.version } });
         $("exp-msg").textContent = "Version " + r.version + " approved by " + r.approved_by + ".";
         $("exp-approve").hidden = true;
-        if (RUNS.view === "schedule") loadExperiments();
+        emit("library");   // the Sequence's experiments as they stand now
       } catch (e) { $("exp-msg").textContent = e.message; }
     });
   }
@@ -6187,13 +6432,17 @@
   }
   const unquoted = (path) => String(path).trim().replace(/^"(.*)"$/, "$1").trim();   // as Windows' Copy as path gives it
   function isVI(path) { return /\.vi$/i.test(unquoted(path)); }
-  async function importVI(path) {
+  // as: the name given for it (New function's Name); from: the dialog it was asked in, which a refusal at once goes back
+  // to (openTranslate): its words are returned, as whether it was translated is
+  async function importVI(path, as, from) {
     const vi = unquoted(path);
     scansSay("");
-    if (!(await openTranslate({ name: vi.replace(/^.*[\\/]/, ""), path: vi }))) return;   // a typed path stays to fix
+    const done = await openTranslate({ name: vi.replace(/^.*[\\/]/, ""), path: vi, as: String(as || "").trim() }, from);
+    if (done !== true) return done;   // a typed path stays to fix
     store("lh.scriptFolder", vi.replace(/[\\/][^\\/]*$/, ""));
     $("scans-path").hidden = true;
     $("scans-path-input").value = "";
+    return true;
   }
   async function importPath(path) {
     if (isVI(path)) return importVI(path);
@@ -6818,7 +7067,8 @@
     const c = ED.check || {}, loops = Array.isArray(ED.parts.loops) ? ED.parts.loops : [];
     const bits = (c.loads && c.points != null ? [(c.estimate ? "~" : "") + c.points + (c.points === 1 ? " point" : " points")] : [])
       .concat(c.loads && c.time ? [c.time] : []);
-    $("ed-status").textContent = bits.join(" · ");
+    // each bit whole ("~5.8 min" never split): a narrow footer breaks only after the dot
+    $("ed-status").textContent = bits.map((b) => b.replace(/ /g, "\u00a0")).join(" · ");
     const mine = new Map(), rest = [];
     for (const problem of c.problems || []) {
       const at = loopOf(problem, loops);
@@ -6837,6 +7087,7 @@
       if (count && loop && li.dataset.i !== "time") count.textContent = loopCount(loop);
     }
     $("ed-plan-text").textContent = c.text || "";
+    $("ed-copy").disabled = !c.text;   // nothing to copy until the scan makes a plan
     edButtons();
   }
   function edButtons() {
@@ -6908,6 +7159,14 @@
     ED.parts = JSON.parse(ED.base);
     edSay("");
     edChanged(true);
+  }
+  // a part opening in place grows to its height as it fades in (app.css: .ed-opening), once; closing is at once
+  function edEase(el) {
+    el.classList.remove("ed-opening");
+    void el.offsetWidth;
+    el.classList.add("ed-opening");
+    const done = (e) => { if (e.target === el) { el.classList.remove("ed-opening"); el.removeEventListener("animationend", done); } };
+    el.addEventListener("animationend", done);
   }
   // Plan text: the plan the editor makes, as YAML, opened and closed in place by its button, whose label stays
   function edPlan(show) {
@@ -8450,6 +8709,10 @@
       const src = keys[hint.dataset.hint];
       hint.textContent = src ? "Set (from " + src + ")" : "Not set";
       hint.classList.toggle("set", !!src);
+      // its Remove only where there is something to remove (a key, a URL, a password): greyed (the row keeps its
+      // width), the reason its tip
+      const clr = document.querySelector('[data-clear="' + hint.dataset.hint + '"]');
+      if (clr) { clr.disabled = !src; clr.title = src ? "" : "Nothing to remove"; }
     }
     for (const input of document.querySelectorAll("#settings-form input:not([type=checkbox])")) { input.value = ""; keyKept(input); }
     $("local-url").value = (S.settings && S.settings.local_base_url) || "";
@@ -8478,8 +8741,10 @@
     loadScriptFolders();   // as they are now: Set up or the first setup may have added one meanwhile
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
     ownerPinState();
+    $("roles-list").replaceChildren();   // filled again as saved (rolesState): picks not saved were let go with the rest
+    $("roles-list").hidden = true;
+    $("roles-msg").textContent = "";
     rolesState();
-    $("roles-list").hidden = $("roles-actions").hidden = true;   // folded: roles picked but not kept by Save roles are let go
     const idle = S.settings && S.settings.idle_off !== undefined ? S.settings.idle_off : 60, idleSel = $("idle-off");
     const idleValue = idle ? String(idle) : "off";
     if (![...idleSel.options].some((o) => o.value === idleValue)) idleSel.append(h("option", { value: idleValue }, "After " + idle + " minutes"));
@@ -8534,10 +8799,17 @@
         (it.files && it.files.length ? " · " + it.files.length + (it.files.length === 1 ? " file" : " files") : "");
       const on = h("button", { class: "switch", type: "button", role: "switch", "aria-checked": String(it.enabled !== false),
         "aria-label": "Kelvin uses " + it.name, title: "Kelvin sees it (off: kept, but not offered)" }, h("span"));
-      swFlip(on, async (v) => {   // at once; a refusal turns it back, the reason under the list
+      swFlip(on, async (v) => {   // at once; a refusal turns it back, its reason under the skill's own line until it turns
+        const note = on.closest(".memory-note");
+        let why = note.querySelector(".memory-meta.bad");
         try { await api("/api/know/" + it.kind + "/" + it.scope + "/" + encodeURIComponent(it.name), { body: { enabled: v } }); it.enabled = v; }
-        catch (e) { msg.textContent = e.message; throw e; }
-        on.closest(".memory-note").classList.toggle("off", !v);
+        catch (e) {
+          if (!why) note.querySelector(".memory-meta").after(why = h("span", { class: "memory-meta bad", role: "status" }));
+          why.textContent = e.message;
+          throw e;
+        }
+        if (why) why.remove();
+        note.classList.toggle("off", !v);
       });
       const acts = h("div", { class: "field-actions" }, show);   // its buttons on one line under what it is
       if (it.kind === "skill") {
@@ -8687,8 +8959,9 @@
   }
 
   // Settings keep Save and Cancel. What acts at once is kept already: a switch (each in a card of its
-  // own at the top of its page, .set-now, or in its row, as a skill's), Page size, and every button. Everything else
-  // waits for Save, and what waits is what Save would send now (settingsBody) that differs from what it would have sent
+  // own at the top of its page, .set-now, or in its row, as a skill's), Page size, and every other button. Everything
+  // else (the lab's roles picked for each person too) waits for Save, and what waits is what Save would send now
+  // (settingsBody) that differs from what it would have sent
   // as the dialog opened (SETS.start). Save is offered only then, the other button reads Cancel (else Close), and each
   // section holding a change has a dot in the list on the left. Cancel lets go of what waits (the fields are filled from
   // S.settings again at the next opening), never of what acted. The head's × and Esc do as that button does, but while
@@ -8731,6 +9004,7 @@
     body.approval_wait = $("approval-wait").value;
     if (S.claudeCode) { body.claude_code = $("cc-on").checked ? "on" : "off"; body.claude_code_path = $("cc-path").value.trim(); }
     body.updates = $("updates").value;
+    body.roles = rolesPicked();   // the lab's roles picked: saveSettings sends them to /api/roles
     return body;
   }
   function settingField(name) { return document.querySelector('#settings-form [name="' + name + '"]'); }
@@ -8809,25 +9083,46 @@
     const go = [...row.querySelectorAll("button:not([data-clear])")].filter(shown).pop();
     if (go && !go.disabled) go.click();
   }
-  // Save: as before (Settings saved., the dialog closes); a refusal keeps the dialog open, says why, and keeps what waits
+  // Save: as before (Settings saved., the dialog closes); a refusal keeps the dialog open, says why, and keeps what waits.
+  // The roles picked go first, to the roles' own endpoint, which asks for the owner's PIN: refused, nothing else is sent,
+  // and the reason shows under them, their page shown. Kept, they no longer wait, whatever the settings' answer, and a
+  // refusal of the settings then says the roles were saved. Focus, lost to the greyed Save while the PIN was asked, goes
+  // to what the refusal is about: the first role, or Save
   async function saveSettings() {
-    const body = settingsBody();
+    const sent = settingsBody(), { roles, ...body } = sent, withRoles = settingsDiff().includes("roles");
     SETS.saving = true;
     settingsPending();   // greyed while it is on its way
     $("settings-msg").textContent = "Saving…";
+    $("roles-msg").textContent = "";
     try {
+      if (withRoles) {
+        await api("/api/roles", { body: { roles } }).catch((e) => { e.roles = true; throw e; });
+        SETS.start.roles = roles;
+        rolesState();
+      }
       const r = await api("/api/settings", { body });
       S.settings = r.settings;
       applyCompare();
-      SETS.start = body;
+      SETS.start = sent;
       applyModels(r.models.groups, r.default_model, r.auto_model, r.models.hub);
       $("settings-dialog").close();
-      toast("Settings saved.");
+      toast(!withRoles ? "Settings saved." : Object.keys(roles).length ? "Settings saved. Anyone without a role is a trainee."
+        : "Settings saved. Roles off: everyone is equal again.");
     } catch (e) {
-      $("settings-msg").textContent = e.message;
+      if (e.roles) {
+        $("settings-msg").textContent = "";
+        $("roles-msg").textContent = e.message;
+        if ($("set-pages").querySelector('.set-page[data-page="instruments"]').hidden) settingsPage("instruments");
+        $("roles-box").scrollIntoView({ block: "nearest" });
+      } else $("settings-msg").textContent = (withRoles ? "Roles saved. " : "") + e.message;
     } finally {
       SETS.saving = false;
       settingsPending();
+      const lost = !document.activeElement || document.activeElement === document.body;
+      if ($("settings-dialog").open && lost) {
+        const to = $("roles-msg").textContent ? $("roles-list").querySelector("select:enabled") : $("save-settings");
+        if (to && !to.disabled) to.focus();
+      }
     }
   }
 
@@ -8835,28 +9130,49 @@
   // One CSS zoom on <html> (--zoom, app.css) is the only scaling, in a browser and in the desktop app. Auto follows the
   // real window, which the zoom does not change, so it never feeds back on itself: 100 % on a big window (1600 × 900 or
   // more), on a touch screen and under 1000 px wide; 85 % under 680 px tall; 90 % otherwise (the person's own "90 % on
-  // a laptop"). A choice in Settings → Page size (80 to 150 %) overrides it on this browser (lh.pageSize). fitTiers also
-  // sets the density tier on <html> by the layout's height, the window's divided by the page size: fit-roomy (900 or
-  // more), fit-compact (720 to 899) or fit-tight.
-  const SIZES = [0.8, 0.85, 0.9, 1, 1.1, 1.25, 1.5];
+  // a laptop"). A choice in Settings → Page size (85 to 150 %) overrides it on this browser (lh.pageSize). A size is
+  // offered only while the layout keeps its least height and its least width at it on this window (PAGE_LEAST, .app's
+  // min-height in app.css; PAGE_LEAST_W, the narrowest page whose top bar keeps its controls apart, a phone's): a choice
+  // too big for the window is applied as the largest size that fits, and kept, so a bigger window gets it back.
+  // fitTiers also sets the density tier on <html> by the layout's height, the window's divided by the page size:
+  // fit-roomy (900 or more), fit-compact (720 to 899) or fit-tight.
+  const SIZES = [0.85, 0.9, 1, 1.1, 1.25, 1.5];
+  const PAGE_LEAST = 560;
+  const PAGE_LEAST_W = 360;
   const FIT = { zoom: 1, tier: "", timer: 0, still: 0, wheel: 0, native: false };
   try { localStorage.removeItem("lh.v"); } catch (e) { /* kept nowhere */ }   // a layout choice an earlier version kept
   const inApp = () => !!(window.pywebview && window.pywebview.api && window.pywebview.api.set_zoom);
-  function pageChoice() { const z = Number(store("lh.pageSize")); return SIZES.includes(z) ? z : 0; }   // 0: Auto
+  // the size chosen on this browser, 0 for Auto; a stored size under the smallest step reads as that step
+  function pageChoice() {
+    const z = Number(store("lh.pageSize"));
+    return z > 0 && z < SIZES[0] ? SIZES[0] : SIZES.includes(z) ? z : 0;
+  }
   function autoZoom() {
     const w = window.innerWidth, h = window.innerHeight;
     if (w < 1000 || window.matchMedia("(pointer: coarse)").matches) return 1;
     return w >= 1600 && h >= 900 ? 1 : h < 680 ? 0.85 : 0.9;
   }
+  // a size fits this window when the layout keeps its least height and its least width at it
+  const fitsTall = (z) => window.innerHeight / z >= PAGE_LEAST;
+  const fitsWide = (z) => window.innerWidth / z >= PAGE_LEAST_W;
+  const sizeFits = (z) => fitsTall(z) && fitsWide(z);
+  // the size applied: the choice, or Auto, held at the largest size that fits (the smallest when none does). Auto on a
+  // touch screen keeps 100 %, for its 40 px targets
+  function pageSize() {
+    const chosen = pageChoice(), want = chosen || autoZoom();
+    if (!chosen && window.matchMedia("(pointer: coarse)").matches) return want;
+    return SIZES.filter((s) => s <= want && sizeFits(s)).pop() || SIZES[0];
+  }
   const pageZoom = () => FIT.zoom;   // Kelvin.zoom(): divide pointer and rect lengths by it before writing them to CSS
   // the page size and the tier: on loading, 50 ms after the window changes size, and when a size is chosen. Never
-  // animated (k-still, app.css). A new factor tells everything that measures the window (a resize event)
+  // animated (k-still, app.css). A new factor tells everything that measures the window (a resize event). Page size's
+  // buttons are weighed each time, as the window's height decides which sizes fit
   function fitTiers() {
-    const root = document.documentElement, z = pageChoice() || autoZoom();
+    const root = document.documentElement, z = pageSize();
     const h = window.innerHeight / z;
     const tier = h >= 900 ? "fit-roomy" : h >= 720 ? "fit-compact" : "fit-tight";
     const first = !FIT.tier, zoomed = z !== FIT.zoom;
-    if (!zoomed && tier === FIT.tier) return;
+    if (!zoomed && tier === FIT.tier) { showPage(); return; }
     root.classList.add("k-still");
     if (zoomed) root.style.setProperty("--zoom", String(z));
     root.classList.remove("fit-roomy", "fit-compact", "fit-tight");
@@ -8871,20 +9187,42 @@
     if (zoomed && !first) window.dispatchEvent(new Event("resize"));
     emit("fit", { zoom: z, tier });
   }
-  function showPage() {   // Settings → Display → Page size
+  // Settings → Display → Page size: the size applied; − and + greyed at the ends, + also where the next size would not
+  // fit the window, the reason their tip. The line under them says a choice held smaller, else why the window greys +
+  // (a disabled button shows no tip to the keyboard or a finger). When the button holding the focus greys or goes, the
+  // focus moves to another of the row's, so it never falls out of Settings
+  function showPage() {
     if (!$("zoom-now")) return;
-    const z = FIT.zoom, chosen = pageChoice(), pct = Math.round(z * 100) + "%";
-    $("zoom-now").textContent = chosen ? pct : "Auto · " + pct;
+    const z = FIT.zoom, chosen = pageChoice(), pct = (s) => Math.round(s * 100) + "%";
+    const next = SIZES.find((s) => s > z + 0.001), cramped = !!next && !sizeFits(next);
+    const why = !next ? pct(z) + " is the largest"
+      : !cramped ? ""
+      : !fitsWide(next) ? "At " + pct(next) + " the page would be narrower than its least width of " + PAGE_LEAST_W + " px on this window"
+      : "At " + pct(next) + " the page would be under its least height of " + PAGE_LEAST + " px on this window";
+    const bigger = !fitsWide(chosen) ? (fitsTall(chosen) ? "wider" : "bigger") : "taller";
+    const now = chosen ? pct(z) : "Auto · " + pct(z);
+    const held = chosen > z + 0.001 ? pct(chosen) + " chosen: a " + bigger + " window shows it" : cramped ? why : "";
+    if ($("zoom-now").textContent !== now) $("zoom-now").textContent = now;
+    if ($("zoom-held").textContent !== held) $("zoom-held").textContent = held;
+    $("zoom-held").hidden = !held;
+    const row = [$("zoom-in"), $("zoom-out"), $("zoom-reset")], had = document.activeElement;
     $("zoom-out").disabled = z <= SIZES[0];
-    $("zoom-in").disabled = z >= SIZES[SIZES.length - 1];
+    const least = z <= SIZES[0] ? pct(SIZES[0]) + " is the smallest" : "";
+    if ($("zoom-out").title !== least) $("zoom-out").title = least;
+    $("zoom-in").disabled = !next || cramped;
+    if ($("zoom-in").title !== why) $("zoom-in").title = why;
     $("zoom-reset").hidden = !chosen;
     $("zoom-hint").hidden = !inApp();
+    if (row.includes(had) && (had.disabled || had.hidden)) {
+      const to = row.find((b) => b !== had && !b.disabled && !b.hidden);
+      if (to) to.focus();
+    }
   }
-  function stepPage(dir) {   // +1 bigger, -1 smaller, 0 back to Auto
+  function stepPage(dir) {   // +1 bigger, -1 smaller, 0 back to Auto; never bigger than the window holds (sizeFits)
     let z = 0;
     if (dir) {
       z = dir > 0 ? SIZES.find((s) => s > FIT.zoom + 0.001) : [...SIZES].reverse().find((s) => s < FIT.zoom - 0.001);
-      if (!z) return;
+      if (!z || (dir > 0 && !sizeFits(z))) return;
     }
     if (z) store("lh.pageSize", String(z));
     else try { localStorage.removeItem("lh.pageSize"); } catch (e) { /* kept nowhere */ }
@@ -9397,6 +9735,8 @@
   }
   // the pane brought to the screen with a dataset: a run's Analyze (run: the subagent analyzes it), or Kelvin's
   // analyze tool in the chat (spec, result and steps: Kelvin's own analysis, shown as the subagent's figures are)
+  // asked: the person's own Analyze, which brings the pane to the screen even in full screen or under the list;
+  // Kelvin's analysis opens it where it stands, and under full screen or the list it waits, as Runs does when a run starts
   async function openAnalysis(ev) {
     ev = ev || {};
     ANA.follow = false;   // the dataset asked for, not the newest
@@ -9409,7 +9749,7 @@
       fitLayout();
     }
     if (seen) { look("anpane"); ring($("anpane").querySelector(":scope > header")); }   // asked for: looked at
-    else fullShow("anpane");   // to the screen, even in full screen or under the list
+    else if (ev.asked) fullShow("anpane");   // to the screen, even in full screen or under the list
     const result = ev.result, spec = ev.spec || {};
     const run = ev.run || (result && (result.curves || []).length ? result.curves[0].run : (spec.runs || [])[0]) || "";
     await loadAnalysisRuns();
@@ -9483,6 +9823,8 @@
     $("mode-seg").addEventListener("keydown", (e) => {   // a tab list: the arrows, Home and End move along it
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
       e.preventDefault();
+      const t = $("mode-seg").querySelector(":scope > .seg-thumb");   // the keyboard's change: the thumb jumps (still)
+      if (t) { t.classList.add("still"); setTimeout(() => t.classList.remove("still"), 80); }
       setMode(e.key === "ArrowLeft" || e.key === "Home" ? "chat" : "home");
       $(S.mode === "home" ? "mode-home" : "mode-chat").focus();
     });
@@ -9575,10 +9917,12 @@
     const kept = store("lh.labPart");
     chooseLabPart(labTabShown(kept) ? kept : [...LAB_TABS.tabs.keys()].find(labTabShown));
   }
-  function chooseLabPart(id) {
+  // keep: false for a link to a part (Home's Lab tile while an alarm is on, the notice row's "n more"), which shows it
+  // without taking the place of the part the person chose
+  function chooseLabPart(id, keep = true) {
     if (!labTabShown(id)) return;
     LAB_TABS.chosen = id;
-    store("lh.labPart", id);
+    if (keep) store("lh.labPart", id);
     for (const [k, tab] of LAB_TABS.tabs) {
       const on = k === id;
       tab.hidden = $("lab-sec-" + k).hidden;   // a part that shows nothing has no tab
@@ -9680,8 +10024,8 @@
     $, h, api, icon, md, toast, fmt, store, S, MARK,
     setMode, ask, sendMessage, newChat, openChat, pollState,
     toggleSeq, toggleRuns, toggleLab, toggleAnalysis, openRun, openRunList, showView, showScan, fitLayout, exitFull, thumb,
-    openEditor, openVersions, openLabSetup, openSettings, settingsPage, openCards,
-    pickFolder, hasPicker, hasFilePicker, isVI, importVI, folderLabels, popMenu, closeMenu, lineChart, getRun, runCharts,
+    openEditor, openVersions, openLabSetup, openSettings, settingsPage, openCards, refreshModels,
+    pickFolder, hasPicker, hasFilePicker, isVI, importVI, openReview, folderLabels, popMenu, closeMenu, lineChart, getRun, runCharts,
     zoom: pageZoom, askYes, askText, fitTiers,   // the fit's contract (the page size, the in-page question)
   };
 
@@ -9760,8 +10104,6 @@
       ($("eln-day").value || "today") + "-lab-record.zip", "day's lab notebook record"));
     $("owner-pin-set").addEventListener("click", () => ownerPinChange(false));
     $("owner-pin-remove").addEventListener("click", () => ownerPinChange(true));
-    $("roles-edit").addEventListener("click", editRoles);
-    $("roles-cancel").addEventListener("click", () => { $("roles-list").hidden = $("roles-actions").hidden = true; });
     $("owner-notify-mine").addEventListener("click", () => ownerNotify("mine"));
     $("owner-notify-off").addEventListener("click", () => ownerNotify("off"));
     for (const id of ["history-open", "lab-history"]) $(id).addEventListener("click", openHistory);
@@ -9891,6 +10233,10 @@
     $("make-report").addEventListener("click", makeReport);
     $("watch-add-toggle").addEventListener("click", () => partForm("watch-form", $("watch-form").hidden));
     $("watch-form").addEventListener("submit", addWatch);
+    $("alarm-history-btn").addEventListener("click", (e) => {   // a disclosure: a second press closes it
+      const box = $("alarm-history");
+      foldOpen(box, e.currentTarget, $("alarm-history-fold"), !box.classList.contains("open"), e);
+    });
     // a second press closes the form, also while it changes a note (its pencil opened it)
     $("labmem-add").addEventListener("click", () => { if ($("labmem-form").hidden) editLabNote(null); else closeLabNote(); });
     $("labmem-form").addEventListener("submit", keepLabNote);
@@ -9944,6 +10290,7 @@
     };
     for (const b of document.querySelectorAll("#inst-seg button")) b.addEventListener("click", () => instShown(b.dataset.v));
     segKeys($("inst-seg"), instShown);
+    holdInstruments();
     $("close-lab").addEventListener("click", () => toggleLab(false));
     $("open-settings").addEventListener("click", openSettings);
     for (const b of document.querySelectorAll(".set-nav button")) {   // each section's name, with its dot while it holds a change

@@ -1,4 +1,4 @@
-"""Full screen for each panel, and the one click model for opening panels (brief 1.2.2, 1.2.3 and 1.2.5). A button
+"""Full screen for each panel, and the one click model for opening panels. A button
 beside a panel's close button gives that one panel the window below the top bar and the notice row (FULL in app.js,
 #app.full in app.css); the button again, Esc, or closing the panel ends it and the layout under it comes back. Another
 panel's top-bar button, or a panel opened by code (Analyze, Edit on a scan, a waiting request), takes the screen in its
@@ -123,13 +123,40 @@ def test_one_click_model_for_every_way_of_opening_a_panel():
     assert "requestAnimationFrame" not in ring + show + pill
     assert "@keyframes k-ring" in CSS and ".k-ring { animation: k-ring" in CSS
     assert "Object.assign(window.Kelvin, { paneShow, paneHide, paneVisible, ring });" in _js("initPanes")
-    opened = _js("openAnalysis")   # Analyze, and Kelvin's analyze: to the screen even in full screen, rung when there
+    # the person's Analyze: to the screen even in full screen or under the list, rung when there; Kelvin's analyze
+    # opens the pane where it stands and, under full screen or the list, waits there as a run that starts does
+    opened = _js("openAnalysis")
+    assert "function openAnalysis(ev) {" in opened
     assert 'const seen = paneVisible("anpane");' in opened
     assert 'if (seen) { look("anpane"); ring($("anpane").querySelector(":scope > header")); }' in opened
-    assert 'else fullShow("anpane");' in opened
+    assert 'else if (ev.asked) fullShow("anpane");' in opened and 'else fullShow("anpane");' not in opened
     assert "ANA.follow = false;" in opened
+    assert "openAnalysis({ run: runId, asked: true }));" in JS   # a run's Analyze
+    assert 'case "analysis": if (here) openAnalysis(ev); break;' in JS   # Kelvin's: not asked
     assert re.search(r'(fullShow|paneShow)\("edpane"\)', _js("openEditor"))   # Edit on a scan, New scan
     assert "fullShow" not in _js("noticeRun") + _js("openRun") + _js("showQueue")   # a run that starts doesn't take it
+
+
+def test_home_links_follow_the_click_model():
+    """Home's tiles, a block's link to a place, Add to sequence and Open on an approval waiting are links to a place:
+    Kelvin.paneShow shows the pane, or rings it when it is there, and never hides it. The page's own
+    toggles are only the fallback for a page without the click model."""
+    home = (STATIC / "home.js").read_text(encoding="utf-8")
+
+    def fn(name):
+        start = re.search(r"(async )?function %s\(" % name, home).start()
+        return home[start:home.index("\n  }\n", start)]
+
+    assert "if (K.paneShow) K.paneShow(pane, view); else open();" in fn("goTo")
+    assert 't.go.addEventListener("click", safe(() => goTo(name)));' in fn("tile")
+    act = fn("act")
+    assert act.index('op: "add"') < act.index('goTo("seq");')   # the sequence shown once the block's scan is in it
+    assert "if (name) goTo(name);" in act[act.index('a.do === "pane"'):]
+    assert fn("openApproval").rstrip().endswith('else goTo("lab");')
+    start = home.index("const PLACES = {")
+    places = home[start:home.index("\n  };\n", start)]
+    for toggle in ("K.toggleSeq(", "K.toggleLab(", "K.toggleAnalysis(", "K.openRunList("):
+        assert home.count(toggle) == places.count(toggle) == 1, toggle   # only as the fallbacks
 
 
 def test_chat_or_home_ends_full_screen_from_either_side_even_the_one_chosen():
@@ -166,3 +193,63 @@ def test_esc_ends_full_screen_unless_a_field_a_menu_or_a_dialog_takes_it():
                  'e.target.closest("input, textarea, select, [contenteditable]")',
                  "toggleFull(FULL[0]);"):   # as its own button: the layout under it (a pane alone stays)
         assert text in init, text
+
+
+def test_a_panel_in_full_screen_keeps_its_content_in_homes_column():
+    """On a wide window what a panel holds stands in a column as wide as Home's (1440 px and its padding), centred;
+    its head stays across the window, a band at its foot keeps its line across and centres what it holds, and the
+    terminal keeps its long lines."""
+    css = re.sub(r"/\*.*?\*/", "", CSS, flags=re.S)
+    assert ("#app.full:not(.full-term) .full-on > :not(header) {\n"
+            "  margin-inline: max(0px, calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2)); }") in css
+    foot = css[css.index("#app.full:not(.full-term) .full-on > :is(.ed-foot, .team-form, .team-name-form)"):]
+    assert "margin-inline: 0;" in foot[:foot.index("}")]
+    assert ("padding-inline: max(var(--foot-x), calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2 + var(--foot-x)));"
+            in foot[:foot.index("}")])
+    # each band's side padding is said once, on its own rule, and the full-screen rule only adds to it
+    assert "--foot-x:" not in foot[:foot.index("}")]
+    team = re.search(r"\n\.team-form, \.team-name-form \{([^}]*)\}", css).group(1)
+    assert "--foot-x: var(--sp-3, 12px);" in team and "padding: var(--sp-2, 8px) var(--foot-x) var(--sp-3, 12px);" in team
+    eds = re.findall(r"\n\.ed-foot \{([^}]*)\}", css)
+    assert "--foot-x: 14px;" in eds[0] and "padding: 8px var(--foot-x) 12px;" in eds[0]
+    assert len(eds) == 2 and all("padding: 8px var(--foot-x)" in e for e in eds)
+    home = (STATIC / "home.css").read_text(encoding="utf-8")
+    assert "max-width: calc(1440px + 2 * var(--pad-page, 24px))" in home   # the same column as Home's
+
+
+def test_a_full_screen_panels_regions_reach_across_the_side_space():
+    """The column is held inside what scrolls, not around it, so the wheel scrolls a panel from the side space too: a
+    region that is the panel's body (the Analysis, the scan editor, Team chat's messages) keeps the whole width with
+    the column in its padding; the Lab's body holds the column in its padding and its outer parts reach out over the
+    side space (--full-side, measured on the Lab with cqw); the Runs pane's body keeps the whole width, the Scan's
+    measurement keeps the column and its list holds it in its padding."""
+    css = re.sub(r"/\*.*?\*/", "", CSS, flags=re.S)
+    side = "calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2"
+    assert ("#app.full:not(.full-term) .full-on > :is(#an-body, #ed-body) { margin-inline: 0;\n"
+            "  padding-inline: max(14px, %s + 14px)); }" % side) in css
+    assert ("#app.full:not(.full-term) #teampanel > .team-list { margin-inline: 0;\n"
+            "  padding-inline: max(var(--sp-3, 12px), %s + var(--sp-3, 12px))); }" % side) in css
+    assert re.search(r"\n\.an-body \{ padding: 12px 14px 20px;", css) and re.search(r"\n\.ed-body \{[^}]*padding: 10px 14px 12px;", css)
+    assert "#teampanel .team-list { padding: var(--sp-1, 4px) var(--sp-3, 12px) var(--sp-3, 12px); }" in css
+    assert "--full-side: max(0px, calc((100cqw - 1440px - 2 * var(--pad-page, 24px)) / 2));" in css
+    assert "#labpanel { container: lab / inline-size;" in css   # cqw is the Lab's width
+    assert ("#app.full:not(.full-term) #labpanel > .lab-scroll { margin-inline: 0; "
+            "padding-inline: calc(var(--sp-4, 16px) + var(--full-side)); }") in css
+    assert "margin-inline-start: calc(-4px - var(--full-side)); padding-inline-start: calc(4px + var(--full-side));" in css
+    assert "margin-inline-end: calc(-4px - var(--full-side)); padding-inline-end: calc(4px + var(--full-side));" in css
+    assert "#app.full:not(.full-term) #runpane > #run-body { margin-inline: 0; }" in css
+    assert "#app.full:not(.full-term) #scan-live { margin-inline: max(0px, %s); }" % (side + ")") in css
+    assert "padding-inline: max(var(--sp-3, 12px), %s + var(--sp-3, 12px))); }" % side in css
+
+
+def test_the_full_screen_sequence_stands_in_its_blocks_column():
+    """In full screen the Sequence's bar, blocks, ＋ Add and step stand in the blocks' own column (920 px, seq.css),
+    centred, so Start and ⋯ end where the blocks end; the blocks' region keeps the whole width."""
+    css = re.sub(r"/\*.*?\*/", "", CSS, flags=re.S)
+    seq = (STATIC / "seq.css").read_text(encoding="utf-8")
+    assert ".seq-list > *, .seq-add, .seq-extra { max-width: 920px; }" in seq
+    assert ("#app.full:not(.full-term) #seq-view :is(.seq-bar, .seq-list, .seq-extra) {\n"
+            "  max-width: none; padding-inline: max(var(--sp-3, 12px), calc((100% - 920px) / 2)); }") in css
+    assert ("#app.full:not(.full-term) #seq-view .seq-add { margin-inline: max(var(--sp-3, 12px), "
+            "calc((100% - 920px) / 2)); }") in css
+    assert 'id="seq-view"' in PAGE and 'id="run-body"' in PAGE

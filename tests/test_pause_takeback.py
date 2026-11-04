@@ -1,4 +1,4 @@
-"""Pause as an armed action (2026-11-03, the brief's 1.3 and K8): the Sequence's Pause reads Pausing… while the queue
+"""Pause as an armed action: the Sequence's Pause reads Pausing… while the queue
 finishes the item that is running, and a second press takes the pause back, the queue going on as it was approved;
 nothing starts that was not running. The press carries want, the state the button showed, so a screen a poll out of
 date never flips it: the server refuses (409) and says why, in a few words. Only a person's own pause can be taken
@@ -441,9 +441,21 @@ def test_the_sequences_pause_is_an_armed_action():
     assert "if (came || pause.dataset.want !== want) pauseAt = Date.now();" in js
     assert 'own ? "Pausing…" : "Pause"' in js and 'classList.toggle("armed", own)' in js
     assert 'pause.hidden = st !== "running" && !own' in js             # Kelvin's, a failure's or a stop's: no button
-    # the state chip says Running while the person's own pause waits (the button says Pausing…), else Pausing
-    assert 'if (q.state === "running" || ownPause(q)) {' in js
-    assert 'if (q.state === "pausing") return ["Pausing", "warn", q.reason || ""];' in js
+    # the state chip says Pausing (amber) while any pause waits for the running block, the person's own too (its
+    # button says Pausing… as well); Running only while nothing waits to pause, and then no tip
+    chip = js[js.index("function stateChip(q) {"):js.index("function renderHead() {")]
+    assert "ownPause" not in chip
+    assert 'if (q.state === "running") {' in chip and '"Running", "run", ""];' in chip
+    assert 'if (q.state === "pausing") return ["Pausing", "warn", q.reason || ""];' in chip
+    assert chip.index('if (q.state === "running") {') < chip.index('if (q.state === "pausing")') < chip.index('"paused"')
+    # Home's Sequence tile and its state line say it as the bar does: Pausing, amber, for the person's own pause too
+    home = (STATIC / "home.js").read_text(encoding="utf-8")
+    assert "ownPause" not in home
+    assert 'st === "running" ? ["blue", "Running"] : st === "pausing" ? ["warn", "Pausing"]' in home
+    assert 'run = n.q.state === "running";' in home and 'tone: run ? "ok" : "warn"' in home
+    # the tile's tip is why, as the bar's is: of any pause (the person's own too), and of a sequence that ended for one
+    assert ('const why = st === "pausing" || st === "paused" ? said : (kind === "ok" || kind === "bad") && '
+            'said !== "finished" ? said : "";') in home
     # the keyboard on Pause as it went: ⋯ holds it (never Stop), then Resume or Retry once offered
     assert "if (held && pause.hidden) pauseFocus = true;" in js
     assert "start.focus({ preventScroll: true })" in js and "more.focus({ preventScroll: true })" in js
@@ -458,8 +470,57 @@ def test_the_sequences_pause_is_an_armed_action():
     part = css[css.index("/* ===== fit P"):css.index("/* ===== end fit P ===== */")]
     armed = re.search(r"\.seq-hold\.armed \{([^}]*)\}", part).group(1)
     assert "var(--warn-bg)" in armed and "var(--warn)" in armed and "#" not in armed   # colours through tokens
-    # a refusal's words are read whole: the name gives way first while the bar says something (not while renamed)
-    assert ".seq-head-main.saying .seq-name:not(:focus) { flex-shrink: 1000; }" in part
+    # the state chip and a refusal's words are read whole: the name always gives way first (not while renamed)
+    assert ".seq-head-main .seq-name:not(:focus) { flex-shrink: 1000; }" in part
     # a narrow pane shows Pause by its icon, but Pausing… by its word too (not by colour alone)
     narrow = part[part.index("@container seqview (max-width: 460px)"):]
     assert ".seq-bar .btn.seq-hold.armed > span { display: inline; }" in narrow
+
+
+def test_a_refused_pause_after_turns_its_switch_back():
+    """Pause after acts at once, and refused, it turns back and says why under itself, as every switch that acts at
+    once does: a refused op keeps the why for the block (SEQ.refused, before anything is drawn) and draws every block
+    again from the server's state, the switch with it and the why under it. Where a block is not drawn again yet (out
+    of sight, a drag, a field in it typed in), op's null answer turns the switch back itself, and the why shows when it
+    is drawn (every block's signature was cleared). A press takes the last why away in place, so the block is not drawn
+    again under the press; closing the block forgets it too."""
+    js = (STATIC / "seq.js").read_text(encoding="utf-8")
+    start = js.index('const sw = h("button", { class: "switch"')
+    handler = js[start:js.index('box.append(h("label", { class: "seq-switch" }', start)]
+    assert 'sw.setAttribute("aria-checked", String(want));' in handler and 'sw.setAttribute("aria-busy", "true");' in handler
+    assert handler.index("SEQ.refused.delete(it.id);") < handler.index('op({ op: "then_pause"')
+    assert 'const was = box.querySelector(".seq-switch + .seq-bad");' in handler and "if (was) was.remove();" in handler
+    assert 'op({ op: "then_pause", item: it.id, value: want }, { refused: (why) => SEQ.refused.set(it.id, why) })' in handler
+    assert '.then((r) => { if (!r) sw.setAttribute("aria-checked", String(!want)); })' in handler
+    assert '.finally(() => sw.removeAttribute("aria-busy"))' in handler
+    after = js[js.index('box.append(h("label", { class: "seq-switch" }', start):]
+    after = after[:after.index("return box;")]
+    assert 'const no = SEQ.refused.get(it.id);' in after
+    assert 'if (no) box.append(h("span", { class: "seq-bad", role: "status" }, "Not switched: " + no));' in after
+    refused = _fn(js, "op")
+    assert "async function op(body, o) {" in refused
+    refused = refused[refused.index("catch (e)"):]
+    assert "if (o && o.refused) o.refused(e.message); else K.toast(e.message);" in refused
+    assert refused.index("o.refused(e.message)") < refused.index("render()")   # kept before the blocks are drawn
+    assert 'for (const c of SEQ.cards.values()) c.sig = "";' in refused and "render()" in refused and "return null;" in refused
+    def body(name):
+        at = js.index("  function %s(" % name)
+        return js[at:js.index("\n  }\n", at)]
+    assert "SEQ.refused" not in body("cardSig")   # a press that takes the why away draws nothing again
+    assert "if (!keep.has(id)) SEQ.refused.delete(id);" in body("renderList")
+    assert "SEQ.edit.delete(id); SEQ.refused.delete(id);" in body("toggleEd")
+
+
+def test_retry_follows_the_pause_its_failed_block_made():
+    """Retry runs a failed block again only when its failure made the pause (the loop writes that reason as
+    "<block>: …"); a pause for anything else (a declined change after an earlier failure went on, a person's) offers
+    Resume."""
+    js = (STATIC / "seq.js").read_text(encoding="utf-8")
+    start = js.index("function startKind(q) {")
+    kind = js[start:js.index("\n  }\n", start)]
+    assert 'last.status === "failed" && (q.reason || "").startsWith(last.name + ":")) return { label: "Retry", item: last };' in kind
+    assert "paused by|stopped by" not in kind
+    from labharness.agent import runtime
+    src = Path(runtime.__file__).read_text(encoding="utf-8")
+    assert 'q.state, q.reason = "pausing", "%s: %s%s" % (item.name, message,' in src   # the failure's reason
+    assert "(added or changed after the queue was approved)" in src   # a declined change's: not "<block>: …"
