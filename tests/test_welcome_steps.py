@@ -104,5 +104,8 @@ def test_the_card_is_centred_on_a_tall_window_and_nothing_moves_from_step_to_ste
     assert re.search(r"--wl-h: (\d+)px;", col) and int(re.search(r"--wl-h: (\d+)px;", col).group(1)) >= 744
     assert "height: min(100%, var(--wl-h));" in col and "margin: auto;" in col and "flex: none;" in col
     assert "min-height: 420px;" in col   # below its floor the welcome scrolls as a whole rather than clipping
+    # with the scripts in one column (a phone) the tallest step is taller: the phone keeps its whole height for it
+    narrow = css[css.index("@media (max-width: 639.98px)"):]
+    assert int(re.search(r"\.wl-col \{ --wl-h: (\d+)px; \}", narrow[:narrow.index("\n}")]).group(1)) >= 1000
     # nothing in the steps sets the column's height, so no step moves it
     assert "wl-col" not in _code(_function(JS, "render")) and ".style.height" not in _code(JS)

@@ -79,6 +79,10 @@
   .wl-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .wl-list > .wl-row:nth-child(odd):not(:last-child) { border-right: 1px solid var(--line); }   /* none beside a lone last */
 }
+/* narrower, the scripts stand in one column and the tallest step needs about 1080 px: a phone keeps all its height */
+@media (max-width: 639.98px) {
+  .wl-col { --wl-h: 1080px; }
+}
 /* a touch screen: every target 40 px or more (the welcome is not a .dialog, so fit F's rule does not reach it) */
 @media (pointer: coarse) {
   .wl-skip, .welcome :is(.btn, button.link, .kfield, select) { min-height: 40px; }
