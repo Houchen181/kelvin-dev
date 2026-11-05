@@ -109,15 +109,19 @@ def refusal(status: int, message: str, headers: Optional[Dict[str, str]] = None)
 
 
 def cost(price: Dict[str, Any], used: Dict[str, int]) -> float:
-    """Dollars for these tokens at this price (per million tokens; the dearer tier once the prompt is past its size)."""
+    """Dollars for these tokens at this price (per million tokens; the dearer tier once the prompt is past its size).
+    The cache writes Claude keeps an hour (cache_write_1h, part of cache_write) cost twice the input price, not the
+    5-minute writes' price the list gives."""
     p = dict(price)
     prompt = used["input"] + used["cache_read"] + used["cache_write"]
     for tier in price.get("tiers") or []:
         if prompt > tier.get("size", 0):
             p.update({k: v for k, v in tier.items() if k != "size"})
+    hour = min(used.get("cache_write_1h", 0), used["cache_write"])
     return (used["input"] * p["input"] + used["output"] * p["output"]
             + used["cache_read"] * p.get("cache_read", p["input"])
-            + used["cache_write"] * p.get("cache_write", p["input"])) / 1e6 + used.get("searches", 0) * SEARCH_USD
+            + (used["cache_write"] - hour) * p.get("cache_write", p["input"])
+            + hour * 2 * p["input"]) / 1e6 + used.get("searches", 0) * SEARCH_USD
 
 
 class Meter:
@@ -128,7 +132,7 @@ class Meter:
 
     def __init__(self, service: str, streamed: bool):
         self.service, self.streamed = service, streamed
-        self.used = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "searches": 0}
+        self.used = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cache_write_1h": 0, "searches": 0}
         self._line = b""
         self._body = bytearray()
 
@@ -177,8 +181,10 @@ class Meter:
         if self.service == "anthropic":
             u = (obj.get("message") or {}).get("usage") if obj.get("type") == "message_start" else obj.get("usage")
             if isinstance(u, dict):
+                hour = u.get("cache_creation")   # the writes by how long they are kept: an hour's cost more
                 self._set(input=u.get("input_tokens"), output=u.get("output_tokens"),
                           cache_read=u.get("cache_read_input_tokens"), cache_write=u.get("cache_creation_input_tokens"),
+                          cache_write_1h=hour.get("ephemeral_1h_input_tokens") if isinstance(hour, dict) else None,
                           searches=(u.get("server_tool_use") or {}).get("web_search_requests"))
         elif self.service == "gemini":
             u = obj.get("usageMetadata")
@@ -189,15 +195,14 @@ class Meter:
         else:   # OpenAI's Chat Completions and Responses, and services in its format
             done = obj.get("type") == "response.completed"   # the Responses API's last event
             u = (obj.get("response") or {}).get("usage") if done else obj.get("usage")
-            if isinstance(u, dict):
-                if "prompt_tokens" in u:
-                    cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
-                    self._set(True, input=(u.get("prompt_tokens") or 0) - cached, cache_read=cached,
-                              output=u.get("completion_tokens"))
-                else:
-                    cached = (u.get("input_tokens_details") or {}).get("cached_tokens") or 0
-                    self._set(True, input=(u.get("input_tokens") or 0) - cached, cache_read=cached,
-                              output=u.get("output_tokens"))
+            if isinstance(u, dict):   # the prompt's tokens include those read from and written to the cache
+                chat = "prompt_tokens" in u   # Chat Completions; else the Responses API
+                details = u.get("prompt_tokens_details" if chat else "input_tokens_details") or {}
+                cached = details.get("cached_tokens") or 0
+                written = details.get("cache_write_tokens") or 0   # GPT-5.6 on: written at the cache's own price
+                prompt = u.get("prompt_tokens" if chat else "input_tokens") or 0
+                self._set(True, input=max(0, prompt - cached - written), cache_read=cached, cache_write=written,
+                          output=u.get("completion_tokens" if chat else "output_tokens"))
 
 
 class Gateway:

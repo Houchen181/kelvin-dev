@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 import openai
 
 from .base import (DOCUMENTS_NOTE, PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url, opencode_session,
-                   safe_id, text_of, user_text)
+                   safe_id, session_key, text_of, user_text)
 
 _SKIP = ("audio", "realtime", "tts", "transcribe", "image", "search", "embedding", "instruct", "moderation",
          "dall-e", "whisper", "davinci", "babbage")
@@ -244,6 +244,9 @@ class OpenAIProvider(Provider):
         extra = self.extra_headers()
         if extra:
             request["extra_headers"] = extra
+        key = session_key() if self.own else ""
+        if key:   # OpenAI's own: a chat's requests go to the cache holding its prompt (from GPT-5.6, one of its own)
+            request["extra_body"] = {"prompt_cache_key": key}
         left_out = ""
         try:
             response = await self.client.chat.completions.create(**request)

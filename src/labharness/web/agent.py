@@ -1436,7 +1436,7 @@ class ChatAgent:
 
         history = compaction.view(chat)
         if compaction.size(context["system"], context["tools"], history) > \
-                compaction.SHARE * compaction.window(provider, model_id):   # a long day: earlier turns, summarised
+                compaction.limit(provider, model_id):   # a long day: earlier turns, summarised
             self._stream_task = asyncio.ensure_future(compaction.compact(chat, provider, model_id))
             try:
                 folded = await self._stream_task

@@ -26,13 +26,20 @@ Emit = Callable[[Dict[str, Any]], Awaitable[None]]
 SESSION: contextvars.ContextVar = contextvars.ContextVar("kelvin_session", default="")
 
 
+def session_key(outside: str = "") -> str:
+    """A stable name for this chat's requests, not the chat's own id ("": a request outside any chat, without
+    outside)."""
+    seed = SESSION.get() or outside
+    return "kelvin-" + hashlib.sha256(seed.encode()).hexdigest()[:24] if seed else ""
+
+
 def opencode_session(outside: str = "") -> Dict[str, str]:
     """OpenCode routes and caches by conversation, and its Go plan refuses a request without one: a stable session
     for each chat, not the chat's own id. outside: the session for a request outside any chat (a project's opening, a
     card, the list of models), which a person's own OpenCode connection sends (openai_provider.py); the hub's send
     none there, and the hub sends one per person (providers/hub.py)."""
-    seed = SESSION.get() or outside
-    return {"x-opencode-session": "kelvin-" + hashlib.sha256(seed.encode()).hexdigest()[:24]} if seed else {}
+    key = session_key(outside)
+    return {"x-opencode-session": key} if key else {}
 
 
 @dataclass

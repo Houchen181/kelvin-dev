@@ -17,6 +17,23 @@ MODELS = [
 FALLBACK_MODELS = {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"}
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_JSON_RETRIES = 2
+# Every request sends the whole prompt again (the tools, the system prompt, the conversation), and the part sent before
+# is read from Claude's cache at a tenth of the price or less. A cache entry lives 5 minutes unless asked for an
+# hour, and in a lab the person comes back after 5 to 60 minutes: then the 5-minute one is gone, and the whole prompt is
+# written again at 1.25 times the price. An hour's entry costs 2 times once and is read for the rest of the hour, so a
+# conversation with tools keeps its prompt for an hour (Claude Code does too); a one-off request (a summary, a second
+# opinion) keeps the 5-minute default.
+LONG_CACHE = {"type": "ephemeral", "ttl": "1h"}
+SHORT_CACHE = {"type": "ephemeral"}
+
+
+def cached(system: str, tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """How a request asks Claude to cache it: with tools, the system prompt (and the tools before it) kept an hour by a
+    mark of its own, which every chat shares and which outlives a summary of the turns, and the conversation kept an
+    hour up to its latest message; without, the 5-minute default on the whole request."""
+    if not tools or not system:
+        return {"system": system, "cache_control": SHORT_CACHE}
+    return {"system": [{"type": "text", "text": system, "cache_control": LONG_CACHE}], "cache_control": LONG_CACHE}
 
 
 def sanitize(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -125,13 +142,12 @@ class AnthropicProvider(Provider):
         kwargs: Dict[str, Any] = dict(
             model=model,
             max_tokens=64000,
-            system=system,
             messages=to_messages(history, self.name),
             tools=[{"name": t["name"], "description": t["description"], "input_schema": t["schema"],
                     "eager_input_streaming": True} for t in tools],
-            cache_control={"type": "ephemeral"},
             thinking={"type": "adaptive", "display": "summarized"},
             output_config={"effort": "medium"},
+            **cached(system, tools),
         )
         if model in FALLBACK_MODELS:
             kwargs.update(betas=[FALLBACK_BETA], fallbacks="default")
