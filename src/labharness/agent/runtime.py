@@ -92,9 +92,10 @@ SPECIALMEASURE_NEXT = (
     "Set up… → From Special Measure…, where the person picks the setup script, checks each instrument's card and the "
     "limits and ramp rates its channels give, and adds them with the channels' names (the lab config's names:, which "
     "plans, get_value and set_value then take); or add each instrument with add_instrument at its address and the "
-    "likely card. One with no card fitting: draft_card, from its driver (the smc file above): the commands each "
-    "channel sends. Propose limits and set them only once the person agrees. Its scans become Kelvin scans there "
-    "(Keep), and its runs import as runs (Import). Never run MATLAB, a setup script or a driver.")
+    "likely card: it takes the rack's name, and the rack's limits and ramp rates wait in its review for the person to "
+    "accept (never set limits yourself). One with no card fitting: draft_card, from its driver (the smc file above): "
+    "the commands each channel sends. Its scans become Kelvin scans there (Keep), and its runs import as runs "
+    "(Import). Never run MATLAB, a setup script or a driver.")
 
 
 def _light(card: Any) -> bool:
@@ -664,6 +665,10 @@ class LabRuntime:
         # the lab's LabVIEW folder read (Set up's survey and Keep, survey_labview): one at a time, on its own thread
         self.labview_reads = OneAtATime("kelvin-labview", "Kelvin is reading a LabVIEW folder already: try again once "
                                                           "that is done.")
+        # the lab's Special Measure rack, by which add_instrument names an instrument and proposes its limits: the
+        # last read (survey_specialmeasure, Set up's), with the setup chosen; and the racks in the scripts folders
+        self.sm_read: Optional[Tuple[Any, Optional[str]]] = None
+        self._sm_racks: Dict[str, Tuple[float, Any]] = {}   # folder -> (when read, specialmeasure.Found or None)
         self.last_survey: Optional[Dict[str, Any]] = None   # what the last scan looked through, and why (survey.py)
         self.last_found: List[str] = []                     # the addresses it found: where Kelvin may try a card
         self.found_info: Dict[str, Dict[str, Any]] = {}     # what it learnt of each, by VISA resource: identity, card
@@ -6226,6 +6231,8 @@ class LabRuntime:
             found = specialmeasure.survey(path, self.script_cards(), own=self._kelvins())
         except (OSError, ValueError) as e:
             return "not read: %s" % e
+        if found.setup is not None:   # the rack add_instrument names instruments by and proposes limits from
+            self.sm_read = (found, None)
         return found.text() + "\n\n" + SPECIALMEASURE_NEXT
 
     def specialmeasure_found(self, folder: str, setup: Optional[str] = None) -> Dict[str, Any]:
@@ -6240,6 +6247,8 @@ class LabRuntime:
         view = found.view(setup)
         view["kind"] = "specialmeasure"
         chosen = found.chosen(setup)
+        if chosen is not None:   # the rack add_instrument names instruments by and proposes limits from
+            self.sm_read = (found, chosen.path)
         rack = specialmeasure._hardware(chosen)
         self._in_lab(view["instruments"], [ri.inst for ri in rack])
         self._ask_found(view["instruments"], [ri.inst for ri in rack], registry,
@@ -6260,41 +6269,44 @@ class LabRuntime:
 
     def _sm_channels(self, item: Dict[str, Any], ri: Any, registry: Any) -> None:
         """A rack instrument's channels on the card it has in the review (the lab's, the one its identity reply
-        named, or the rack's guess): each channel's parameter, and the limits and ramp rates they give on what sets it
-        (its set point, where the card has one apart). A rate only for a drive Kelvin ramps itself, at most the card's
-        max_rate, as the lab config takes them."""
+        named, or the rack's guess): each channel's parameter, and the limits and ramp rates the rack gives on what
+        sets it (specialmeasure.on_card, as add_instrument proposes them)."""
         from .. import specialmeasure
         card_id = (item.get("card") or {}).get("id")
         card = registry.get(card_id) if card_id and card_id in registry else None
         if item.get("in_lab") in self.lab.instruments:
             card = self.lab.instruments[item["in_lab"]].card
-        limits: Dict[str, List[float]] = {}
-        rates: Dict[str, float] = {}
-        taken: Dict[str, str] = {}
+        limits, rates = specialmeasure.on_card(ri, card)
         for view_ch, ch in zip(item["channels"], ri.channels):
-            param, why = specialmeasure.param_of(card, ch.channel, ri.numbered.get(ch.channel, []), ch.send)
-            if param and param in taken:
-                param, why = None, "%s is %s's already: a second channel is an entry of its own" % (param,
-                                                                                                    taken[param])
-            elif param:
-                taken[param] = ch.name
-            view_ch.update(param=param, why=why, set_param=specialmeasure.set_param_of(card, param))
-            ch.param, ch.set_param = param, view_ch["set_param"]
-            specialmeasure.card_units(ch, card)   # on this card: sm's multiplier, or the card's own unit
-            view_ch.update(native=ch.native, how=ch.how)
-            drive = view_ch["set_param"] or param
-            spec = card.params.get(drive) if card is not None and drive else None
-            if spec is None or not spec.numeric or not spec.is_drive:
-                continue
-            ends = sorted(ch.to_instrument(v) for v in (ch.low, ch.high))   # as the instrument gets them
-            if all(math.isfinite(v) for v in ends):
-                limits[drive] = ends
-            if math.isfinite(ch.rate) and ch.rate > 0 and spec.ramp == "gate":
-                rate = ch.rate * abs(ch.multiplier())
-                rates[drive] = min(rate, spec.max_rate) if spec.max_rate else rate
+            view_ch.update(param=ch.param, why=ch.why, set_param=ch.set_param, native=ch.native, how=ch.how)
         if item.get("card") is not None:
             item["card"]["limits"] = limits
             item["card"]["rates"] = rates
+
+    RACK_SECONDS = 300.0   # a rack read from the lab's scripts folders is used again for this long
+
+    def rack_at(self, address: str) -> Optional[Tuple[Any, str]]:
+        """The lab's Special Measure rack's instrument at an address, and the rack in words: from the last Special
+        Measure read (survey_specialmeasure, Set up's From Special Measure…, the setup chosen there), else from the
+        lab's scripts folders, read here (never run) and again after RACK_SECONDS. None: no rack Kelvin knows has it.
+        add_instrument names an instrument by it and proposes the rack's limits for it."""
+        from .. import specialmeasure
+        reads: List[Tuple[Any, Optional[str]]] = [self.sm_read] if self.sm_read is not None else []
+        for folder in self.scripts_folders():
+            kept = self._sm_racks.get(folder)
+            if kept is None or time.monotonic() - kept[0] > self.RACK_SECONDS:
+                try:   # no cards: only its instruments, channels and start-up commands are needed here
+                    found = specialmeasure.survey(folder, None, own=self._kelvins(), scans=False)
+                except (OSError, ValueError):
+                    found = None
+                kept = self._sm_racks[folder] = (time.monotonic(), found)
+            if kept[1] is not None and kept[1].setup is not None:
+                reads.append((kept[1], None))
+        for found, path in reads:
+            ri = specialmeasure.instrument_at(found, address, path)
+            if ri is not None:
+                return ri, "your Special Measure rack (%s in %s)" % (found.chosen(path).path, found.folder)
+        return None
 
     @staticmethod
     def _sm_translated(scan: Any, keys: Dict[str, Tuple[Any, ...]], name: str, functions: Dict[str, Any]) -> \
@@ -8323,7 +8335,10 @@ class LabRuntime:
         """Kelvin adds an instrument connected to this computer to the lab (lab.yaml), marked added_by: kelvin, and
         connects it; the others stay connected as they are. It reads and configures at once; until a person reviews
         its limits, every output change on it asks them. An address the last scan did not find is approved by Kelvin
-        itself (it connects and reads); a program to run asks a person in Lab setup."""
+        itself (it connects and reads); a program to run asks a person in Lab setup. At an address the lab's Special
+        Measure rack has (rack_at), it takes the rack's name, so plans written from the lab's scans name it, and the
+        rack's limits and ramp rates wait in its review for the person: only a person sets limits (field test #9)."""
+        from .. import specialmeasure
         from ..adapters import AdapterError, resource_name
         from ..cards import CONNECTION_KEYS
         from ..discovery import Found, add_to_config, card_for
@@ -8354,6 +8369,16 @@ class LabRuntime:
             the_card = registry.get(card_id)
         except KeyError:
             return "not added: there is no card %r (draft_card or save_card makes one)" % card_id
+        rack: Dict[str, Any] = {}   # the lab's Special Measure rack has it: its name there, and what it proposes
+        try:
+            hit = self.rack_at(address)
+            if hit is not None:
+                import copy
+                limits, rates = specialmeasure.on_card(copy.deepcopy(hit[0]), the_card)
+                rack = {"name": hit[0].inst.name, "from": hit[1], "limits": limits, "rates": rates}
+        except Exception:   # an odd rack never keeps an instrument out: it is added as without one
+            import logging
+            logging.getLogger("kelvin").exception("reading the rack for %s", address)
 
         def run() -> str:
             live = self.live or {}
@@ -8381,6 +8406,9 @@ class LabRuntime:
                 listed = []
             names = sorted(set(taken) | {str(n) for n in listed})
             new = (name or "").strip() or Found(address, kind=the_card.kind).suggest_name(names)
+            picked, racked = new, str(rack.get("name") or "")
+            if racked and racked != new and racked.isidentifier() and racked not in names:
+                new = racked   # as the rack names it: plans written from the lab's scans (k2400_tg.V) then match
             if not new.isidentifier():
                 return "not added: %r can't be a name (letters, digits and _)" % new
             if new in names:
@@ -8468,19 +8496,47 @@ class LabRuntime:
                     profiles.store_manual(self.home, new, self.lab.instruments[new].card, manual["data"], manual["url"])
                 except Exception:
                     pass   # the app's setup fetches it again
+            proposed, kept = "", False   # the rack's limits and rates: for the person's review, never set by Kelvin
+            if rack.get("limits") or rack.get("rates"):
+                proposed = ", ".join(
+                    ["%s [%s, %s]" % (p, num(lo), num(hi)) for p, (lo, hi) in sorted(rack["limits"].items())] +
+                    ["%s ramped at %s %s/s" % (p, num(r), the_card.params[p].unit or "unit")
+                     for p, r in sorted(rack["rates"].items())])
+                try:
+                    specialmeasure.keep_proposed(self.home, new, address, the_card.id, rack["limits"], rack["rates"],
+                                                 rack["from"])
+                    kept = True
+                except (KeyError, OSError):
+                    kept = False
             self.gate.log.write("instrument_added", by=by, instrument=new, card=the_card.id, address=address,
                                 lab=self.lab.config.name)
             self.notifier("setup", "Kelvin added %s to the lab" % new,
                           "%s at %s. Readings and settings work now; Kelvin asks you before each output change on it "
-                          "until you review its limits in Lab setup." % (the_card.model, address))
+                          "until you review its limits in Lab setup.%s" % (
+                              the_card.model, address, " Your Special Measure rack's limits for it are there for you "
+                                                       "to accept (Limits… on its row)." if kept else ""))
             self.lab_changed("added")
             lim = ", ".join("%s [%s, %s]%s" % (p.name, num(p.limits[0]), num(p.limits[1]), " " + p.unit if p.unit else "")
                             for p in self.lab.instruments[new].card.drives if p.numeric and p.limits)
+            racked, source = str(rack.get("name") or ""), str(rack.get("from") or "")
+            source = source[:1].upper() + source[1:]
+            said = []   # what the lab's rack has of it
+            if racked and new != racked:
+                said.append("%s names it %s, which this lab has already." % (source, racked))
+            elif racked:
+                said.append("%s names it %s%s, so plans written from the lab's scans match." % (
+                    source, new, " (not %s)" % picked if picked != new else ""))
+            if proposed:
+                said.append("%s proposes %s: Kelvin never sets limits; %s, so tell them." % (
+                    "It" if said else source, proposed, "they wait in its review in Lab setup (Limits… on its row) for "
+                                                        "the person to accept" if kept else
+                    "the person sets them in Lab setup (Limits… on its row)"))
             return ("added %s (%s, card %s%s%s) at %s to %s; health: %s. Its outputs keep the maker's limits%s until a "
-                    "person reviews them, and every output change on it asks them (auto mode doesn't cover it)."
+                    "person reviews them, and every output change on it asks them (auto mode doesn't cover it).%s"
                     % (new, the_card.model, the_card.id, ", a draft" if the_card.status == "draft" else "",
                        ", found by " + matched if matched else "", address, self.lab.config.name,
-                       "ok" if health.ok else "; ".join(health.problems), " (" + lim + ")" if lim else ""))
+                       "ok" if health.ok else "; ".join(health.problems), " (" + lim + ")" if lim else "",
+                       "".join(" " + s for s in said)))
         return self._do("adding an instrument", run)
 
     def change_instrument(self, name: str, address: str = "", card: str = "",

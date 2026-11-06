@@ -7406,10 +7406,25 @@
         h("span", { class: "muted small lim-card" }, row.vendor ? "card: " + show(row.vendor[0]) + " to " + show(row.vendor[1]) : "no limit on its card"));
     });
     const msg = h("span", { class: "muted small" });
+    // what the lab's Special Measure rack proposes for an instrument Kelvin added: the person takes it, or not
+    let rates = null;   // its ramp rates, saved with the limits once the person takes them
+    const offered = r.proposed ? r.rows.filter((row) => row.proposed || row.proposed_rate) : [];
+    const offer = offered.length ? h("p", { class: "hint lim-offer" }, "Proposed by " + r.proposed + ": " +
+      offered.map((row) => row.label + " " + [row.proposed ? show(row.proposed[0]) + " to " + show(row.proposed[1]) : "",
+        row.proposed_rate ? "ramped at " + show(row.proposed_rate) + " " + (row.unit || "") + "/s" : ""].filter(Boolean).join(", ")).join("; ") + ". ") : null;
+    if (offer && r.editable) {
+      const take = h("button", { class: "link soft", type: "button" }, "Use these");
+      take.addEventListener("click", () => {
+        for (const row of offered) if (row.proposed) { row.ui.lo.value = show(row.proposed[0]); row.ui.hi.value = show(row.proposed[1]); }
+        rates = Object.fromEntries(offered.filter((row) => row.proposed_rate).map((row) => [row.param, row.proposed_rate]));
+        msg.textContent = "Filled in from the rack: check them, then Save limits.";
+      });
+      offer.append(take);
+    }
     box.append(h("p", { class: "hint" }, r.rows.length
       ? "What " + name + " may reach. Empty: the card's limits." +
         (r.editable ? "" : " They are set in the lab config, which there isn't yet.")
-      : name + " has no numeric setting to limit."), ...rows);
+      : name + " has no numeric setting to limit."), ...(offer ? [offer] : []), ...rows);
     if (r.editable && r.rows.length) {
       const reviewed = h("input", { type: "checkbox" });   // the person ticks it themselves
       const save = h("button", { class: "btn small primary", type: "button" }, "Save limits");
@@ -7423,7 +7438,10 @@
         }
         save.disabled = true;
         try {
-          const saved = await api("/api/instruments/" + encodeURIComponent(name) + "/limits", { body: { limits, reviewed: !r.reviewed && reviewed.checked, why: why.value.trim() } });
+          const body = { limits, reviewed: !r.reviewed && reviewed.checked, why: why.value.trim() };
+          if (rates && Object.keys(rates).length) body.rates = rates;
+          const saved = await api("/api/instruments/" + encodeURIComponent(name) + "/limits", { body });
+          rates = null;
           const now = new Map(saved.rows.map((x) => [x.param, x.lab]));
           for (const row of r.rows) row.lab = now.get(row.param) || null;
           const checked = saved.reviewed && !r.reviewed;
@@ -7955,10 +7973,12 @@
           const lim = it.card && Object.keys(it.card.limits || {}).length ? it.card.limits : null;
           if (!lim) return row;
           const use = h("button", { class: "link soft", type: "button" }, "Use these limits");
-          const note = h("div", { class: "found-write muted small" }, (sm ? "Limits from the rack: " : "Limits from the values your " + (labview ? "VIs" : "scripts") + " use: ") + span(lim) + " ", use);
+          const rated = sm && Object.keys(it.card.rates || {}).length ? it.card.rates : null;   // the rack's ramp rates too
+          const note = h("div", { class: "found-write muted small" }, (sm ? "Limits from the rack: " : "Limits from the values your " + (labview ? "VIs" : "scripts") + " use: ") + span(lim) +
+            (rated ? "; ramp rates " + Object.entries(rated).map(([p, v]) => p + " " + v + "/s").join(", ") : "") + " ", use);
           use.addEventListener("click", async () => {   // a person's choice, like Save limits in Limits…
             try {
-              await api("/api/instruments/" + encodeURIComponent(it.in_lab) + "/limits", { body: { limits: lim } });
+              await api("/api/instruments/" + encodeURIComponent(it.in_lab) + "/limits", { body: rated ? { limits: lim, rates: rated } : { limits: lim } });
               note.textContent = "Kelvin holds " + it.in_lab + " to " + span(lim) + " from now on.";
               refreshLabSetup(false);
             } catch (e) { note.textContent = e.message; }

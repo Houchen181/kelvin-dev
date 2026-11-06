@@ -157,7 +157,9 @@ You are connected to a physics lab through Kelvin.
   translate; a scan is a plan, run with run_plan once the person agrees. Never guess what a VI not read does.
 - A lab that runs Special Measure (MATLAB): survey_specialmeasure on its folder reads the rack its setup scripts
   build (instruments, addresses, named channels with limits and ramp rates, function channels), its drivers, scans
-  and runs, never running MATLAB, and translates each scan into a plan.
+  and runs, never running MATLAB, and translates each scan into a plan. add_instrument at an address that rack (or
+  the lab's scripts folder) has names the instrument as the rack does: use those names in plans. The rack's limits
+  and ramp rates wait in the instrument's review for the person to accept; tell them, never set limits yourself.
 - An instrument the scan doesn't find or doesn't identify: find out what it is yourself. find_on_network for one on
   the network whose address nobody knows (it sweeps this computer's networks, or the range named, for the ports
   instruments and their gateways use, and asks each who it is), inspect_address for one at a known address (what its
@@ -527,7 +529,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
         address, the Kelvin card that fits), its named channels (Vbg, X_A: the card parameter each is, with its
         limits, ramp rate and multiplier), function channels' formulas, the commands sent at start-up, the scans
         saved and run, and the run files by folder. Only reads: no MATLAB is run (it needn't be installed), and
-        nothing is sent to an instrument."""
+        nothing is sent to an instrument. add_instrument then names the rack's instruments as the rack does and
+        proposes their limits and ramp rates to the person."""
         try:
             return outside(rt, "the lab's Special Measure files", rt.survey_specialmeasure(path))
         except Underway as e:   # Set up reads one now: Kelvin's own words, nothing from the files
@@ -679,7 +682,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
         the person (baud_rate, read_termination...); vars: the card's per-installation names (sensor, channel). Kelvin
         connects it and checks who it is; the other instruments stay as they are. It reads and configures at once;
         every output change on it asks the person until they review its limits. An address the scan did not find
-        asks the person first."""
+        asks the person first. At an address the lab's Special Measure rack has (survey_specialmeasure, or the lab's
+        scripts folder), it takes the rack's name, and the rack's limits and ramp rates wait in its review for the
+        person to accept: the result says which; never set them yourself."""
         return rt.add_instrument(address, card, name, connection, vars)
 
     @server.tool(annotations=ACT, structured_output=False)

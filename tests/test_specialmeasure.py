@@ -4,7 +4,7 @@ address, connection settings and start-up commands; each named channel with its 
 and the card parameter its driver's command (or its name) says it is; function channels; and its scans translated
 into Kelvin plans by fixed rules. The files here are written for the tests, in Special Measure's form: none of its
 code and none of a lab's files are in Kelvin."""
-from pathlib import Path
+import copy
 
 import pytest
 
@@ -453,6 +453,75 @@ end
     assert specialmeasure.sent_value(cases[2][1], {}, name)["scale"] == 1
     assert specialmeasure.sent_value(["outputSingleScan(s, val^2)"], {}) is None   # not a scale and an offset
     assert specialmeasure.sent_value(["fprintf(dev, [':FREQ ' num2str(val*k)])"], {}) is None   # k unknown
+
+
+GATES = r"""
+% three gates on Keithleys, in the form a field test's setup script had (#9), written for this test: the addresses
+% in variables set first, smloadinst(driver, [], board type, board, address), gpib() and visa() in blocks that load
+% their instrument with no adaptor, and *_Use flags
+GPIB_BOARD = 'ni';
+BOARD_NUM = 0;
+SourceM_K2400_bg_GPIB = 15;
+SourceM_K2400_tg_GPIB = 24;
+SourceM_K2400_cg_GPIB = 25;
+Generator3321_GPIB = 10;
+K2400_Use = 1;
+SP150_Use = 1;
+Gen_Use = 0;
+smloadinst('test');
+if K2400_Use == 1
+    ind = smloadinst('K2400', [], GPIB_BOARD, BOARD_NUM, SourceM_K2400_bg_GPIB);
+    smdata.inst(ind).name = 'K2400_bg';
+    smaddchannel('K2400_bg', 'V', 'Vbg', [-5 5 2 1]);
+    fprintf(smdata.inst(ind).data.inst, ':source:voltage 0');
+    fprintf(smdata.inst(ind).data.inst, 'sense:current:protection 1e-6');
+    ind = smloadinst('K2400', [], GPIB_BOARD, BOARD_NUM, SourceM_K2400_tg_GPIB);
+    smdata.inst(ind).name = 'K2400_tg';
+    smaddchannel('K2400_tg', 'V', 'Vtg', [-30 30 5 0.1]);
+    ind = smloadinst('K2400', [], GPIB_BOARD, BOARD_NUM, SourceM_K2400_cg_GPIB);
+    smdata.inst(ind).name = 'K2400_cg';
+    smaddchannel('K2400_cg', 'V', 'Vcg', [-500 500 50 1]);
+end
+if SP150_Use == 1
+    global SP150
+    ind = smloadinst('SP150', [], 'None');
+    SP150 = visa('ni', 'GPIB0::11::INSTR');
+    smdata.inst(ind).name = 'SP150';
+end
+if Gen_Use == 1
+    global Generator3321
+    ind = smloadinst('AG33220A', [], 'None');
+    Generator3321 = gpib('ni', BOARD_NUM, Generator3321_GPIB);
+    smdata.inst(ind).name = 'Gen';
+end
+"""
+
+
+def test_the_racks_limits_for_an_instrument_are_its_channels_and_the_compliance_its_setup_sets(tmp_path):
+    (tmp_path / "smsetup_gates.m").write_text(GATES, encoding="utf-8")
+    found = specialmeasure.survey(tmp_path, None, scans=False)   # no cards: the rack alone, as add_instrument reads it
+    at = specialmeasure.instrument_at
+    assert at(found, "GPIB0::15::INSTR").inst.name == "k2400_bg" and at(found, "gpib::24").inst.name == "k2400_tg"
+    assert at(found, "GPIB0::11::INSTR").inst.name == "sp150"   # the instrument object its block opens
+    gen = at(found, "GPIB0::10::INSTR")
+    assert gen.name == "Gen" and not gen.used and at(found, "GPIB0::16::INSTR") is None   # listed, though not loaded
+
+    card = homelab.builtin_registry().get("keithley/2400")
+    bg = at(found, "GPIB0::15::INSTR")
+    limits, rates = specialmeasure.on_card(copy.deepcopy(bg), card)
+    assert limits == {"V": [-5, 5], "compliance_I": [1e-9, 1e-6]} and rates == {"V": 2}   # 1 uA, never V at 0 V
+    assert bg.channels[0].param is None   # the rack read stays as it was: the copy got the card
+    limits, rates = specialmeasure.on_card(at(found, "GPIB0::24::INSTR"), card)
+    assert limits == {"V": [-3, 3]} and rates == {"V": 0.5}   # as the instrument gets them: x its factor 0.1
+    limits, rates = specialmeasure.on_card(at(found, "GPIB0::25::INSTR"), card)
+    assert limits == {"V": [-210, 210]} and rates == {"V": 10}   # never past the card's own, which a lab can't pass
+
+    specialmeasure.keep_proposed(tmp_path, "k2400_bg", "GPIB0::15::INSTR", card.id, {"V": [-5, 5]}, {"V": 2}, "a rack")
+    assert specialmeasure.proposed(tmp_path, "k2400_bg", "GPIB0::15::INSTR", card.id) == {
+        "from": "a rack", "limits": {"V": [-5, 5]}, "rates": {"V": 2}}
+    assert specialmeasure.proposed(tmp_path, "k2400_bg", "GPIB0::16::INSTR", card.id) is None   # another instrument
+    assert specialmeasure.proposed(tmp_path, "k2400_bg", "GPIB0::15::INSTR", "keithley/2450") is None   # another card
+    assert specialmeasure.proposed(tmp_path, "k2400_tg", "GPIB0::24::INSTR", card.id) is None
 
 
 def test_the_pem200s_card_reads_its_bracketed_replies():

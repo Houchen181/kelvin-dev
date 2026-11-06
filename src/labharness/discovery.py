@@ -18,7 +18,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .adapters import AdapterError, apply_serial_settings, is_serial, resource_manager, resource_name
 from .cards import Card, CardRegistry
@@ -596,7 +596,8 @@ def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
     lim = ["%s: [%g, %g]" % (p.name, p.limits[0], p.limits[1]) for p in card.drives
            if p.numeric and p.limits and p.name not in used and p.name not in rated]
     if used and item.get("from") == "specialmeasure":   # which are the rack's, said apart from the card's own
-        lines.append("    limits: { %s }   # %s from your Special Measure rack (its channels' limits): check %s%s" % (
+        lines.append("    limits: { %s }   # %s from your Special Measure rack (its channels' limits, its setup's "
+                     "compliance): check %s%s" % (
             ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in used.items()] + lim), ", ".join(used),
             "it" if len(used) == 1 else "them", "; the rest are its card's vendor limits: tighten them" if lim else ""))
     elif used:
@@ -863,23 +864,42 @@ def change_entry(text: str, name: str, changes: Dict[str, Any]) -> str:
 def set_limits(text: str, name: str, limits: Dict[str, Optional[Sequence[float]]], reviewed: bool = False) -> str:
     """The lab config text with one instrument's limits changed (None takes a limit out), the rest of the text and
     its comments kept; reviewed: without the instrument's added_by: kelvin mark (a person checked its limits)."""
+    return _set_mapping(text, name, "limits", {p: None if lim is None else [float(lim[0]), float(lim[1])]
+                                               for p, lim in limits.items()},
+                        lambda v: "[%g, %g]" % (v[0], v[1]), reviewed)
+
+
+def set_rates(text: str, name: str, rates: Dict[str, Optional[float]]) -> str:
+    """The lab config text with one instrument's ramp rates changed (None takes a rate out, back to its card's
+    max_rate), the rest of the text and its comments kept: a person's, as set_limits is (Limits…, where they accept a
+    Special Measure rack's rates)."""
+    return _set_mapping(text, name, "rates", {p: None if r is None else float(r) for p, r in rates.items()},
+                        lambda v: "%g" % v)
+
+
+def _set_mapping(text: str, name: str, key: str, changes: Dict[str, Any], written: Callable[[Any], str],
+                 reviewed: bool = False) -> str:
+    """The lab config text with one mapping of one instrument's entry (its limits: or rates:) changed, each value
+    written by written() (None takes one out), the rest of the text and its comments kept; reviewed: without the
+    instrument's added_by: kelvin mark."""
     from .yamlio import load_yaml
     data = load_yaml(text) if text.strip() else None
     entry = (data.get("instruments") or {}).get(name) if isinstance(data, dict) else None
     if not isinstance(entry, dict):
         raise KeyError("no instrument %r in the lab config" % name)
-    merged: Dict[str, List[float]] = {str(k): list(v) for k, v in (entry.get("limits") or {}).items()}
-    for p, lim in limits.items():
-        if lim is None:
+    merged: Dict[str, Any] = {str(k): list(v) if isinstance(v, (list, tuple)) else v
+                              for k, v in (entry.get(key) or {}).items()}
+    for p, value in changes.items():
+        if value is None:
             merged.pop(p, None)
         else:
-            merged[p] = [float(lim[0]), float(lim[1])]
+            merged[p] = value
     lines = text.split("\n")
     at, end = _instrument_lines(lines, name)
     indent = len(lines[at]) - len(lines[at].lstrip())
     head, _, rest = lines[at].partition(":")
     if rest.strip() and not rest.strip().startswith("#"):   # written on one line: name: { card: ..., ... }
-        entry = dict(entry, limits=merged) if merged else {k: v for k, v in entry.items() if k != "limits"}
+        entry = dict(entry, **{key: merged}) if merged else {k: v for k, v in entry.items() if k != key}
         if reviewed:
             entry.pop("added_by", None)
         lines[at] = "%s: %s" % (head, _flow(entry))
@@ -888,15 +908,15 @@ def set_limits(text: str, name: str, limits: Dict[str, Optional[Sequence[float]]
     child = min((len(l) - len(l.lstrip()) for l in block if l.strip() and not l.lstrip().startswith("#")),
                 default=indent + 2)
     out, i, placed = [], 0, False
-    new = ("%slimits: { %s }   # set in Kelvin (Set up, Limits…)" % (" " * child, ", ".join(
-        "%s: [%g, %g]" % (p, v[0], v[1]) for p, v in merged.items()))) if merged else None
+    new = ("%s%s: { %s }   # set in Kelvin (Set up, Limits…)" % (" " * child, key, ", ".join(
+        "%s: %s" % (p, written(v)) for p, v in merged.items()))) if merged else None
     while i < len(block):
         line = block[i]
         depth = len(line) - len(line.lstrip())
-        if depth == child and re.match(r"^\s*limits\s*:", line):
+        if depth == child and re.match(r"^\s*%s\s*:" % key, line):
             i += 1
             while i < len(block) and (not block[i].strip() or len(block[i]) - len(block[i].lstrip()) > child):
-                i += 1   # a limits mapping written as a block: its lines go too
+                i += 1   # a mapping written as a block: its lines go too
             if new:
                 out.append(new)
             placed = True
@@ -906,8 +926,9 @@ def set_limits(text: str, name: str, limits: Dict[str, Optional[Sequence[float]]
             continue
         out.append(line)
         i += 1
-    if not placed and new:
-        after = next((k for k, l in enumerate(out) if re.match(r"^\s*address\s*:", l)), len(out) - 1)
+    if not placed and new:   # limits after the address, rates after the limits
+        anchors = ("address",) if key == "limits" else ("limits", "address")
+        after = next((k for a in anchors for k, l in enumerate(out) if re.match(r"^\s*%s\s*:" % a, l)), len(out) - 1)
         out.insert(after + 1, new)
     return "\n".join(lines[:at + 1] + out + lines[end:])
 

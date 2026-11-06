@@ -3231,21 +3231,26 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(400, str(e))
 
     def limits_view(name: str) -> Dict[str, Any]:
+        from .. import specialmeasure
         inst = runtime.lab.instruments[name]
         ic = runtime.lab.config.instruments[name]
+        offer = specialmeasure.proposed(home, name, ic.address, ic.card) or {}   # its rack's, Kelvin having added it
         rows = [{"param": s.name, "label": s.title, "unit": s.unit, "drive": s.is_drive,
                  "vendor": list(s.limits) if s.limits else None,
                  "lab": list(ic.limits[s.name]) if s.name in ic.limits else None,
-                 "safe": s.safe if isinstance(s.safe, (int, float)) and not isinstance(s.safe, bool) else None}
+                 "safe": s.safe if isinstance(s.safe, (int, float)) and not isinstance(s.safe, bool) else None,
+                 "rate": ic.rates.get(s.name), "proposed": (offer.get("limits") or {}).get(s.name),
+                 "proposed_rate": (offer.get("rates") or {}).get(s.name)}
                 for s in inst.card.params.values() if s.numeric and s.set_cmd is not None]
         rows.sort(key=lambda r: not r["drive"])   # what drives the sample first
         return {"instrument": name, "model": inst.card.model, "rows": rows,
-                "reviewed": name not in runtime.lab.config.unreviewed(),
+                "reviewed": name not in runtime.lab.config.unreviewed(), "proposed": offer.get("from"),
                 "editable": runtime.lab_info.get("kind") == "file" and lab_file.exists()}
 
     async def instrument_limits(request: Request) -> Response:
-        """GET: an instrument's numeric settings, with the card's limits and the lab's. POST {limits: {param:
-        [low, high] or null}, reviewed}: change the lab's in the lab config, at once (a person's; no Kelvin tool
+        """GET: an instrument's numeric settings, with the card's limits and the lab's, and what the lab's Special
+        Measure rack proposes for one Kelvin added (proposed). POST {limits: {param: [low, high] or null}, rates:
+        {param: per second or null}, reviewed}: change the lab's in the lab config, at once (a person's; no Kelvin tool
         reaches this). reviewed: the person checked them, so Kelvin's mark on an instrument it added goes."""
         name = request.path_params["name"]
         if name not in runtime.lab.instruments:
@@ -3271,10 +3276,20 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                     isinstance(x, (int, float)) and not isinstance(x, bool) for x in lim) and lim[0] <= lim[1]):
                 return error(400, "%s: give the lowest and the highest value, lowest first" % spec.title)
             changes[spec.name] = [float(lim[0]), float(lim[1])]
+        rates: Dict[str, Any] = {}   # a drive Kelvin ramps itself: how fast (a Special Measure rack's, accepted here)
+        for p, rate in (body.get("rates") or {}).items():
+            spec = card.params.get(str(p))
+            if spec is None or spec.ramp != "gate":
+                return error(400, "%s has no setting %r that Kelvin ramps" % (name, p))
+            if rate is not None and not (isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate > 0):
+                return error(400, "%s: give how fast it may ramp, per second, above 0" % spec.title)
+            rates[spec.name] = None if rate is None else float(rate)
         reviewed = bool(body.get("reviewed"))
         try:
+            from ..discovery import set_rates
             old = lab_file.read_text(encoding="utf-8")
             text = set_limits(old, name, changes, reviewed)
+            text = set_rates(text, name, rates) if rates else text
             cfg = load_lab_config(text, lab_registry(lab_file.parent))   # a limit beyond the card's is refused here
         except KeyError as e:
             return error(404, e.args[0])
@@ -3289,10 +3304,13 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         tmp.replace(lab_file)
         ic = runtime.lab.config.instruments[name]   # the running lab's: in force at once, no reconnecting
         ic.limits = dict(cfg.instruments[name].limits)
+        if rates:
+            ic.rates = dict(cfg.instruments[name].rates)
         if reviewed:
             ic.added_by = ""
         runtime.gate.log.write("limits", by="human (portal)", instrument=name,
-                               limits={p: list(v) for p, v in ic.limits.items()}, reviewed=reviewed)
+                               limits={p: list(v) for p, v in ic.limits.items()}, reviewed=reviewed,
+                               **({"rates": dict(ic.rates)} if rates else {}))
         made = await asyncio.to_thread(runtime.config_changed, "human (portal)",
                                        " ".join(str(body.get("why") or "").split())[:300], "limits")
         return JSONResponse(dict(limits_view(name), versions=[v["n"] for v in made]))

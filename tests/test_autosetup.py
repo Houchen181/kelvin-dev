@@ -396,3 +396,73 @@ def test_the_first_setup_uses_the_labs_scripts(tmp_path, bench, pdf):
     assert sorted(cfg.unreviewed()) == ["bias", "cryo", "lockin", "tc"]   # every one still asks until reviewed
     assert any("bias (" in n["text"] for n in rt.notifier.notices if n["kind"] == "setup")   # named as the lab does
     assert drive_commands(bench) == []
+
+
+RACK = r"""
+% a rig's Special Measure setup, written for this test in the form labs write them
+GPIB_BOARD = 'ni';
+BOARD_NUM = 0;
+SourceM_K2400_bg_GPIB = 24;
+LockIn_GPIB = 8;
+K2400_bg_Use = 1;
+LockIn_Use = 1;
+Cryo_Use = 0;
+smloadinst('test');
+if K2400_bg_Use == 1
+    ind = smloadinst('K2400', [], GPIB_BOARD, BOARD_NUM, SourceM_K2400_bg_GPIB);
+    smdata.inst(ind).name = 'K2400_bg';
+    smaddchannel('K2400_bg', 'V', 'Vbg', [-5 5 2 1]);
+    fprintf(smdata.inst(ind).data.inst, ':source:voltage 0');
+    fprintf(smdata.inst(ind).data.inst, 'sense:current:protection 1e-6');
+end
+if LockIn_Use == 1
+    global LockIn
+    ind = smloadinst('SR830', [], 'None');
+    LockIn = gpib('ni', BOARD_NUM, LockIn_GPIB);
+    smdata.inst(ind).name = 'LockIn_Upper';
+    smaddchannel('LockIn_Upper', 'X', 'X_A');
+    smaddchannel('LockIn_Upper', 'VREF', 'Vref_A', [0.004 0.5 0.1 1]);
+end
+if Cryo_Use == 1
+    ind = smloadinst('LS336', [], 'serial', 'COM3');
+    smdata.inst(ind).name = 'Cryo_old';
+end
+"""
+
+
+def test_the_first_setup_reads_a_special_measure_rack_and_proposes_its_limits(tmp_path, bench, pdf):
+    """Field test #9: Kelvin found 0 instruments in a lab's Special Measure scripts, then named the instruments by
+    address (k2400_24) while the lab's plans said k2400_tg, and kept the maker's limits where the rack had 5 V and
+    1 uA. Now the rack's instruments come in under its names, and its limits wait for a person."""
+    from labharness import specialmeasure
+    rig = tmp_path / "SpecialMeasure"
+    rig.mkdir()
+    (rig / "smsetup_rig.m").write_text(RACK, encoding="utf-8")
+    plain = tmp_path / "python"   # another of the lab's scripts folders, read as without a rack
+    plain.mkdir()
+    (plain / "temp.py").write_text('import serial\ncryo = serial.Serial("COM3", 57600)   # Lake Shore 336\n',
+                                   encoding="utf-8")
+    rt = runtime_for(tmp_path)
+    setup = AutoSetup(rt, FakeSettings(), tmp_path, fetch=lambda url: pdf)
+    assert setup.use_scripts([str(rig), str(tmp_path / "gone")])["instruments"] == 2   # one not there: only said
+    with pytest.raises(OSError):
+        setup.use_scripts(str(tmp_path / "gone"))
+    read = setup.use_scripts([str(rig), str(plain)])
+    assert read["instruments"] == 3 and read["scripts"] == 2, read   # what the rack loads (not Cryo_old), and cryo
+    assert setup.run()["state"] == "done"
+    text = (tmp_path / "lab.yaml").read_text(encoding="utf-8")
+    cfg = load_lab_config(text, builtin_registry())
+    assert cfg.instruments["k2400_bg"].address == "GPIB0::24::INSTR"           # as the rack names it, at its address
+    assert cfg.instruments["lockin_upper"].card == "srs/sr830" and cfg.instruments["cryo"].card == "lakeshore/336"
+    assert sorted(cfg.unreviewed()) == ["cryo", "k2400_bg", "lockin_upper"]
+    assert cfg.instruments["k2400_bg"].limits["V"] == (-210, 210) and not cfg.instruments["k2400_bg"].rates
+    assert "V: [0, 0]" not in text and "from your scripts" not in text      # Kelvin sets no limits of its own
+    bg = specialmeasure.proposed(tmp_path, "k2400_bg", "GPIB0::24::INSTR", "keithley/2400")
+    assert bg["limits"] == {"V": [-5, 5], "compliance_I": [1e-9, 1e-6]} and bg["rates"] == {"V": 2}   # for a person
+    assert bg["from"].startswith("your Special Measure rack (smsetup_rig.m in ")
+    assert specialmeasure.proposed(tmp_path, "lockin_upper", "GPIB0::8::INSTR", "srs/sr830")["limits"] == {
+        "amplitude": [0.004, 0.5]}
+    assert specialmeasure.proposed(tmp_path, "cryo", "ASRL3::INSTR", "lakeshore/336") is None
+    said = next(n["text"] for n in rt.notifier.notices if n["title"].startswith("Kelvin set up"))
+    assert "rack's limits for k2400_bg, lockin_upper are there for you to accept" in said
+    assert drive_commands(bench) == []
