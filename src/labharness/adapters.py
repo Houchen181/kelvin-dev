@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .cards import Card, parity_name, serial_settings
 
 _rm: Any = None
+_rm_own = False   # whether Kelvin made _rm itself
 _rm_lock = threading.Lock()
 # PyVISA warns of a reply that ended at the bus's end-of-message mark (GPIB's EOI) without the line end: whole all the
 # same, and a field test's log had six such warnings in an afternoon
@@ -139,9 +140,10 @@ def short_code(e: BaseException) -> str:
 
 def resource_manager() -> Any:
     """The process-wide PyVISA resource manager (created on first use)."""
-    global _rm
+    global _rm, _rm_own
     with _rm_lock:
         if _rm is None:
+            _rm_own = True   # Kelvin's own, which it closes as it quits (close_resource_manager)
             try:
                 import pyvisa
             except ImportError as e:
@@ -162,9 +164,11 @@ def resource_manager() -> Any:
 def close_resource_manager() -> None:
     """PyVISA's resource manager closed, after every session it opened is (Kelvin quitting, Lab.close first): left to
     Python's exit, it complained of sessions gone before it (VI_ERROR_INV_OBJECT, at every quit of a field test)."""
-    global _rm
+    global _rm, _rm_own
     with _rm_lock:
-        rm, _rm = _rm, None
+        if not _rm_own:   # one set from outside (a test's pretend bus) is theirs
+            return
+        rm, _rm, _rm_own = _rm, None, False
     close = getattr(rm, "close", None)
     if close is not None:
         try:
@@ -175,9 +179,9 @@ def close_resource_manager() -> None:
 
 def set_resource_manager(rm: Any) -> None:
     """Use another resource manager (tests use a fake bus)."""
-    global _rm
+    global _rm, _rm_own
     with _rm_lock:
-        _rm = rm
+        _rm, _rm_own = rm, False
 
 
 def bus_of(address: str) -> Optional[str]:

@@ -19,6 +19,15 @@ homelab._BUILTIN_IDS = None
 
 
 @pytest.fixture(autouse=True)
+def no_hung_bus():
+    """Each test starts with no GPIB bus marked as hung (adapters.BUSES is the process's): one test's hung bus never
+    makes another's instruments refuse every command."""
+    yield
+    from labharness.adapters import BUSES
+    BUSES.hung.clear()
+
+
+@pytest.fixture(autouse=True)
 def no_real_hub(monkeypatch):
     """Tests never reach the real Kelvin hub: one that needs a hub names its own. Nor models.dev: a test hub's
     catalog (hub/catalog.py) reads a list of its own, or none."""
