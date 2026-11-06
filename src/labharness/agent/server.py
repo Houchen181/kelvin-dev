@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import argparse
+import contextvars
 import functools
 import json
 import sys
+import threading
 import webbrowser
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
@@ -17,6 +19,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 import anyio
 import anyio.to_thread
 from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import ToolAnnotations
 
 from .. import carddraft, datatools, expr, fitting, guide
@@ -202,6 +205,7 @@ You are connected to a physics lab through Kelvin.
 - Reply to the user briefly: the result first, then the next step."""
 
 READ = ToolAnnotations(readOnlyHint=True)
+TOOL_IO_S = 60.0   # the longest a tool that reads instruments waits for them (at_most)
 OUTSIDE = '<outside_text from="%s">\n%s\n</outside_text>'
 VIEWER_META = "kelvin.viewer"   # a portal chat's tool call names its viewer here (LabRuntime.register_viewer)
 
@@ -240,6 +244,45 @@ def _viewer_token(context: Any) -> str:
     return str(meta.get(VIEWER_META) or "") if isinstance(meta, dict) else ""
 
 
+def anticipated(exc: Optional[BaseException]) -> Optional[str]:
+    """What a tool's error says, when it is one of Kelvin's refusals rather than a crash: an instrument or run it
+    doesn't have or can't use now, a value it won't take, an instrument that didn't answer. The MCP library passes on
+    only "Error executing tool <name>" for any other exception, so the agent never learnt why (a field test's
+    describe_instrument on a camera that wasn't connected). None for a crash, which is logged with its traceback."""
+    if exc is None:
+        return None
+    if isinstance(exc, KeyError):   # its text, without the quotes a KeyError puts around it
+        return str(exc.args[0]) if exc.args else type(exc).__name__
+    if isinstance(exc, (ValueError, PermissionError, FileNotFoundError, TimeoutError)) or (
+            isinstance(exc, (RuntimeError, OSError)) and type(exc).__module__.startswith("labharness")):
+        return str(exc) or type(exc).__name__
+    return None
+
+
+def at_most(what: str, fn: Callable[[], str], seconds: Optional[float] = None) -> str:
+    """fn() waited for TOOL_IO_S at most, on a thread of its own with this one's context (whose call it is): an
+    instrument that doesn't answer on a hung bus once held an agent's request until a person stopped it. Past
+    that, what it waits on, in words; the read goes on alone and its answer is dropped."""
+    box: Dict[str, Any] = {}
+    context = contextvars.copy_context()
+
+    def work() -> None:
+        try:
+            box["out"] = context.run(fn)
+        except BaseException as e:   # raised here, on the tool's own thread
+            box["error"] = e
+    t = threading.Thread(target=work, name="kelvin-tool-io", daemon=True)
+    t.start()
+    t.join(TOOL_IO_S if seconds is None else seconds)
+    if t.is_alive():
+        return ("still waiting for %s after %.0f s: an instrument there doesn't answer (or its bus hung; the "
+                "alarms say). Kelvin stopped waiting; that read goes on by itself and its answer is dropped. "
+                "lab_status shows what is known" % (what, TOOL_IO_S if seconds is None else seconds))
+    if "error" in box:
+        raise box["error"]
+    return box["out"]
+
+
 def build_server(rt: LabRuntime) -> MCPServer:
     server = MCPServer("kelvin", instructions=INSTRUCTIONS + lab_memory_part(rt), version=__version__)
     plain_call = server.call_tool
@@ -249,7 +292,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         names its viewer by a token only this process knows; any other client is an agent over MCP, no chat, which
         sees shared work only. The worker thread a tool runs in takes the viewer with its context."""
         with rt.viewing(rt.viewer_of(_viewer_token(context))):
-            return await plain_call(name, arguments, context)
+            try:
+                return await plain_call(name, arguments, context)
+            except UnexpectedToolError as e:   # Kelvin's own refusals reach the model in its words, not as a crash
+                said = anticipated(e.__cause__)
+                if said is None:
+                    raise
+                raise ToolError("Error executing tool %s: %s" % (name, said)) from e.__cause__
     server.call_tool = call_tool   # type: ignore[method-assign]
 
     def cancellable(fn: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
@@ -285,7 +334,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def lab_status() -> str:
         """Every instrument's current values. * marks drives away from their safe value. An instrument a run (or
         another change in progress) uses isn't asked meanwhile: its latest values, with how old each is."""
-        return rt.lab_status()
+        return at_most("the lab's instruments", rt.lab_status)
 
     @server.tool(annotations=READ, structured_output=False)
     def describe_instrument(instrument: str) -> str:
@@ -351,7 +400,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def get_value(instrument: str, parameter: str) -> str:
         """Read one parameter (a trace is summarized; record traces with a plan to keep them). While a run uses the
         instrument, its latest value instead (the run's last point), with how old it is."""
-        return rt.get(instrument, parameter)
+        return at_most("%s.%s" % (instrument, parameter), lambda: rt.get(instrument, parameter))
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
@@ -571,7 +620,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.set_live(name, value, run)
 
     @server.tool(annotations=READ, structured_output=False)
-    def try_card(card: str, instrument: str) -> str:
+    def try_card(card: str, instrument: str = "") -> str:
         """Try a card on the instrument before using it: card is its YAML text, or the id of a card Kelvin has (one
         draft_card wrote); instrument is its name in the lab or its address (one the last scan did not find asks the
         person first). Asks who it is, reads every reading, and writes one setting with the value it already has to
@@ -650,6 +699,15 @@ def build_server(rt: LabRuntime) -> MCPServer:
         measurement, arm an acquisition, fire a burst. One that drives the sample asks the person first. In a plan,
         trigger: [instrument.action] does them at every point, after settling, before measuring."""
         return rt.do_action(instrument, action) + rt.lab_notes_at_use([instrument])
+
+    @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
+    def clear_bus(bus: str = "GPIB0") -> str:
+        """A GPIB bus that stopped answering (its alarm names it; or a Prologix adapter, prologix://<port or host>): an
+        interface clear, then each instrument on it cleared and asked who it is; the one that stopped answering first
+        is left out until reconnect_instrument. No setting or output changes, but a measurement in progress on it
+        ends, so a person is asked while one runs."""
+        return rt.clear_bus(bus)
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
@@ -822,7 +880,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def health_check(instruments: Optional[List[str]] = None) -> str:
         """Identity, error queue, sanity readings and drives inside limits, for all or some instruments. run_plan
         already checks the instruments a plan uses; call this when one misbehaves, after an alarm, or when asked."""
-        return rt.health(instruments)
+        return at_most("the health check", lambda: rt.health(instruments))
 
     @server.tool(annotations=READ, structured_output=False)
     def validate_plan(plan: str) -> str:

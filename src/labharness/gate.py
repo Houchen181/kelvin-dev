@@ -379,7 +379,13 @@ class SafetyGate:
             self._held_still(inst, target)   # a stage's own stop still works with hands on the sample
         if held:
             return self._done(Result(False, "refused", target, message="refused: %s" % held), "action")
-        if action.drives:
+        drives = action.drives
+        if drives and action.drives_when:   # it drives the sample only while that switch is on: asked then
+            try:
+                drives = inst.spec(action.drives_when).coerce(inst.read(action.drives_when))
+            except Exception:
+                drives = True   # not known: a person decides
+        if drives:
             hands = self._hands_problem(target)
             if hands:
                 return self._done(Result(False, "refused", target, message="refused: %s" % hands), "action")
@@ -438,9 +444,16 @@ class SafetyGate:
         return r
 
     def describe(self, instr: str) -> str:
-        inst = self.lab.instrument(instr)
+        """Its card, limits and rules: nothing is sent to it, so it is described also while switched off or not
+        connected (once that failed, and the agent couldn't learn what the instrument has)."""
+        inst = self.lab.instruments.get(instr)
+        if inst is None:
+            inst = self.lab.instrument(instr)   # NotHere: says which instruments there are
         card = inst.card
         lines = ["%s: %s (%s, card %s, %s, trust %s)" % (inst.name, card.model, card.kind, card.id, card.status, inst.trust)]
+        away = self.lab.away(instr)
+        if away:
+            lines.append("  %s: Kelvin sends it nothing now; its card is as below" % away)
         unsure = self.unsure(inst)
         if unsure:
             lines.append("  not sure yet: %s; every output change asks a person" % unsure)

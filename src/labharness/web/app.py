@@ -76,7 +76,7 @@ ATTACH_MAX = 40 * 2 ** 20   # a photo (the portal shrinks it first), a PDF or a 
 TEXT_TAIL = 256 * 1024      # of a script run's own text files, the last part a person reads (X-Kelvin-Cut: the whole)
 # what works while nobody is signed in: signing in, a new account, and stopping whatever runs
 SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/accounts", "/api/accounts/remove",
-              "/api/stop", "/api/runs/stop"}
+              "/api/stop", "/api/runs/stop", "/api/app/show"}
 # sharing work with the Kelvin hub (hubsync.py) is switched off for now: the hub is for accounts only (central.py)
 HUB_SHARING = False
 # Claude Code bridge: while Claude works the screen, this computer's browser only reads and stops, so its clicks never
@@ -85,11 +85,12 @@ HUB_SHARING = False
 # route keeps the card's dismiss locked) and what only reads, though sent as a POST (the Analysis pane's working out,
 # its subagent's and its CSV; keeping a fit writes, so it waits)
 WHILE_OPERATING = ("/api/stop", "/api/runs/stop", "/api/safe", "/api/incident", "/api/analysis", "/api/analysis/auto",
-                   "/api/analysis/csv")
+                   "/api/analysis/csv", "/api/app/show")
 ACK_WHILE_OPERATING = re.compile(r"^/api/alarms/[^/]+/ack$")
 OPERATING = ("Claude is operating this computer, so everything in Kelvin but Stop, Bring to safe and reading is locked "
              "until it finishes. Press Stop to end it.")
 COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument collection while it is on
+CLOSE_INSTRUMENTS_S = 10.0   # how long the instruments may take to close as Kelvin quits
 
 
 def make_providers(settings: Settings, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
@@ -332,7 +333,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
                providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None,
                auto_setup: bool = False, accounts: Optional[Accounts] = None, updater: Any = None,
-               on_exit: Optional[Any] = None, sync_collection: bool = False) -> Any:
+               on_exit: Optional[Any] = None, sync_collection: bool = False, on_show: Optional[Any] = None) -> Any:
     """accounts: people sign in, each to their own settings, keys, chats, data folder and record (accounts.py).
     Without it, one person uses Kelvin, as before accounts. updater: keeps an installed Kelvin up to date
     (updater.py); on_exit closes the app (the desktop window), so an update can install. sync_collection: keep the
@@ -605,6 +606,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             runtime.stop_watching()
             await remote.stop()
             await agent.close()
+            # every instrument let go of, each on a thread of its own: one that hangs can't keep Kelvin from quitting
+            stuck = await asyncio.to_thread(runtime.close_instruments, CLOSE_INSTRUMENTS_S)
+            if stuck:
+                log.warning("still closing as Kelvin quits: %s", ", ".join(stuck))
 
     def error(status: int, message: str) -> JSONResponse:
         return JSONResponse({"error": message}, status_code=status)
@@ -1501,6 +1506,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(404, "not found")
         agent.stop()
         on_quit()
+        return JSONResponse({"ok": True})
+
+    async def bus_clear(request: Request) -> Response:
+        """POST {bus}: a person's Clear the bus, from a hung GPIB bus's alarm (runtime.clear_bus)."""
+        body = await request.json()
+        said = await asyncio.to_thread(runtime.clear_bus, str(body.get("bus") or "GPIB0"), person(request))
+        return JSONResponse({"said": said})
+
+    async def show_app(request: Request) -> Response:
+        """Kelvin was started again on this computer: this one comes forward instead (desktop._one_kelvin)."""
+        if on_show is None:
+            return error(404, "not found")
+        on_show()
         return JSONResponse({"ok": True})
 
     def suggested_folder(project: Optional[str]) -> str:
@@ -4435,6 +4453,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/instruments/card", card_for_found, methods=["POST"]),
         Route("/api/settings", settings_view, methods=["GET", "POST"]),
         Route("/api/quit", quit_app, methods=["POST"]),
+        Route("/api/app/show", show_app, methods=["POST"]),
+        Route("/api/bus/clear", bus_clear, methods=["POST"]),
         Route("/api/live", live),
         Route("/api/runs", runs),
         Route("/api/runs/stop", stop_run, methods=["POST"]),

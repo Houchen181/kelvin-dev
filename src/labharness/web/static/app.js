@@ -5112,8 +5112,23 @@
   }
   function gotIt(a) {   // an alarm's Got it: a person has seen it (it ends when it clears)
     const ok = h("button", { class: "btn small", type: "button", "data-k": "ok" }, "Got it");
-    ok.addEventListener("click", async () => { try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ } pollState(); });
+    ok.addEventListener("click", async () => {
+      ok.disabled = true;   // one Got it per click: a double click once sent three
+      try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ }
+      pollState();
+    });
     return ok;
+  }
+  function clearBus(a) {   // a hung GPIB bus's alarm: an interface clear, then each instrument cleared and asked who it is
+    const b = h("button", { class: "btn small primary", type: "button", "data-k": "clear-bus" }, "Clear the bus");
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try { const r = await api("/api/bus/clear", { body: { bus: a.bus } }); if (r.said) toast(r.said); }
+      catch (e) { toast(e.message); }
+      await pollState();
+      b.disabled = false;
+    });
+    return b;
   }
   // a list drawn again in place: the keyboard's place on it (the control with the same data-k, else the first one) kept
   function keepPlace(box, draw) {
@@ -5139,7 +5154,7 @@
     S.alertsShown = sig;
     const rows = first ? [h("div", { class: "alert" + (first.cleared ? " cleared" : "") }, icon("warn"), h("div", { class: "alert-body" },
       h("b", {}, first.text), first.actions.length ? h("span", {}, "Kelvin " + first.actions.join("; ")) : null,
-      h("span", { class: "alert-when" }, alarmWhen(first))), gotIt(first))] : [];
+      h("span", { class: "alert-when" }, alarmWhen(first))), first.bus && !first.cleared ? clearBus(first) : null, gotIt(first))] : [];
     if (more > 0) {
       const b = h("button", { class: "alert alert-more", type: "button", "data-k": "more", title: "Lab → Watches lists every alarm" }, icon("warn"),
         h("span", { class: "alert-body" }, h("b", {}, more + (more === 1 ? " more alarm" : " more alarms"))), icon("chev"));

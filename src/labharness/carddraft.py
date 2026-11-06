@@ -31,7 +31,8 @@ Top level:
   lock-in, temperature-controller, magnet-supply, laser, preamplifier, multimeter, generator, ...);
   status: draft (always, for a card you write); manual: which manual and chapter it came from.
 - identify: {idn: a regex matching the *IDN? reply, example: a real reply}. Add query: if the instrument does not
-  answer *IDN?.
+  answer *IDN?. Another reply the same card fits (a newer model set to emulate this one) goes under also: [{idn: its
+  own regex, written out, is: what answers so, in words, check: {query, expect}}], never into a looser idn.
 - error_query: the command that reads the error queue, if any (e.g. "SYSTem:ERRor?"). Replies starting with 0 ("0,No
   error", 0000) mean no error; for any other way of saying it, no_error: a regex for that reply (Newport's "1TE@").
 - connection (only if the manual requires it): read_termination, write_termination, baud_rate, data_bits, parity
@@ -144,7 +145,11 @@ commands arm, trigger and wait before the fetch is get: ["INIT", "*TRG", "*OPC?"
 and wait: <the seconds it may take>; *OPC? answers when the acquisition is done. Those commands only arm, trigger
 and wait: a setting (trigger source, sample count) is a parameter of its own. Named commands with no value go under
 actions: {trigger: {send: "*TRG", label: Trigger}, fire: {send: ":BURS:FIRE", label: Fire a burst, drives: true}}
-(drives: true when it drives the sample, which then asks a person); a plan does them at every point with trigger:.
+(drives: true when it drives the sample, which then asks a person; drives: output when it does only while that
+on/off parameter is on, as a source's :ABORt can switch its output off); a plan does them at every point with trigger:.
+A reading the instrument answers only in a certain state (one reading per :READ?, not measuring continuously, its
+fields in the order the card reads them) gets health checks with before: [those readings] and says: what a failing
+reply means and which action fixes it; Kelvin then asks no such reading until the check holds.
 A measurement the instrument times itself into its buffer, with parameters (cyclic voltammetry, an impedance sweep,
 a scope's segmented capture) is a technique: techniques: {cv: {label, parameters: {start: {unit: V, drive: V},
 rate: {unit: V/s, rate_of: V, limits: [lo, hi], default: x}, ...}, let: {delay: "step / rate"}, duration: "<its

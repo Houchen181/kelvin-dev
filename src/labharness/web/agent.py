@@ -298,6 +298,7 @@ def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
 DEFERRED = {
     "setting up instruments": ["scan_instruments", "find_on_network", "connected_devices", "inspect_address",
                                "inspect_serial", "add_instrument", "change_instrument", "reconnect_instrument",
+                               "clear_bus",
                                "ask_to_switch_on", "survey_scripts", "survey_labview", "survey_specialmeasure"],
     "running the lab's own scripts": ["run_script", "check_script", "set_live"],
     "translating LabVIEW into experiments": ["describe_vi", "translate_vi", "save_experiment", "keep_experiment",

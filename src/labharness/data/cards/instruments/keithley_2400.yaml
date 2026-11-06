@@ -9,6 +9,11 @@ manual_url: "https://download.tek.com/manual/2400S-900-01_K-Sep2011_User.pdf"
 identify:
   idn: "KEITHLEY INSTRUMENTS INC\\.?,MODEL 24(00|01|10|20|25|30|40)"
   example: "KEITHLEY INSTRUMENTS INC.,MODEL 2400,1234567,C30   Mar 17 2006 09:29:29/A02  /K/J"
+  also:
+    - idn: "^KEITHLEY INSTRUMENTS,MODEL 2400,\\d{8},\\d+\\.\\d+\\.\\d+\\w*"
+      example: "KEITHLEY INSTRUMENTS,MODEL 2400,04453531,1.6.7c"
+      is: "a Keithley 2450 (or another of Keithley's touchscreen SourceMeters: its identity doesn't say which) set to its 2400 command set. For its own commands, set Command Set to SCPI at its front panel (Menu > System > Settings), restart it, and use the keithley/2450 card"
+      check: { query: "*LANG?", expect: "SCPI2400" }
 connection: { timeout_ms: 5000 }
 error_query: ":SYSTem:ERRor[:NEXT]?"
 safe_sequence: [V, I_source, output, compliance_I, compliance_V, source_function]
@@ -124,7 +129,7 @@ parameters:
     get: ":READ?"
     field: 1
     read_when: output
-    description: Measured current. :READ? turns the output on, so Kelvin only reads while the output is already on.
+    description: Measured current. :READ? turns the output on, so Kelvin only reads while the output is already on, and only while the instrument takes one reading at a time (the checks below); V_meas comes from the same reading.
   V_meas:
     label: Measured voltage
     kind: measure
@@ -149,9 +154,41 @@ health:
     expect: "KEITHLEY"
   - query: ":SYSTem:ERRor?"
     expect: "^[+]?0,"
+  - query: ":ARM:COUNt?"
+    expect: "^\\s*\\+?0*1(\\.0*)?(E[+-]?0+)?\\s*$"
+    says: "it is set to measure continuously (its arm count isn't 1), so it never answers :READ?: Stop continuous mode (action stop_continuous) first"
+    before: [I, V_meas]
+  - query: ":TRIGger:COUNt?"
+    expect: "^\\s*\\+?0*1(\\.0*)?(E[+-]?0+)?\\s*$"
+    says: "it takes more than one reading for each :READ? (its trigger count isn't 1): Stop continuous mode (action stop_continuous) first"
+    before: [I, V_meas]
+  - query: ":ARM:SOURce?"
+    expect: "^\\s*IMM"
+    says: "it waits for a trigger before it measures (its arm source isn't immediate), so :READ? would wait: Stop continuous mode (action stop_continuous) first"
+    before: [I, V_meas]
+  - query: ":TRIGger:SOURce?"
+    expect: "^\\s*IMM"
+    says: "it waits for a trigger before each reading (its trigger source isn't immediate), so :READ? would wait: Stop continuous mode (action stop_continuous) first"
+    before: [I, V_meas]
+  - query: ":FORMat:ELEMents?"
+    expect: "^\\s*VOLT\\w*,CURR"
+    says: "its readings come in another order (:FORMat:ELEMents), so V_meas and I would be taken from the wrong places: set Kelvin's reading order (action reading_order) first"
+    before: [I, V_meas]
+actions:
+  stop_continuous:
+    label: Stop continuous mode
+    send: [":ABORt", ":ARM:COUNt 1", ":TRIGger:COUNt 1", ":ARM:SOURce IMMediate", ":TRIGger:SOURce IMMediate"]
+    drives: output
+  reading_order:
+    label: Kelvin's reading order
+    send: ":FORMat:ELEMents VOLTage,CURRent,RESistance,TIME,STATus"
+  clear_errors:
+    label: Clear its error queue
+    send: "*CLS"
 raw:
   reset: ["*RST", ":SYSTem:PRESet"]
   blocked: [":CALibration", ":SYSTem:PASSword"]
 notes:
   - Written from the manual; verify on your unit before trusting it with a sample.
-  - Readings assume the default :FORMat:ELEMents (voltage, current, resistance, time, status).
+  - Readings assume the default :FORMat:ELEMents (voltage, current, resistance, time, status), and one reading per :READ?; Kelvin checks both before it reads, and says what to do when another program or the front panel left it otherwise.
+  - Left measuring continuously (arm count infinite), it answers nothing to :READ? (error 830), and asking it again and again hung a whole GPIB bus in a field test. Stop continuous mode (:ABORt, then one reading at a time) asks a person while the output is on, as :ABORt can switch it off.

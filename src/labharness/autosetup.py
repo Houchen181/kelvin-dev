@@ -206,7 +206,7 @@ class AutoSetup:
             names = sorted(n for n, i in rt.lab.instruments.items() if not i.simulated and i.enabled)
             self._set("reading", message="Reading the settings of %s" % ", ".join(names),
                       instruments=names, unreviewed=rt.lab.config.unreviewed())
-            for name, ic in rt.lab.config.instruments.items():   # manuals found while writing cards: no second download
+            for name, ic in list(rt.lab.config.instruments.items()):   # manuals found while writing cards: no second download
                 m = self._manuals.pop(ic.address, None)
                 if m and name in rt.lab.instruments:
                     try:

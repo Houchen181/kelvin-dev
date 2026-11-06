@@ -107,6 +107,11 @@ def _at_exit() -> None:
     _hold_h5py(deadline)
 
 
+def before_exit() -> None:
+    """What Python's exit does for run.h5 files (_at_exit), for a Kelvin that then quits at once (desktop._leave)."""
+    _at_exit()
+
+
 def _hold_h5py(deadline: float) -> None:
     """h5py's lock (phil), taken for good by the thread exiting Python. h5py's own exit unregisters its converters
     in HDF5 without that lock or the GIL, and HDF5 here serves one thread at a time: a thread still releasing h5py

@@ -32,6 +32,7 @@ from .instrument import Garbled, InstrumentLost, SensorError
 
 FAILS_BEFORE_ALARM = 3       # failed exchanges in a row before "doesn't answer" (one that can't reach it at all: one)
 ERROR_CHECK_EVERY = 60.0     # lab seconds between error-queue checks on real instruments
+BUS_PROBE_S = 30.0           # how often one instrument on a hung GPIB bus is asked whether it answers again
 ALIVE_EVERY = 20.0           # lab seconds between checks that each real instrument answers, while a run or queue goes
 RESET_EVERY = 5.0            # lab seconds between checks that the outputs the running plan switched on are still on
 GARBLE_CLEAR_S = 300.0       # lab seconds without a garbled reply before a comms fault clears
@@ -184,6 +185,11 @@ class Watch:
                 "device": self.device}
 
 
+def _and(names: List[str]) -> str:
+    """"a", "a and b", "a, b and c"."""
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
 @dataclass
 class Alarm:
     id: str
@@ -215,7 +221,7 @@ class Alarm:
                 "raised": self.raised, "cleared": self.cleared, "acknowledged": self.acknowledged,
                 "count": self.count, "last": self.latest, "cleared_text": self.cleared_text,
                 "acknowledged_by": self.acknowledged_by, "acknowledged_at": self.acknowledged_at,
-                "latched": self.latched}
+                "latched": self.latched, **({"bus": self.key} if self.source == "bus" else {})}
 
     @classmethod
     def restore(cls, v: Dict[str, Any]) -> "Alarm":
@@ -263,6 +269,8 @@ class Monitor:
         self._last_reset_check: Dict[str, float] = {}
         self._suspect: Dict[str, float] = {}      # output switches read off under a running plan once: since when
         self._comms: Dict[str, Alarm] = {}        # instruments whose replies arrive garbled (latched)
+        self._buses: Dict[str, Alarm] = {}        # GPIB buses that stopped answering, by bus
+        self._bus_probe_at: Dict[str, float] = {}
         self._garbles_seen: Dict[str, int] = {}   # garbled replies already counted, by instrument
         self._garbled_lab: Dict[str, float] = {}  # lab time the latest garbled reply was seen
         self._last_interlock_check = -1e18
@@ -371,6 +379,7 @@ class Monitor:
             if a is None:
                 return None
             now = time.time()
+            a.just_acknowledged = not a.acknowledged   # a second Got it (three in 0.7 s) is the same one: kept once
             if not a.acknowledged:
                 a.acknowledged, a.acknowledged_by, a.acknowledged_at = True, by, now
             if a.latched and a.cleared is None:
@@ -452,6 +461,7 @@ class Monitor:
         self._check_interlocks(now)
         self._check_errors(now)
         self._check_alive(now)
+        self._check_buses()   # first: a hung bus is one alarm, and its instruments' own don't go up meanwhile
         self._check_health(now)
 
     # ------------------------------------------------------------------ alarms
@@ -763,6 +773,11 @@ class Monitor:
         self._check_health()   # one that answers again is cleared; garbled replies latch their fault
         return out
 
+    @staticmethod
+    def _on_hung_bus(inst: Any) -> bool:
+        from .adapters import BUSES, bus_of
+        return not inst.simulated and bus_of(inst.config.address) in BUSES.hung
+
     def _raise_lost(self, name: str, text: str) -> Alarm:
         a = self._new("silent", name, text)
         self._silent[name] = a
@@ -780,7 +795,8 @@ class Monitor:
             self._check_garbles(name, inst, now)
             with self._lock:
                 on = self._silent.get(name)
-                if on is None and inst.enabled and h.fails and (h.gone or h.fails >= FAILS_BEFORE_ALARM):
+                if on is None and inst.enabled and h.fails and (h.gone or h.fails >= FAILS_BEFORE_ALARM) \
+                        and not self._on_hung_bus(inst):   # a hung bus has one alarm, for all of them
                     self._raise_lost(name, h.lost_text)
                 elif on is not None and h.fails == 0:
                     del self._silent[name]
@@ -788,6 +804,63 @@ class Monitor:
                         name, _since(on.raised), "; a power cut puts an instrument back to its power-on settings "
                         "(outputs off), so check them before going on" if any(s.enables for s in inst.card.drives)
                         else ""))
+
+    def _check_buses(self) -> None:
+        """GPIB buses that stopped answering (Lab.hung_buses): one alarm for the bus, not one per instrument, and
+        Kelvin stops sending on it (adapters.BUSES) until it is cleared (clear_bus) or answers again: every
+        BUS_PROBE_S one instrument on it is asked who it is."""
+        from .adapters import BUSES, bus_words
+        hung = dict(self.lab.hung_buses())
+        for bus, names in hung.items():
+            if bus in BUSES.hung:
+                continue
+            first = self.lab.first_silent(names)
+            inst = self.lab.instruments.get(first) if first else None
+            when = (" (after %s, at %s)" % (inst.health.first_failed or "a command", time.strftime(
+                "%H:%M:%S", time.localtime(inst.health.first_failed_at)))
+                if inst is not None and inst.health.first_failed_at else "")
+            text = ("%s isn't answering: %s stopped answering, and nothing on it has answered since. Kelvin stopped "
+                    "sending on it.%s Clear the bus (an interface clear, then each instrument cleared and asked who it "
+                    "is: no setting or output changes)" % (
+                        bus_words(bus), _and(names), " The first to stop was %s%s, most likely what hung it." % (
+                            first, when) if first else ""))
+            BUSES.flag(bus, names, text)
+            self._bus_probe_at[bus] = time.time()
+            with self._lock:
+                a = self._buses[bus] = self._new("comms", bus, text, source="bus")
+            self._tell(a, "Runs that use instruments on it stop; Kelvin asks one of them again every %.0f s." %
+                       BUS_PROBE_S, bus=bus)
+        for bus in list(BUSES.hung):
+            if time.time() - self._bus_probe_at.get(bus, 0.0) < BUS_PROBE_S:
+                continue
+            self._bus_probe_at[bus] = time.time()
+            if self._probe_bus(bus):
+                self.bus_cleared(bus, "%s answers again" % bus_words(bus))
+
+    def _probe_bus(self, bus: str) -> bool:
+        """One instrument on a hung bus (not the one that stopped first), asked who it is: whether the bus answers."""
+        from .adapters import BUSES, bus_of
+        on = [i for i in list(self.lab.instruments.values()) if i.enabled and not i.simulated
+              and bus_of(i.config.address) == bus and i.card.idn_pattern]
+        first = self.lab.first_silent([i.name for i in on])
+        pick = next((i for i in on if i.name != first), on[0] if on else None)
+        if pick is None:
+            return False
+        try:
+            with BUSES.through(bus):
+                pick.query_raw(pick.card.idn_query)
+            return True
+        except Exception:
+            return False
+
+    def bus_cleared(self, bus: str, text: str) -> None:
+        """A hung bus answers again (a probe, or clear_bus): Kelvin sends on it again, and its alarm clears."""
+        from .adapters import BUSES
+        BUSES.clear(bus)
+        with self._lock:
+            a = self._buses.pop(bus, None)
+        if a is not None:
+            self._clear(a.id, text)
 
     def _check_garbles(self, name: str, inst: Any, now: float) -> None:
         h = inst.health

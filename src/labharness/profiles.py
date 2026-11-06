@@ -104,12 +104,27 @@ def read_values(inst: Any) -> Dict[str, Any]:
     return values
 
 
+def shown_setting(entry: Dict[str, Any]) -> str:
+    """A setting from settings.json as Kelvin shows it: one that didn't answer is unknown, also in a file written before
+    Kelvin kept errors apart (0.3.43 showed a source's output that didn't answer as on)."""
+    from .cards import UNREAD, unread
+    value = entry.get("value")
+    if entry.get("error") or unread(value):
+        return UNREAD
+    return str(entry.get("shown", value))
+
+
 def write_settings(home: Any, name: str, card: Any, values: Dict[str, Any]) -> Dict[str, Any]:
     """settings.json: every value read at setup, as the instrument reported it and as Kelvin shows it."""
+    from .cards import UNREAD, unread
     shown = {}
     for pname, v in values.items():
         spec = card.params.get(pname)
         if spec is None or isinstance(v, list):
+            continue
+        if unread(v):   # what it said instead, kept apart: no value, so nothing can take the error for one
+            shown[pname] = {"value": None, "error": v[len("ERROR:"):].strip(), "shown": UNREAD, "kind": spec.kind,
+                            "unit": spec.unit}
             continue
         try:
             shown[pname] = {"value": v, "shown": spec.show(v), "kind": spec.kind, "unit": spec.unit}
@@ -314,7 +329,7 @@ def prepare(home: Any, lab: Any, lock: Any, found: Optional[Dict[str, Dict[str, 
     `found` is what a scan learnt, by address; without it the instrument is asked who it is. `lock` keeps these reads
     from overlapping with anything else Kelvin does with the instruments."""
     report: Dict[str, Any] = {}
-    for name, inst in lab.instruments.items():
+    for name, inst in list(lab.instruments.items()):   # a copy: the agent may add an instrument meanwhile
         if inst.simulated or not inst.enabled or (names is not None and name not in names):
             continue   # switched off in the Lab panel: nothing is sent to it, not even who-are-you
         card, address = inst.card, inst.config.address

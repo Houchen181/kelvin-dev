@@ -176,7 +176,9 @@ def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[
         if address.startswith("sim://"):
             return sim(name, card, address)
         from .adapters import open_backend
-        backend = open_backend(name, card, address, overrides=cfg.instruments[name].connection)
+        from .lab import connecting_entry
+        entry = connecting_entry(name) or cfg.instruments[name]   # one being added or changed: its new entry
+        backend = open_backend(name, card, address, overrides=entry.connection)
         opened.append(backend)
         return backend
 

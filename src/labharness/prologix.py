@@ -365,6 +365,17 @@ class Adapter:
             except OSError as e:
                 raise self._lost(e) from e
 
+    def interface_clear(self) -> None:
+        """GPIB's interface clear (++ifc) on the adapter's bus: every instrument on it stops talking and listening (its
+        settings stay). What brings a hung bus back."""
+        with self.lock:
+            link = self._link()
+            try:
+                link.send(b"++ifc\n")
+                self.last = None   # each instrument is addressed afresh after it
+            except OSError as e:
+                raise self._lost(e) from e
+
     def clear(self, at: Where) -> None:
         """Selected Device Clear (++clr): the instrument drops what it was doing and what it had to say."""
         with self.lock:

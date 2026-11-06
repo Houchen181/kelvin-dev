@@ -63,6 +63,15 @@ def _got(value: Any, most: int = 80) -> str:
     return text if len(text) <= most else "%s… (%d characters)" % (text[:most], len(text))
 
 
+UNREAD = "unknown (no answer)"   # how a value Kelvin couldn't read is shown, whatever its type
+
+
+def unread(value: Any) -> bool:
+    """A value Kelvin couldn't read, as snapshots and setup keep it ("ERROR: …"). Never a value: a field test showed a
+    source's output as on while it didn't answer, because the error text, not being empty, read as on."""
+    return isinstance(value, str) and value.startswith("ERROR")
+
+
 def parity_name(value: Any) -> Optional[str]:
     """none, odd, even, mark or space, from the word or the letter a manual gives (N, O, E, M, S); None for neither."""
     text = str(value).strip().lower()
@@ -264,9 +273,14 @@ class ParamSpec:
     def show(self, value: Any) -> str:
         if value is None:
             return "?"
-        if self.type == "bool":
+        if unread(value):
+            return UNREAD
+        if self.type == "bool":   # on or off only for what reads as one: never a reply or an error that isn't
             on, off = self.words or ("on", "off")
-            return on if value else off
+            try:
+                return on if self.coerce(value) else off
+            except ValueError:
+                return "unknown (%s)" % _got(value, 40)
         if self.type == "trace":
             return "trace (%d points)" % len(value)
         if self.type == "image":
@@ -302,6 +316,10 @@ class HealthCheck:
     expect: Optional[str] = None
     read: Optional[str] = None
     range: Optional[Tuple[float, float]] = None
+    says: str = ""                  # what it means when the reply isn't as expected, in words, with what to do
+    # readings asked only while this check holds (Instrument.read): a Keithley 2400 left measuring continuously never
+    # answers :READ?, and asking it again and again until the bus hung froze every instrument on it (field test)
+    before: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -312,6 +330,9 @@ class Action:
     send: List[str]
     label: str = ""
     drives: bool = False
+    # drives the sample only while this switch is on (drives: output): a Keithley 2400's :ABORt can turn its output
+    # off, which only matters while it is on, so it asks a person then and goes ahead otherwise
+    drives_when: Optional[str] = None
 
 
 @dataclass
@@ -324,6 +345,10 @@ class Card:
     vendor: str = ""
     idn_pattern: Optional[str] = None
     idn_example: Optional[str] = None
+    idn_own: Optional[str] = None   # its own identity reply (idn_pattern also holds the others it fits)
+    # other identity replies the card fits, each in full, with what answers so, in words, and a query confirming it
+    # (identify.also): a Keithley 2450 set to its 2400 command set answers as a 2400, without "INC."
+    idn_variants: List[Dict[str, str]] = field(default_factory=list)
     error_query: Optional[Template] = None
     no_error: Optional[str] = None             # a regex for the error query's reply that means no error (SMC100: 1TE@)
     safe_sequence: List[str] = field(default_factory=list)
@@ -361,6 +386,16 @@ class Card:
             return self.params[name]
         except KeyError:
             raise KeyError("%s has no parameter %r (has: %s)" % (self.id, name, ", ".join(self.params)))
+
+    def variant(self, idn: str) -> Optional[Dict[str, str]]:
+        """The other identity this reply is, among those the card fits (identify.also); None for its own, or none."""
+        if not self.idn_variants or (self.idn_own and re.search(self.idn_own, idn or "", re.I)):
+            return None
+        return next((v for v in self.idn_variants if re.search(v["idn"], idn or "", re.I)), None)
+
+    def guards(self, param: str) -> List["HealthCheck"]:
+        """The checks that must hold before this reading is asked (health: before)."""
+        return [h for h in self.health if param in h.before]
 
     @property
     def drives(self) -> List[ParamSpec]:
@@ -822,7 +857,21 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
     for i, h in enumerate(data.get("health") or []):
         path = "health[%d]" % i
         if isinstance(h, dict) and h.get("query"):
-            health.append(HealthCheck(query=as_sent(h["query"]), expect=h.get("expect")))
+            before = h.get("before") or []
+            before = [before] if isinstance(before, str) else before
+            if h.get("expect"):
+                try:
+                    re.compile(str(h["expect"]))
+                except re.error as e:
+                    err(path + ".expect", "not a valid regex: %s" % e)
+            if not isinstance(before, list) or any(str(b) not in params or params[str(b)].get_cmd is None
+                                                   for b in before):
+                err(path + ".before", "the readings asked only while this check holds, by name")
+                before = []
+            elif before and not h.get("expect"):
+                err(path + ".before", "needs expect: the reply that lets those readings be asked")
+            health.append(HealthCheck(query=as_sent(h["query"]), expect=h.get("expect"),
+                                      says=str(h.get("says") or ""), before=tuple(str(b) for b in before)))
         elif isinstance(h, dict) and h.get("read"):
             r = h.get("range")
             if h["read"] not in params:
@@ -852,6 +901,10 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
             re.compile(str(identify["idn"]))
         except re.error as e:
             err("identify.idn", "not a valid regex: %s" % e)
+    variants = _variants(identify, err)
+    idn_pattern = identify.get("idn")
+    if idn_pattern and variants:   # its own reply or one of the others it fits, each written out in full
+        idn_pattern = "|".join("(?:%s)" % p for p in [str(idn_pattern)] + [v["idn"] for v in variants])
     usb_ids = [str(u).lower() for u in identify.get("usb") or []]
     requires = data.get("requires") or []
     if not isinstance(requires, list) or not all(isinstance(r, str) and PACKAGE.match(r.strip()) for r in requires):
@@ -929,7 +982,8 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
     return Card(
         id=str(data["id"]), model=str(data["model"]), kind=str(data["kind"]), status=status,
         params=params, vendor=str(data.get("vendor", "")),
-        idn_pattern=identify.get("idn"), idn_example=identify.get("example"),
+        idn_pattern=idn_pattern, idn_example=identify.get("example"), idn_own=identify.get("idn"),
+        idn_variants=variants,
         error_query=error_query, no_error=no_error, safe_sequence=seq, health=health,
         reset=reset, blocked=blocked, twin=data.get("twin"), headline=headline,
         notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")), manual_url=manual_url,
@@ -1175,6 +1229,33 @@ def _jsonrpc(spec: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any], 
     return out
 
 
+def _variants(identify: Dict[str, Any], err: Callable[[str, str], None]) -> List[Dict[str, str]]:
+    """identify.also: other identity replies the card fits, each a regex of its own (never the card's own made looser),
+    with what answers so (is) and, optionally, a query that confirms it: {idn, is, example, check: {query, expect}}."""
+    out: List[Dict[str, str]] = []
+    raw = identify.get("also") or []
+    if not isinstance(raw, list):
+        err("identify.also", "a list of {idn, is, check}")
+        return out
+    for k, v in enumerate(raw):
+        path = "identify.also[%d]" % k
+        if not isinstance(v, dict) or not v.get("idn") or not v.get("is"):
+            err(path, "another identity reply this card fits: {idn: <its regex>, is: <what answers so, in words>}")
+            continue
+        try:
+            re.compile(str(v["idn"]))
+        except re.error as e:
+            err(path + ".idn", "not a valid regex: %s" % e)
+            continue
+        check = v.get("check") or {}
+        if check and not (isinstance(check, dict) and check.get("query") and check.get("expect")):
+            err(path + ".check", "{query, expect}: a query whose reply confirms it")
+            check = {}
+        out.append({"idn": str(v["idn"]), "is": str(v["is"]), "example": str(v.get("example") or ""),
+                    "query": as_sent(str(check["query"])) if check else "", "expect": str(check.get("expect") or "")})
+    return out
+
+
 def _actions(raw: Any, params: Dict[str, ParamSpec], err: Callable[[str, str], None]) -> Dict[str, Action]:
     """actions: {trigger: {send: "*TRG", label: ...}, fire: {send: ":BURS:FIRE", drives: true}}."""
     out: Dict[str, Action] = {}
@@ -1198,10 +1279,14 @@ def _actions(raw: Any, params: Dict[str, ParamSpec], err: Callable[[str, str], N
             for p in params.values():
                 if p.set_cmd is not None and p.family().match(c) is not None:
                     err(path + ".send", "%r would set %s: set it as the parameter, with its limits" % (c, p.name))
-        if spec.get("drives") is not None and not isinstance(spec["drives"], bool):
-            err(path + ".drives", "true when it drives the sample (fires a burst, a pulse, a shutter)")
+        drives, when = spec.get("drives"), None
+        if isinstance(drives, str) and drives in params and params[drives].type == "bool":
+            drives, when = True, drives   # only while that switch is on
+        elif drives is not None and not isinstance(drives, bool):
+            err(path + ".drives", "true when it drives the sample (fires a burst, a pulse, a shutter), or the on/off "
+                                  "parameter while which it does (output)")
         out[str(name)] = Action(str(name), [as_sent(c) for c in send], str(spec.get("label") or name),
-                                bool(spec.get("drives")))
+                                bool(drives), when)
     return out
 
 

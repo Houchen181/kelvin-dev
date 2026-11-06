@@ -172,9 +172,22 @@ def _long(path: Path) -> Path:
 def _write(path: Path, data: bytes) -> None:
     path = _long(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".part")
+    tmp = path.with_name("%s.%d.part" % (path.name, os.getpid()))   # this process's own: never another's half-written
     tmp.write_bytes(data)
-    os.replace(tmp, path)
+    _replace(tmp, path)
+
+
+def _replace(src: Path, dst: Path, tries: int = 8, delay: float = 0.05) -> None:
+    """os.replace, tried again for a moment: on Windows an antivirus or the search indexer holds a file just written
+    for a moment (WinError 5 and 32), as another Kelvin's update of the collection did in a field test."""
+    for i in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(delay * 2 ** i)
 
 
 def _matching(path: Optional[Path], digest: str) -> Optional[bytes]:
@@ -354,58 +367,77 @@ class Collection:
         only while the collection is switched on. A problem goes into the status (never raised), and the copy before
         stays in use."""
         fetch = fetch or http_get
+        from .rundata import _hold, _let_go
         with self._syncing:
-            state = self.state()
-            now = time.time()
             try:
-                name, branch = public_repository(fetch(API % self.repo))   # its own name, if it was renamed
-                commit = latest_commit(fetch(COMMIT % (name, branch)))
-                folder = self.dir / commit[:12]
-                same = commit == state.get("commit") and self._folder(state) == folder
-                raw = _matching(folder / "index.json", str(state.get("index_sha256"))) if same else None
-                if raw is None:
-                    raw = fetch(RAW % (name, commit, "index.json"))
-                index = read_index(raw)
-                before = self._folder(state)
-                fetched, unstored = 0, []
-                for path, digest in files_of(index):
-                    if _matching(folder / path, digest) is not None:
-                        continue
-                    data = _matching(before / path, digest) if before is not None else None
-                    if data is None:
-                        data = fetch(RAW % (name, commit, path))
-                        fetched += 1
-                        if sha256(data) != digest:
-                            raise CollectionError("%s at %s does not match its SHA-256 in index.json" % (path, commit[:12]))
-                    try:
-                        _write(folder / path, data)
-                    except OSError as e:   # this computer could not keep one file: the rest of the collection works
-                        unstored.append("%s (%s)" % (path, _first_line(e)))
-                _write(folder / "index.json", raw)
-                problem = None
-                if unstored:   # those files' cards are left out, and say so (status: left_out)
-                    problem = "%d file%s of the instrument collection could not be stored here: %s" % (
-                        len(unstored), "" if len(unstored) == 1 else "s", "; ".join(unstored[:3]))
-                    log.warning(problem)
-                with _LOCK:   # the switch: from now on the new copy is read
-                    _write(self.dir / "state.json", json.dumps({
-                        "source": self.repo, "repository": name, "commit": commit, "index_sha256": sha256(raw),
-                        "synced": state.get("synced") if same else now, "checked": now, "error": problem},
-                        indent=1).encode("utf-8"))
-                    for other in _long(self.dir).iterdir():   # the copies before
-                        if other.is_dir() and other.name != folder.name:
-                            shutil.rmtree(other, ignore_errors=True)
-                if not same:
-                    log.info("instrument collection: now at %s (%d files fetched)", commit[:12], fetched)
-                if problem and not state.get("error"):
-                    self._tell(problem)
-            except Exception as e:   # offline, rate-limited, a file that does not match: the copy here stays
-                problem = "could not update the instrument collection from %s: %s" % (self.repo, _first_line(e))
-                log.warning(problem)
-                _write(self.dir / "state.json", json.dumps(dict(state, checked=now, error=problem), indent=1).encode())
-                if not state.get("error"):   # once, when it starts failing, not at every look
-                    self._tell(problem)
+                _long(self.dir).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            held = _hold(_long(self.dir) / "sync.lock")   # one Kelvin at a time, also across processes
+            if held is None:
+                log.info("instrument collection: another Kelvin is updating it; this one uses it as it is")
+                return self.status()
+            try:
+                self._sync(fetch)
+            finally:
+                _let_go(held)
         return self.status()
+
+    def _sync(self, fetch: Fetch) -> None:
+        state = self.state()
+        now = time.time()
+        try:
+            name, branch = public_repository(fetch(API % self.repo))   # its own name, if it was renamed
+            commit = latest_commit(fetch(COMMIT % (name, branch)))
+            folder = self.dir / commit[:12]
+            same = commit == state.get("commit") and self._folder(state) == folder
+            raw = _matching(folder / "index.json", str(state.get("index_sha256"))) if same else None
+            if raw is None:
+                raw = fetch(RAW % (name, commit, "index.json"))
+            index = read_index(raw)
+            before = self._folder(state)
+            fetched, unstored = 0, []
+            for path, digest in files_of(index):
+                if _matching(folder / path, digest) is not None:
+                    continue
+                data = _matching(before / path, digest) if before is not None else None
+                if data is None:
+                    data = fetch(RAW % (name, commit, path))
+                    fetched += 1
+                    if sha256(data) != digest:
+                        raise CollectionError("%s at %s does not match its SHA-256 in index.json" % (path, commit[:12]))
+                try:
+                    _write(folder / path, data)
+                except OSError as e:   # this computer could not keep one file: the rest of the collection works
+                    unstored.append("%s (%s)" % (path, _first_line(e)))
+            _write(folder / "index.json", raw)
+            problem = None
+            if unstored:   # those files' cards are left out, and say so (status: left_out)
+                problem = "%d file%s of the instrument collection could not be stored here: %s" % (
+                    len(unstored), "" if len(unstored) == 1 else "s", "; ".join(unstored[:3]))
+                log.warning(problem)
+            with _LOCK:   # the switch: from now on the new copy is read
+                _write(self.dir / "state.json", json.dumps({
+                    "source": self.repo, "repository": name, "commit": commit, "index_sha256": sha256(raw),
+                    "synced": state.get("synced") if same else now, "checked": now, "error": problem},
+                    indent=1).encode("utf-8"))
+                for other in _long(self.dir).iterdir():   # the copies before
+                    if other.is_dir() and other.name != folder.name:
+                        shutil.rmtree(other, ignore_errors=True)
+            if not same:
+                log.info("instrument collection: now at %s (%d files fetched)", commit[:12], fetched)
+            if problem and not state.get("error"):
+                self._tell(problem)
+        except Exception as e:   # offline, rate-limited, a file that does not match: the copy here stays
+            problem = "could not update the instrument collection from %s: %s" % (self.repo, _first_line(e))
+            log.warning(problem)
+            try:
+                _write(self.dir / "state.json", json.dumps(dict(state, checked=now, error=problem),
+                                                           indent=1).encode())
+            except OSError as e2:   # said in the log; the copy here stays in use
+                log.warning("could not keep the instrument collection's state: %s", _first_line(e2))
+            if not state.get("error"):   # once, when it starts failing, not at every look
+                self._tell(problem)
 
     def _tell(self, problem: str) -> None:
         """A problem with the collection, said where people see it (notify: the portal's notices), not only in the

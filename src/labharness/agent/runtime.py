@@ -14,6 +14,7 @@ import dataclasses
 import hashlib
 import io
 import json
+import logging
 import math
 import re
 import sys
@@ -61,6 +62,8 @@ LIGHT = ("laser", "laser-driver", "light-source", "led", "lamp")   # card kinds 
 BACKGROUND_S = 5.0    # how often Kelvin looks for that, and (once, after a start) for what a restart left
 BUSY_WAIT_S = 30.0   # how long a request waits for the lab while another holds it, before it answers "busy"
 READ_WAIT_S = 10.0   # how long a reading waits for another reading of the same instrument, before it gives the latest
+UI_LISTS = ("pending", "history", "unavailable", "unreviewed", "drafts", "watches", "alarms", "notices",
+            "instruments", "events")   # the Lab panel's parts that are lists
 PANEL_WAIT_S = 0.2   # the same, for the Lab panel's look every few seconds: it shows the latest values meanwhile
 AFTER_STOP_S = 900.0   # how long the card after a Stop waits, in the background, for the stopped work to end
 MAX_CONFIG_CHARS = 30000   # of the lab config shown at once; an instrument's own entry is always shown whole
@@ -633,6 +636,8 @@ class LabRuntime:
         self._busy_whose: Optional[Dict[str, Any]] = None   # the marks of the unshared work busy names (_whose_now)
         self._status: Dict[str, Dict[str, Any]] = {}
         self._status_at = 0.0
+        self._ui_last: Dict[str, Any] = {}     # each part of the Lab panel's state as it last worked out
+        self._ui_failed: Dict[str, float] = {}   # when a part last failed to, said in the log
         self.live: Optional[Dict[str, Any]] = None   # the run in progress (or the last one), for live displays
         self._catalog: Optional["Catalog"] = None    # every run in the data folder (catalog.py); see .catalog
         self._library: Optional[Library] = None      # the person's scans and scripts (scanlibrary.py); see .library
@@ -1033,6 +1038,19 @@ class LabRuntime:
             held: Dict[str, str] = {}
             for name, inst in list(self.lab.instruments.items()):
                 if not inst.enabled:
+                    continue
+                from ..adapters import BUSES, bus_of
+                hung = None if inst.simulated else BUSES.text(bus_of(inst.config.address))
+                if hung:   # nothing is sent on its bus now: its latest values, and why
+                    held[name] = hung
+                    status[name] = {p: v for p, (v, _, _) in self._kept(name).items()}
+                    continue
+                rest = inst.health.resting()
+                if rest is not None:   # it stopped answering: asked again later, its latest values shown meanwhile
+                    held[name] = "it didn't answer at %s; Kelvin asks again at %s" % (
+                        time.strftime("%H:%M:%S", time.localtime(inst.health.lost_at or time.time())),
+                        time.strftime("%H:%M:%S", time.localtime(rest)))
+                    status[name] = {p: v for p, (v, _, _) in self._kept(name).items()}
                     continue
                 with self._reading(name, wait) as why:
                     if why is None:
@@ -5562,7 +5580,13 @@ class LabRuntime:
             inst = self.lab.instruments[name]
             if inst.enabled == on and not inst.unavailable:
                 return
-            self.lab.switch(name, on)
+            try:
+                self.lab.switch(name, on)
+            except Exception as e:   # on, not connected, and why: never taken for "switched off" afterwards
+                self.gate.log.write("switch_on_failed" if on else "switch_off_failed", by=by, instrument=name,
+                                    error=str(e).splitlines()[0][:300] if str(e) else type(e).__name__)
+                self._refresh()
+                raise
             self.gate.log.write("instrument_switched", by=by, instrument=name, on=on)
             if on:
                 self._caps_if_waiting()
@@ -5679,7 +5703,7 @@ class LabRuntime:
         st = profiles.settings_of(self.home, instrument)
         if st.get("settings"):
             when = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.get("read_at") or 0))
-            vals = ", ".join("%s = %s" % (k, v.get("shown", v.get("value"))) for k, v in st["settings"].items())
+            vals = ", ".join("%s = %s" % (k, profiles.shown_setting(v)) for k, v in st["settings"].items())
             lines.append("settings read at %s (get_value for the current value): %s" % (when, vals))
         return "\n".join(lines)
 
@@ -7374,7 +7398,7 @@ class LabRuntime:
                 continue
         return None
 
-    def try_card(self, text: str, instrument: str) -> str:
+    def try_card(self, text: str, instrument: str = "") -> str:
         """Kelvin's own try: on an instrument in the lab or one the last scan found; anywhere else a person says
         yes first. `text` is the card's YAML, or the id of a card Kelvin has (one draft_card wrote)."""
         from .. import cardtry
@@ -7404,8 +7428,10 @@ class LabRuntime:
                 return "declined: the person did not want Kelvin to try %s%s" % (instrument, note)
             address = instrument
         if address is None:
-            return ("Kelvin tries a card on an instrument in the lab or an address (the last scan found: %s)"
-                    % (", ".join(sorted(targets)) or "nothing yet: scan first"))
+            return ("%s: an instrument in the lab or an address (the lab and the last scan have: %s)" % (
+                "Which instrument? Give it as instrument" if not instrument.strip() else
+                "Kelvin tries a card on an instrument in the lab or an address the scan found, not %r" % instrument,
+                ", ".join(sorted(targets)) or "nothing yet: scan first"))
 
         def run() -> str:
             try:
@@ -9193,6 +9219,8 @@ class LabRuntime:
         a = self.monitor.acknowledge(alarm_id, who)
         if a is None:
             return False
+        if not getattr(a, "just_acknowledged", True):   # it was already: the record has it once
+            return True
         self.gate.log.write("alarm_ack", by=by, alarm=a.id, text=a.text, account=self.user, channel=channel,
                             device=device)
         return True
@@ -9343,6 +9371,85 @@ class LabRuntime:
         if self._watching is not None:
             self._watching.join(timeout=5)
             self._watching = None
+
+    def clear_bus(self, bus: str = "GPIB0", by: str = "agent") -> str:
+        """A GPIB bus that stopped answering, brought back: an interface clear (every instrument on it stops talking
+        and listening), then each instrument on it cleared and asked who it is until it answers as itself (a reply it
+        still owed is read off), the one that stopped answering first left out as not connected (most likely what hung
+        the bus; reconnect_instrument brings it back). No setting and no output changes. A person decides while
+        something measures (a device clear ends a measurement in progress); otherwise Kelvin does it, and says so (a
+        person's own click goes ahead). A field test's bus came back at once this way, after 45 minutes."""
+        from ..adapters import BUSES, bus_of, bus_words, interface_clear
+        from ..instrument import Unavailable
+        on = {n: i for n, i in list(self.lab.instruments.items()) if not i.simulated
+              and bus_of(i.config.address) == bus}
+        if not on:
+            return "no instrument of this lab is on %s (its GPIB buses: %s)" % (bus, ", ".join(sorted(
+                self.lab.buses())) or "none")
+        names = sorted(n for n, i in on.items() if i.enabled)
+        first = self.lab.first_silent(names) if len(names) > 1 else None
+        if not by.startswith("human"):
+            measuring = (self.live or {}).get("status") == "running" or self.queue.state in ("running", "pausing")
+            request = ApprovalRequest("Clear %s?" % bus_words(bus), [
+                "An interface clear, then each instrument on it cleared and asked who it is (%s). No setting or output "
+                "changes; a measurement in progress on them ends." % (", ".join(names) or "none switched on")]
+                + (["%s stopped answering first: it is left out until it is reconnected." % first] if first else []))
+            if measuring or not self.gate.auto_simple(request, "it changes no setting or output, and nothing "
+                                                               "measures now"):
+                if not self.gate.ask(request):
+                    note = " (%s)" % request.note if request.note else ""
+                    return "declined: %s is left as it is%s" % (bus_words(bus), note)
+
+        def run() -> str:
+            said, answered = [], 0
+            with BUSES.through(bus):
+                try:
+                    interface_clear(bus)
+                except Exception as e:
+                    return "could not clear %s: %s" % (bus_words(bus), str(e).splitlines()[0][:200] if str(e)
+                                                       else type(e).__name__)
+                for n in names:
+                    inst = on[n]
+                    if n == first:   # set aside, as one that could not be connected: nothing more is sent to it
+                        try:
+                            inst.backend.close()
+                        except Exception:
+                            pass
+                        inst.backend = Unavailable(n, "left out after %s hung: it stopped answering first (after %s);"
+                                                      " reconnect it once it is checked" % (
+                                                          bus_words(bus), inst.health.first_failed or "a command"))
+                        said.append("%s left out (it stopped answering first)" % n)
+                        continue
+                    resync = getattr(inst.backend, "resync", None)
+                    try:
+                        if resync is not None:
+                            resync()
+                        inst.health.answered()
+                        answered += 1
+                        said.append("%s answers" % n)
+                    except Exception as e:
+                        said.append("%s: %s" % (n, str(e).splitlines()[0][:160] if str(e) else type(e).__name__))
+            if names and not answered and len(names) > (1 if first else 0):
+                self.gate.log.write("bus_cleared", by=by, bus=bus, results=said, answered=0)
+                return ("%s still doesn't answer after an interface clear (%s): check the instruments on it, the GPIB "
+                        "cables and the adapter (NI MAX's Reset of the board too)" % (bus_words(bus), "; ".join(said)))
+            self.monitor.bus_cleared(bus, "%s cleared (%s)" % (bus_words(bus), by))
+            self.gate.log.write("bus_cleared", by=by, bus=bus, results=said, answered=answered)
+            self.lab_changed("bus")
+            return "cleared %s: %s" % (bus_words(bus), "; ".join(said) or "nothing on it is switched on")
+        return self._do("clearing %s" % bus_words(bus), run, uses=list(on))
+
+    def close_instruments(self, within: float) -> List[str]:
+        """Every instrument let go of as Kelvin quits (Lab.close), each on a thread of its own: the ones still closing
+        after `within` seconds, left as they are. VISA itself is closed last, once every session of it is (closed by
+        Python's exit instead, it complained of sessions gone before it). A field test's Kelvin quit without closing
+        its camera, and the camera library stayed unusable for every program until the computer's processes were
+        ended."""
+        stuck = self.lab.close(within=within)
+        if not stuck:
+            from ..adapters import close_resource_manager
+            close_resource_manager()
+        return stuck
 
     def _keep_watch(self) -> None:
         while not self._watching_stop.wait(BACKGROUND_S):
@@ -9786,8 +9893,11 @@ class LabRuntime:
         """The current mode, and what auto mode would approve in this lab, in words for the person choosing."""
         cfg = self.lab.config
         never, ranges = [], []
-        for name, ic in cfg.instruments.items():
-            card = self.lab.instruments[name].card
+        for name, ic in list(cfg.instruments.items()):
+            inst = self.lab.instruments.get(name)
+            if inst is None:   # not in the lab (yet): nothing of it is approved in either mode
+                continue
+            card = inst.card
             for param, rule in ic.auto.items():
                 key = name if param == "*" else "%s.%s" % (name, param)
                 if rule == "never":
@@ -9841,24 +9951,30 @@ class LabRuntime:
                 row.append({"name": pname, "value": "ERROR" if bad else spec.show(v),
                             "away": (not bad) and spec.is_drive and spec.distance(v) > 0})
             status[name] = row
-        pending = getattr(self.approver, "pending_list", lambda: [])()
-        history = getattr(self.approver, "history_list", lambda: [])()
-        return {"lab": self.lab.config.name,
-                "simulated": all(i.simulated for i in self.lab.instruments.values()),
-                "busy": self.busy, "pending": pending, "history": history, "status": status, "queue": self.queue_view(),
-                "mounted": self.mounted_view(),
-                "hands_on": self.hands,
-                "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
-                "lab_info": self.lab_info,
-                "unavailable": self._unavailable_view(),
-                "unreviewed": self.lab.config.unreviewed(), "setup": self.setup_status, "survey": self.last_survey,
-                "drafts": sorted(n for n, i in self.lab.instruments.items()
-                                 if not i.simulated and i.card.status == "draft"),
-                "watches": self.monitor.list(),
-                "alarms": self.alarms_view(),
-                "incident": self.incident_view(),
-                "notices": list(self.notifier.notices)[-20:],
-                "instruments": self.instruments(),
-                "live": {k: v for k, v in (self.live_view(10 ** 9) or {}).items()
-                         if k in ("run_id", "plan", "done", "total", "eta_s", "status")} or None,
-                "events": [event_line(e) for e in reversed(tail_events(self.events_path, 25))]}
+        parts: Dict[str, Callable[[], Any]] = {
+            "pending": lambda: getattr(self.approver, "pending_list", lambda: [])(),
+            "history": lambda: getattr(self.approver, "history_list", lambda: [])(),
+            "simulated": lambda: all(i.simulated for i in self.lab.instruments.values()),
+            "queue": self.queue_view, "mounted": self.mounted_view,
+            "approval_rule": lambda: self.approval_mode()["rule"],
+            "unavailable": self._unavailable_view, "unreviewed": self.lab.config.unreviewed,
+            "drafts": lambda: sorted(n for n, i in self.lab.instruments.items()
+                                     if not i.simulated and i.card.status == "draft"),
+            "watches": self.monitor.list, "alarms": self.alarms_view, "incident": self.incident_view,
+            "notices": lambda: list(self.notifier.notices)[-20:], "instruments": self.instruments,
+            "live": lambda: {k: v for k, v in (self.live_view(10 ** 9) or {}).items()
+                             if k in ("run_id", "plan", "done", "total", "eta_s", "status")} or None,
+            "events": lambda: [event_line(e) for e in reversed(tail_events(self.events_path, 25))]}
+        state: Dict[str, Any] = {"lab": self.lab.config.name, "busy": self.busy, "status": status,
+                                 "hands_on": self.hands, "approval_mode": "auto" if self.gate.auto else "ask",
+                                 "lab_info": self.lab_info, "setup": self.setup_status, "survey": self.last_survey}
+        for key, part in parts.items():   # each on its own: one that fails can't fail the panel (a field test's /state
+            try:                          # failed for 3 minutes on one instrument the lab config listed too soon)
+                state[key] = self._ui_last[key] = part()
+            except Exception:   # the last it showed, meanwhile
+                state[key] = self._ui_last.get(key, [] if key in UI_LISTS else None)
+                now = time.time()
+                if now - self._ui_failed.get(key, 0.0) > 60:   # in the log once a minute, not every poll
+                    self._ui_failed[key] = now
+                    logging.getLogger("kelvin").exception("the Lab panel's %s", key)
+        return state

@@ -21,13 +21,19 @@ from __future__ import annotations
 import os
 import re
 import threading
+import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .cards import Card, parity_name, serial_settings
 
 _rm: Any = None
 _rm_lock = threading.Lock()
+# PyVISA warns of a reply that ended at the bus's end-of-message mark (GPIB's EOI) without the line end: whole all the
+# same, and a field test's log had six such warnings in an afternoon
+warnings.filterwarnings("ignore", message="read string doesn't end with termination characters")
 WAIT_SLICE_MS = 1000   # a long wait on an instrument is read a second at a time, so a stop ends it within one
+SYNC_MS = 2000         # after a timeout: how long its identity, asked to check it is back in step, may take
+AFTER_MS = 1000        # and its error queue, asked right after a query it didn't answer
 
 
 class AdapterError(RuntimeError):
@@ -153,11 +159,114 @@ def resource_manager() -> Any:
         return _rm
 
 
+def close_resource_manager() -> None:
+    """PyVISA's resource manager closed, after every session it opened is (Kelvin quitting, Lab.close first): left to
+    Python's exit, it complained of sessions gone before it (VI_ERROR_INV_OBJECT, at every quit of a field test)."""
+    global _rm
+    with _rm_lock:
+        rm, _rm = _rm, None
+    close = getattr(rm, "close", None)
+    if close is not None:
+        try:
+            close()
+        except Exception:
+            pass   # quitting: nothing more to do with it
+
+
 def set_resource_manager(rm: Any) -> None:
     """Use another resource manager (tests use a fake bus)."""
     global _rm
     with _rm_lock:
         _rm = rm
+
+
+def bus_of(address: str) -> Optional[str]:
+    """The GPIB bus an instrument shares with others: "GPIB0" (a board), or "prologix://<adapter>"; None for one on a
+    connection of its own (USB, LAN, a serial port), which can't hang the others."""
+    address = (address or "").strip()
+    if address.lower().startswith("prologix://"):
+        from .prologix import where
+        try:
+            return "prologix://" + where(address).adapter
+        except ValueError:
+            return None
+    m = re.match(r"^GPIB(\d*)::", resource_name(address).upper())
+    return "GPIB%s" % (m.group(1) or "0") if m else None
+
+
+def bus_words(bus: str) -> str:
+    """A bus as people know it: "GPIB0", "the Prologix adapter on COM5"."""
+    if bus.startswith("prologix://"):
+        from .prologix import place
+        return "the Prologix adapter %s" % place(bus[len("prologix://"):])
+    return bus
+
+
+class Buses:
+    """GPIB buses that stopped answering (one instrument can hang a whole bus): Kelvin sends nothing on one until it is
+    cleared or answers again, so its own calls never pile up in front of the clear. In a field test a hung bus took
+    every instrument on it for 45 minutes, Kelvin went on asking each of them, and an interface clear from another
+    program waited more than a minute behind its calls."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.hung: Dict[str, Dict[str, Any]] = {}   # bus -> {since, names, text}
+        self._through = threading.local()   # the bus this thread may send on anyway (its probe, its clear)
+
+    def flag(self, bus: str, names: List[str], text: str) -> None:
+        import time
+        with self._lock:
+            self.hung.setdefault(bus, {"since": time.time(), "names": list(names), "text": text})
+
+    def clear(self, bus: str) -> bool:
+        with self._lock:
+            return self.hung.pop(bus, None) is not None
+
+    def text(self, bus: Optional[str]) -> Optional[str]:
+        """Why nothing is sent on this bus now, in words; None when it may be."""
+        if not bus or getattr(self._through, "bus", None) == bus:
+            return None
+        with self._lock:
+            h = self.hung.get(bus)
+        if h is None:
+            return None
+        return ("%s isn't answering: Kelvin sends nothing on it until it is cleared (Lab panel: Clear the bus, or the "
+                "agent's clear_bus) or it answers again" % bus_words(bus))
+
+    def through(self, bus: str) -> Any:
+        """This thread may send on the bus meanwhile (a probe, the clear itself)."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def passing() -> Any:
+            before = getattr(self._through, "bus", None)
+            self._through.bus = bus
+            try:
+                yield
+            finally:
+                self._through.bus = before
+        return passing()
+
+
+BUSES = Buses()
+
+
+def interface_clear(bus: str, rm: Any = None) -> None:
+    """GPIB's interface clear on this bus: every instrument on it stops talking and listening; their settings and
+    outputs stay as they are. What brought a field test's hung bus back at once."""
+    if bus.startswith("prologix://"):
+        from .prologix import held
+        with held(bus[len("prologix://"):]) as adapter:
+            adapter.interface_clear()
+        return
+    res = (rm or resource_manager()).open_resource("%s::INTFC" % bus)
+    try:
+        res.send_ifc()
+    finally:
+        try:
+            res.close()
+        except Exception:
+            pass
 
 
 def resource_name(address: str) -> str:
@@ -228,6 +337,12 @@ class VisaBackend:
         self.query_delay = float(conn.get("query_delay", 0.0))
         self.lock = threading.RLock()
         self._rm, self._conn, self._on_connect = rm, conn, list(card.on_connect)
+        # a reply the instrument may still send: an exchange timed out. It is dropped, and the instrument asked who it
+        # is until it answers as itself, before the next command (_settle): a field test's *IDN? got the reading of a
+        # query from before a bus hang, and every answer after it would have been one behind
+        self.owed = False
+        self._sync = (card.idn_query, card.idn_pattern) if card.idn_pattern else None
+        self.bus = bus_of(address)
         self._open()
 
     def _open(self) -> None:
@@ -239,8 +354,9 @@ class VisaBackend:
             if "LIBRARY_NFOUND" in str(e):
                 raise AdapterError("%s: this computer's VISA cannot reach %s: its interface driver is missing (for GPIB, "
                                    "install NI-488.2 or your GPIB adapter's driver)." % (self.name, self.resource)) from e
+            from .others import holders_text   # who may hold it: another Kelvin still closing, MATLAB, NI MAX...
             raise AdapterError("%s: cannot open %s (%s). Check the cable, the address and that no other program "
-                               "holds the instrument." % (self.name, self.resource, e)) from e
+                               "holds the instrument%s." % (self.name, self.resource, e, holders_text())) from e
         self.res.timeout = int(self._conn.get("timeout_ms", 3000))
         self.res.read_termination = self._conn.get("read_termination", "\n")
         self.res.write_termination = self._conn.get("write_termination", "\n")
@@ -298,30 +414,148 @@ class VisaBackend:
                 raise AdapterError("%s refused %r (it answered NAK)" % (self.name, command))
         raise AdapterError("%s did not acknowledge %r" % (self.name, command))
 
-    def write(self, command: str) -> None:
+    def _bus_ok(self) -> None:
+        """Raises while its bus is hung (BUSES): nothing is sent, at once, instead of each command waiting it out."""
+        why = BUSES.text(self.bus)
+        if why:
+            raise AdapterError("%s: %s" % (self.name, why))
+
+    def resync(self) -> None:
+        """Back in step after its bus was cleared: a device clear, then asked who it is until it answers as itself."""
         with self.lock:
-            if self.enq:
-                return self._enq_ack(command)
-            self.res.write(command)
-            if self.echo:
-                self.res.read()   # the command, echoed
-            if self.ack:
-                self._check_ack(command)
-            elif self.set_reply is not None:   # instruments that answer every set (e.g. Oxford Mercury: ...:VALID)
-                reply = str(self.res.read()).strip()
-                if not self.set_reply.search(reply):
-                    raise AdapterError("%s refused %r: %s" % (self.name, command, reply))
+            self.owed = True
+            self._settle()
+
+    def write(self, command: str) -> None:
+        self._bus_ok()
+        with self.lock:
+            self._settle()
+            try:
+                if self.enq:
+                    return self._enq_ack(command)
+                self.res.write(command)
+                if self.echo:
+                    self.res.read()   # the command, echoed
+                if self.ack:
+                    self._check_ack(command)
+                elif self.set_reply is not None:   # instruments that answer every set (e.g. Oxford Mercury: ...:VALID)
+                    reply = str(self.res.read()).strip()
+                    if not self.set_reply.search(reply):
+                        raise AdapterError("%s refused %r: %s" % (self.name, command, reply))
+            except Exception as e:
+                if timed_out(e):
+                    self._timed_out()
+                raise
 
     def query(self, command: str) -> str:
         if self.write_only:
             raise AdapterError("%s does not answer queries (write-only); Kelvin uses the last value it set" % self.name)
+        self._bus_ok()
         with self.lock:
+            self._settle()
             try:
                 return self._query(command)
             except UnicodeDecodeError as e:   # bytes, not text: a binary block where the card expects text
                 self.drain()
                 from .cards import BINARY_REPLY
                 raise AdapterError("%s (%s): %s" % (self.name, command, BINARY_REPLY)) from e
+            except Exception as e:
+                if timed_out(e):
+                    self._timed_out()
+                raise
+
+    def _timed_out(self) -> None:
+        """An exchange ran out of time, so the instrument may still send its reply. A device clear drops it now, where
+        the bus marks message ends (a Keithley 2400's manual: a query's reply must be read, or the device cleared);
+        the rest happens before the next command (_settle)."""
+        self.owed = True
+        if marks_message_end(self.resource):
+            try:
+                self.res.clear()
+            except Exception:
+                pass   # the bus may not answer either: _settle clears it again before the next command
+
+    def _settle(self) -> None:
+        """Before a command that follows one that timed out: what the instrument may still owe is dropped (a device
+        clear; a serial line read until it is quiet; a plain socket connected again), then it is asked who it is
+        until it answers as itself, twice at most, so one stale reply is read off. Raises while it isn't back in step,
+        and the command isn't sent."""
+        if not self.owed:
+            return
+        if marks_message_end(self.resource):
+            clear = getattr(self.res, "clear", None)
+            if clear is not None:
+                clear()   # a bus that still doesn't answer raises here
+        elif is_serial(self.resource):
+            self._quiet()
+        else:
+            try:
+                self.res.close()
+            except Exception:
+                pass
+            self._open()
+        if self._sync is not None and not self.write_only:
+            query, pattern = self._sync
+            res, before = self.res, self.res.timeout
+            replies: List[str] = []
+            try:
+                res.timeout = min(int(before or SYNC_MS), SYNC_MS)
+                if self.enq or self.echo or self.ack or self.query_delay:
+                    replies.append(str(self._query(query)))
+                else:   # asked once, its replies read until its own: one stale reply in front of it is read off
+                    replies.append(str(res.query(query)))
+                    while not re.search(pattern, replies[-1], re.I) and len(replies) < 3:
+                        try:
+                            replies.append(str(res.read()))
+                        except Exception as e:
+                            if timed_out(e):
+                                break   # it answered, and nothing more comes: not as itself (said below)
+                            raise
+            except Exception as e:
+                if timed_out(e):
+                    self._timed_out()
+                raise
+            finally:
+                if self.res is res:
+                    res.timeout = before
+            if not re.search(pattern, replies[-1], re.I):
+                raise AdapterError("%s is out of step: after a reply it didn't send in time, it answered %s to %s, "
+                                   "not who it is. Kelvin cleared it; check it, then reconnect it"
+                                   % (self.name, ", ".join(repr(r.strip()[:40]) for r in replies), query))
+        self.owed = False
+
+    def _quiet(self) -> None:
+        """A serial line read until nothing more comes (0.3 s), at most 2 s: a late reply's bytes, dropped."""
+        import time
+        res, before, end = self.res, self.res.timeout, time.monotonic() + 2.0
+        try:
+            res.timeout = 300
+            while time.monotonic() < end:
+                res.read_raw()
+        except Exception:
+            pass   # quiet
+        finally:
+            res.timeout = before
+
+    def ask_after_timeout(self, command: str) -> Optional[str]:
+        """One quick question (its error queue) right after an exchange that timed out, once the instrument is back
+        in step: its reply, or None when it isn't, or doesn't answer within a second."""
+        if self.write_only or self.enq or self.echo or self.ack or BUSES.text(self.bus):
+            return None
+        with self.lock:
+            res = self.res
+            before = res.timeout
+            try:
+                res.timeout = min(int(before or AFTER_MS), AFTER_MS)
+                self._settle()
+                return str(self._query(command))
+            except Exception as e:
+                if timed_out(e):
+                    self.owed = True   # cleared before the next command
+                return None
+            finally:
+                if self.res is res:
+                    res.timeout = before
 
     def query_trace(self, command: str) -> str:
         """A trace's reply, read to the end of its message where the bus marks one, not to the first line end: some
@@ -345,7 +579,9 @@ class VisaBackend:
             return self.query(command)
         import time
         from .instrument import Stopped
+        self._bus_ok()
         with self.lock:
+            self._settle()
             res = self.res
             before, end = res.timeout, time.monotonic() + seconds
             res.write(command)
@@ -361,6 +597,7 @@ class VisaBackend:
                         self._abandon()
                         raise Stopped("%s: stopped by a person while it was still working on %s" % (self.name, command))
                     if time.monotonic() >= end:
+                        self._timed_out()   # the answer it still owes is dropped, never taken for a later command's
                         raise AdapterError("%s did not answer %s within %.0f s" % (self.name, command, seconds))
             finally:
                 if self.res is res:   # a connection made again after a stop keeps its own timeout
@@ -429,13 +666,19 @@ class VisaBackend:
         if self.write_only or self.enq or self.echo:
             raise AdapterError("%s: binary traces need an instrument that answers queries plainly" % self.name)
         number, _, order = binary.partition(" ")
+        self._bus_ok()
         with self.lock:
+            self._settle()
             try:
                 values = self.res.query_binary_values(command, datatype=BINARY[number],
                                                       is_big_endian=order.strip() != "little", container=list)
             except (ValueError, TypeError) as e:
                 raise AdapterError("%s: %r did not answer with a block of %s numbers (%s)" % (self.name, command,
                                                                                             number, e)) from e
+            except Exception as e:
+                if timed_out(e):
+                    self._timed_out()
+                raise
         return [float(v) for v in values]
 
     def close(self) -> None:

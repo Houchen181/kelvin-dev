@@ -41,6 +41,15 @@ def plan_text(plan: Dict[str, Any]) -> str:
 
 
 _SHARED = threading.Lock()
+_SHARED_SEQ: Dict[str, int] = {}   # the lab's instrument log numbers its own lines: by file, counted once
+
+
+def _lines(path: Path) -> int:
+    try:
+        with open(path, "rb") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
 
 
 class EventLog:
@@ -88,10 +97,17 @@ class EventLog:
             else:
                 self._memory.append(event)
         if self.shared:
-            line = json.dumps(dict(event, user=self.user), ensure_ascii=False) + "\n"
             try:
                 with _SHARED:
                     self.shared.parent.mkdir(parents=True, exist_ok=True)
+                    key = str(self.shared)
+                    if key not in _SHARED_SEQ:
+                        _SHARED_SEQ[key] = _lines(self.shared)
+                    _SHARED_SEQ[key] += 1
+                    # its own numbering: each person's record numbers its events (own_seq), and those mixed in here
+                    # read 34, 1, 35 (a field test's log, as Kelvin set up on start with nobody signed in)
+                    line = json.dumps(dict(event, seq=_SHARED_SEQ[key], own_seq=event["seq"], user=self.user),
+                                      ensure_ascii=False) + "\n"
                     with open(self.shared, "a", encoding="utf-8") as f:
                         f.write(line)
             except OSError:   # the person's own record has it; the lab's log is a copy

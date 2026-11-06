@@ -59,6 +59,10 @@ class Keithley2400(Wired, Instrument):
         self.terminals = "FRON"
         self.auto_off = False
         self.count = 1
+        # the arm layer: one arm per reading (None: INFinite, as another program or its front panel can leave it, in
+        # which state :READ? answers nothing and queues 830); option continuous: true starts it so
+        self.arm_count = None if str(self.opt("continuous", "")).lower() in ("1", "true", "yes", "on") else 1
+        self.arm_source = self.trig_source = "IMM"
         self.compl = False
         self.t_on = time.monotonic()
         self.applied = (0.0, 0.0)
@@ -282,10 +286,30 @@ class Keithley2400(Wired, Instrument):
         self._apply()
 
     @command("SYSTem:BEEPer[:STATe]", "SYSTem:AZERo[:STATe]", "SYSTem:RSENse", "DISPlay:ENABle", "SYSTem:LOCal",
-             "SYSTem:REMote", "SYSTem:RWLock", "SYSTem:PRESet", "TRIGger:DELay", "TRIGger:SOURce", "ARM:SOURce",
-             "ARM:COUNt", "SYSTem:KEY", "SYSTem:GUARd", "SYSTem:TIME:RESet")
+             "SYSTem:REMote", "SYSTem:RWLock", "SYSTem:PRESet", "TRIGger:DELay", "SYSTem:KEY", "SYSTem:GUARd",
+             "SYSTem:TIME:RESet")
     def _misc(self, q, a, ch):
         return "0" if q else None
+
+    @command("ARM[:SEQuence][:LAYer]:COUNt")
+    def _arm_count(self, q, a, ch):
+        if q:
+            return "+9.900000E+37" if self.arm_count is None else str(self.arm_count)
+        a.need(1)
+        self.arm_count = None if str(a[0]).upper().startswith("INF") else a.int(0, 1, 2500)
+
+    @command("ARM[:SEQuence][:LAYer]:SOURce")
+    def _arm_source(self, q, a, ch):
+        if q:
+            return self.arm_source
+        word = a.word(0, ["IMMediate", "TIMer", "MANual", "BUS", "TLINk", "NSTest", "PSTest", "BSTest"])
+        self.arm_source = word[:4].upper().replace("IMME", "IMM")
+
+    @command("TRIGger[:SEQuence]:SOURce")
+    def _trig_source(self, q, a, ch):
+        if q:
+            return self.trig_source
+        self.trig_source = a.word(0, ["IMMediate", "TLINk"])[:4].upper().replace("IMME", "IMM")
 
     @command("TRIGger:COUNt")
     def _count(self, q, a, ch):
@@ -295,17 +319,28 @@ class Keithley2400(Wired, Instrument):
 
     @command("READ", setter=False)
     def _read_q(self, q, a, ch):
+        self._single()
         return self._read()
+
+    def _single(self) -> None:
+        """READ? and FETCh? only with a finite arm count: else nothing comes back, and 830 is queued (its manual)."""
+        if self.arm_count is None:
+            raise CommandError(830, "Invalid with INFinite ARM:COUNT")
 
     @command("FETCh", setter=False)
     def _fetch(self, q, a, ch):
+        self._single()
         return ",".join(fmt_e(x) for x in self._reading())
 
-    @command("INITiate[:IMMediate]", "ABORt", query=False)
+    @command("INITiate[:IMMediate]", query=False)
     def _init(self, q, a, ch):
         if not self.output and not self.auto_off:
             raise CommandError(803, "Output disabled")
         self.delay(self.nplc / 60.0)
+
+    @command("ABORt", query=False)
+    def _abort(self, q, a, ch):
+        """Ends what the trigger model was doing (a continuous measurement); always accepted."""
 
     @command("MEASure", "MEASure:CURRent[:DC]", "MEASure:VOLTage[:DC]", "MEASure:RESistance", setter=False)
     def _meas(self, q, a, ch):
@@ -323,6 +358,7 @@ class Keithley2450(Keithley2400):
     error_format = '{code:d},"{text}"'
 
     _icomp = _vcomp = _tripped = _elements = _count = _clear_auto = _fetch = None   # 2400 commands a 2450 lacks
+    _arm_count = _arm_source = _trig_source = None
 
     def reset(self) -> None:
         super().reset()
@@ -791,3 +827,15 @@ class Keithley2182A(Wired, Instrument):
              "SENSe:VOLTage[:DC]:DFILter:TCONtrol", "SENSe:VOLTage[:DC]:DFILter:WINDow")
     def _misc(self, q, a, ch):
         return "0" if q else None
+
+
+class Keithley2450As2400(Keithley2400):
+    """A Keithley 2450 set to its 2400 command set (SCPI2400): it answers as a 2400, but without "INC.", with an
+    8-digit serial number and the 2450's firmware, and *LANG? says SCPI2400 (a field test's GPIB 30)."""
+    model = "keithley_2450_scpi2400"
+    idn = "KEITHLEY INSTRUMENTS,MODEL 2400,{serial},1.6.7c"
+    default_serial = "04453531"
+
+    @command("*LANG")
+    def _lang(self, q, a, ch):
+        return "SCPI2400" if q else None
