@@ -64,7 +64,10 @@ class GeminiProvider(Provider):
     def __init__(self, api_key: Optional[str], base_url: Optional[str] = None, name: str = "", label: str = ""):
         """base_url, name, label: Gemini through the Kelvin hub (hubmodels.py), with the hub token as the key."""
         self.name, self.label = name or self.name, label or self.label
-        options = types.HttpOptions(base_url=base_url) if base_url else None
+        # the API version Kelvin was built on, whatever google-genai's default: 3.0 moved it to v1, which a hub from
+        # before that refuses (and v1beta has Google Search grounding)
+        options = types.HttpOptions(base_url=base_url, api_version="v1beta") if base_url else \
+            types.HttpOptions(api_version="v1beta")
         self.client = genai.Client(api_key=api_key, http_options=options) if api_key else None
         self._cache: Optional[List[ModelInfo]] = None
 

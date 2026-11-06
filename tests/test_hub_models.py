@@ -218,6 +218,26 @@ def test_gemini_through_the_hub_and_a_dearer_tier_past_its_size(gateway):
     assert row["usd"] == pytest.approx((200000 * 4 + 100000 * 4 + 75 * 18) / 1e6)   # past 200k: the dearer tier
 
 
+def test_gemini_on_google_genais_v1_paths_too(gateway, monkeypatch):
+    """google-genai 3.0 calls Gemini's v1, not v1beta: a hub that passed v1beta alone refused every Gemini request of a
+    Kelvin built with it (2026-11-06). Kelvin's own client asks v1beta still, which every hub passes."""
+    hub, client, services, token = gateway
+    owner_keys(hub, services, ("gemini",))
+    r = client.post("/llm/gemini/v1/models/gemini-3.1-pro:streamGenerateContent?alt=sse",
+                    headers={"x-goog-api-key": token}, json={"contents": [{"role": "user", "parts": [{"text": "z"}]}]})
+    assert r.status_code == 200 and b"Settled." in r.content
+    assert services.seen[-1][1].endswith("/v1/models/gemini-3.1-pro:streamGenerateContent?alt=sse")
+    assert client.post("/llm/gemini/v1/cachedContents", headers={"x-goog-api-key": token}, json={}).status_code in (
+        404, 405)
+    pytest.importorskip("google.genai")
+    from labharness.web.providers import gemini_provider
+    made = []
+    monkeypatch.setattr(gemini_provider.genai, "Client", lambda **kw: made.append(kw["http_options"]))
+    gemini_provider.GeminiProvider("key")
+    gemini_provider.GeminiProvider("token", base_url="http://hub/llm/gemini")
+    assert [o.api_version for o in made] == ["v1beta", "v1beta"] and made[1].base_url == "http://hub/llm/gemini"
+
+
 def test_gemini_streamed_as_one_json_array_is_metered_too(gateway):
     """Without ?alt=sse, Google streams the same answers as one JSON array: a request made by hand like that once went
     unmetered, and that person's budget never ran out. Nor do Google's parameters that would hide the counts go on."""

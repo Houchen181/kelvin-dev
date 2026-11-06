@@ -47,8 +47,9 @@ SERVICES: Dict[str, Dict[str, Any]] = {
                "keep": ("openai-beta",)},
     "gemini": {"name": "Gemini", "upstream": "https://generativelanguage.googleapis.com", "header": "x-goog-api-key",
                "form": "{}",
-               "calls": [("POST", r"v1beta/models/(?P<model>\w[\w.-]*):(?:generateContent|streamGenerateContent|"
-                                  r"countTokens)"), ("GET", r"v1beta/models(?:/\w[\w.-]*)?")],
+               # v1beta, and v1, google-genai's own from its 3.0 on
+               "calls": [("POST", r"v1(?:beta)?/models/(?P<model>\w[\w.-]*):(?:generateContent|"
+                                  r"streamGenerateContent|countTokens)"), ("GET", r"v1(?:beta)?/models(?:/\w[\w.-]*)?")],
                "keep": ()},
     "opencode": {"name": "OpenCode Zen", "upstream": "https://opencode.ai/inference", "header": "authorization",
                  "form": "Bearer {}", "calls": [("POST", r"openai/v1/chat/completions"), ("GET", r"v1/models")],
