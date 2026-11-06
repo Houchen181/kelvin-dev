@@ -4374,7 +4374,8 @@ class LabRuntime:
         set and read: {param, label, unit, group} (drive, action; name: the lab's own name for it; choices: what a
         switch or a list setting takes, its words). group: what it is, as the Lab panel groups an instrument's
         parameters: reading (only read: a lock-in's X, Y, R, θ), output (a drive), setting (configuration: its time
-        constant) or action; the editor's menus show them so, readings first in what a scan records."""
+        constant) or action. The editor offers only readings for what a scan records: settings and outputs are set
+        once (Setup), and every run keeps them all as they were at its start and end (its conditions)."""
         settable: List[Dict[str, Any]] = []
         readable: List[Dict[str, Any]] = []
         instruments: List[Dict[str, Any]] = []

@@ -5886,9 +5886,8 @@
       const lab = d.lab || { set: [], read: [] };
       QUEUE.units = new Map(lab.set.concat(lab.read).map((p) => [p.key, p.unit || ""]));
       $("step-set-keys").replaceChildren(...lab.set.filter((p) => !p.action).map((p) => h("option", { value: p.key }, p.unit || "")));
-      const rank = (p) => (p.group === "reading" ? 0 : 1);   // readings (a lock-in's X, Y, R) before settings
-      $("step-read-keys").replaceChildren(...lab.read.slice().sort((a, b) => rank(a) - rank(b))
-        .map((p) => h("option", { value: p.key }, p.unit || "")));
+      const readings = lab.read.some((p) => p.group) ? lab.read.filter((p) => p.group === "reading") : lab.read;
+      $("step-read-keys").replaceChildren(...readings.map((p) => h("option", { value: p.key }, p.unit || "")));
       stepChanged();
     }, () => { QUEUE.keys = null; });
     return QUEUE.keys;
@@ -6687,20 +6686,24 @@
   const edSplit = (key) => { const k = String(key || ""), dot = k.indexOf("."); return dot < 0 ? [null, k] : [k.slice(0, dot), k.slice(dot + 1)]; };
   const edInstText = (i) => [i.name, i.model, i.twin ? i.address : ""].filter(Boolean).join(" · ") + (i.off ? " (off)" : "");
   const edParamText = (p) => p.label + (p.unit ? " (" + p.unit + ")" : "") + (p.name ? " · " + p.name : "") + (p.action ? " · action" : "");
-  function edParams(name, what) {   // what of an instrument a row may take: "read", "setup" (actions too) or "set"
+  // what of an instrument a row may take: "read" (what a scan records, at each point or each value of a loop: its
+  // readings, a lock-in's X, Y, R and θ; its settings and outputs are set once, in Setup, and every run keeps them all
+  // as they were at its start and end), "setup" (actions too) or "set"
+  function edParams(name, what) {
     const i = ED.insts.get(name);
-    return !i ? [] : what === "read" ? i.read : what === "setup" ? i.set : i.set.filter((p) => !p.action);
+    if (!i) return [];
+    if (what === "read") return i.read.some((p) => p.group) ? i.read.filter((p) => p.group === "reading") : i.read;
+    return what === "setup" ? i.set : i.set.filter((p) => !p.action);
   }
-  // a parameter menu's choices grouped as the Lab panel shows an instrument: what a row records, its readings first
-  // (a lock-in's X, Y, R and θ, then its outputs and settings); what a loop changes, its outputs first
-  const ED_GROUPS = { read: [["reading", "Readings"], ["output", "Outputs"], ["setting", "Settings"]],
-                      set: [["output", "Outputs"], ["setting", "Settings"], ["action", "Actions"]] };
+  // what a loop changes, or Setup sets, grouped as the Lab panel shows an instrument: its outputs first, then its
+  // settings and actions
+  const ED_GROUPS = [["output", "Outputs"], ["setting", "Settings"], ["action", "Actions"]];
   const edGroup = (p) => p.group || (p.action ? "action" : p.drive ? "output" : "setting");
   function edOptions(list, what, opt) {
-    const order = ED_GROUPS[what === "read" ? "read" : "set"];
-    const groups = order.map(([g, name]) => [name, list.filter((p) => edGroup(p) === g)]).filter(([, ps]) => ps.length);
-    const rest = list.filter((p) => !order.some(([g]) => g === edGroup(p)));
+    const groups = what === "read" ? [] : ED_GROUPS.map(([g, name]) => [name, list.filter((p) => edGroup(p) === g)])
+      .filter(([, ps]) => ps.length);
     if (groups.length < 2) return list.map((p) => opt(p.param, edParamText(p)));
+    const rest = list.filter((p) => !ED_GROUPS.some(([g]) => g === edGroup(p)));
     return groups.map(([name, ps]) => h("optgroup", { label: name }, ...ps.map((p) => opt(p.param, edParamText(p)))))
       .concat(rest.map((p) => opt(p.param, edParamText(p))));
   }
