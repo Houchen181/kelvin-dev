@@ -297,8 +297,8 @@ def event_line(e: Dict[str, Any]) -> str:
     elif kind == "lab_changed":
         text = "now controlling %s (%s)" % (e.get("lab"), ", ".join(e.get("instruments") or []))
     elif kind == "instrument_switched":
-        text = "%s switched %s%s" % (e.get("instrument"), "on" if e.get("on") else "off",
-                                     "" if e.get("on") else ": Kelvin sends it nothing")
+        text = "%s %s" % (e.get("instrument"), "connected to Kelvin" if e.get("on") else
+                          "disconnected from Kelvin: Kelvin sends it nothing")
     elif kind in ("signed_in", "signed_out"):
         text = kind.replace("_", " ")
     elif kind == "computer_task":
@@ -1394,8 +1394,8 @@ class LabRuntime:
     def _status_lines(self) -> List[str]:
         lines = []
         for name in self.lab.switched_off:
-            lines.append("%s: Kelvin's connection is off (Lab panel), so Kelvin sends it nothing (ask_to_switch_on "
-                         "asks the person)" % name)
+            lines.append("%s: disconnected from Kelvin in the Lab panel, so Kelvin sends it nothing "
+                         "(ask_to_switch_on asks the person)" % name)
         for name, why in self.lab.unavailable.items():
             if why.startswith("set aside"):   # its lab.yaml entry has a problem: the person's to fix, not a reconnect
                 lines.append("%s: %s; tell the person" % (name, why))
@@ -1851,7 +1851,7 @@ class LabRuntime:
             if why is not None:
                 lines.append("%s not checked now: %s" % (name, why))
         if not instruments:
-            lines += ["%s switched off (not checked)" % n for n in self.lab.switched_off]
+            lines += ["%s disconnected from Kelvin (not checked)" % n for n in self.lab.switched_off]
             lines += ["%s not connected: %s" % kv for kv in self.lab.unavailable.items()]
         if self.home is not None:   # a calibration out of date or due soon: said, never a failure (profiles.py)
             from .. import profiles
@@ -4589,7 +4589,7 @@ class LabRuntime:
         for name in names:
             inst = self.lab.instruments.get(name)
             if inst is None or not inst.enabled:
-                unread[name] = "not in the lab now" if inst is None else (self.lab.away(name) or "switched off")
+                unread[name] = "not in the lab now" if inst is None else (self.lab.away(name) or "disconnected from Kelvin")
                 continue
             with self._reading(name) as why:
                 if why is None:
@@ -4678,7 +4678,7 @@ class LabRuntime:
                 continue
             out[key] = c["then"]
         if not whole:
-            notes.append("Some settings couldn't be read now (an instrument in use, switched off or not answering), "
+            notes.append("Some settings couldn't be read now (an instrument in use, disconnected from Kelvin or not answering), "
                          "so they aren't restored")
         return out, notes
 
@@ -5608,10 +5608,10 @@ class LabRuntime:
             if inst is None:
                 return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
             if inst.enabled:
-                return "%s is on" % name
+                return "%s is connected to Kelvin" % name
             if inst.unavailable:
-                return ("not asked: nobody switched %s off; it is not connected (%s). Fix that, then "
-                        "reconnect_instrument" % (name, inst.unavailable))
+                return ("not asked: nobody disconnected %s from Kelvin; it could not be connected (%s). Fix that, "
+                        "then reconnect_instrument" % (name, inst.unavailable))
             live = self.live or {}
             if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
                 return "not asked: a plan or the queue is running; ask when it has finished"
@@ -5621,7 +5621,7 @@ class LabRuntime:
                 "outputs stay as they are, and output changes still ask you as usual."])
             if not self.gate.ask(request):
                 note = " (%s)" % request.note if request.note else ""
-                return "declined: Kelvin's connection to %s stays off%s" % (name, note)
+                return "declined: %s stays disconnected from Kelvin%s" % (name, note)
             try:
                 self.switch_instrument(name, True, "human (approved Kelvin's request)")
             except (AdapterError, OSError, ValueError, RuntimeError) as e:
@@ -8165,7 +8165,7 @@ class LabRuntime:
             return "%s keeps the card it connected with: %s" % (name, e)
         if not inst.enabled and not inst.unavailable:
             news = self.lab.reconnect(name, card)
-            return "Kelvin's connection to %s is off (Lab panel): ask_to_switch_on asks the person%s" % (
+            return "%s is disconnected from Kelvin in the Lab panel: ask_to_switch_on asks the person%s" % (
                 name, " (it will use %s)" % news if news else "")
         if inst.enabled and card is None:
             return "%s is connected, with its card as it is now" % name
@@ -8560,7 +8560,7 @@ class LabRuntime:
         if inst is None:
             return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
         if not inst.enabled and inst.unavailable is None:
-            return "not changed: Kelvin's connection to %s is off (Lab panel); ask_to_switch_on first" % name
+            return "not changed: %s is disconnected from Kelvin in the Lab panel; ask_to_switch_on first" % name
         address, named = (address or "").strip(), (card or "").strip()
         if not (address or named or connection is not None or card_vars is not None):
             return "nothing to change: give its address, card, connection or vars"

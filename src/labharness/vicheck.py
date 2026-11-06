@@ -46,7 +46,8 @@ WAITS = ("Wait (ms)", "Wait Until Next ms Multiple", "Time Delay")
 # a rehearsal's refusal that is not a safety failure: an instrument the lab doesn't have, or one switched off or not
 # connected now (lab.away); every other refusal (a limit, a guard, an interlock, hands on the sample, a draft card)
 # blocks keeping the translation
-_NOT_THERE = re.compile(r"^refused: (the lab has no instrument |[\w-]+ is (not connected|switched off))")
+_NOT_THERE = re.compile(r"^refused: (the lab has no instrument |[\w-]+ is (not connected|switched off|"
+                        r"disconnected from Kelvin))")
 _TAG = re.compile(r"#\s*VI:\s*([A-Za-z0-9_.]+(?:\s*,\s*[A-Za-z0-9_.]+)*)")
 _NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 

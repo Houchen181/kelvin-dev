@@ -353,7 +353,7 @@ def test_what_couldnt_be_read_now_is_said(tmp_path, monkeypatch):
     rt.lab.switch("vna", False)
     view = rt.run_again_view(run_id)
     vna = [c for c in view["conditions"] if c["key"].startswith("vna.")]
-    assert view["read_now"] is False and vna and all(c["now"] is None and "switched off" in c["why"] for c in vna)
+    assert view["read_now"] is False and vna and all(c["now"] is None and "disconnected from Kelvin" in c["why"] for c in vna)
     rt.lab.switch("vna", True)
     tc = rt.lab.instruments["tc"]
     real = tc.read

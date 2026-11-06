@@ -194,13 +194,13 @@ def test_kelvin_asks_to_switch_on_an_instrument_a_person_switched_off(tmp_path):
     rt.lab_changed = changed.append
     assert "ask_to_switch_on asks the person" in rt.lab_status()
     rt.gate.approver = ScriptedApprover([False, True])
-    assert rt.ask_to_switch_on("lockin", "to read the signal").startswith("declined: lockin stays off")
+    assert rt.ask_to_switch_on("lockin", "to read the signal").startswith("declined: lockin stays disconnected from Kelvin")
     request = rt.gate.approver.requests[0]
     assert request.title == "Connect Kelvin to lockin again?" and "to read the signal" in request.items[0]
     assert not rt.lab.instruments["lockin"].enabled and changed == []
     assert rt.ask_to_switch_on("lockin", "to read the signal") == "Kelvin is connected to lockin again (the person approved)"
     assert rt.lab.instruments["lockin"].enabled and changed == ["switched"]
-    assert rt.ask_to_switch_on("lockin", "again") == "lockin is on"
+    assert rt.ask_to_switch_on("lockin", "again") == "lockin is connected to Kelvin"
     assert rt.ask_to_switch_on("nope", "x").startswith("no instrument 'nope'")
     assert [e["by"] for e in events(tmp_path, "instrument_switched")] == ["human (approved Kelvin's request)"]
 
@@ -231,7 +231,7 @@ def test_the_new_tools_over_mcp(tmp_path):
                                     ("draft_card", {"address": "GPIB0::5::INSTR"}),
                                     ("ask_to_switch_on", {"instrument": "lockin", "why": "to read the signal"}))
     assert added.startswith("not added: this Kelvin keeps no lab config")
-    assert "write it yourself" in drafted and switched == "lockin is on"
+    assert "write it yourself" in drafted and switched == "lockin is connected to Kelvin"
     assert "add_instrument" in INSTRUCTIONS and "draft_card" in INSTRUCTIONS and "Only a person can add" not in INSTRUCTIONS
 
 
@@ -248,7 +248,7 @@ def test_the_app_keeps_what_kelvin_changed(tmp_path):
     rt.lab.switch("lockin", False)
     create_app(rt, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"])
     assert rt.card_writer is not None and rt.switched_off_for == settings.switched_off
-    assert rt.ask_to_switch_on("lockin", "to read the signal").startswith("lockin is on again")
+    assert rt.ask_to_switch_on("lockin", "to read the signal").startswith("Kelvin is connected to lockin again")
     assert settings.switched_off(rt.lab.config.name) == []                  # kept across restarts
     rt.lab_changed("added")
 

@@ -67,14 +67,14 @@ def test_a_switched_off_instrument_gets_nothing(tmp_path):
     lab, sent, opened = recorded_lab(off={"smu"})
     assert "smu" not in opened and isinstance(lab.instruments["smu"].backend, OffBackend)   # never even connected
     rt = runtime_for(lab, tmp_path)
-    assert "smu: Kelvin's connection is off (Lab panel)" in rt.lab_status()
-    assert "switched off" in rt.get("smu", "V")
-    assert "switched off" in rt.set("smu", "V", 1)
-    assert "switched off" in rt.raw("smu", "*IDN?")
-    assert "switched off" in rt.run(SWEEP)                                   # a plan that uses it is refused
-    assert "smu switched off (not checked)" in rt.health() and "smu FAIL" not in rt.health()
+    assert "smu: disconnected from Kelvin in the Lab panel" in rt.lab_status()
+    assert "disconnected from Kelvin" in rt.get("smu", "V")
+    assert "disconnected from Kelvin" in rt.set("smu", "V", 1)
+    assert "disconnected from Kelvin" in rt.raw("smu", "*IDN?")
+    assert "disconnected from Kelvin" in rt.run(SWEEP)                                   # a plan that uses it is refused
+    assert "smu disconnected from Kelvin (not checked)" in rt.health() and "smu FAIL" not in rt.health()
     assert "smu" not in lab.snapshot() and [h.instr for h in lab.health_check()].count("smu") == 0
-    assert "switched off" in str(lab.health_check(["smu"])[0])
+    assert "disconnected from Kelvin" in str(lab.health_check(["smu"])[0])
     assert "smu" not in [i["name"] for i in rt.instruments() if i["enabled"]]
     assert next(i for i in rt.instruments() if i["name"] == "smu")["state"] == "off"
     rt.monitor.tick()
@@ -86,9 +86,9 @@ def test_a_drive_whose_guard_or_interlock_is_off_stays_put(tmp_path):
     lab, sent, _ = recorded_lab(off={"tc"})
     rt = runtime_for(lab, tmp_path)
     r = rt.set("laser", "power", 1)
-    assert "guard" in r and "tc" in r and "switched off" in r                # nothing would watch the sample's T
+    assert "guard" in r and "tc" in r and "disconnected from Kelvin" in r   # nothing would watch the sample's T
     r = rt.set("magnet", "B", 0.1)
-    assert "interlock" in r and "switched off" in r
+    assert "interlock" in r and "disconnected from Kelvin" in r
     assert [c for c in sent if c[0] in ("laser", "magnet") and not c[1].endswith("?")] == []
     rt.monitor.tick()                                                         # its watch rests: no "not answering"
     assert not rt.monitor.active() and [c for c in sent if c[0] == "tc"] == []
@@ -115,8 +115,8 @@ def test_switching_off_and_on_while_kelvin_runs(tmp_path):
     with pytest.raises(KeyError):
         rt.switch_instrument("nothing", False, "Ada")
     lines = [event_line(e) for e in rt.gate.log.events() if e.get("type") == "instrument_switched"]
-    assert any("Ada: smu switched off: Kelvin sends it nothing" in x for x in lines)
-    assert any("smu switched on" in x for x in lines)
+    assert any("Ada: smu disconnected from Kelvin: Kelvin sends it nothing" in x for x in lines)
+    assert any("smu connected to Kelvin" in x for x in lines)
 
 
 def test_a_quiet_connection_is_closed_and_opened_again(tmp_path):
@@ -159,7 +159,7 @@ def test_the_lab_panel_switch(tmp_path):
     assert r.status_code == 200 and next(i for i in r.json()["instruments"] if i["name"] == "smu")["state"] == "off"
     assert settings.switched_off("Virtual Lab") == ["smu"] and settings.switched_off("Another lab") == []
     r = client.post("/api/terminal", headers=h, json={"instrument": "smu", "op": "get", "arg": "V"})
-    assert "switched off" in r.text
+    assert "disconnected from Kelvin" in r.text
     assert client.post("/api/instruments/nothing/switch", headers=h, json={"on": False}).status_code == 404
     runtime.live = {"status": "running"}
     assert client.post("/api/instruments/smu/switch", headers=h, json={"on": True}).status_code == 409

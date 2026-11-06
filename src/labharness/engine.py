@@ -221,7 +221,7 @@ class RunEngine:
                 errors.append("%s is not connected (%s); reconnect_instrument once that is fixed"
                               % (name, lab.instruments[name].unavailable))
             elif not lab.instruments[name].enabled:
-                errors.append("Kelvin's connection to %s is off (Lab panel); a person turns it on there to use it" % name)
+                errors.append("%s is disconnected from Kelvin in the Lab panel; a person connects it there to use it" % name)
 
         def settable(instr: str, param: str, where: str):
             try:

@@ -373,7 +373,8 @@ class Collection:
                 _long(self.dir).mkdir(parents=True, exist_ok=True)
             except OSError:
                 pass
-            held = _hold(_long(self.dir) / "sync.lock")   # one Kelvin at a time, also across processes
+            lock = _long(self.dir) / "sync.lock"
+            held = _hold(lock)   # one Kelvin at a time, also across processes
             if held is None:
                 log.info("instrument collection: another Kelvin is updating it; this one uses it as it is")
                 return self.status()
@@ -381,6 +382,10 @@ class Collection:
                 self._sync(fetch)
             finally:
                 _let_go(held)
+                try:
+                    lock.unlink()   # gone again: the folder holds the collection only
+                except OSError:
+                    pass   # another Kelvin has it now
         return self.status()
 
     def _sync(self, fetch: Fetch) -> None:

@@ -4737,7 +4737,7 @@
   function instHead(inst) {
     const head = inst.readings.find((r) => r.name === inst.headline);
     const [hv, hu] = head ? splitValue(head.value) : ["", ""];
-    const state = inst.state === "unavailable" ? "not connected" : inst.enabled === false ? "Kelvin's connection off"
+    const state = inst.state === "unavailable" ? "not connected" : inst.enabled === false ? "disconnected from Kelvin"
       : inst.state === "error" ? "not responding" : inst.state === "active" ? inst.active + " active" : "safe";
     return { hv, hu, tip: inst.model + " · " + state + (head ? " · " + head.label + " " + head.value : "") };
   }
@@ -4776,8 +4776,8 @@
       "aria-checked": String(asked === undefined ? !off : asked), "aria-busy": asked === undefined ? null : "true",
       "aria-label": "Kelvin's connection to " + inst.name, "data-k": "switch " + inst.name,
       title: missing ? "Not connected: " + inst.why + " Turn it on to try again."
-        : off ? "Kelvin's connection is off: Kelvin sends " + inst.name + " nothing. Turn it on to use it (its outputs stay as they are)."
-        : "Kelvin's connection is on: Kelvin may use " + inst.name + ". Turn it off to keep Kelvin from sending it anything." },
+        : off ? "Disconnected from Kelvin: Kelvin sends " + inst.name + " nothing. Turn the switch on to connect it (its outputs stay as they are)."
+        : "Connected to Kelvin: Kelvin may use " + inst.name + ". Turn the switch off to keep Kelvin from sending it anything." },
       h("span", { class: "switch-thumb", "aria-hidden": "true" }));
     sw.addEventListener("click", (e) => switchInstrument(inst.name, off, sw, !e.detail));
     const item = h("div", { class: "inst " + inst.state + (open ? " open" : "") }, h("div", { class: "inst-head" }, row, sw));
@@ -5226,7 +5226,7 @@
     return (watches.length ? watches.map((w) => {
       const remove = w.source === "lab" ? h("span", { class: "tag", title: "From the lab config; change it there" }, "lab")
         : rowButton("x", "Stop watching", async () => { try { await api("/api/watches/" + w.id, { method: "DELETE" }); } catch (e) { toast(e.message); } pollState(); });
-      return h("li", { class: "watch" + (w.alarm ? " alarm" : ""), title: w.paused ? "Paused: Kelvin's connection to its instrument is off, so nothing is read" : null },
+      return h("li", { class: "watch" + (w.alarm ? " alarm" : ""), title: w.paused ? "Paused: its instrument is disconnected from Kelvin, so nothing is read" : null },
         h("span", { class: "dot" + (w.alarm ? " bad" : w.paused ? "" : " on") }),
         h("span", { class: "watch-rule" }, w.rule, w.paused ? h("span", { class: "watch-then" }, " (paused: instrument off)")
           : w.then.length ? h("span", { class: "watch-then" }, " → " + w.then.join(", ")) : null),

@@ -321,7 +321,7 @@ def test_a_tagged_input_keeps_the_vis_value_whatever_the_notes_say(lab):
     ("refused: the draft card's output asks a person", True),
     ("its process refused: ctypes.dlopen", True),
     ("refused: the lab has no instrument scope", False),
-    ("refused: Kelvin's connection to smu is off (Lab panel)", False),
+    ("refused: smu is disconnected from Kelvin in the Lab panel", False),
     ("refused: smu is not connected (no reply)", False),
     ("ZeroDivisionError: division by zero", False)])
 def test_any_refusal_in_a_rehearsal_blocks_but_one_of_an_instrument_that_isnt_there(problem, blocks):

@@ -232,7 +232,7 @@ def write_caps(gate: Any, lab: Any, protection: Dict[str, Any]) -> Tuple[List[st
     for inst, param, value, why in caps(lab, protection):
         if not inst.enabled:
             lines.append("%s is %s: its caps are written when it is on again" % (
-                inst.name, "not connected" if inst.unavailable else "switched off"))
+                inst.name, "not connected" if inst.unavailable else "disconnected from Kelvin"))
             done = False
             continue
         try:

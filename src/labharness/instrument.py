@@ -17,8 +17,7 @@ from .clock import Stops
 from .labconfig import Guard, InstrumentConfig
 
 
-OFF_TEXT = ("Kelvin's connection to %s is off (Lab panel): Kelvin sends it nothing until a person turns it on "
-            "again")
+OFF_TEXT = "%s is disconnected from Kelvin in the Lab panel: Kelvin sends it nothing until a person connects it"
 NOT_CONNECTED = "%s is not connected (%s): Kelvin sends it nothing until it connects (reconnect_instrument)"
 GUARD_S = 30.0    # how long what a card's check before a reading found holds, unless a command goes to it meanwhile
 SHARED_S = 1.0    # how long one reply (:READ?) may serve the other readings that take a field of it

@@ -82,7 +82,7 @@ def test_kelvin_reconnects_an_instrument_once_it_is_fixed(bench, tmp_path):
         assert rt.ui_state()["unavailable"][0]["name"] == "lockin"
         row = next(i for i in rt.instruments() if i["name"] == "lockin")
         assert row["state"] == "unavailable" and row["why"] and row["install"] is None
-        assert rt.ask_to_switch_on("lockin", "for the lock-in signal").startswith("not asked: nobody switched")
+        assert rt.ask_to_switch_on("lockin", "for the lock-in signal").startswith("not asked: nobody disconnected lockin from Kelvin")
         assert rt.reconnect_instrument("lockin").startswith("lockin is still not connected")
         bench.devices["GPIB0::9::INSTR"] = Device("srs/sr830", name="sr830")
         assert rt.reconnect_instrument("lockin").startswith("lockin is connected now")
@@ -99,7 +99,7 @@ def test_a_person_may_switch_off_an_instrument_that_isnt_connected(bench, tmp_pa
     try:
         lab.switch("lockin", False)
         assert lab.unavailable == {} and lab.switched_off == ["lockin"]
-        with pytest.raises(KeyError, match=r"connection to .* is off \(Lab panel\)"):
+        with pytest.raises(KeyError, match="disconnected from Kelvin in the Lab panel"):
             lab.read("lockin", "X")
     finally:
         lab.close()
