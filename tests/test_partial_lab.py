@@ -99,7 +99,7 @@ def test_a_person_may_switch_off_an_instrument_that_isnt_connected(bench, tmp_pa
     try:
         lab.switch("lockin", False)
         assert lab.unavailable == {} and lab.switched_off == ["lockin"]
-        with pytest.raises(KeyError, match="switched off in the Lab panel"):
+        with pytest.raises(KeyError, match=r"connection to .* is off \(Lab panel\)"):
             lab.read("lockin", "X")
     finally:
         lab.close()

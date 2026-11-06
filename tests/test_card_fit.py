@@ -93,7 +93,7 @@ def test_a_change_that_cannot_connect_or_finds_another_instrument_leaves_it_as_i
     assert "names a program" in rt.change_instrument("cryo", address="lib://COM4?python=C:/x/python.exe")
     assert rt.change_instrument("cryo", card="no/such-card").startswith("not changed: there is no card")
     rt.lab.switch("lockin", False)
-    assert "switched off in the Lab panel" in rt.change_instrument("lockin", address="GPIB0::9::INSTR")
+    assert "Kelvin's connection to lockin is off (Lab panel)" in rt.change_instrument("lockin", address="GPIB0::9::INSTR")
 
 
 def test_this_labs_version_of_a_card_takes_the_instrument_over(tmp_path, bench):

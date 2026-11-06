@@ -196,9 +196,9 @@ def test_kelvin_asks_to_switch_on_an_instrument_a_person_switched_off(tmp_path):
     rt.gate.approver = ScriptedApprover([False, True])
     assert rt.ask_to_switch_on("lockin", "to read the signal").startswith("declined: lockin stays off")
     request = rt.gate.approver.requests[0]
-    assert request.title == "Switch lockin on?" and "to read the signal" in request.items[0]
+    assert request.title == "Connect Kelvin to lockin again?" and "to read the signal" in request.items[0]
     assert not rt.lab.instruments["lockin"].enabled and changed == []
-    assert rt.ask_to_switch_on("lockin", "to read the signal") == "lockin is on again (the person approved)"
+    assert rt.ask_to_switch_on("lockin", "to read the signal") == "Kelvin is connected to lockin again (the person approved)"
     assert rt.lab.instruments["lockin"].enabled and changed == ["switched"]
     assert rt.ask_to_switch_on("lockin", "again") == "lockin is on"
     assert rt.ask_to_switch_on("nope", "x").startswith("no instrument 'nope'")

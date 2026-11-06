@@ -143,7 +143,7 @@ class Lab:
         inst = self.instruments.get(name)
         if inst is None or inst.enabled:
             return None
-        return "not connected (%s)" % inst.unavailable if inst.unavailable else "switched off in the Lab panel"
+        return "not connected (%s)" % inst.unavailable if inst.unavailable else "Kelvin's connection is off (Lab panel)"
 
     def reconnect(self, name: str, card: Optional[Card] = None) -> str:
         """Connect an instrument that could not be connected; it stays set aside, with the new reason, if it still
@@ -331,7 +331,7 @@ class Lab:
                 out.append(HealthResult(name, False, ["not in this lab"]))
                 continue
             if not inst.enabled:
-                out.append(HealthResult(name, False, [self.away(name) or "switched off in the Lab panel"]))
+                out.append(HealthResult(name, False, [self.away(name) or "Kelvin's connection is off (Lab panel)"]))
                 continue
             problems: List[str] = []
             notes: List[str] = []

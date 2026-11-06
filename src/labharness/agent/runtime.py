@@ -1394,8 +1394,8 @@ class LabRuntime:
     def _status_lines(self) -> List[str]:
         lines = []
         for name in self.lab.switched_off:
-            lines.append("%s: switched off in the Lab panel; Kelvin sends it nothing (ask_to_switch_on asks the person)"
-                         % name)
+            lines.append("%s: Kelvin's connection is off (Lab panel), so Kelvin sends it nothing (ask_to_switch_on "
+                         "asks the person)" % name)
         for name, why in self.lab.unavailable.items():
             if why.startswith("set aside"):   # its lab.yaml entry has a problem: the person's to fix, not a reconnect
                 lines.append("%s: %s; tell the person" % (name, why))
@@ -5598,8 +5598,9 @@ class LabRuntime:
             self._refresh()
 
     def ask_to_switch_on(self, name: str, why: str) -> str:
-        """Kelvin needs an instrument a person switched off: it asks them, and switches it on if they say yes.
-        Switching off stays a person's: it says the instrument is not part of the experiment."""
+        """Kelvin needs an instrument whose connection a person turned off (the Lab panel's switch): it asks them,
+        and connects to it again if they say yes. Turning it off stays a person's: it says the instrument is not part
+        of the experiment. Said as Kelvin's connection, never "switch on", which a field test read as an output."""
         from ..adapters import AdapterError
 
         def run() -> str:
@@ -5614,19 +5615,19 @@ class LabRuntime:
             live = self.live or {}
             if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
                 return "not asked: a plan or the queue is running; ask when it has finished"
-            request = ApprovalRequest("Switch %s on?" % name, [
+            request = ApprovalRequest("Connect Kelvin to %s again?" % name, [
                 "Kelvin needs it: %s" % (why.strip() or "(no reason given)"),
-                "You switched it off in the Lab panel. On, Kelvin connects to it again and reads it; output changes "
-                "still ask you as usual."])
+                "You turned Kelvin's connection to it off in the Lab panel. Connected again, Kelvin reads it; its "
+                "outputs stay as they are, and output changes still ask you as usual."])
             if not self.gate.ask(request):
                 note = " (%s)" % request.note if request.note else ""
-                return "declined: %s stays off%s" % (name, note)
+                return "declined: Kelvin's connection to %s stays off%s" % (name, note)
             try:
                 self.switch_instrument(name, True, "human (approved Kelvin's request)")
             except (AdapterError, OSError, ValueError, RuntimeError) as e:
                 return "%s could not be connected: %s" % (name, str(e).splitlines()[0] if str(e) else e)
             self.lab_changed("switched")
-            return "%s is on again (the person approved)" % name
+            return "Kelvin is connected to %s again (the person approved)" % name
         return self._do("asking to switch %s on" % name, run)
 
     # ------------------------------------------------------------------ instruments on this computer
@@ -8164,7 +8165,7 @@ class LabRuntime:
             return "%s keeps the card it connected with: %s" % (name, e)
         if not inst.enabled and not inst.unavailable:
             news = self.lab.reconnect(name, card)
-            return "%s is switched off in the Lab panel: ask_to_switch_on asks the person%s" % (
+            return "Kelvin's connection to %s is off (Lab panel): ask_to_switch_on asks the person%s" % (
                 name, " (it will use %s)" % news if news else "")
         if inst.enabled and card is None:
             return "%s is connected, with its card as it is now" % name
@@ -8559,7 +8560,7 @@ class LabRuntime:
         if inst is None:
             return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
         if not inst.enabled and inst.unavailable is None:
-            return "not changed: %s is switched off in the Lab panel; ask_to_switch_on first" % name
+            return "not changed: Kelvin's connection to %s is off (Lab panel); ask_to_switch_on first" % name
         address, named = (address or "").strip(), (card or "").strip()
         if not (address or named or connection is not None or card_vars is not None):
             return "nothing to change: give its address, card, connection or vars"

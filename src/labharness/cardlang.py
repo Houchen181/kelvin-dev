@@ -36,7 +36,7 @@ _ZH_TITLES = _rules([
     (r"Run plan (\S+): (.+)", "运行计划 {1}：{t2}"),
     (r"Run the queue: (.+)", "运行队列：{t1}"),
     (r"Send raw command\?", "发送原始命令？"),
-    (r"Switch (\S+) on\?", "为 Kelvin 打开 {1}？"),
+    (r"Connect Kelvin to (\S+) again\?", "让 Kelvin 重新连接 {1}？"),
     (r"Try a card on (\S+)\?", "在 {1} 上试用仪器卡？"),
     (r"Install on this computer\?", "在这台电脑上安装？"),
     (r"Install on this computer for (.+)\?", "在这台电脑上为 {1} 安装？"),
@@ -53,8 +53,9 @@ _ZH_LINES = _rules([
      r"interlock still pauses it", "若某项失败，队列会继续下一项（失败时：继续）；停止、保护跳闸或联锁仍会让它暂停"),
     (r"This approval covers every item now waiting; anything outside these ranges asks again\.",
      "此批准涵盖队列中现在等待的每一项；超出这些范围的操作会再次询问。"),
-    (r"You switched it off in the Lab panel\. On, Kelvin connects to it again and reads it; output changes still ask "
-     r"you as usual\.", "你在实验室面板里把它关掉了。打开后，Kelvin 会重新连接并读取它；输出变更仍会照常询问你。"),
+    (r"You turned Kelvin's connection to it off in the Lab panel\. Connected again, Kelvin reads it; its outputs "
+     r"stay as they are, and output changes still ask you as usual\.",
+     "你在实验室面板里关闭了 Kelvin 与它的连接。重新连接后，Kelvin 会读取它；它的输出保持原样，输出变更仍会照常询问你。"),
 ])
 
 _ZH_PARTS = _rules([

@@ -67,7 +67,7 @@ def test_a_switched_off_instrument_gets_nothing(tmp_path):
     lab, sent, opened = recorded_lab(off={"smu"})
     assert "smu" not in opened and isinstance(lab.instruments["smu"].backend, OffBackend)   # never even connected
     rt = runtime_for(lab, tmp_path)
-    assert "smu: switched off in the Lab panel" in rt.lab_status()
+    assert "smu: Kelvin's connection is off (Lab panel)" in rt.lab_status()
     assert "switched off" in rt.get("smu", "V")
     assert "switched off" in rt.set("smu", "V", 1)
     assert "switched off" in rt.raw("smu", "*IDN?")
