@@ -76,6 +76,7 @@ class AutoSetup:
         self._thread: Optional[threading.Thread] = None
         self.first = False   # setting up a lab that has no lab config yet: the portal asks for the lab's scripts
         self.scripts: Any = None   # the lab's scripts, read (scripts.Survey), once a person named their folder
+        self.racks: Dict[str, Any] = {}   # their Special Measure rack, by address: (its instrument, the rack in words)
         self._drafted = False      # the first lab config is written: the scripts come too late to shape it
         self._scripts_lock = threading.Lock()
 
@@ -101,15 +102,54 @@ class AutoSetup:
     def use_scripts(self, folder: Any) -> Dict[str, Any]:
         """The lab's own scripts, which a person pointed Kelvin to (folder: a folder, or the lab's scripts folders, a
         list read as one): read now (never run; files only, so not waiting for the instruments) for the first lab
-        config, if it isn't written yet. now: they shape it; otherwise Set up's Scripts… adds what they show.
-        Raises OSError for a folder that isn't there."""
-        from .scripts import survey
-        found = survey(folder, self.runtime.script_cards())
+        config, if it isn't written yet. now: they shape it; otherwise Set up's Scripts… adds what they show. A folder
+        with Special Measure's setup scripts is read as its rack (specialmeasure.py), which the script survey can't
+        read (field test #9: 0 instruments in 14 scripts): the instruments its newest setup loads, named as the rack
+        names them, at the addresses its numbers, flags, smloadinst, gpib and visa calls give; what the rack proposes
+        as their limits waits in each one's review (_keep_proposed). Raises OSError for a folder that isn't there."""
+        import dataclasses
+        from . import specialmeasure
+        from .scripts import Script, Survey, survey
+        registry = self.runtime.script_cards()
+        paths = list(folder) if isinstance(folder, (list, tuple)) else [folder]
+        racks, plain = [], []
+        for p in paths:
+            try:
+                sm = specialmeasure.survey(p, registry, scans=False)
+            except (OSError, ValueError):   # not there, or in Kelvin's own folder: the script survey says so
+                sm = None
+            if sm is not None and sm.setup is not None:
+                racks.append(sm)
+            else:
+                plain.append(p)
+        found = Survey("")
+        try:
+            if plain:
+                found = survey(plain if isinstance(folder, (list, tuple)) else plain[0], registry)
+        except (OSError, ValueError) as e:   # with a rack read, another folder that can't be read is only said
+            if not racks:
+                raise
+            found.skipped.append(str(e))
+        rack: Dict[str, Any] = {}
+        for sm in racks:
+            for ri in specialmeasure._hardware(sm.setup):
+                if ri.used and ri.inst.address:   # what the setup loads (its *_Use flag on), the first at an address
+                    rack.setdefault(specialmeasure.rack_key(ri.inst.address),
+                                    (ri, "your Special Measure rack (%s in %s)" % (sm.setup.path, sm.folder)))
+        if racks:   # a start-up command is no value the lab drives it at: the rack proposes limits, Kelvin sets none
+            found.instruments = [i for i in found.instruments if specialmeasure.rack_key(i.address) not in rack] + \
+                [dataclasses.replace(ri.inst, commands=[]) for ri, _ in rack.values()]
+            found.scripts += [Script(sm.setup.path, "matlab") for sm in racks]
+            found.folders = found.folders + [sm.folder for sm in racks]
+            found.folder = found.folders[0] if len(found.folders) == 1 else \
+                ", ".join(found.folders[:-1]) + " and " + found.folders[-1]
         with self._scripts_lock:
-            self.scripts = found
+            self.scripts, self.racks = found, rack
             now = self.first and not self._drafted and self._thread is not None and self._thread.is_alive()
-        log.info("The lab's scripts in %s: %d instrument(s) in %d script(s)%s", found.folder, len(found.instruments),
-                 len(found.scripts), "; used for the first lab config" if now else "")
+        log.info("The lab's scripts in %s: %d instrument(s) in %d script(s)%s%s", found.folder, len(found.instruments),
+                 len(found.scripts), "; Special Measure's rack in %s" % ", ".join(
+                     "%s (%s)" % (sm.folder, sm.setup.path) for sm in racks) if racks else "",
+                 "; used for the first lab config" if now else "")
         return {"folder": found.folder, "folders": found.folders, "instruments": len(found.instruments),
                 "scripts": len(found.scripts), "now": now}
 
@@ -336,6 +376,7 @@ class AutoSetup:
         tmp.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(text, encoding="utf-8")
         tmp.replace(self.lab_file)
+        proposed = self._keep_proposed(text, registry)
         changed = getattr(rt, "config_changed", None)   # kept in the lab's config history (configversions.py)
         if changed is not None:
             changed("Kelvin (setup)", "set up the instruments it found: %s" % names, "setup")
@@ -357,5 +398,38 @@ class AutoSetup:
             return False
         rt.notifier("setup", "Kelvin set up %d instrument%s" % (len(matched), "" if len(matched) == 1 else "s"),
                     names + ". Readings and settings work now; Kelvin asks you before each output change until you "
-                    "review their limits in Lab setup.")
+                    "review their limits in Lab setup.%s" % (
+                        " Your Special Measure rack's limits for %s are there for you to accept (Limits… on %s row)."
+                        % (", ".join(proposed), "its" if len(proposed) == 1 else "each") if proposed else ""))
         return True
+
+    def _keep_proposed(self, text: str, registry: Any) -> List[str]:
+        """What the lab's Special Measure rack proposes for each instrument of the first lab config it has
+        (specialmeasure.on_card: its channels' limits and ramp rates, the compliance its setup sets), kept in the
+        instrument's folder for the person: its review shows it, and only a person sets limits. The names kept for."""
+        import copy
+        from . import specialmeasure
+        from .yamlio import load_yaml
+        with self._scripts_lock:
+            rack = dict(self.racks)
+        if not rack:
+            return []
+        try:
+            entries = (load_yaml(text) or {}).get("instruments") or {}
+        except Exception:   # Kelvin wrote it, so it reads; never a reason to stop the setup
+            entries = {}
+        kept: List[str] = []
+        for name, e in entries.items():
+            hit = rack.get(specialmeasure.rack_key(str(e.get("address") or ""))) if isinstance(e, dict) else None
+            if hit is None or str(e.get("card")) not in registry:
+                continue
+            limits, rates = specialmeasure.on_card(copy.deepcopy(hit[0]), registry.get(str(e["card"])))
+            if not limits and not rates:
+                continue
+            try:
+                specialmeasure.keep_proposed(self.home, str(name), str(e["address"]), str(e["card"]), limits, rates,
+                                             hit[1])
+                kept.append(str(name))
+            except (KeyError, OSError) as err:
+                log.info("  could not keep the rack's limits for %s: %s", name, profiles._first_line(err))
+        return kept

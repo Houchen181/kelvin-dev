@@ -15,10 +15,14 @@ Nothing is ever run: no MATLAB (it need not be installed), and nothing is sent t
     runs            the run files (NNN_name.mat), counted by folder: importers/specialmeasure.py reads each as a run
 
 survey() gathers them by instrument in the script survey's form (scripts.Instrument, its card by scripts.match), for
-the same review in Set up. Special Measure is GPL software: none of its code is in Kelvin; only a lab's own files are
-read, where they are."""
+the same review in Set up, and for Kelvin's first lab config and add_instrument, which name an instrument as the
+rack does (instrument_at). on_card() is what the rack proposes for an instrument on a card: its channels' limits and
+ramp rates, and the compliance its setup sets. Only a person sets limits: what Kelvin added at an address the rack
+knows keeps the rack's proposals in its folder (keep_proposed) for its review. Special Measure is GPL software: none
+of its code is in Kelvin; only a lab's own files are read, where they are."""
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -1681,3 +1685,116 @@ def names_of(setup: Setup, named: Dict[str, str], taken: Iterable[str] = ()) -> 
     blocked = set(taken) | set(named.values()) | RESERVED | NOT_NAMES | {"e", "count"}
     keys, _ = channel_map(setup, named)
     return {ch: k for ch, (k, *_) in keys.items() if ch not in blocked and re.fullmatch(r"[A-Za-z_]\w*", ch)}
+
+
+# ------------------------------------------------------------------ what the rack proposes for one of its instruments
+
+PROPOSED = "proposed.json"   # in an instrument's folder (profiles.py): the rack's limits and rates, for its review
+
+
+def rack_key(address: str) -> str:
+    """An address as the rack and the lab are matched by: as VISA names it, in capitals (GPIB::15 and GPIB0::15::INSTR
+    alike, serial://COM3 as ASRL3::INSTR)."""
+    from .adapters import resource_name
+    return resource_name(normalize(address)).upper() if (address or "").strip() else ""
+
+
+def instrument_at(found: Found, address: str, path: Optional[str] = None) -> Optional[RackInstrument]:
+    """The chosen setup's instrument with hardware at an address (the newest setup by default): where two share it,
+    the one the setup loads."""
+    key = rack_key(address)
+    for ri in _hardware(found.chosen(path)) if key else []:
+        if ri.inst.address and rack_key(ri.inst.address) == key:
+            return ri
+    return None
+
+
+def compliance(card: Any, spec: Any) -> bool:
+    """A source's own limit on what it lets through (its compliance, a protection level): a numeric drive another
+    names its current_limit, or one its card calls a compliance, a protection or a limit."""
+    if spec is None or not spec.is_drive or not spec.numeric:
+        return False
+    if any(s.current_limit == spec.name for s in card.params.values()):
+        return True
+    return bool(re.search(r"complian|protect|limit", "%s %s" % (spec.name, spec.label or ""), re.I))
+
+
+def on_card(ri: RackInstrument, card: Any) -> Tuple[Dict[str, List[float]], Dict[str, float]]:
+    """A rack instrument on a card (the one Set up's review has for it, or the one Kelvin adds it with): each channel's
+    parameter, set on the channel (param, why, set_param, and native: the card takes the channel's own unit); and
+    what the rack gives what sets them: each channel's range as limits, as the instrument gets them, and its ramp rate
+    for a drive Kelvin ramps itself (at most the card's max_rate, as the lab config takes rates); and a compliance no
+    channel sets, as the setup sends it at start-up (sense:current:protection 1e-6), with its safe value. Limits stay
+    inside the card's own, which the lab config never lets a lab pass. Changes the rack instrument's channels: give it
+    a copy where the rack is shared."""
+    limits: Dict[str, List[float]] = {}
+    rates: Dict[str, float] = {}
+    taken: Dict[str, str] = {}
+    for ch in ri.channels:
+        param, why = param_of(card, ch.channel, ri.numbered.get(ch.channel, []), ch.send)
+        if param and param in taken:
+            param, why = None, "%s is %s's already: a second channel is an entry of its own" % (param, taken[param])
+        elif param:
+            taken[param] = ch.name
+        ch.param, ch.why, ch.set_param = param, why, set_param_of(card, param)
+        card_units(ch, card)   # on this card: sm's multiplier, or the card's own unit
+        drive = ch.set_param or param
+        spec = card.params.get(drive) if card is not None and drive else None
+        if spec is None or not spec.numeric or not spec.is_drive:
+            continue
+        ends = sorted(ch.to_instrument(v) for v in (ch.low, ch.high))   # as the instrument gets them
+        if all(math.isfinite(v) for v in ends):
+            limits[drive] = ends
+        if math.isfinite(ch.rate) and ch.rate > 0 and spec.ramp == "gate":
+            rate = ch.rate * abs(ch.multiplier())
+            rates[drive] = min(rate, spec.max_rate) if spec.max_rate else rate
+    if card is None:
+        return limits, rates
+    for p, (lo, hi) in scripts.limits(card, ri.inst.commands).items():   # what its setup sends once, at start-up
+        if p not in limits and compliance(card, card.params[p]):
+            limits[p] = [lo, hi]
+    for p, (lo, hi) in list(limits.items()):
+        own = card.params[p].limits
+        lo, hi = (max(lo, own[0]), min(hi, own[1])) if own else (lo, hi)
+        if lo <= hi:
+            limits[p] = [lo, hi]
+        else:   # wholly past what the card allows: nothing to propose
+            del limits[p]
+    return limits, rates
+
+
+def keep_proposed(home: Any, name: str, address: str, card_id: str, limits: Dict[str, List[float]],
+                  rates: Dict[str, float], source: str) -> None:
+    """What the rack proposes for an instrument Kelvin added (on_card), kept in the instrument's folder for a person:
+    its review (Limits… on its row) shows it, and only the person sets limits. Kept with the address and card it was
+    worked out for, so an instrument that later takes the name or the card shows none."""
+    from . import profiles
+    path = profiles.folder(home, name) / PROPOSED
+    data = {"from": source, "address": address, "card": card_id, "at": time.time(),
+            "limits": {p: [float(v[0]), float(v[1])] for p, v in limits.items()},
+            "rates": {p: float(v) for p, v in rates.items()}}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def proposed(home: Any, name: str, address: str, card_id: str) -> Optional[Dict[str, Any]]:
+    """What keep_proposed kept for an instrument, {from, limits, rates}, while it is still the one at that address
+    with that card; None otherwise."""
+    from . import profiles
+    try:
+        data = json.loads((profiles.folder(home, name) / PROPOSED).read_text(encoding="utf-8"))
+    except (KeyError, OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("card") != card_id or \
+            rack_key(str(data.get("address") or "")) != rack_key(address):
+        return None
+    limits = {str(p): [float(v[0]), float(v[1])] for p, v in (data.get("limits") or {}).items()
+              if isinstance(v, list) and len(v) == 2
+              and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)}
+    rates = {str(p): float(v) for p, v in (data.get("rates") or {}).items()
+             if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0}
+    if not limits and not rates:
+        return None
+    return {"from": str(data.get("from") or "your Special Measure rack"), "limits": limits, "rates": rates}

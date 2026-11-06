@@ -58,8 +58,8 @@ def test_from_special_measure_sets_the_lab_up_with_its_channels_names(bench):
         assert src["address"] == "GPIB0::24::INSTR" and src["card"]["id"] == "keithley/2400"
         assert "it answered KEITHLEY" in src["card"]["why"] and src["name"] == "source"
         assert {c["name"]: c["param"] for c in src["channels"]} == {"Vbg": "V", "Ibg": "I"}
-        assert src["card"]["limits"] == {"V": [-5, 5]} and src["card"]["rates"] == {"V": 0.2}
-        assert src["startup"] == ["sense:current:protection 1e-6"]
+        assert src["card"]["limits"] == {"V": [-5, 5], "compliance_I": [1e-9, 1e-6]}   # the compliance it starts at
+        assert src["card"]["rates"] == {"V": 0.2} and src["startup"] == ["sense:current:protection 1e-6"]
         assert lock["card"]["limits"] == {"amplitude": [0.004, 1]}
         assert lock["card"]["rates"] == {}   # Kelvin doesn't ramp its amplitude: no rate, which the config would refuse
         assert not mag["used"] and mag["address"] == "serial://COM1"   # its flag is 0: listed, not ticked
@@ -71,7 +71,8 @@ def test_from_special_measure_sets_the_lab_up_with_its_channels_names(bench):
                   "rates": src["card"]["rates"], "from": "specialmeasure"}]
         text = client.post("/api/instruments/draft", json={"items": items, "base": "", "names": view["names"]},
                            headers=headers).json()["yaml"]
-        assert "V: [-5, 5]" in text and "V from your Special Measure rack (its channels' limits)" in text
+        assert "V: [-5, 5]" in text and "compliance_I: [1e-09, 1e-06]" in text
+        assert "V, compliance_I from your Special Measure rack (its channels' limits, its setup's compliance)" in text
         assert "the rest are its card's vendor limits" in text   # said apart from the rack's
         assert "rates: { V: 0.2 }" in text and "\nnames:" in text and "  Vbg: source.V" in text
         text = text.replace("  X_A: lockin_a.X\n", "").replace("  Vref_A: lockin_a.amplitude\n", "")
@@ -84,6 +85,57 @@ def test_from_special_measure_sets_the_lab_up_with_its_channels_names(bench):
         assert added.startswith("added step gate"), added
         assert "source.V" in runtime.queue.items[-1].text and "Vbg" not in runtime.queue.items[-1].text
         assert "Vbg = source.V" in runtime.lab_status()
+
+
+def test_kelvin_adds_an_instrument_the_rack_has_by_its_name_and_a_person_takes_the_racks_limits(bench,
+                                                                                                tmp_path_factory):
+    """Field test #9: given a setup script, the agent added its Keithley with the maker's limits (210 V, 1.05 A)
+    where the rack had 5 V and 1 uA, and named the others by address (k2400_24) while its plans used the rack's
+    names. Now add_instrument names it as the rack does and leaves the rack's limits for the person to take."""
+    (runtime, settings, store), bus, home = bench
+    lab = tmp_path_factory.mktemp("lab")   # the lab's own files, outside Kelvin's folder
+    (lab / "SpecialMeasure" / "setups").mkdir(parents=True)
+    (lab / "SpecialMeasure" / "setups" / "smsetup_rig.m").write_text(RACK, encoding="utf-8")
+    client, headers = client_for((runtime, settings, store), {"scripted": Scripted([])})
+    with client:
+        settings.add_lab_scripts(str(lab / "SpecialMeasure"))   # the lab's scripts folder Kelvin was pointed to
+        out = runtime.add_instrument("GPIB0::24::INSTR", card="keithley/2400", name="k2400_24")
+        assert out.startswith("added source ("), out
+        assert "Your Special Measure rack (" in out and "names it source (not k2400_24), so plans written" in out
+        assert "It proposes V [-5, 5], compliance_I [1e-09, 1e-06], V ramped at 0.2 V/s" in out
+        assert "Kelvin never sets limits" in out and "Limits… on its row" in out
+        text = (home / "lab.yaml").read_text(encoding="utf-8")
+        assert "  source:\n" in text and "V: [-210, 210]" in text and "V: [-5, 5]" not in text   # the maker's
+        assert runtime.lab.instruments["source"].limits("V") == (-210, 210) and not runtime.lab.config.instruments[
+            "source"].rates and runtime.lab.config.unreviewed() == ["source"]
+
+        view = client.get("/api/instruments/source/limits", headers=headers).json()   # its review
+        rows = {row["param"]: row for row in view["rows"]}
+        assert view["proposed"].startswith("your Special Measure rack (") and not view["reviewed"]
+        assert rows["V"]["proposed"] == [-5, 5] and rows["V"]["proposed_rate"] == 0.2 and rows["V"]["rate"] is None
+        assert rows["compliance_I"]["proposed"] == [1e-9, 1e-6] and rows["I_range"]["proposed"] is None
+        for bad in ({"I_range": 1}, {"V": -1}, {"V": True}, {"V": 50}):   # not ramped by Kelvin, or no rate a card has
+            r = client.post("/api/instruments/source/limits", json={"limits": {}, "rates": bad}, headers=headers)
+            assert r.status_code == 400, bad
+        taken = {"limits": {"V": [-5, 5], "compliance_I": [1e-9, 1e-6]}, "rates": {"V": 0.2}, "reviewed": True}
+        r = client.post("/api/instruments/source/limits", json=taken, headers=headers)   # the person's yes
+        assert r.status_code == 200 and r.json()["reviewed"] and {x["param"]: x for x in r.json()["rows"]}["V"][
+            "rate"] == 0.2
+        assert runtime.lab.instruments["source"].limits("V") == (-5, 5) and runtime.lab.config.unreviewed() == []
+        assert runtime.lab.instruments["source"].limits("compliance_I") == (1e-9, 1e-6)
+        assert runtime.lab.config.instruments["source"].rates == {"V": 0.2}   # in force at once
+        text = (home / "lab.yaml").read_text(encoding="utf-8")
+        assert "rates: { V: 0.2 }" in text and "added_by" not in text
+        logged = [e for e in runtime.gate.log.events() if e.get("type") == "limits"][-1]
+        assert logged["by"] == "human (portal)" and logged["rates"] == {"V": 0.2}
+
+        (lab / "rig2").mkdir()   # a Special Measure folder read in a chat names it as its own rack does
+        (lab / "rig2" / "smsetup.m").write_text(RACK.replace("LockIn_A", "LockIn_Upper"), encoding="utf-8")
+        assert "LockIn_Upper" in runtime.survey_specialmeasure(str(lab / "rig2"))
+        out = runtime.add_instrument("GPIB0::8::INSTR", card="srs/sr830")
+        assert out.startswith("added lockin_upper (") and "rig2" in out, out
+        assert "proposes amplitude [0.004, 1]" in out
+        assert runtime.lab.instruments["lockin_upper"].limits("amplitude") == (0.004, 5)   # the card's, till taken
 
 
 def test_names_join_a_lab_config_and_keep_what_is_there():
