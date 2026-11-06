@@ -14,7 +14,9 @@ from test_more_instruments import FakePicamDLL, _out
 
 @pytest.fixture(autouse=True)
 def clean(tmp_path, monkeypatch):
+    from labharness import princeton
     monkeypatch.setattr(frames, "FOLDER", tmp_path / "frames")
+    monkeypatch.setattr(princeton, "holder", lambda: ("", []))   # who has a camera: not this computer's own programs
     yield
     MODULES.clear()
 
