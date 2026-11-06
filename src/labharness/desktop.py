@@ -132,13 +132,14 @@ def _self_test(port: int, key: str) -> int:
         hardware = False
     if getattr(sys, "frozen", False):   # the app must bring them; a source checkout may be installed without them
         page_ok = page_ok and hardware and _run_file_ok()
-    from . import library, viworker
+    from . import library, princeton, viworker
     bridge_ok = library.self_test()   # the helper for makers' libraries starts (Kelvin.exe --bridge) and answers
     reader_ok = viworker.self_test()   # so does the reader of a lab's LabVIEW files, and it reads
-    page_ok = page_ok and bridge_ok and reader_ok
+    picam_ok = princeton.self_test()   # and PICam's helper, without loading Picam.dll
+    page_ok = page_ok and bridge_ok and reader_ok and picam_ok
     # the models' list loads (the services are packaged); a fresh install has no key yet, so none need be offered
     ok = page_ok and bool(boot.get("lab")) and isinstance((boot.get("models") or {}).get("groups"), list)
-    extra = "" if reader_ok else " (the LabVIEW reader FAILED)"
+    extra = ("" if reader_ok else " (the LabVIEW reader FAILED)") + ("" if picam_ok else " (PICam's helper FAILED)")
     if os.environ.get("KELVIN_SELFTEST_ENVS") == "1":   # the release builds, which have the network (envs.py)
         from . import envs
         try:

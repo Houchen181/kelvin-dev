@@ -409,3 +409,24 @@ def test_a_2450_set_to_its_2400_command_set_is_recognized_and_said(lang, ok):
     if not ok:
         assert "*LANG? answered 'SCPI'" in str(result)
     assert not builtin_registry().get("keithley/2400").variant("KEITHLEY INSTRUMENTS INC.,MODEL 2400,1083680,C27")
+
+
+def test_reconnecting_a_camera_whose_helper_kelvin_ended_makes_a_fresh_one():
+    import types
+    registry = builtin_registry()
+    cfg = load_lab_config(ONE, registry)
+    world = World(SimClock())
+    made = []
+
+    def factory(name, card, address):
+        made.append(name)
+        return make_twin_backend(card, world, name)
+    lab = Lab(cfg, registry, factory, SimClock())
+    inst = lab.instruments["smu"]
+    closed = []
+    inst.backend = types.SimpleNamespace(helper=types.SimpleNamespace(gone="a frame didn't come in 90 s"),
+                                         close=lambda: closed.append(1))
+    said = lab.reconnect("smu")
+    assert "connected again (its connection had ended: a frame didn't come in 90 s)" in said
+    assert closed == [1] and made == ["smu", "smu"] and inst.read("V") is not None
+    assert lab.reconnect("smu") == ""   # connected: nothing to do

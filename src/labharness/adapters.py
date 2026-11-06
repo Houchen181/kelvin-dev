@@ -78,7 +78,9 @@ def lost_kind(e: BaseException) -> Optional[str]:
 
 # a maker's software an instrument is reached through, by its address's scheme: (where, what to check)
 _SOFTWARE = {"qd": ("MultiVu at %s", "is MultiVu running, with its server started?"),
-             "zhinst": ("LabOne at %s", "is the LabOne data server running, and the instrument on?")}
+             "zhinst": ("LabOne at %s", "is the LabOne data server running, and the instrument on?"),
+             "picam": ("PICam (camera %s)", "is it on and cabled, and not open in another program (LightField, "
+                                            "another Kelvin)?")}
 
 
 def where_and_cause(address: str) -> Tuple[str, str]:

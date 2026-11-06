@@ -51,6 +51,13 @@ def real_backend_factory(name: str, card: Card, address: str) -> Any:
 
 
 
+def _ended(backend: Any) -> str:
+    """Why a connection that still counts as made has ended by itself, or "": a camera library's helper Kelvin ended
+    after a call that hung (princeton.py) is gone, and reconnecting it makes a fresh one."""
+    helper = getattr(backend, "helper", None)
+    return str(getattr(backend, "gone", "") or getattr(helper, "gone", "") or "")
+
+
 def _close_quietly(inst: Instrument) -> None:
     try:
         inst.close()
@@ -167,14 +174,18 @@ class Lab:
                     inst.backend.close()
                     inst.backend = Unavailable(name, "connecting again with its card as it is now")
                     news += ", connected again with its new connection settings"
-        if inst.unavailable is None:
+        ended = _ended(inst.backend)
+        if inst.unavailable is None and not ended:
             return news
+        if ended:   # a connection that ended by itself (a camera's PICam helper Kelvin had to end): made anew
+            _close_quietly(inst)
+            inst.backend = Unavailable(name, ended)
         try:
             inst.backend = self._factory(name, inst.card, inst.config.address)
         except Exception as e:
             inst.backend = Unavailable(name, first_line(e))
             raise
-        return news
+        return news + ("; connected again (its connection had ended: %s)" % ended if ended else "")
 
     def switch(self, name: str, on: bool) -> None:
         """Switch an instrument on or off for this lab. Off sends nothing: a plain VISA session is closed (that
