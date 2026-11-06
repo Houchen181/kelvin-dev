@@ -12,7 +12,7 @@ from .cards import Card, CardRegistry, ParamSpec, num
 from .adapters import timed_out
 from .clock import SimClock, Stops
 from .instrument import (NOT_CONNECTED, OFF_TEXT, Garbled, Instrument, InstrumentFault, InstrumentLost, NotHere,
-                         OffBackend, Unavailable)
+                         NotNow, OffBackend, Unavailable)
 from .labconfig import InstrumentConfig, LabConfig
 
 BackendFactory = Callable[[str, Card, str], Any]
@@ -25,6 +25,10 @@ class HealthResult:
     ok: bool
     problems: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)   # what is worth knowing and isn't a problem (what answers there)
+    # readings that can't be asked in the state the instrument is in now, and why (its card's checks: health
+    # before): a plan that measures one is refused; every other one may go (a 2400 another program left taking ten
+    # readings a trigger still sweeps its source)
+    not_now: Dict[str, str] = field(default_factory=dict)
 
     def __str__(self) -> str:
         said = " (%s)" % "; ".join(self.notes) if self.notes else ""
@@ -316,6 +320,7 @@ class Lab:
                 continue
             values: Dict[str, Any] = {}
             silent = False
+            replies: Dict[str, str] = {}   # this look's own replies: two readings of one :READ? take it once
             for spec in inst.card.params.values():
                 if spec.type in ("trace", "image") or spec.acquires or (spec.get_cmd is None and
                                                                         spec.name not in inst._last):
@@ -324,7 +329,7 @@ class Lab:
                     values[spec.name] = "ERROR: not read: %s did not answer" % name
                     continue
                 try:
-                    values[spec.name] = inst.read(spec.name)
+                    values[spec.name] = inst.read(spec.name, replies)
                 except Exception as e:  # a snapshot must never stop a run
                     values[spec.name] = "ERROR: %s" % e
                     silent = timed_out(e) or isinstance(e, InstrumentLost)
@@ -346,6 +351,7 @@ class Lab:
                 continue
             problems: List[str] = []
             notes: List[str] = []
+            not_now: Dict[str, str] = {}
             try:
                 card = inst.card
                 if card.idn_pattern:
@@ -381,6 +387,8 @@ class Lab:
                         continue
                     try:
                         inst.read(spec.name)
+                    except NotNow as e:   # that reading only, not the instrument: said, and kept for plans
+                        not_now[spec.name] = str(e)
                     except Exception as e:
                         dead.append("%s (%s)" % (spec.name, str(e).splitlines()[0][:60] if str(e) else type(e).__name__))
                 if dead:
@@ -389,8 +397,13 @@ class Lab:
                     if chk.query:
                         resp = inst.query_raw(chk.query).strip()
                         if chk.expect and not re.search(chk.expect, resp, re.I):
-                            problems.append("%s (%s answered %r)" % (chk.says, chk.query, resp[:60]) if chk.says
-                                            else "%s returned %r" % (chk.query, resp))
+                            said = ("%s (%s answered %r)" % (chk.says, chk.query, resp[:60]) if chk.says
+                                    else "%s returned %r" % (chk.query, resp))
+                            if chk.before:   # it keeps those readings from being asked, nothing more
+                                for b in chk.before:
+                                    not_now.setdefault(b, "%s doesn't read %s now: %s" % (name, b, said))
+                            else:
+                                problems.append(said)
                     else:
                         v = inst.read(chk.read)
                         lo, hi = chk.range
@@ -406,7 +419,9 @@ class Lab:
                 problems.append(str(e))
             except Exception as e:
                 problems.append("no response (%s)" % e)
-            out.append(HealthResult(name, not problems, problems, notes))
+            if not_now:
+                notes.append("not read now: %s" % "; ".join(sorted(set(not_now.values()))))
+            out.append(HealthResult(name, not problems, problems, notes, not_now))
         return out
 
     def _state_of(self, inst: Instrument) -> Dict[str, Any]:
@@ -434,7 +449,8 @@ class Lab:
         now = time.time() if now is None else now
         out = []
         for bus, insts in self.buses().items():
-            failing = [i for i in insts if i.enabled and i.health.fails and i.health.lost_at
+            # timeouts only: "nothing listens" (an instrument switched off at its mains) means the bus itself worked
+            failing = [i for i in insts if i.enabled and i.health.fails and not i.health.gone and i.health.lost_at
                        and now - i.health.lost_at < BUS_WINDOW_S]
             opened = [i for i in insts if i.unavailable and "VI_ERROR_TMO" in i.unavailable
                       and "cannot open" in i.unavailable]
@@ -467,7 +483,7 @@ class Lab:
             twin.instruments[name]._last = dict(inst._last)
         return twin
 
-    def close(self, within: Optional[float] = None) -> List[str]:
+    def close(self, within: Optional[float] = None, quitting: bool = False) -> List[str]:
         """Every connection closed (a camera's, a maker's program's: they hold the instrument for other programs until
         then). Connections set aside when their instrument was switched off stay as they are: closing could send.
         within: seconds for all of them together, each closed on a thread of its own, so one that hangs (a camera
@@ -479,6 +495,9 @@ class Lab:
             return []
         threads = []
         for name, inst in self.instruments.items():
+            if quitting and not (getattr(inst.backend, "quiet_close", False)
+                                 or getattr(inst.backend, "close_at_quit", False)):
+                continue   # a driver whose closing sends something (a pulse generator stops its outputs): as it is
             t = threading.Thread(target=_close_quietly, args=(inst,), name="kelvin-close-" + name, daemon=True)
             t.start()
             threads.append((name, t))

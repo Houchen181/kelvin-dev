@@ -685,9 +685,15 @@ class RunEngine:
         drives = self.drive_values(plan)
         # a plan that drives the sample always checks its instruments now; one that only measures trusts a check
         # from the last HEALTHY_FOR seconds (if one has died since, its reading fails and the scan just stops)
-        bad = [r for r in self.preflight(plan.requires, fresh=bool(drives)) if not r.ok]
+        checked = self.preflight(plan.requires, fresh=bool(drives))
+        bad = [r for r in checked if not r.ok]
         if bad:
             return self._refuse(plan.name, "preflight failed: " + "; ".join(str(r) for r in bad))
+        reads = set(plan.measure) | {(i, p) for a in plan.axes for i, p in a.measure}
+        blocked = [r.not_now[p] for r in checked for i, p in sorted(reads)
+                   if i == r.instr and p in getattr(r, "not_now", {})]
+        if blocked:   # a reading the instrument can't give in its state now (its card's checks): said before it starts
+            return self._refuse(plan.name, "preflight failed: " + "; ".join(blocked))
         for cond in plan.preconditions:
             ok, actual = cond.check(self.lab.read)
             if not ok:

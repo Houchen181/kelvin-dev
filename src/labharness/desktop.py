@@ -67,8 +67,9 @@ def _watch_for_crashes(home: Path) -> None:
     try:
         _faults = open(home / "faults.log", "a", encoding="utf-8", buffering=1)
         from ._version import __version__
-        _faults.write("%s Kelvin %s started (process %d)\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), __version__,
-                                                                os.getpid()))
+        _faults.write("%s Kelvin %s started (process %d). A crash writes every thread's place below it; a \"Windows "
+                      "fatal exception\" that Kelvin went on after is one its window's .NET code handled itself.\n"
+                      % (time.strftime("%Y-%m-%d %H:%M:%S"), __version__, os.getpid()))
         faulthandler.enable(file=_faults, all_threads=True)
     except (OSError, RuntimeError, ValueError):
         _faults = None
@@ -80,11 +81,14 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _running_copy(lock: Path) -> Optional[int]:
-    """The port of a Kelvin that is already running, if any."""
+def _running_copy(lock: Path, wait: float = 1.0) -> Optional[int]:
+    """The port of a Kelvin that is already running, if any; not one that is quitting (it says so in app.json)."""
     try:
-        port = int(json.loads(lock.read_text(encoding="utf-8"))["port"])
-        with urllib.request.urlopen("http://127.0.0.1:%d/" % port, timeout=1) as r:
+        state = json.loads(lock.read_text(encoding="utf-8"))
+        if state.get("closing"):
+            return None
+        port = int(state["port"])
+        with urllib.request.urlopen("http://127.0.0.1:%d/" % port, timeout=wait) as r:
             return port if b"<title>Kelvin</title>" in r.read() else None
     except (OSError, ValueError, KeyError):
         return None
@@ -181,13 +185,21 @@ def _zoom(window: Any, factor: float) -> bool:
     return False
 
 
-def _measuring(runtime: Any) -> bool:
-    """A run or the queue is going."""
+def _under_way(runtime: Any) -> List[str]:
+    """What Kelvin is in the middle of that quitting would cut short, in words: a run or the queue, a change it is
+    making (a ramp from the Lab panel), outputs it is bringing to safe."""
+    out = []
     try:
         live = runtime.live or {}
-        return live.get("status") == "running" or runtime.queue.state in ("running", "pausing")
+        if live.get("status") == "running" or runtime.queue.state in ("running", "pausing"):
+            out.append("measuring (a run or the queue)")
+        elif runtime.lock.owner()[0] is not None:
+            out.append("changing the lab (%s)" % (runtime.busy or "a ramp"))
     except Exception:
-        return False
+        pass
+    if any(t.name == "kelvin-safe" and t.is_alive() for t in threading.enumerate()):
+        out.append("bringing outputs to safe")
+    return out
 
 
 def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dict] = None,
@@ -201,9 +213,7 @@ def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dic
         closer["fn"] = window.destroy
 
     def on_closing() -> bool:
-        busy = ["working on a request"] if agent.answering() else []
-        if _measuring(runtime):
-            busy.append("measuring (a run or the queue)")
+        busy = (["working on a request"] if agent.answering() else []) + _under_way(runtime)
         if busy:
             if not window.create_confirmation_dialog(
                     "Quit Kelvin?", "Kelvin is still %s. Quitting stops it where it is; outputs stay as they are."
@@ -295,8 +305,13 @@ def main(argv: Optional[list] = None) -> int:
     close_log = _log_to_file(home)
     if not args.self_test:
         _watch_for_crashes(home)
+    code = 1
     try:
         code = _run(args, home)
+    except Exception:
+        log.exception("Kelvin stopped on an error")
+        if args.self_test:
+            raise
     finally:
         close_log()
     if not args.self_test:
@@ -352,7 +367,7 @@ def _one_kelvin(mutex: Any, lock: Path, key: str) -> bool:
     that stays without a window is offered to be ended."""
     deadline = time.monotonic() + START_WAIT_S
     while True:
-        port = _running_copy(lock)
+        port = _running_copy(lock, wait=3.0)   # a busy Kelvin may take a moment to answer
         if port:   # one runs, with its portal: it comes forward, and this start ends
             _show(port, key, lock)
             return False
@@ -370,8 +385,9 @@ def _one_kelvin(mutex: Any, lock: Path, key: str) -> bool:
     pids = other_kelvins()
     if not pids:   # it quit just now
         return _owns(mutex, 5.0)
-    if not _ask("Kelvin is still running", "A Kelvin from before is still running without a window (process %s) "
-                "and may hold instruments. End it and start Kelvin again?" % ", ".join(map(str, pids))):
+    if not _ask("Kelvin is still running", "A Kelvin that started before (process %s) doesn't answer. It may be "
+                "busy, or stuck without a window and holding instruments. End it and start Kelvin again? If it is "
+                "measuring, that stops it where it is." % ", ".join(map(str, pids))):
         return False
     _end(pids)
     return _owns(mutex, 15.0)
@@ -401,7 +417,8 @@ def _ask(title: str, text: str) -> bool:
         return False
     try:
         import ctypes
-        return ctypes.windll.user32.MessageBoxW(None, text, title, 0x04 | 0x30 | 0x10000) == 6   # yes/no, warning
+        return ctypes.windll.user32.MessageBoxW(None, text, title, 0x04 | 0x30 | 0x100 | 0x10000) == 6   # yes/no,
+        # a warning, No the default: ending a Kelvin that was only busy would stop what it was doing
     except Exception:
         return False
 
@@ -513,6 +530,10 @@ def _run(args: argparse.Namespace, home: Path) -> int:
         if _faults is not None and not args.self_test:   # past the deadline: where it is stuck, then it quits anyway
             faulthandler.dump_traceback_later(QUIT_DEADLINE_S, exit=True, file=_faults)
         log.info("Kelvin is quitting")
+        try:   # another start now waits for this one to let go of the instruments instead of bringing it forward
+            lock.write_text(json.dumps({"port": port, "pid": os.getpid(), "closing": True}), encoding="utf-8")
+        except OSError:
+            pass
         server.should_exit = True   # its portal stops, and with it the agent, the watches and the instruments
         thread.join(CLOSE_WAIT_S)
         if thread.is_alive():

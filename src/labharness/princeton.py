@@ -872,6 +872,7 @@ def _array(got: Any) -> Any:
 class PicamCamera(Camera):
     """A camera through PICam, in a helper process of its own (Helper): each call is forwarded there with a time
     limit. module: a fake PICam module (tests), run in Kelvin's own process instead (LocalHelper)."""
+    close_at_quit = True   # Kelvin quitting closes the camera and lets PICam go: left open, PICam stayed unusable
 
     def __init__(self, name: str, card: Card, address: str, module: Any = None):
         super().__init__(name, card, address)

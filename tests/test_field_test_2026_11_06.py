@@ -195,13 +195,13 @@ def test_a_2400_left_measuring_continuously_is_never_asked_read_and_kelvin_says_
     inst.act("stop_continuous")
     assert inst.read("I") is not None and fake.reads == 1
     inst.read("V_meas")
-    assert fake.reads == 1   # V and I from the same :READ?
+    assert fake.reads == 2   # each caller its own :READ?: another's may be from before a change
+    lab.snapshot(["smu"])
+    assert fake.reads == 3   # one look at the instrument: V and I from one :READ?
+    checks = len([c for c in fake.sent if c.upper().startswith((":ARM", ":TRIG", ":FORM"))])
+    inst.write("V", 0.5)   # a setting that can't change what the checks ask: they are not asked again
     inst.read("I")
-    assert fake.reads == 2   # I again: asked again, never the same reply twice
-    inst.read("V_meas")
-    inst.write("V", 0.5)     # after a command, nothing earlier is reused
-    inst.read("V_meas")
-    assert fake.reads == 3
+    assert len([c for c in fake.sent if c.upper().startswith((":ARM", ":TRIG", ":FORM"))]) == checks
 
 
 class Silent:
@@ -430,3 +430,147 @@ def test_reconnecting_a_camera_whose_helper_kelvin_ended_makes_a_fresh_one():
     assert "connected again (its connection had ended: a frame didn't come in 90 s)" in said
     assert closed == [1] and made == ["smu", "smu"] and inst.read("V") is not None
     assert lab.reconnect("smu") == ""   # connected: nothing to do
+
+
+# ------------------------------------------------------------------ what a review found
+
+def test_a_2400_another_program_left_taking_many_readings_still_sweeps_its_source(tmp_path):
+    rt = runtime(tmp_path, answers=[True])
+    inst = rt.lab.instruments["smu"]
+    inst.backend = Continuous(inst.backend)   # its arm count infinite: I and V_meas can't be read
+    result = rt.lab.health_check(["smu"])[0]
+    assert result.ok and "I" in result.not_now and "not read now" in str(result)
+    said = rt.run("""plan: gate_only
+sweep: { smu.V: {from: 0, to: 0.2, step: 0.1} }
+measure: [smu.V]
+after: { smu.V: 0 }""")
+    assert "preflight failed" not in said, said
+    said = rt.run("""plan: needs_current
+setup: { smu.output: on }
+sweep: { smu.V: {from: 0, to: 0.2, step: 0.1} }
+measure: [smu.I]
+after: { smu.V: 0, smu.output: off }""")
+    assert "preflight failed" in said and "measure continuously" in said, said
+
+
+class Socket:
+    """A plain socket instrument with a start-up command: reconnecting after a timeout sends it again, once."""
+    def __init__(self, opened):
+        self.timeout, self.read_termination, self.write_termination = 3000, None, None
+        self.opened, self.out = opened, []
+        opened.append(self)
+
+    def write(self, cmd):
+        if cmd.endswith("?"):
+            self.out.append("ACME,W9,1,1.0" if cmd == "*IDN?" else "1")
+
+    def read(self):
+        if not self.out:
+            raise TimeoutError("VI_ERROR_TMO")
+        return self.out.pop(0)
+
+    def query(self, cmd, delay=None):
+        if len(self.opened) == 1 and cmd != "*IDN?":   # the first connection's first answer comes too late
+            raise TimeoutError("VI_ERROR_TMO")
+        self.write(cmd)
+        return self.read()
+
+    def close(self):
+        pass
+
+
+def test_a_socket_instrument_reconnected_after_a_timeout_sends_its_start_up_once_and_goes_on():
+    from labharness.cards import parse_card
+    card = parse_card({"card": 1, "id": "acme/w9", "model": "ACME W9", "kind": "multimeter", "status": "draft",
+                       "identify": {"idn": "ACME,W9"}, "on_connect": ["CHDR OFF"],
+                       "parameters": {"v": {"kind": "measure", "unit": "V", "get": "V?"}}}, "test")
+    opened = []
+
+    class RM:
+        def open_resource(self, name):
+            return Socket(opened)
+    smu = VisaBackend("w9", card, "TCPIP0::10.0.0.5::5025::SOCKET", rm=RM())
+    with pytest.raises(TimeoutError):
+        smu.query("V?")
+    assert smu.query("V?") == "1" and len(opened) == 2 and not smu.owed
+
+
+def test_instruments_switched_off_at_their_mains_never_make_a_working_bus_hung():
+    lab = smu_lab(TWO)
+    for name in ("smu", "smu2"):
+        inst = lab.instruments[name]
+        inst.config.address = "GPIB0::%d::INSTR" % (24 if name == "smu" else 25)
+        inst.health.failed(True, "%s doesn't answer: nothing listens there" % name)   # VI_ERROR_NLISTENERS
+        inst.backend.simulated = False
+    assert lab.hung_buses() == []
+    for name in ("smu", "smu2"):
+        lab.instruments[name].health.failed(False, "%s doesn't answer" % name)   # timeouts: the bus may be hung
+    assert [b for b, _ in lab.hung_buses()] == ["GPIB0"]
+
+
+def test_the_first_to_stop_answering_is_the_one_whose_exchange_began_first():
+    import time as _time
+    lab = smu_lab()
+    inst = lab.instruments["smu"]
+
+    class Slow:
+        simulated = False
+
+        def query(self, cmd):
+            _time.sleep(0.3)
+            raise TimeoutError("VI_ERROR_TMO")
+    inst.backend = Slow()
+    began = _time.time()
+    with pytest.raises(InstrumentLost):
+        inst._io(inst.backend.query, ":READ?")
+    assert inst.health.first_failed_at - began < 0.1   # when it began, not when it gave up
+
+
+def test_quitting_leaves_a_driver_whose_closing_would_send_something_as_it_is():
+    lab = smu_lab(TWO)
+    closed = []
+
+    class Quiet:
+        quiet_close = True
+
+        def close(self):
+            closed.append("quiet")
+
+    class Pulses:   # a pulse generator: closing it stops its outputs
+        def close(self):
+            closed.append("pulses")
+    lab.instruments["smu"].backend, lab.instruments["smu2"].backend = Quiet(), Pulses()
+    assert lab.close(within=1.0, quitting=True) == [] and closed == ["quiet"]
+
+
+def test_a_bus_clear_asks_a_person_when_the_bus_is_not_plainly_kelvins(tmp_path, monkeypatch):
+    from labharness import others
+    monkeypatch.setattr(others, "holders", lambda: [])
+    rt = runtime(tmp_path, ONE.replace("sim://smu", "sim://smu") + """  k2:
+    card: keithley/2400
+    address: sim://k2
+""", answers=[False])
+    for name, addr in (("smu", "GPIB0::15::INSTR"), ("k2", "GPIB0::24::INSTR")):
+        inst = rt.lab.instruments[name]
+        inst.config.address, inst.backend.simulated = addr, False
+    said = rt.clear_bus("GPIB0")   # it answers: Kelvin hasn't found it hung, so a person decides
+    assert said.startswith("declined") and "hasn't found it hung" in str(rt.approver.requests[-1])
+    rt.switch_instrument("smu", False, "human")
+    rt.switch_instrument("k2", False, "human")
+    assert rt.clear_bus("GPIB0").startswith("not cleared: every instrument of this lab on GPIB0 is disconnected")
+
+
+def test_each_viewer_has_its_own_last_lab_panel(tmp_path):
+    from labharness.agent.runtime import Viewer
+    rt = runtime(tmp_path)
+    rt.ui_state()
+    with rt.viewing(Viewer(chat="c1", project="p1")):
+        rt.ui_state()
+    assert set(rt._ui_last) == {None, ("c1", "p1")}
+
+
+def test_a_kelvin_that_is_quitting_is_not_brought_forward(tmp_path):
+    from labharness import desktop
+    lock = tmp_path / "app.json"
+    lock.write_text(json.dumps({"port": 1, "pid": 2, "closing": True}), encoding="utf-8")
+    assert desktop._running_copy(lock) is None

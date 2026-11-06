@@ -712,8 +712,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def clear_bus(bus: str = "GPIB0") -> str:
         """A GPIB bus that stopped answering (its alarm names it; or a Prologix adapter, prologix://<port or host>): an
         interface clear, then each instrument on it cleared and asked who it is; the one that stopped answering first
-        is left out until reconnect_instrument. No setting or output changes, but a measurement in progress on it
-        ends, so a person is asked while one runs."""
+        is left out until reconnect_instrument. Settings and output levels stay, but a sweep or measurement in
+        progress on it ends, so a person is asked unless the bus is hung, nothing measures, no other program runs and
+        no instrument on it is disconnected from Kelvin."""
         return rt.clear_bus(bus)
 
     @server.tool(annotations=ACT, structured_output=False)

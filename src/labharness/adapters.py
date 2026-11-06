@@ -488,13 +488,21 @@ class VisaBackend:
         and the command isn't sent."""
         if not self.owed:
             return
+        self.owed = False   # owed again below while it isn't back in step; meanwhile its own commands go (_open's)
+        try:
+            self._back_in_step()
+        except BaseException:
+            self.owed = True
+            raise
+
+    def _back_in_step(self) -> None:
         if marks_message_end(self.resource):
             clear = getattr(self.res, "clear", None)
             if clear is not None:
                 clear()   # a bus that still doesn't answer raises here
         elif is_serial(self.resource):
             self._quiet()
-        else:
+        else:   # a plain socket, connected again; its start-up commands go as on any connection (never a loop back)
             try:
                 self.res.close()
             except Exception:
@@ -528,7 +536,6 @@ class VisaBackend:
                 raise AdapterError("%s is out of step: after a reply it didn't send in time, it answered %s to %s, "
                                    "not who it is. Kelvin cleared it; check it, then reconnect it"
                                    % (self.name, ", ".join(repr(r.strip()[:40]) for r in replies), query))
-        self.owed = False
 
     def _quiet(self) -> None:
         """A serial line read until nothing more comes (0.3 s), at most 2 s: a late reply's bytes, dropped."""

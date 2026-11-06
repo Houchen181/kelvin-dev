@@ -154,7 +154,7 @@ def test_a_second_kelvin_shows_the_one_that_runs(tmp_path, monkeypatch):
     lock = tmp_path / "app.json"
     assert desktop._one_kelvin(None, lock, "key") is True   # nothing runs: this one is the one
     shown = []
-    monkeypatch.setattr(desktop, "_running_copy", lambda lock: 51851)
+    monkeypatch.setattr(desktop, "_running_copy", lambda lock, wait=1.0: 51851)
     monkeypatch.setattr(desktop, "_show", lambda port, key, lock: shown.append(port))
     assert desktop._one_kelvin(None, lock, "key") is False and shown == [51851]
 

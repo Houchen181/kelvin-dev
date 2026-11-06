@@ -426,6 +426,9 @@ class Monitor:
             if instr in self.lab.instruments and not self.lab.instruments[instr].enabled:
                 w.value = None   # switched off: nothing is sent to it, so nothing to watch (and no alarm)
                 continue
+            if instr in self.lab.instruments and self._on_hung_bus(self.lab.instruments[instr]):
+                w.value = None   # its bus is hung: the bus's alarm says it, not one of the watch's own
+                continue
             try:
                 value = self.lab.read(*w.key.split(".", 1))
             except SensorError as e:   # it answers, but says its sensor is faulty: the reading is unknown, so alarm
@@ -821,7 +824,7 @@ class Monitor:
                 if inst is not None and inst.health.first_failed_at else "")
             text = ("%s isn't answering: %s stopped answering, and nothing on it has answered since. Kelvin stopped "
                     "sending on it.%s Clear the bus (an interface clear, then each instrument cleared and asked who it "
-                    "is: no setting or output changes)" % (
+                    "is: settings and output levels stay; what they are in the middle of ends)" % (
                         bus_words(bus), _and(names), " The first to stop was %s%s, most likely what hung it." % (
                             first, when) if first else ""))
             BUSES.flag(bus, names, text)
@@ -843,9 +846,12 @@ class Monitor:
         on = [i for i in list(self.lab.instruments.values()) if i.enabled and not i.simulated
               and bus_of(i.config.address) == bus and i.card.idn_pattern]
         first = self.lab.first_silent([i.name for i in on])
-        pick = next((i for i in on if i.name != first), on[0] if on else None)
-        if pick is None:
+        # not the one that stopped first (most likely what hung it), nor one nothing listens at: among the others, the
+        # one that answered last
+        others = [i for i in on if i.name != first and not i.health.gone] or on
+        if not others:
             return False
+        pick = max(others, key=lambda i: i.health.answered_at or 0.0)
         try:
             with BUSES.through(bus):
                 pick.query_raw(pick.card.idn_query)
@@ -892,7 +898,7 @@ class Monitor:
             return
         asked = dict(asked)
         for name, inst in list(self.lab.instruments.items()):
-            if inst.simulated or not inst.enabled:
+            if inst.simulated or not inst.enabled or self._on_hung_bus(inst):
                 continue
             if now - self._last_alive_check.get(name, -1e18) >= ALIVE_EVERY:
                 self._last_alive_check[name] = now
@@ -967,8 +973,8 @@ class Monitor:
     def _check_errors(self, now: float) -> None:
         """Real instruments' own error queues, once a minute (lab time). That it answered or didn't goes into its
         health."""
-        for name, inst in self.lab.instruments.items():
-            if inst.simulated or inst.card.error_query is None or not inst.enabled:
+        for name, inst in list(self.lab.instruments.items()):
+            if inst.simulated or inst.card.error_query is None or not inst.enabled or self._on_hung_bus(inst):
                 continue
             if now - self._last_error_check.get(name, -1e18) < ERROR_CHECK_EVERY:
                 continue

@@ -637,7 +637,7 @@ class LabRuntime:
         self._busy_whose: Optional[Dict[str, Any]] = None   # the marks of the unshared work busy names (_whose_now)
         self._status: Dict[str, Dict[str, Any]] = {}
         self._status_at = 0.0
-        self._ui_last: Dict[str, Any] = {}     # each part of the Lab panel's state as it last worked out
+        self._ui_last: Dict[Any, Dict[str, Any]] = {}   # each viewer's Lab panel parts as they last worked out
         self._ui_failed: Dict[str, float] = {}   # when a part last failed to, said in the log
         self.live: Optional[Dict[str, Any]] = None   # the run in progress (or the last one), for live displays
         self._catalog: Optional["Catalog"] = None    # every run in the data folder (catalog.py); see .catalog
@@ -9459,15 +9459,26 @@ class LabRuntime:
             return "no instrument of this lab is on %s (its GPIB buses: %s)" % (bus, ", ".join(sorted(
                 self.lab.buses())) or "none")
         names = sorted(n for n, i in on.items() if i.enabled)
+        if not names:   # an interface clear reaches every instrument on the bus: none of them is Kelvin's to reach now
+            return ("not cleared: every instrument of this lab on %s is disconnected from Kelvin; an interface clear "
+                    "would reach them all" % bus_words(bus))
         first = self.lab.first_silent(names) if len(names) > 1 else None
         if not by.startswith("human"):
+            from ..others import holders
             measuring = (self.live or {}).get("status") == "running" or self.queue.state in ("running", "pausing")
+            elsewhere = sorted(n for n, i in on.items() if not i.enabled)   # a person's: another program may use them
+            programs = holders()
             request = ApprovalRequest("Clear %s?" % bus_words(bus), [
-                "An interface clear, then each instrument on it cleared and asked who it is (%s). No setting or output "
-                "changes; a measurement in progress on them ends." % (", ".join(names) or "none switched on")]
-                + (["%s stopped answering first: it is left out until it is reconnected." % first] if first else []))
-            if measuring or not self.gate.auto_simple(request, "it changes no setting or output, and nothing "
-                                                               "measures now"):
+                "An interface clear, then each instrument on it cleared and asked who it is (%s). Their settings and "
+                "output levels stay as they are; a sweep or measurement in progress on them ends." % ", ".join(names)]
+                + (["%s stopped answering first: it is left out until it is reconnected." % first] if first else [])
+                + (["The interface clear also reaches %s, disconnected from Kelvin: another program may be using "
+                    "%s." % (", ".join(elsewhere), "it" if len(elsewhere) == 1 else "them")] if elsewhere else [])
+                + (["Running now: %s." % ", ".join(programs)] if programs else [])
+                + ([] if bus in BUSES.hung else ["%s answers now: Kelvin hasn't found it hung." % bus_words(bus)]))
+            plain = bus in BUSES.hung and not measuring and not elsewhere and not programs
+            if not plain or not self.gate.auto_simple(request, "the bus is hung, nothing measures on it, and no "
+                                                               "other program is running"):
                 if not self.gate.ask(request):
                     note = " (%s)" % request.note if request.note else ""
                     return "declined: %s is left as it is%s" % (bus_words(bus), note)
@@ -9517,7 +9528,7 @@ class LabRuntime:
         Python's exit instead, it complained of sessions gone before it). A field test's Kelvin quit without closing
         its camera, and the camera library stayed unusable for every program until the computer's processes were
         ended."""
-        stuck = self.lab.close(within=within)
+        stuck = self.lab.close(within=within, quitting=True)
         if not stuck:
             from ..adapters import close_resource_manager
             close_resource_manager()
@@ -10040,11 +10051,15 @@ class LabRuntime:
         state: Dict[str, Any] = {"lab": self.lab.config.name, "busy": self.busy, "status": status,
                                  "hands_on": self.hands, "approval_mode": "auto" if self.gate.auto else "ask",
                                  "lab_info": self.lab_info, "setup": self.setup_status, "survey": self.last_survey}
+        viewer = _VIEWER.get()   # each viewer's own last parts: one's are never shown to another
+        if len(self._ui_last) > 64:
+            self._ui_last.clear()
+        last = self._ui_last.setdefault((viewer.chat, viewer.project) if viewer is not None else None, {})
         for key, part in parts.items():   # each on its own: one that fails can't fail the panel (a field test's /state
             try:                          # failed for 3 minutes on one instrument the lab config listed too soon)
-                state[key] = self._ui_last[key] = part()
-            except Exception:   # the last it showed, meanwhile
-                state[key] = self._ui_last.get(key, [] if key in UI_LISTS else None)
+                state[key] = last[key] = part()
+            except Exception:   # the last it showed this viewer, meanwhile
+                state[key] = last.get(key, [] if key in UI_LISTS else None)
                 now = time.time()
                 if now - self._ui_failed.get(key, 0.0) > 60:   # in the log once a minute, not every poll
                     self._ui_failed[key] = now

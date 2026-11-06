@@ -20,7 +20,6 @@ from .labconfig import Guard, InstrumentConfig
 OFF_TEXT = "%s is disconnected from Kelvin in the Lab panel: Kelvin sends it nothing until a person connects it"
 NOT_CONNECTED = "%s is not connected (%s): Kelvin sends it nothing until it connects (reconnect_instrument)"
 GUARD_S = 30.0    # how long what a card's check before a reading found holds, unless a command goes to it meanwhile
-SHARED_S = 1.0    # how long one reply (:READ?) may serve the other readings that take a field of it
 
 
 class InstrumentOff(RuntimeError):
@@ -57,6 +56,11 @@ class InstrumentFault(RuntimeError):
     never "cable or power?" (a field test's alarms all said that of a Keithley left measuring continuously)."""
 
 
+class NotNow(InstrumentFault):
+    """A reading its card's check says can't be asked in the state the instrument is in (health: before): that
+    reading only, said in the card's words. The instrument itself is fine, and every other setting and reading works."""
+
+
 class Garbled(RuntimeError):
     """A reply that arrived garbled: characters no instrument sends, a reading that always read before and now can't
     be, an error-queue reply that isn't one. A loose cable, a bad adapter or electrical noise; nothing in it can be
@@ -84,10 +88,12 @@ class Health:
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
 
-    def failed(self, gone: bool, text: str, command: str = "") -> None:
+    def failed(self, gone: bool, text: str, command: str = "", started: Optional[float] = None) -> None:
+        """started: when the exchange that got no answer began (a hung bus's first is the one that began first, not
+        the one whose timeout was shortest)."""
         with self._lock:
             if not self.fails:   # the first of a run of failures: which command, and when (a hung bus's first)
-                self.first_failed, self.first_failed_at = command, time.time()
+                self.first_failed, self.first_failed_at = command, started or time.time()
             self.fails += 1
             self.losses += 1
             self.gone, self.lost_text, self.lost_at = gone, text, time.time()
@@ -164,19 +170,25 @@ class Instrument:
         self._error_form = False     # its error query has answered as SCPI's do (-113,"Undefined header")
         # what its card's checks before readings (health: before) found lately: check -> (when, holds, reply)
         self._checked: Dict[Tuple[int, int], Tuple[float, bool, str]] = {}
-        # one reply that several readings take their fields from (a Keithley 2400's :READ? gives V and I), shared by
-        # those read right after it: command -> (when, reply, the readings it has served). Never one reading twice, and
-        # nothing after any command is sent: the next reading of the same one asks again
-        self._shared: Dict[str, Tuple[float, str, set]] = {}
-        self._sharers: Optional[Tuple[Any, Dict[str, set]]] = None
         self._cache_lock = threading.Lock()
 
     def _forget(self) -> None:
-        """A command went to it (a setting, an action, a raw command), or an exchange failed: what its checks found
-        and a reply readings shared no longer hold."""
+        """A command that can change what its checks look at went to it (an action, a raw command, a setting of what
+        they ask), or an exchange failed: what they found no longer holds, and they are asked again."""
         with self._cache_lock:
             self._checked.clear()
-            self._shared.clear()
+
+    def _touches_checks(self, spec: ParamSpec) -> bool:
+        """Whether setting this parameter can change what a check before a reading asks (a card's trigger count as a
+        parameter of its own): only then are they asked again. Every other setting left them as they were, and asking
+        them again at every point of a sweep cost five more GPIB exchanges a point."""
+        if spec.set_cmd is None:
+            return False
+        checks = [h.query.strip().rstrip("?").strip() for h in self.card.health if h.before and h.query]
+        if not checks:
+            return False
+        family = spec.family()
+        return any(family.match(c + " 1") is not None for c in checks)
 
     @property
     def device_name(self) -> Optional[str]:
@@ -193,6 +205,7 @@ class Instrument:
         (InstrumentLost: which instrument, on which bus, what to check), wherever it happens; any other error (a
         command it refused, a card's mistake) passes as it is. alive=False: an answer that doesn't show it is there
         (a maker's driver says its identity by itself)."""
+        started = time.time()
         try:
             out = fn(*args)
         except (InstrumentOff, Stopped, InstrumentLost):
@@ -207,7 +220,7 @@ class Instrument:
                 self.health.answered()
                 raise InstrumentFault(why) from e
             command = str(args[0]).strip() if args and isinstance(args[0], str) else ""
-            self.health.failed(kind == "gone", self.loss_text(e, command), command)
+            self.health.failed(kind == "gone", self.loss_text(e, command), command, started)
             raise InstrumentLost(self.health.lost_text) from e
         if alive:
             self.health.answered()
@@ -317,10 +330,14 @@ class Instrument:
     def spec(self, param: str) -> ParamSpec:
         return self.card.param(param)
 
-    def read(self, param: str) -> Any:
-        """The parameter's value; None if the card says to read it only while a switch is on and it is off."""
+    def read(self, param: str, replies: Optional[Dict[str, str]] = None) -> Any:
+        """The parameter's value; None if the card says to read it only while a switch is on and it is off. replies:
+        the caller's own pass over this instrument (Lab.snapshot), by command: a reading whose command was answered in
+        it takes that reply (a Keithley 2400's V_meas and I, two fields of one :READ?), as nothing went to the
+        instrument between. Never across callers: another's reply may be from before a change (a review found a run's
+        V_meas taken from a watch's :READ? before the run's own gate step)."""
         spec = self.spec(param)
-        if spec.read_when is not None and not self.read(spec.read_when):
+        if spec.read_when is not None and not self.read(spec.read_when, replies):
             return None
         if spec.get_cmd is None:
             if param in self._last:
@@ -334,10 +351,12 @@ class Instrument:
         if spec.type == "trace":
             return self._trace(spec)
         command = spec.get_cmd.render()
-        reply = self._shared_reply(spec.name, command)
-        if reply is None:
+        if replies is not None and command in replies:
+            reply = replies[command]
+        else:
             reply = self._io(self.backend.query, command)
-            self._keep_reply(spec.name, command, reply)
+            if replies is not None:
+                replies[command] = reply
         value = self._parse(spec, command, reply)
         if spec.status_cmd is not None or spec.plausible is not None:
             self._vouch(spec, value)
@@ -361,44 +380,9 @@ class Instrument:
                 with self._cache_lock:
                     self._checked[key] = kept
             if not kept[1]:
-                raise InstrumentFault("%s doesn't read %s now: %s (%s answered %r)" % (
+                raise NotNow("%s doesn't read %s now: %s (%s answered %r)" % (
                     self.name, spec.name, check.says or "a check its card makes first doesn't hold", check.query,
                     kept[2][:60]))
-
-    def _sharing(self) -> Dict[str, set]:
-        """The commands whose one reply more than one reading takes its value from (fields of :READ?), by command."""
-        card = self.card
-        with self._cache_lock:
-            if self._sharers is not None and self._sharers[0] is card:
-                return self._sharers[1]
-        by: Dict[str, set] = {}
-        for p in card.params.values():
-            if p.get_cmd is None or p.get_before or p.acquires or p.type in ("trace", "image") or p.status_cmd:
-                continue
-            try:
-                by.setdefault(p.get_cmd.render(), set()).add(p.name)
-            except Exception:
-                continue
-        shared = {c: names for c, names in by.items() if len(names) > 1}
-        with self._cache_lock:
-            self._sharers = (card, shared)
-        return shared
-
-    def _shared_reply(self, name: str, command: str) -> Optional[str]:
-        """The reply another reading just got to this same command, if this reading hasn't taken it yet."""
-        if command not in self._sharing():
-            return None
-        with self._cache_lock:
-            kept = self._shared.get(command)
-            if kept is None or name in kept[2] or time.monotonic() - kept[0] > SHARED_S:
-                return None
-            kept[2].add(name)
-            return kept[1]
-
-    def _keep_reply(self, name: str, command: str, reply: str) -> None:
-        if command in self._sharing():
-            with self._cache_lock:
-                self._shared[command] = (time.monotonic(), reply, {name})
 
     def _vouch(self, spec: ParamSpec, value: Any) -> None:
         """SensorError unless the card's status query says the reading is valid and it is plausible."""
@@ -498,7 +482,8 @@ class Instrument:
 
     def write(self, param: str, value: Any) -> None:
         spec = self.spec(param)
-        self._forget()
+        if self._touches_checks(spec):
+            self._forget()
         self._io(self.backend.write, spec.set_cmd.render(spec.to_wire(value)))
         self._last[param] = value
 
