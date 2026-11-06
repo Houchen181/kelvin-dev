@@ -115,6 +115,44 @@ def test_network_instruments_from_their_mdns_adverts(monkeypatch):
     assert Zeroconf.closed
 
 
+def test_the_vxi11_broadcast_lists_no_usb_device(monkeypatch):
+    """pyvisa-py's resource manager lists every kind of resource before it filters (USB too, logging a warning for
+    each USB device whose serial number it can't read): the broadcast asks its TCPIP listing alone. A pretend
+    pyvisa-py; nothing is sent."""
+    listed = []
+
+    class Vxi11:   # pyvisa_py.tcpip.TCPIPInstrVxi11: the broadcast
+        @staticmethod
+        def list_resources():
+            listed.append("TCPIP")
+            return ["TCPIP::10.0.0.7::INSTR"]
+
+    class UsbRaw:   # pyvisa_py.usb.USBRawSession
+        @staticmethod
+        def list_resources():
+            listed.append("USB")
+            return ["USB0::1027::24577::???::0::RAW"]
+
+    class ResourceManager:   # pyvisa.ResourceManager("@py"): every kind of resource, then the query
+        def __init__(self, backend=""):
+            pass
+
+        def list_resources(self, query="?*::INSTR"):
+            return tuple(r for kind in (UsbRaw, Vxi11) for r in kind.list_resources() if r.startswith("TCPIP"))
+
+    tcpip = types.SimpleNamespace(TCPIPInstrVxi11=Vxi11, TCPIPInstrSession=Vxi11)
+    monkeypatch.setitem(sys.modules, "pyvisa_py", types.SimpleNamespace(
+        tcpip=tcpip, usb=types.SimpleNamespace(USBRawSession=UsbRaw)))
+    monkeypatch.setitem(sys.modules, "pyvisa_py.tcpip", tcpip)
+    monkeypatch.setitem(sys.modules, "pyvisa", types.SimpleNamespace(ResourceManager=ResourceManager))
+    monkeypatch.setattr(sv, "use_bundled_libusb", lambda: True)
+    found, problems = sv.network_adverts(mdns=lambda: [("TCPIP0::10.0.0.8::hislip0::INSTR", "network (mDNS)")])
+    assert found == [("TCPIP::10.0.0.7::INSTR", "network (VXI-11)"),
+                     ("TCPIP0::10.0.0.8::hislip0::INSTR", "network (mDNS)")] and problems == []
+    assert listed == ["TCPIP"]   # no USB device listed, so none warned about
+    assert sv.network_adverts(broadcast=False, mdns=lambda: [])[0] == [] and listed == ["TCPIP"]
+
+
 def test_the_start_up_scan_says_why_and_logs_it(tmp_path, caplog):
     pytest.importorskip("mcp")
     from labharness.autosetup import AutoSetup
