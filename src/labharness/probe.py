@@ -3,8 +3,10 @@ computer (USB devices, serial ports and network adapters, also those no driver c
 drivers are installed, and where their files are.
 
 Everything here only looks. On the network it reads what a port says by itself, asks *IDN? on the ports instruments
-use for SCPI, and loads a web page's title; it looks only at addresses on local networks, never the internet. On a
-serial port it listens first, then asks only an identity query, at the speeds and framings instruments use."""
+use for SCPI, and loads a web page's title; it looks only at addresses on local networks, never the internet. A
+link-local network (169.254.x.x), too wide to sweep, it doesn't sweep: it reads this computer's neighbour table there
+and sends GigE Vision's discovery broadcast, which cameras answer with who they are. On a serial port it listens
+first, then asks only an identity query, at the speeds and framings instruments use."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -321,7 +323,8 @@ def sweep_networks(named: str = "", adapters: Optional[List[Dict[str, Any]]] = N
                    ) -> Tuple[List[ipaddress.IPv4Network], List[str]]:
     """The networks a sweep looks at, with notes on what it leaves out: the range named (192.168.1.0/24,
     192.168.1.*, or an address for its /24), else each network this computer is on (of a wider one, only this
-    computer's own /24). Raises ValueError for a range on the internet or wider than MAX_SWEEP addresses."""
+    computer's own /24; a link-local one not at all: look_on_link_local looks there). Raises ValueError for a range
+    on the internet or wider than MAX_SWEEP addresses."""
     if named.strip():
         text = named.strip()
         if text.endswith(".*"):
@@ -336,8 +339,10 @@ def sweep_networks(named: str = "", adapters: Optional[List[Dict[str, Any]]] = N
             raise ValueError("%s is not a local network: Kelvin looks only on local networks, where instruments are"
                              % net)
         if net.num_addresses > MAX_SWEEP:
-            raise ValueError("%s has %d addresses: Kelvin looks at %d at most (a /22), so name a smaller range"
-                             % (net, net.num_addresses, MAX_SWEEP))
+            raise ValueError("%s has %d addresses: Kelvin looks at %d at most (a /22), so name a smaller range%s"
+                             % (net, net.num_addresses, MAX_SWEEP, "; or name none: this computer's link-local "
+                                "networks are looked at through its neighbour table and GigE Vision's discovery"
+                                if net.is_link_local else ""))
         return [net], []
     nets: List[ipaddress.IPv4Network] = []
     notes: List[str] = []
@@ -345,9 +350,10 @@ def sweep_networks(named: str = "", adapters: Optional[List[Dict[str, Any]]] = N
         net = ipaddress.ip_network(a["network"], strict=False)
         if net.prefixlen >= 31 or net.is_loopback:
             continue
-        if a.get("link_local") or net.is_link_local:
-            notes.append("%s (%s) is a link-local network, too wide to sweep: an instrument there answers its "
-                         "announcements, or give its address (front panel) to inspect_address" % (net, a["name"]))
+        if a.get("link_local") or net.is_link_local:   # look_on_link_local looks there instead
+            notes.append("%s (%s) is a link-local network, too wide to sweep: looked there through this computer's "
+                         "neighbour table, GigE Vision's discovery broadcast and mDNS instead; for an instrument "
+                         "these miss, give its address (front panel) to inspect_address" % (net, a["name"]))
             continue
         if ipaddress.ip_address(a["address"]) in ipaddress.ip_network("100.64.0.0/10"):
             continue   # a VPN's own addresses (Tailscale): no instruments there
@@ -436,6 +442,170 @@ def what_answers(f: Dict[str, Any]) -> str:
     if not bits:
         bits.append("open, says nothing by itself")
     return "port %d: %s; usually %s" % (port, "; ".join(bits), f["hint"])
+
+
+# ------------------------------------------------------------------ a link-local network (169.254.x.x)
+
+# A link-local network is a cable straight to an instrument with nobody's DHCP on it: 65,536 addresses, too many to
+# sweep. What is there shows in this computer's neighbour (ARP) table, and every GigE Vision camera answers its
+# discovery broadcast with who it is, also one whose own address is on another network.
+GVCP_PORT = 3956
+# DISCOVERY_CMD: key 0x42; flags 0x11, an answer wanted and allowed as a broadcast (for a camera that can't send it
+# to this computer's address); command 0x0002; no payload; request id 1
+GVCP_DISCOVERY = b"\x42\x11\x00\x02\x00\x00\x00\x01"
+# Teledyne Princeton Instruments' cameras, which PICam finds itself, also on GigE
+PRINCETON = re.compile(r"princeton|\b(pylon|pixis|proem|blaze|kuro|sophia|nirvana|pi-?max)", re.I)
+_IPV4 = re.compile(r"(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d.])")
+_MAC = re.compile(r"(?<![\w:-])((?:[0-9a-f]{1,2}[:-]){5}[0-9a-f]{1,2})(?![\w:-])", re.I)
+
+
+def gige_answer(data: bytes, sender: str = "") -> Optional[Dict[str, str]]:
+    """What a GigE Vision camera's DISCOVERY_ACK says (the bootstrap registers it carries): maker, model, version,
+    serial, the name a person gave it, its IP address, subnet mask and MAC address. None for anything else."""
+    if len(data) < 8 + 0x38 or data[:4] != b"\x00\x00\x00\x03":   # status: success; DISCOVERY_ACK
+        return None
+    body = data[8:]
+
+    def text(at: int, size: int) -> str:
+        return _clean(body[at:at + size].split(b"\x00", 1)[0], size)
+    ip = socket.inet_ntoa(body[0x24:0x28])
+    return {"maker": text(0x48, 32), "model": text(0x68, 32), "version": text(0x88, 32), "info": text(0xA8, 48),
+            "serial": text(0xD8, 16), "name": text(0xE8, 16), "ip": sender if ip == "0.0.0.0" and sender else ip,
+            "mask": socket.inet_ntoa(body[0x34:0x38]), "mac": ":".join("%02x" % b for b in body[0x0A:0x10])}
+
+
+def _udp() -> socket.socket:
+    return socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+def gige_cameras(own: str, seconds: float = 1.0, udp: Optional[Callable[[], Any]] = None) -> List[Dict[str, str]]:
+    """The GigE Vision cameras that answer one discovery broadcast (GVCP DISCOVERY_CMD, UDP 3956) sent from this
+    computer's address `own`, so that it leaves through that adapter only. It asks who is there, nothing else.
+    Raises OSError when it can't be sent."""
+    sock = (udp or _udp)()
+    found: Dict[Tuple[str, str], Dict[str, str]] = {}
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.bind((own, 0))
+        sock.sendto(GVCP_DISCOVERY, ("255.255.255.255", GVCP_PORT))
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            sock.settimeout(max(0.01, end - time.monotonic()))
+            try:
+                data, sender = sock.recvfrom(4096)
+            except ConnectionResetError:   # Windows: an ICMP 'port unreachable' for something sent earlier
+                continue
+            except OSError:   # the time is up
+                break
+            cam = gige_answer(data, sender[0])
+            if cam:   # a camera that answers twice (to this computer, and as a broadcast) is one camera
+                found.setdefault((cam["mac"], cam["ip"]), cam)
+    finally:
+        sock.close()
+    return sorted(found.values(), key=lambda c: ipaddress.ip_address(c["ip"]))
+
+
+def neighbour_table(text: str, network: str, own: str = "") -> Dict[str, str]:
+    """The addresses of `network` in a neighbour table as the system prints it (Windows' arp -a, Linux's ip neigh,
+    arp -an), with their MAC addresses: {ip: mac}. Entries not resolved, broadcast and multicast ones and this
+    computer's own address are left out. Only the numbers are read, so it doesn't matter which language it's in."""
+    net = ipaddress.ip_network(network, strict=False)
+    out: Dict[str, str] = {}
+    for line in text.splitlines():
+        ip, mac = _IPV4.search(line), _MAC.search(line)
+        if not ip or not mac:
+            continue
+        try:
+            addr = ipaddress.ip_address(ip.group(1))
+        except ValueError:
+            continue
+        octets = [int(x, 16) for x in re.split(r"[:-]", mac.group(1))]
+        if addr in net and addr not in (net.network_address, net.broadcast_address) and str(addr) != own \
+                and any(octets) and not octets[0] & 1:   # ff:ff:... and 01:00:5e:... are broadcast and multicast
+            out.setdefault(str(addr), ":".join("%02x" % x for x in octets))
+    return out
+
+
+def _run_text(command: List[str], seconds: float = 5.0) -> str:
+    """What one of the system's own commands prints. Raises OSError when there is no such command."""
+    done = subprocess.run(command, capture_output=True, timeout=seconds,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return done.stdout.decode("utf-8", "replace")
+
+
+def neighbours(adapter: Dict[str, Any], run: Optional[Callable[[List[str]], str]] = None) -> Dict[str, str]:
+    """The addresses this computer has lately exchanged packets with through one network adapter, from its neighbour
+    (ARP) table: {ip: mac}. Only reads the table. Windows: arp -a -N <the adapter's address>; elsewhere ip neigh,
+    or arp -an where there is no ip command (macOS)."""
+    run = run or _run_text
+    if WIN:
+        text = run(["arp", "-a", "-N", adapter["address"]])
+    else:
+        try:
+            text = run(["ip", "-4", "neigh", "show", "dev", adapter["name"]])
+        except OSError:
+            on = re.compile(r"\son %s(\s|$)" % re.escape(adapter["name"]))
+            text = "\n".join(ln for ln in run(["arp", "-an"]).splitlines() if on.search(ln))
+    return neighbour_table(text, adapter["network"], adapter["address"])
+
+
+def look_on_link_local(adapters: Iterable[Dict[str, Any]], skip: Iterable[str] = (), seconds: float = 1.0,
+                       udp: Optional[Callable[[], Any]] = None, run: Optional[Callable[[List[str]], str]] = None
+                       ) -> Dict[str, Any]:
+    """What is on this computer's link-local networks, found without sweeping them: on each, the GigE Vision cameras
+    that answer a discovery broadcast from this computer's address there, then the addresses in its neighbour table
+    there (the cameras' answers put them in it too). {looked: [the adapters], cameras: [...], hosts: {ip: how it was
+    found}, problems: [...]}: hosts are the addresses on those networks, except skip, to look at as any other."""
+    left_out = set(skip)
+    out: Dict[str, Any] = {"looked": [], "cameras": [], "hosts": {}, "problems": []}
+    for a in adapters:
+        net = ipaddress.ip_network(a["network"], strict=False)
+        if not (a.get("link_local") or net.is_link_local):
+            continue
+        out["looked"].append(a)
+        try:
+            cameras = gige_cameras(a["address"], seconds, udp)
+        except OSError as e:
+            cameras = []
+            out["problems"].append("GigE Vision's discovery could not be sent on %s (%s)" % (a["name"], e))
+        for cam in cameras:
+            cam.update(adapter=a["name"], network=str(net))
+            out["cameras"].append(cam)
+            if ipaddress.ip_address(cam["ip"]) in net and cam["ip"] not in left_out:
+                out["hosts"].setdefault(cam["ip"], "a GigE Vision camera on %s" % a["name"])
+        try:
+            table = neighbours(a, run)
+        except (OSError, subprocess.SubprocessError) as e:
+            table = {}
+            out["problems"].append("This computer's neighbour table for %s could not be read (%s)" % (a["name"], e))
+        for ip, mac in table.items():
+            if ip not in left_out:
+                out["hosts"].setdefault(ip, "in this computer's neighbour table on %s (MAC %s)" % (a["name"], mac))
+    return out
+
+
+def gige_line(cam: Dict[str, str]) -> str:
+    """A camera that answered GigE Vision's discovery, in words: who it is, and what Kelvin reaches it through."""
+    who = " ".join(x for x in (cam.get("maker"), cam.get("model")) if x) or "(it doesn't say its maker or model)"
+    line = "GigE Vision camera %s%s%s (MAC %s)" % (who, ", serial " + cam["serial"] if cam.get("serial") else "",
+                                                  ", named %r" % cam["name"] if cam.get("name") else "", cam["mac"])
+    if cam.get("network") and ipaddress.ip_address(cam["ip"]) not in ipaddress.ip_network(cam["network"]):
+        line += (" at %s, on %s's cable but not on its network %s: give the camera an address there (its maker's "
+                 "program sets it) or the adapter one on the camera's network" % (cam["ip"], cam.get("adapter"),
+                                                                                    cam["network"]))
+    serial = cam.get("serial") or "<serial>"
+    if "basler" in cam.get("maker", "").lower():
+        use = "pylon://%s, through Basler's pypylon (scan_instruments lists it once that is installed)" % serial
+    elif PRINCETON.search(" ".join((cam.get("maker", ""), cam.get("model", ""), cam.get("info", "")))):
+        use = ("a Teledyne Princeton Instruments camera: PICam finds it itself, so scan_instruments lists it "
+               "(picam://<serial>), not a network search")
+    else:
+        use = ("genicam://%s (card generic/genicam-camera), through Harvesters and the GenTL producer (.cti) its "
+               "maker's SDK installs" % serial)
+        if "pleora" in cam.get("maker", "").lower():   # a GigE engine many makers build in; it may not name the camera
+            use = ("a Teledyne Princeton Instruments camera, if it is one (PICam reaches theirs through Pleora's "
+                   "eBUS): PICam finds it itself, so scan_instruments lists it; another camera: " + use)
+    return "%s → %s" % (line, use)
 
 
 # ------------------------------------------------------------------ a serial port

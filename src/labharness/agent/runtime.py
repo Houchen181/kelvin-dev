@@ -7686,9 +7686,11 @@ class LabRuntime:
     def find_on_network(self, network: str = "") -> str:
         """Instruments on the local network: those that announce themselves (mDNS, as LXI instruments do, and a
         VXI-11 broadcast), and every address of this computer's networks (or the local range named) with a port open
-        that instruments or their gateways use. Each is asked who it is and matched to a card, and what answered is
-        kept for try_card and add_instrument. Only looks: one connection per port, *IDN? only where instruments
-        speak SCPI; an instrument already in the lab is left alone."""
+        that instruments or their gateways use. A link-local network (169.254.x.x) is too wide to sweep: there the
+        addresses in this computer's neighbour table and the cameras that answer GigE Vision's discovery are looked
+        at instead, each on every port inspect_address knows. Each is asked who it is and matched to a card, and what
+        answered is kept for try_card and add_instrument. Only looks: one connection per port, *IDN? only where
+        instruments speak SCPI; an instrument already in the lab is left alone."""
         import concurrent.futures
         import ipaddress
         from .. import probe, prologix
@@ -7720,10 +7722,15 @@ class LabRuntime:
         self.busy = "looking for instruments on the network"
         try:
             adverts, problems = ([], []) if network else network_adverts()
-            ports = probe.sweep(nets, skip=set(in_lab) | {a["address"] for a in adapters})
+            skip = set(in_lab) | {a["address"] for a in adapters}
+            near = probe.look_on_link_local([] if network else adapters, skip)   # not swept: its neighbours, cameras
+            problems = problems + near["problems"]
+            ports: Dict[str, List[int]] = {ip: [] for ip in near["hosts"]}   # first: few, and each looked at fully
+            ports.update(probe.sweep(nets, skip=skip))
             hosts = list(ports)[:probe.MAX_IDENTIFIED]
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-                said = dict(zip(hosts, pool.map(lambda ip: probe.identify_host(ip, ports[ip]), hosts)))
+                said = dict(zip(hosts, pool.map(lambda ip: probe.identify_host(ip, ports[ip]) if ports[ip] else
+                                                probe.inspect(ip), hosts)))
             visa = [(r, probe.host_of(r)[0]) for r, _ in adverts if probe.host_of(r)[0] not in in_lab]
             gpib: List[str] = []   # Prologix GPIB-ETHERNETs: who is on the GPIB bus behind each
             for ip in hosts:
@@ -7774,14 +7781,17 @@ class LabRuntime:
                 return 1, 0, host
 
         everyone = sorted(set(hosts) | set(found), key=order)
+        where = ["%s (ports %s)" % (", ".join(map(str, nets)), " ".join(map(str, probe.SWEEP_PORTS)))] if nets else []
+        where += ["the link-local %s (%s) without sweeping" % (a["network"], a["name"]) for a in near["looked"]]
         lines = ["%s%s: %s" % (
-            "Looked on %s (ports %s)" % (", ".join(map(str, nets)), " ".join(map(str, probe.SWEEP_PORTS))) if nets
-            else "Swept no network", "" if network else " and for instruments that announce themselves",
+            "Looked on " + ", ".join(where) if where else "Swept no network",
+            "" if network else " and for instruments that announce themselves",
             "%d address%s answered" % (len(everyone), "" if len(everyone) == 1 else "es") if everyone else
             "nothing answered")]
         for host in everyone:
             seen = said.get(host) or {"found": [], "lxi": {}}
-            bits = [probe.what_answers(f) for f in seen["found"] if not f.get("idn") and not f.get("device")]
+            bits = [probe.gige_line(c) for c in near["cameras"] if c["ip"] == host]
+            bits += [probe.what_answers(f) for f in seen["found"] if not f.get("idn") and not f.get("device")]
             if seen["lxi"]:
                 bits.append("LXI identification: " + ", ".join("%s %s" % kv for kv in seen["lxi"].items()))
             for got in found.get(host, []):
@@ -7794,19 +7804,24 @@ class LabRuntime:
                         10001: "TCPIP0::%s::10001::SOCKET"}.get(f["port"])
                 if gate and gate % host not in self.last_found:
                     self.last_found.append(gate % host)
-            lines.append("- %s: %s" % (host, "; ".join(bits) or "ports %s open" % ", ".join(map(str, ports[host]))))
+            lines.append("- %s: %s" % (host, "; ".join(bits) or (
+                "ports %s open" % ", ".join(map(str, ports[host])) if ports.get(host) else
+                "%s; answers none of the ports instruments use" % near["hosts"].get(host, "found"))))
+        lines += ["- " + probe.gige_line(c) for c in near["cameras"] if c["ip"] not in everyone]   # off its network
         if len(ports) > len(hosts):
             lines.append("Also answered, not asked who they are: " + ", ".join(list(ports)[len(hosts):]))
         if in_lab:
             lines.append("In the lab already, left alone: " + ", ".join("%s (%s)" % (n, h) for h, n in in_lab.items()))
         lines += notes + problems
-        if not everyone:
+        if not everyone and not near["cameras"]:
             lines.append("Check that the instrument is switched on, on one of this computer's networks "
                          "(connected_devices lists them), with its network interface on (often a front-panel "
                          "setting); or give its address, from its front panel, to inspect_address.")
-        self.gate.log.write("network_search", by="agent", networks=[str(n) for n in nets] or None,
+        self.gate.log.write("network_search", by="agent",
+                            networks=[str(n) for n in nets] + [a["network"] for a in near["looked"]] or None,
                             answered=everyone or None, found=[g.address for h in everyone for g in found.get(h, [])]
-                            or None)
+                            or None, cameras=[" ".join(x for x in (c["maker"], c["model"], c["serial"]) if x)
+                                              for c in near["cameras"]] or None)
         return "\n".join(lines)
 
     def behind_prologix(self, adapter: str) -> str:

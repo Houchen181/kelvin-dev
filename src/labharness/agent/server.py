@@ -164,9 +164,10 @@ You are connected to a physics lab through Kelvin.
   decides the card: text commands give an ordinary card; a maker's Python package, DLL, .NET assembly (Thorlabs
   Kinesis) or COM object gives a library card (library_api lists a package's, an assembly's or a COM object's
   functions). Cameras: uvc://<index> for a USB webcam or microscope camera, genicam://<serial> for an industrial one
-  (card generic/usb-camera or generic/genicam-camera). A multimeter's buffer, a scope's single shot or an analyzer's
-  sweep is a reading that arms, triggers and waits (*OPC?) before it fetches; named actions (trigger, arm, fire) are
-  done with do_action, or at every point of a plan with trigger:.
+  (card generic/usb-camera or generic/genicam-camera). A Teledyne Princeton Instruments camera, also one on GigE
+  (PyLoN, ProEM, SOPHIA), is found by PICam itself: scan_instruments lists it, not a network search. A multimeter's
+  buffer, a scope's single shot or an analyzer's sweep is a reading that arms, triggers and waits (*OPC?) before it
+  fetches; named actions (trigger, arm, fire) are done with do_action, or at every point of a plan with trigger:.
 - What an instrument needs on this computer, Kelvin installs, never the app: install_for_instrument installs the
   maker's Python package (at the version the instrument needs) or the maker's files, shown in the chat, into
   the drivers environment for Kelvin's built-in drivers (a card's requires, or a driver saying a package is missing),
@@ -732,10 +733,12 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Find instruments on the local network whose address nobody knows: those that announce themselves (mDNS,
         as LXI instruments do, and a VXI-11 broadcast), and every address of this computer's networks with a port
         open that instruments or their gateways use (VXI-11, HiSLIP, SCPI sockets, Modbus, Prologix GPIB-ETHERNET,
-        serial device servers). Each is asked who it is (*IDN?, its LXI page; behind a Prologix, every GPIB address)
-        and matched to a card; what answered can then go to try_card and add_instrument. network: a local range to
-        sweep instead (192.168.1.0/24 or 192.168.1.*, at most a /22); empty: this computer's own networks. Takes up to
-        half a minute, and about 12 s more for each Prologix; only looks."""
+        serial device servers). A link-local network (169.254.x.x, a cable straight to an instrument) is too wide to
+        sweep: there it looks at the addresses in this computer's neighbour table and sends GigE Vision's discovery,
+        which cameras answer with maker, model and serial. Each is asked who it is (*IDN?, its LXI page; behind a
+        Prologix, every GPIB address) and matched to a card; what answered can then go to try_card and add_instrument.
+        network: a local range to sweep instead (192.168.1.0/24 or 192.168.1.*, at most a /22); empty: this
+        computer's own networks. Takes up to half a minute, and about 12 s more for each Prologix; only looks."""
         return outside(rt, "what addresses on the network answered", rt.find_on_network(network))
 
     @server.tool(annotations=READ, structured_output=False)

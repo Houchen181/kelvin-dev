@@ -1,8 +1,9 @@
 """What a scan looks through, so Kelvin can say what it found, what it could not open, and why it found nothing.
 
     VISA      the installed one (NI-VISA, Keysight IO Libraries, R&S VISA), else Kelvin's own (pyvisa-py)
-    network   instruments on the local network (LXI): a VXI-11 broadcast and HiSLIP through pyvisa-py, and the mDNS
-              adverts instruments send (_vxi-11, _hislip, _scpi-raw, _lxi) through zeroconf. No driver is needed
+    network   instruments on the local network (LXI): a VXI-11 broadcast through pyvisa-py's TCPIP listing (not its
+              USB one), and the mDNS adverts instruments send (_vxi-11, _hislip, _scpi-raw, _lxi) through zeroconf. No
+              driver is needed
     USB       every USB device through Kelvin's own libusb (pyusb + libusb-package). An instrument is recognised by
               its USBTMC interface or its maker's vendor ID even when no driver lets VISA open it, and the survey
               says which driver is missing
@@ -135,13 +136,14 @@ def describe_visa(rm: Any) -> str:
     return "%s (%s)" % (maker or "installed VISA", os.path.basename(path) or "system")
 
 
-def _builtin_rm() -> Any:
-    try:
-        import pyvisa
-        use_bundled_libusb()
-        return pyvisa.ResourceManager("@py")
-    except Exception:
-        return None
+def vxi11_broadcast() -> List[str]:
+    """The instruments that answer a VXI-11 broadcast on each of this computer's networks, through pyvisa-py's TCPIP
+    listing alone: its resource manager's list_resources lists every kind of resource before it filters, USB devices
+    too, and logs a warning for each USB device whose serial number it can't read."""
+    use_bundled_libusb()   # pyvisa-py sets up its USB support as it is first imported: with Kelvin's libusb
+    from pyvisa_py import tcpip
+    lister = getattr(tcpip, "TCPIPInstrVxi11", None) or tcpip.TCPIPInstrSession   # an older pyvisa-py: one class
+    return [str(r) for r in lister.list_resources()]
 
 
 def mdns_instruments(seconds: float = 2.0, interfaces: Any = None) -> List[Tuple[str, str]]:
@@ -233,18 +235,16 @@ def _usb_advice(u: Dict[str, Any]) -> str:
 def network_adverts(broadcast: bool = True, mdns_seconds: float = 2.0,
                     mdns: Optional[Callable[[], Iterable[Tuple[str, str]]]] = None
                     ) -> Tuple[List[Tuple[str, str]], List[str]]:
-    """Instruments on the local network that answer a VXI-11 broadcast (through Kelvin's built-in VISA) or announce
-    themselves over mDNS (LXI instruments do), as (VISA resource, how it was found), and what went wrong. mdns
-    replaces the mDNS lookup in tests."""
+    """Instruments on the local network that answer a VXI-11 broadcast (through Kelvin's built-in VISA's TCPIP
+    listing, which never lists USB) or announce themselves over mDNS (LXI instruments do; HiSLIP ones too), as (VISA
+    resource, how it was found), and what went wrong. mdns replaces the mDNS lookup in tests."""
     found: List[Tuple[str, str]] = []
     problems: List[str] = []
     if broadcast:
-        py = _builtin_rm()
-        if py is not None:
-            try:
-                found += [(str(r), "network (VXI-11)") for r in py.list_resources("TCPIP?*::INSTR")]
-            except Exception:
-                pass
+        try:
+            found += [(r, "network (VXI-11)") for r in vxi11_broadcast()]
+        except Exception:
+            pass
     try:
         found += list(mdns() if mdns is not None else mdns_instruments(mdns_seconds))
     except Exception as e:
