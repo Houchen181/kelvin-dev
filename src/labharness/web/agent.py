@@ -297,8 +297,8 @@ def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
 # Kelvin's rarer tools, loaded in a chat when it needs them (find_tools), so every step doesn't carry them all
 DEFERRED = {
     "setting up instruments": ["scan_instruments", "find_on_network", "connected_devices", "inspect_address",
-                               "inspect_serial", "add_instrument", "reconnect_instrument", "ask_to_switch_on",
-                               "survey_scripts", "survey_labview", "survey_specialmeasure"],
+                               "inspect_serial", "add_instrument", "change_instrument", "reconnect_instrument",
+                               "ask_to_switch_on", "survey_scripts", "survey_labview", "survey_specialmeasure"],
     "running the lab's own scripts": ["run_script", "check_script", "set_live"],
     "translating LabVIEW into experiments": ["describe_vi", "translate_vi", "save_experiment", "keep_experiment",
                                              "experiments"],

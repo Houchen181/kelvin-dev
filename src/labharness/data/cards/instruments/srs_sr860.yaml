@@ -20,6 +20,7 @@ parameters:
     get: "SLVL?"
     limits: [1.0e-9, 2.0]
     safe: 1.0e-9
+    description: Reference sine output (rms), when it is the sample's excitation; 1 nV to 2 V, and a sine out read at 0 V is off
   offset:
     label: Sine out DC offset
     kind: drive
@@ -28,6 +29,22 @@ parameters:
     get: "SOFF?"
     limits: [-5.0, 5.0]
     safe: 0
+  reference:
+    label: Reference source
+    kind: measure
+    type: enum
+    set: "RSRC {value}"
+    get: "RSRC?"
+    values: { internal: 0, external: 1, dual: 2, chop: 3 }
+    description: Internal (its own oscillator, on SINE OUT), external (REF IN, e.g. a current source's phase marker or a chopper's), dual, or an SR540 chopper's
+  reference_slope:
+    label: External reference trigger
+    kind: measure
+    type: enum
+    set: "RTRG {value}"
+    get: "RTRG?"
+    values: { sine: 0, "TTL rising": 1, "TTL falling": 2 }
+    description: How REF IN is read with an external reference, a sine's zero crossing or a TTL edge
   frequency:
     label: Frequency
     kind: measure
@@ -35,6 +52,7 @@ parameters:
     set: "FREQ {value}"
     get: "FREQ?"
     limits: [0.001, 500000]
+    description: The internal reference frequency; with an external reference, the frequency it locks to
   phase:
     label: Phase
     kind: measure
@@ -102,3 +120,4 @@ raw:
   reset: ["*RST"]
 notes:
   - Written from the manual; verify on your unit before trusting it with a sample.
+  - "reference and reference_slope are RSRC and RTRG of the manual's reference commands: a lock-in referenced to another instrument (a 6221's phase marker, a chopper) is set to external, with TTL rising for a TTL reference. OUTP? 0 to 3 read X, Y, R and θ."

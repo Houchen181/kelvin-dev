@@ -193,7 +193,7 @@ def test_the_check_says_points_time_and_whats_wrong_reading_no_instrument(ran, m
     opened = rt.scan_parts(entry["id"])
     assert opened["id"] == entry["id"] and opened["name"] == "gate_sweep"
     assert {"key": "smu.V", "unit": "V", "drive": True} in opened["lab"]["set"]
-    assert {"key": "lockin.X", "unit": "V"} in opened["lab"]["read"]
+    assert {"key": "lockin.X", "unit": "V", "group": "reading"} in opened["lab"]["read"]   # a reading, not a setting
     assert not any(c["key"] == "lockin.X" for c in opened["lab"]["set"])   # a reading, never stepped
     check = opened["check"]
     assert check["loads"] and check["problems"] == [] and check["points"] == 5 and check["counts"] == {"smu.V": 5}

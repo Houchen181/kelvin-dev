@@ -4371,8 +4371,10 @@ class LabRuntime:
         record (read), each with its unit: from the lab's cards, nothing is read. instruments: the same by instrument,
         for the editor's two menus (an instrument, then its parameter): each by its name, with its model, kind and
         address (two of one model told apart), off (switched off, or not connected), its headline reading, and its
-        set and read: {param, label, unit} (drive, action; name: the lab's own name for it; choices: what a switch or
-        a list setting takes, its words)."""
+        set and read: {param, label, unit, group} (drive, action; name: the lab's own name for it; choices: what a
+        switch or a list setting takes, its words). group: what it is, as the Lab panel groups an instrument's
+        parameters: reading (only read: a lock-in's X, Y, R, θ), output (a drive), setting (configuration: its time
+        constant) or action; the editor's menus show them so, readings first in what a scan records."""
         settable: List[Dict[str, Any]] = []
         readable: List[Dict[str, Any]] = []
         instruments: List[Dict[str, Any]] = []
@@ -4389,18 +4391,20 @@ class LabRuntime:
             for p in card.params.values():
                 key = "%s.%s" % (name, p.name)
                 alias = {"name": named[key]} if key in named else {}
+                group = "output" if p.is_drive else "setting" if p.set_cmd is not None else "reading"
                 if p.set_cmd is not None and p.type not in ("trace", "image"):
                     settable.append(dict({"key": key, "unit": p.unit, "drive": p.is_drive}, **alias))
                     choices = list(p.words or ("on", "off")) if p.type == "bool" else \
                         list(p.values or {}) if p.type == "enum" else None
-                    mine["set"].append(dict({"param": p.name, "label": p.title, "unit": p.unit,
-                                             "drive": p.is_drive}, **alias, **({"choices": choices} if choices else {})))
+                    mine["set"].append(dict({"param": p.name, "label": p.title, "unit": p.unit, "drive": p.is_drive,
+                                             "group": group}, **alias, **({"choices": choices} if choices else {})))
                 if p.get_cmd is not None:
-                    readable.append(dict({"key": key, "unit": p.unit}, **alias))
-                    mine["read"].append(dict({"param": p.name, "label": p.title, "unit": p.unit}, **alias))
+                    readable.append(dict({"key": key, "unit": p.unit, "group": group}, **alias))
+                    mine["read"].append(dict({"param": p.name, "label": p.title, "unit": p.unit, "group": group},
+                                             **alias, **({"type": p.type} if p.type in ("trace", "image") else {})))
             settable += [{"key": "%s.%s" % (name, a), "unit": "", "action": True} for a in card.actions]
-            mine["set"] += [{"param": a, "label": act.label or a.replace("_", " "), "unit": "", "action": True}
-                            for a, act in card.actions.items()]
+            mine["set"] += [{"param": a, "label": act.label or a.replace("_", " "), "unit": "", "action": True,
+                             "group": "action"} for a, act in card.actions.items()]
             instruments.append(mine)
         return {"set": settable, "read": readable, "instruments": instruments}
 
@@ -4639,6 +4643,9 @@ class LabRuntime:
                 target = spec.coerce(c["then"])
                 lim = inst.limits(spec.name)
                 if spec.numeric and lim and not lim[0] <= target <= lim[1]:
+                    if spec.is_drive and spec.distance(target) == 0:   # off below its least (a sine out at 0 V)
+                        out[key] = spec.safe
+                        continue
                     notes.append("%s isn't restored: %s is outside its limits now [%s, %s]"
                                  % (key, spec.show(target), num(lim[0]), num(lim[1])))
                     continue
@@ -7600,6 +7607,7 @@ class LabRuntime:
         an instrument already in the lab keeps its connection (only its web page is looked at). Behind a Prologix
         GPIB-ETHERNET (its port 1234 answers, or prologix://<address>): the instruments on its GPIB bus."""
         from .. import probe, prologix
+        from ..adapters import resource_name
         from ..discovery import identify, match_card
         if prologix.is_prologix(address):
             try:
@@ -7629,7 +7637,17 @@ class LabRuntime:
         for f in res["found"]:
             line = "- " + probe.what_answers(f)
             resource = None
-            if f.get("idn"):
+            if f.get("jsonrpc"):   # a controller with a JSON-RPC interface (attocube's eNSPIRE): its own address
+                resource = "jsonrpc://%s:%d" % (ip, f["port"])
+                idn = probe.rpc_identity(f)
+                card = match_card(idn, self.lab.registry) if idn else None
+                line += (" → card %s (%s): add_instrument %s" % (card.id, card.model, resource) if card else
+                         " → no card fits it yet: write one (card_guide, JSON-RPC) and try_card it on %s" % resource)
+                self.found_info[resource_name(resource)] = {"address": resource, "idn": idn,
+                                                            "card_id": card.id if card else None,
+                                                            "model": card.model if card else "",
+                                                            "kind": card.kind if card else ""}
+            elif f.get("idn"):
                 resource = "TCPIP0::%s::%d::SOCKET" % (ip, f["port"])
                 card = match_card(f["idn"], self.lab.registry)
                 line += (" → card %s (%s): add_instrument %s" % (card.id, card.model, resource) if card else
@@ -7709,7 +7727,14 @@ class LabRuntime:
             gpib: List[str] = []   # Prologix GPIB-ETHERNETs: who is on the GPIB bus behind each
             for ip in hosts:
                 for f in said[ip]["found"]:
-                    if f.get("idn"):
+                    if f.get("jsonrpc"):   # a controller with a JSON-RPC interface (attocube's eNSPIRE)
+                        idn = probe.rpc_identity(f)
+                        card = match_card(idn, self.lab.registry) if idn else None
+                        if idn:   # one that said what it is; another is told as what_answers says it
+                            keep(ip, Found("jsonrpc://%s:%d" % (ip, f["port"]), idn, card.id if card else None,
+                                           card.model if card else "", card.kind if card else "",
+                                           "its JSON-RPC answer" if card else "no card fits it yet"))
+                    elif f.get("idn"):
                         card = match_card(f["idn"], self.lab.registry)
                         got = Found("TCPIP0::%s::%d::SOCKET" % (ip, f["port"]), f["idn"], card.id if card else None,
                                     card.model if card else "", card.kind if card else "", "identity reply")
@@ -7755,7 +7780,7 @@ class LabRuntime:
             "nothing answered")]
         for host in everyone:
             seen = said.get(host) or {"found": [], "lxi": {}}
-            bits = [probe.what_answers(f) for f in seen["found"] if not f.get("idn")]
+            bits = [probe.what_answers(f) for f in seen["found"] if not f.get("idn") and not f.get("device")]
             if seen["lxi"]:
                 bits.append("LXI identification: " + ", ".join("%s %s" % kv for kv in seen["lxi"].items()))
             for got in found.get(host, []):
@@ -8415,6 +8440,115 @@ class LabRuntime:
                        ", found by " + matched if matched else "", address, self.lab.config.name,
                        "ok" if health.ok else "; ".join(health.problems), " (" + lim + ")" if lim else ""))
         return self._do("adding an instrument", run)
+
+    def change_instrument(self, name: str, address: str = "", card: str = "",
+                          connection: Optional[Dict[str, Any]] = None, card_vars: Optional[Dict[str, str]] = None,
+                          by: str = "agent") -> str:
+        """An instrument of the lab pointed at another card (this lab's version of Kelvin's, or one Kelvin wrote),
+        address, connection settings or card variables, as its entry in the lab config, and connected so: what Kelvin
+        does once its card doesn't fit the lab's instrument. Its name, limits, rates and guards stay. It drives
+        nothing, so Kelvin approves it itself (after text from the web, a person does); a lib:// address that runs a
+        program is a person's to set. A connection that can't be made, or answers as another instrument, leaves the
+        instrument and the lab config as they were."""
+        from ..adapters import AdapterError
+        from ..discovery import ENTRY_KEYS, card_for, change_entry
+        from ..homelab import lab_registry
+        from ..labconfig import ConfigError, load_lab_config
+        from ..lab import same_card
+        if self.home is None or self.lab_info.get("kind") != "file":
+            return "not changed: this lab has no lab config file to change (Lab setup makes one)"
+        inst = self.lab.instruments.get(name)
+        if inst is None:
+            return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
+        if not inst.enabled and inst.unavailable is None:
+            return "not changed: %s is switched off in the Lab panel; ask_to_switch_on first" % name
+        address, named = (address or "").strip(), (card or "").strip()
+        if not (address or named or connection is not None or card_vars is not None):
+            return "nothing to change: give its address, card, connection or vars"
+        if address and _runs_a_program(address):
+            return ("not changed: a lib:// address with python= or path= names a program to run, so a person sets "
+                    "it in Lab setup; or install the maker's library with install_for_instrument and use "
+                    "lib://<address>?env=<environment>")
+        registry = lab_registry(self.home, self.collection)
+        old = self.lab.config.instruments[name]
+        changes: Dict[str, Any] = {}
+        if named:
+            hit, why = card_for("", registry, "", named)
+            if hit is None:
+                return "not changed: %s (find_card lists the cards Kelvin has)" % why
+            changes["card"] = hit.id
+            if hit.id != old.card:   # a card no person has checked on this instrument: its outputs ask until they do
+                changes["added_by"] = "kelvin"
+        if address:
+            changes["address"] = address
+        if connection is not None:
+            changes["connection"] = dict(connection) or None
+        if card_vars is not None:
+            changes["vars"] = {str(k): str(v) for k, v in card_vars.items()} or None
+        lab_file = self.home / "lab.yaml"
+
+        def run() -> str:
+            live = self.live or {}
+            if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
+                return "not changed: a plan or the queue is running; change it when it has finished"
+            text = lab_file.read_text(encoding="utf-8") if lab_file.exists() else ""
+            try:
+                new_text = change_entry(text, name, changes)
+                cfg = load_lab_config(new_text, registry)
+            except KeyError:
+                return "not changed: %s is not in the lab config file (Lab setup)" % name
+            except ConfigError as e:   # e.g. limits for a parameter the new card doesn't have: the person's to change
+                return "not changed: " + "; ".join(e.errors[:4])
+            except (ValueError, yaml.YAMLError) as e:
+                return "not changed: %s" % (str(e).splitlines()[0] if str(e) else type(e).__name__)
+            ic = cfg.instruments[name]
+            the_card = registry.get(ic.card)
+            said = ["%s: %s → %s" % (k, getattr(old, k) or "none", getattr(ic, k) or "none")
+                    for k in ENTRY_KEYS if getattr(old, k) != getattr(ic, k)]
+            fresh_card = not same_card(inst.card, the_card.bind(ic.vars))
+            if fresh_card and old.card == ic.card:   # its card changed on disk (this lab's version, saved since)
+                said.append("card %s as it is now" % the_card.id)
+            if not said and inst.unavailable is None:
+                return "%s already has that entry and card, and is connected" % name
+            request = ApprovalRequest("Change %s's entry?" % name, said + [
+                "Kelvin connects it again and asks who it is; it sends nothing else. Every output change on a draft "
+                "card still asks you."])
+            if not self.gate.auto_simple(request, "pointing an instrument at another card or address connects it and "
+                                                  "reads it; it drives nothing") and not self.gate.ask(request):
+                note = " (%s)" % request.note if request.note else ""
+                return "declined: the person did not want %s changed%s" % (name, note)
+            try:
+                undo = self.lab.replace(ic, the_card)
+            except (AdapterError, OSError, ValueError, RuntimeError) as e:
+                why = str(e).splitlines()[0] if str(e) else type(e).__name__
+                return "not changed: Kelvin could not connect %s that way: %s. It is as it was." % (name, why)
+            health = self.lab.health_check([name])[0]
+            if any("does not match card" in p for p in health.problems):   # another instrument at that address
+                undo()
+                return "not changed: %s. It is as it was." % "; ".join(health.problems)
+            try:
+                fresh = lab_file.read_text(encoding="utf-8") if lab_file.exists() else ""
+                if fresh != text:   # a person changed it meanwhile: the change goes into theirs
+                    new_text = change_entry(fresh, name, changes)
+                    load_lab_config(new_text, registry)
+                tmp = lab_file.with_suffix(".tmp")
+                tmp.write_text(new_text, encoding="utf-8")
+                tmp.replace(lab_file)
+            except (OSError, KeyError, ConfigError, ValueError, yaml.YAMLError) as e:
+                undo()
+                return "not changed: Kelvin could not save the lab config (%s). It is as it was." % e
+            self._refresh()
+            self.config_changed("Kelvin (%s)" % by, "changed %s: %s" % (name, "; ".join(said)), "changed")
+            self._apply_protection(recheck=True)
+            self.gate.log.write("instrument_changed", by=by, instrument=name, card=the_card.id, address=ic.address,
+                                changes=said)
+            self.notifier("setup", "Kelvin changed %s" % name, "; ".join(said))
+            self.lab_changed("changed")
+            return "changed %s (%s): %s; health: %s%s" % (
+                name, the_card.id, "; ".join(said) or "connected again",
+                "ok" if health.ok else "; ".join(health.problems),
+                ". Its outputs ask a person until they review it (another card)" if "added_by" in changes else "")
+        return self._do("changing an instrument", run)
 
     def refresh_cards(self, ids: Iterable[str]) -> None:
         """After cards changed (the user's, or a new copy of the collection): the card the lab's registry has for each

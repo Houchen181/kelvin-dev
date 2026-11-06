@@ -90,6 +90,9 @@ def where_and_cause(address: str) -> Tuple[str, str]:
             return "through a Prologix adapter (%s)" % rest, "cable or power?"
         return ("on GPIB (address %d) through the Prologix %s" % (at.pad, place(at.adapter)),
                 "cable or power? (or the adapter: unplugged, or held by another program)")
+    if sep and scheme.lower() == "jsonrpc":   # its own interface on the network, no maker's program between
+        host = rest.split("?", 1)[0].split("/", 1)[0].rsplit(":", 1)[0] or rest
+        return "on the network (%s)" % host, "network cable, power or its IP address?"
     if sep and scheme.lower() not in ("visa", "serial"):
         where, cause = _SOFTWARE.get(scheme.lower(), ("its maker's software (%s)" % address,
                                                       "is it on, and its maker's software running?"))

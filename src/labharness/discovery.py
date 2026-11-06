@@ -75,7 +75,8 @@ def match_card(idn: str, registry: CardRegistry) -> Optional[Card]:
     return max(hits, key=lambda c: len(c.idn_pattern or "")) if hits else None
 
 
-GENERIC_SCHEMES = ("http", "https", "lib", "serial", "visa", "sim", "modbus")   # any instrument's: no card follows
+# any instrument's: no card follows from the address alone
+GENERIC_SCHEMES = ("http", "https", "lib", "serial", "visa", "sim", "modbus", "jsonrpc")
 _OPTION = re.compile(r"[?&]([a-z0-9_]+=[^&\s\"',)]+)", re.I)
 
 
@@ -797,6 +798,66 @@ def renamed_plan_text(text: str, old: str, new: str) -> str:
             lines[j] = bare.sub(new, lines[j])
             j += 1
     return "\n".join(lines)
+
+
+ENTRY_KEYS = ("card", "address", "connection", "vars")   # what change_entry changes; never limits, rates or guards
+
+
+def change_entry(text: str, name: str, changes: Dict[str, Any]) -> str:
+    """The lab config text with one instrument's card, address, connection settings or card variables changed
+    (connection or vars None: taken out), the rest of the text and its comments kept; added_by: kelvin marks it
+    again as Kelvin's to review (another card: each output change asks until a person reviews it). KeyError: no such
+    instrument."""
+    from .yamlio import load_yaml
+    keys = ENTRY_KEYS + ("added_by",)
+    changes = {k: v for k, v in changes.items() if k in keys and (k != "added_by" or v == "kelvin")}
+    data = load_yaml(text) if text.strip() else None
+    entry = (data.get("instruments") or {}).get(name) if isinstance(data, dict) else None
+    if not isinstance(entry, dict):
+        raise KeyError("no instrument %r in the lab config" % name)
+
+    def written(key: str, value: Any) -> str:
+        if key == "added_by":
+            return "added_by: kelvin   # each output change asks you until you review the limits and delete this line"
+        return "%s: %s" % (key, value if key == "card" else json.dumps(value) if key == "address" else _flow(value))
+    lines = text.split("\n")
+    at, end = _instrument_lines(lines, name)
+    indent = len(lines[at]) - len(lines[at].lstrip())
+    head, _, rest = lines[at].partition(":")
+    if rest.strip() and not rest.strip().startswith("#"):   # written on one line: name: { card: ..., ... }
+        entry = dict(entry)
+        for key, value in changes.items():
+            if value is None:
+                entry.pop(key, None)
+            else:
+                entry[key] = value
+        lines[at] = "%s: %s" % (head, _flow(entry))
+        return "\n".join(lines)
+    block = lines[at + 1:end]
+    child = min((len(l) - len(l.lstrip()) for l in block if l.strip() and not l.lstrip().startswith("#")),
+                default=indent + 2)
+    out, i, placed = [], 0, set()
+    while i < len(block):
+        line = block[i]
+        m = re.match(r"^\s*(\w+)\s*:", line) if len(line) - len(line.lstrip()) == child else None
+        if m and m.group(1) in changes:
+            i += 1
+            while i < len(block) and block[i].strip() and len(block[i]) - len(block[i].lstrip()) > child:
+                i += 1   # its value written as a block: those lines go too
+            if changes[m.group(1)] is not None:
+                out.append(" " * child + written(m.group(1), changes[m.group(1)]))
+            placed.add(m.group(1))
+            continue
+        out.append(line)
+        i += 1
+    for key in keys:
+        if key in changes and key not in placed and changes[key] is not None:
+            if key == "added_by":   # last in its entry, as Kelvin writes it when it adds one
+                out.append(" " * child + written(key, changes[key]))
+                continue
+            after = max([k for k, l in enumerate(out) if re.match(r"^\s*(card|address)\s*:", l)], default=-1)
+            out.insert(after + 1, " " * child + written(key, changes[key]))
+    return "\n".join(lines[:at + 1] + out + lines[end:])
 
 
 def set_limits(text: str, name: str, limits: Dict[str, Optional[Sequence[float]]], reviewed: bool = False) -> str:

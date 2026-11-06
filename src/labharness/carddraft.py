@@ -89,6 +89,18 @@ reply is the value; "GET /v1/Status#laser.state" takes one field), set: "PUT /v1
 {value}" or "PUT /v1/Shutter {\"open\": {value}}". For an action per state, a bool with bool_text: [EnableOutput,
 CloseOutput] and set: "POST /v1/Basic/{value}". identify: {query: "GET /v1/...", idn: a regex for its reply}.
 
+Instruments with a JSON-RPC interface (JSON-RPC 2.0 over the network: attocube's eNSPIRE cryostat controller, AMC
+and IDS, and any whose examples send {"jsonrpc": "2.0", "method": ..., "params": [...]}): the address is
+jsonrpc://<ip>:<port>, and the card has a jsonrpc section: port (when the address names none); transport: http to
+POST each request (default: one JSON request a line over TCP); fields: what every request carries besides jsonrpc,
+method, params and id (attocube's: {api: 2}); errors: where the instrument's own error number is in an answer's
+list (first, as attocube's; none; or its position), and errors_at: {<method>: <position>} for a method where it
+differs; identity: [the methods that read who it is]; switches: {<name>: {on: <method>, off: <method>}} for an on/off
+with a method for each. Then get: "GET <method> [arguments]" and set: "SET <method> [arguments] {value}" (or "SET
+<switch> [arguments] {value}"), the arguments numbers, true/false, words or "quoted text", separated by spaces, and
+each method written in full as the examples call it (com.attocube.cryostat.interface.sample.getTemperature). A get
+must call a method that only reads; only methods the card names are ever called.
+
 Instruments the maker controls through a library (its example scripts in Python, MATLAB or C call a module or a
 DLL instead of sending text): the card gets a library section, and each command calls one function.
 - library: module: <the Python module the examples import> (object: <the class or object the functions hang on>;
@@ -146,9 +158,16 @@ Instruments whose commands start with the value ("ON,1" / "OFF,1"): set: "{value
 it set, and treats the value as unknown until then. Connecting leaves the instrument as it is: on_connect may only
 set up the connection (listen mode, headers), never a parameter.
 
-Rules: use only commands that are in the manual text you were given; never invent a command, a limit or a reply
-format. If the manual does not say, leave the parameter out and mention it. Block calibration, firmware, sensor
-curve and protection-limit commands under raw.blocked."""
+This lab's version of one of Kelvin's cards: when Kelvin's card doesn't fit how this lab reaches its instrument
+(another interface or generation of it, such as a network controller where the card has a DLL; another firmware; a
+different command or range; a setting this lab doesn't use that the card warns about), keep Kelvin's id and its
+parameter names (plans, limits and the lab's names use them), change what differs as the lab's scripts or the maker's
+examples show it, try_card it on the instrument's address, and save_card it with version: true; change_instrument
+then points the instrument at it (and its new address).
+
+Rules: use only commands that are in the manual, the maker's examples or the lab's own scripts you read; never
+invent a command, a limit or a reply format. If they do not say, leave the parameter out and mention it. Block
+calibration, firmware, sensor curve and protection-limit commands under raw.blocked."""
 
 
 def example() -> str:

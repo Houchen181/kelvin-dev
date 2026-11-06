@@ -1,0 +1,145 @@
+card: 1
+id: attocube/attodry-enspire
+model: attocube attoDRY2100e / 2100XL cryostat (eNSPIRE controller)
+vendor: attocube
+kind: cryostat
+status: draft
+manual: "attocube eNSPIRE controller, its JSON-RPC interface (TCP port 9090), as attocube's Python and MATLAB example scripts call it"
+notes:
+  - "For attoDRYs run from the eNSPIRE controller, with its WebApp in a browser (attoDRY2100e, 2100XL). An older attoDRY with a touch screen and attoDRYLib.dll uses attocube/attodry. Address: jsonrpc://<the controller's IP address>:9090, the address its WebApp opens at."
+  - "Draft, from a public client of the eNSPIRE interface rather than attocube's manual: until someone checks it on the cryostat, every setting and output change asks a person. Compare each reading with the WebApp; where the lab's own scripts call other methods, Kelvin makes this lab's version of the card from them."
+  - "Temperature and field act only while their control is on (Start in the WebApp's sample temperature and magnet panels). A field set point moves the magnet at once while field control is on."
+  - "Make safe sets the field set point to zero and waits for the field, stops field control, sets the temperature set point to the lowest limit and stops temperature control. Check that this is how your system should be left before marking the card reviewed."
+  - "Left out: going to base temperature, sample exchange, the pumps and valves, ramp rates and the magnet's ramp zones. Run them from the WebApp."
+identify:
+  idn: "^attocube,\\s*atto\\s*DRY"
+  example: "attocube,attoDRY2100XL,<serial number>,<firmware>"
+connection: { timeout_ms: 15000 }
+vars:
+  channel: { default: "0", label: "magnet channel: 0 for a single-axis magnet (the WebApp names each channel)" }
+
+jsonrpc:
+  port: 9090
+  fields: { api: 2 }
+  errors: first
+  errors_at: { com.attocube.cryostat.interface.system.isCryostatSane: 2 }
+  identity: [com.attocube.cryostat.interface.system.getDeviceType, com.attocube.system.getSerialNumber,
+             com.attocube.system.getFirmwareVersion]
+  switches:
+    temperatureControl: { on: com.attocube.cryostat.interface.sample.startTempControl,
+                          off: com.attocube.cryostat.interface.sample.stopTempControl }
+    fieldControl: { on: com.attocube.cryostat.interface.magnet.startFieldControl,
+                    off: com.attocube.cryostat.interface.magnet.stopFieldControl }
+
+parameters:
+  T:
+    label: Sample temperature
+    kind: measure
+    unit: K
+    get: "GET com.attocube.cryostat.interface.sample.getTemperature"
+  temperature_control:
+    label: Temperature control
+    kind: drive
+    type: bool
+    set: "SET temperatureControl {value}"
+    get: "GET com.attocube.cryostat.interface.sample.getTempControlStatus"
+    safe: off
+    description: The sample's temperature control (Start and Stop in the WebApp); the sample goes to T_set while it is on
+  T_set:
+    label: Temperature set point
+    applies_when: temperature_control
+    kind: drive
+    unit: K
+    set: "SET com.attocube.cryostat.interface.sample.setSetPoint {value}"
+    get: "GET com.attocube.cryostat.interface.sample.getSetPoint"
+    limits: [1.65, 300]
+    safe: 1.65
+    ramp: instrument
+    readback: T
+    tol: 0.05
+    timeout: 14400
+  B:
+    label: Field
+    kind: measure
+    unit: T
+    get: "GET com.attocube.cryostat.interface.magnet.getH {channel}"
+  field_control:
+    label: Field control
+    kind: drive
+    type: bool
+    set: "SET fieldControl {channel} {value}"
+    safe: off
+    description: The magnet channel's field control (Start and Stop in the WebApp); the magnet goes to B_set while it is on. Its state is the WebApp's (magnet_state here)
+  B_set:
+    label: Field set point
+    kind: drive
+    unit: T
+    set: "SET com.attocube.cryostat.interface.magnet.setHSetPoint {channel} {value}"
+    get: "GET com.attocube.cryostat.interface.magnet.getHSetPoint {channel}"
+    limits: [-9, 9]
+    safe: 0
+    ramp: instrument
+    readback: B
+    tol: 0.001
+    timeout: 7200
+    description: Moves the magnet at once while field control is on. The limits are the 9 T magnet's; set your system's own
+  magnet_state:
+    label: Magnet state
+    kind: measure
+    type: str
+    get: "GET com.attocube.cryostat.interface.magnet.getHState {channel}"
+  T_vti:
+    label: VTI temperature
+    kind: measure
+    unit: K
+    get: "GET com.attocube.cryostat.interface.vti.getTemperature"
+  T_magnet:
+    label: Magnet temperature
+    kind: measure
+    unit: K
+    get: "GET com.attocube.cryostat.interface.magnet.getTemperature"
+  p_cryo_in:
+    label: Cryo-in pressure
+    kind: measure
+    unit: mbar
+    get: "GET com.attocube.cryostat.interface.pressures.getCryoInPressure"
+  p_cryo_out:
+    label: Cryo-out pressure
+    kind: measure
+    unit: mbar
+    get: "GET com.attocube.cryostat.interface.pressures.getCryoOutPressure"
+  p_dump:
+    label: Dump pressure
+    kind: measure
+    unit: mbar
+    get: "GET com.attocube.cryostat.interface.pressures.getDumpPressure"
+  quench:
+    label: Magnet quenched
+    kind: measure
+    type: bool
+    words: ["yes", "no"]
+    get: "GET com.attocube.cryostat.interface.magnet.getIsInQuenchState"
+  sane:
+    label: Cryostat OK
+    kind: measure
+    type: bool
+    words: ["yes", "no"]
+    field: 0
+    get: "GET com.attocube.cryostat.interface.system.isCryostatSane"
+  command:
+    label: Running
+    kind: measure
+    type: str
+    get: "GET com.attocube.cryostat.interface.action.getCurrentCommand"
+    description: What the controller is doing now (a cool-down, a sample exchange...), in its own words
+  last_error:
+    label: Last error
+    kind: measure
+    type: int
+    field: 0
+    get: "GET com.attocube.cryostat.interface.system.getLastError"
+    description: The controller's last error number, 0 when there is none (the WebApp says what it means)
+
+safe_sequence: [B_set, field_control, T_set, temperature_control]
+display:
+  headline: T

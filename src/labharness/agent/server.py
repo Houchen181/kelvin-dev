@@ -57,6 +57,12 @@ You are connected to a physics lab through Kelvin.
   ask_to_switch_on asks the person, saying why. Only they switch it on. One that could not be connected (lab_status
   says why; the rest of the lab works) is yours to fix: a missing package with install_for_instrument, which
   connects it after, anything else with the person, then reconnect_instrument.
+- Kelvin's card for an instrument is a start, not a rule. When it doesn't fit how this lab reaches its instrument
+  (another interface or generation, library, firmware, or warnings for settings this lab doesn't use), make the card
+  fit, never the person: learn how the lab talks to it from the lab's own scripts or the maker's examples
+  (survey_scripts, read_examples, library_api) and its manual, write this lab's version (card_guide, check_card,
+  try_card until its readings match what the person sees, save_card with version: true), then change_instrument
+  to it. Ask the person only for what no file says (where the scripts are, an address).
 - For sweeps, write a plan and call run_plan directly. It checks the plan, health-checks the instruments it uses,
   asks once for its drive ranges, runs, logs and analyses the data. Report its assessment and key numbers (with
   uncertainties) rather than raw rows. A dry run (simulate_plan, or run_plan with dry_run: true) is not a routine
@@ -424,7 +430,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """The cards Kelvin has for an instrument: its own, the instrument collection's and the lab's, by maker and
         model (e.g. "AMI 430", "Mercury iTC"), kind ("lock-in"), identity reply or driver address (qd://...); and the
         instruments the collection knows that have no card yet, with their manuals. Look here before draft_card or
-        writing a card: a card Kelvin has is used as it is. No query lists every card."""
+        writing a card: a card Kelvin has is used as it is, unless it doesn't fit this lab's instrument (then this
+        lab's version of it: save_card with version: true). No query lists every card."""
         return rt.find_card(query)
 
     @server.tool(annotations=READ, structured_output=False)
@@ -575,12 +582,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
     def save_card(card: str, version: bool = False) -> str:
-        """Keep a new instrument card (status draft) with the user's cards. Only from the manual text the user gave;
-        never invent commands. Then try_card and add_instrument; until a person reviews it, every setting and output
-        change on it asks them. A card under the id of one of Kelvin's cards (find_card) is refused: use Kelvin's.
-        Only when Kelvin's card doesn't fit this lab's instrument (another firmware, a wider range, a different
-        command), save the corrected card under the same id with version: true: it becomes this lab's version of
-        Kelvin's card and replaces it here only."""
+        """Keep a new instrument card (status draft) with the user's cards. Only from what a source says: the manual,
+        the maker's examples or the lab's own scripts; never invent commands. Then try_card and add_instrument (or
+        change_instrument); until a person reviews it, every setting and output change on it asks them. A card under
+        the id of one of Kelvin's cards (find_card) is refused: use Kelvin's. When Kelvin's card doesn't fit this
+        lab's instrument (another interface, library or firmware, a wider range, a different command, a setting this
+        lab doesn't use), save the corrected card under the same id with version: true: it becomes this lab's version
+        of Kelvin's card and replaces it here only."""
         return rt.save_card(card, version=version)
 
     @server.tool(annotations=FETCH, structured_output=False)
@@ -623,6 +631,17 @@ def build_server(rt: LabRuntime) -> MCPServer:
         every output change on it asks the person until they review its limits. An address the scan did not find
         asks the person first."""
         return rt.add_instrument(address, card, name, connection, vars)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
+    def change_instrument(instrument: str, address: str = "", card: str = "",
+                          connection: Optional[Dict[str, Any]] = None, vars: Optional[Dict[str, str]] = None) -> str:
+        """Point an instrument already in the lab at another card or address and connect it so, when Kelvin's card
+        doesn't fit how this lab's instrument is reached (another interface, library or firmware: what the lab's own
+        scripts or the maker's examples use). card: this lab's version of Kelvin's card (save_card version: true), or
+        another card's id; address, connection, vars as for add_instrument. Its name and limits stay. It drives
+        nothing; a connection that fails, or answers as another instrument, leaves it as it was."""
+        return rt.change_instrument(instrument, address, card, connection, vars)
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable

@@ -10,6 +10,7 @@ from __future__ import annotations
 import concurrent.futures
 import html
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -48,14 +49,16 @@ PORTS: List[Tuple[int, str, str]] = [
     (8004, "open", "Zurich Instruments LabOne data server (zhinst://<device id>?host={host})"),
     (8080, "http", "web service"),
     (8888, "http", "a Pyro4 name server, as QICK boards run (qick://{host}:8888/<proxy name>), or Jupyter"),
-    (9090, "http", "Jupyter (PYNQ boards), or attocube's JSON-RPC interface (attoDRY, IDS, AMC)"),
+    (9090, "jsonrpc", "attocube's JSON-RPC interface (an attoDRY's eNSPIRE controller, AMC, IDS): "
+                      "jsonrpc://{host}:9090; or Jupyter (PYNQ boards)"),
     (10001, "open", "a serial device server (Lantronix): an RS-232 instrument behind it, "
                     "TCPIP0::{host}::10001::SOCKET (its speed and framing are set on the server)"),
 ]
 SOCKET_PORTS = {5025, 5555, 7020, 7777}
 # what a sweep of a whole network knocks on: ports only instruments and their gateways open, not the web, SSH or
-# Jupyter, which any computer may have (inspect_address looks at those on one address)
-SWEEP_PORTS = (111, 502, 1234, 1998, 4001, 4880, 5024, 5025, 5555, 7020, 7230, 7777, 8004, 10001)
+# Jupyter, which any computer may have (inspect_address looks at those on one address); 9090 too, where attocube's
+# controllers answer (a Jupyter there says it is a web server)
+SWEEP_PORTS = (111, 502, 1234, 1998, 4001, 4880, 5024, 5025, 5555, 7020, 7230, 7777, 8004, 9090, 10001)
 MAX_SWEEP = 1024     # addresses one sweep looks at, at most (a /22)
 MAX_IDENTIFIED = 32  # hosts that answered whose identity a sweep asks for
 
@@ -159,7 +162,11 @@ def _read(sock: socket.socket, seconds: float, limit: int = 65536, until: Option
 def _http(sock: socket.socket, host: str, path: str, seconds: float) -> Dict[str, str]:
     sock.sendall(("GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: Kelvin (lab assistant)\r\nAccept: text/html, */*\r\n"
                   "Connection: close\r\n\r\n" % (path, host)).encode("ascii"))
-    data = _read(sock, seconds)
+    return _web_answer(_read(sock, seconds))
+
+
+def _web_answer(data: bytes) -> Dict[str, str]:
+    """What a web server's answer says: its status, server, where it sends one, its page's title."""
     head, _, body = data.partition(b"\r\n\r\n")
     lines = head.decode("latin-1", "replace").split("\r\n")
     if not lines or not lines[0].startswith("HTTP/"):
@@ -213,6 +220,8 @@ def probe_port(ip: str, port: int, how: str, seconds: float = 0.8, connect: Opti
             reply = _read(sock, seconds + 0.7, 4096, until=b"\n")
             if reply:
                 out["idn"] = _clean(reply, 200)
+        elif how == "jsonrpc":   # attocube's JSON-RPC asked who it is; a web server here (Jupyter) read as one
+            out.update(rpc_answer(_ask_rpc(sock, seconds + 0.7)))
         elif how == "any":   # a port the person named: what it says by itself, else its answer to *IDN?
             said = _read(sock, seconds, 4096)
             if said:
@@ -232,6 +241,40 @@ def probe_port(ip: str, port: int, how: str, seconds: float = 0.8, connect: Opti
         except OSError:
             pass
     return out
+
+
+# what attocube's eNSPIRE controller says who it is to (an AMC or an IDS has no such method: attocube's all the same)
+RPC_ASK = {"jsonrpc": "2.0", "method": "com.attocube.cryostat.interface.system.getDeviceType", "params": [], "id": 1,
+           "api": 2}
+
+
+def _ask_rpc(sock: socket.socket, seconds: float) -> bytes:
+    sock.sendall((json.dumps(RPC_ASK) + "\n").encode("ascii"))
+    return _read(sock, seconds, 65536, until=b"\n")
+
+
+def rpc_answer(data: bytes) -> Dict[str, Any]:
+    """What a port asked over attocube's JSON-RPC said: {jsonrpc: True, device: what the controller says it is}, or
+    {jsonrpc: True, rpc_error: its error} for one without that method; a web server's answer as a web page's."""
+    if data.startswith(b"HTTP/"):
+        return _web_answer(data)
+    line = data.split(b"\n", 1)[0].strip()
+    try:
+        reply = json.loads(line.decode("utf-8", "replace"))
+    except ValueError:
+        return {"banner": _clean(data)} if data else {}
+    if not isinstance(reply, dict) or "jsonrpc" not in reply:
+        return {"banner": _clean(data)}
+    result, error = reply.get("result"), reply.get("error")
+    if isinstance(result, list) and len(result) > 1 and result[0] == 0 and isinstance(result[1], str):
+        return {"jsonrpc": True, "device": _clean(result[1].encode("utf-8"), 80)}
+    said = error.get("message") if isinstance(error, dict) else error if error is not None else result
+    return {"jsonrpc": True, "rpc_error": _clean(str(said).encode("utf-8"), 80)}
+
+
+def rpc_identity(found: Dict[str, Any]) -> str:
+    """The identity a card is matched to, for a JSON-RPC controller that said what it is ('' for one that didn't)."""
+    return "attocube,%s" % found["device"] if found.get("device") else ""
 
 
 def lxi_identity(ip: str, connect: Optional[Connect] = None, seconds: float = 1.5) -> Dict[str, str]:
@@ -368,6 +411,9 @@ def identify_host(ip: str, ports: Iterable[int], seconds: float = 0.8, connect: 
 def what_answers(f: Dict[str, Any]) -> str:
     """One port's finding in words, with what it likely is."""
     port, bits = f["port"], []
+    if f.get("jsonrpc"):
+        bits.append("answers attocube's JSON-RPC: %s" % ("it is an %s" % f["device"] if f.get("device") else
+                                                         "not a cryostat controller (it said %r)" % f.get("rpc_error")))
     if f.get("idn"):
         bits.append("answers *IDN? with %r" % f["idn"])
     if f.get("banner"):

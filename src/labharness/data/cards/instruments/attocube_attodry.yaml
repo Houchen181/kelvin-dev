@@ -6,6 +6,7 @@ kind: cryostat
 status: draft
 manual: "attocube attoDRYLib (attoDRYLib.h, the DLL built from the attoDRY LabVIEW interface) and its example scripts"
 notes:
+  - "For attoDRYs with a touch screen, through attocube's attoDRYLib.dll. One run from the eNSPIRE controller and its WebApp in a browser (attoDRY2100e, 2100XL) uses attocube/attodry-enspire instead."
   - "Through attocube's attoDRYLib.dll, as in attocube's example scripts. Address lib://COM4?python=<python.exe>&path=<folder with attoDRYLib.dll>: the attoDRY's COM port, a Python that can load the DLL, and the DLL's folder. The DLL needs the LabVIEW run-time engine it was built with (2016 for older releases), and a 32-bit DLL needs a 32-bit Python."
   - "Set the var device: 0 attoDRY1100, 1 attoDRY2100, 2 attoDRY800. After connecting, the attoDRY takes about 10 s to initialise before it answers."
   - "Temperature and field act only while their control is on (the thermometer and magnet icons on the touch screen). Kelvin reads each control's state before toggling it, so it never flips one the wrong way."

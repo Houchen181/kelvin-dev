@@ -3,6 +3,7 @@ address of this computer's networks with a port open that instruments or their g
 Only looking: one connection per port, *IDN? only where instruments speak SCPI, the lab's own instruments left alone.
 Nothing here touches a real network: a port on this computer, or a pretend network."""
 import ipaddress
+import json
 import socket
 import threading
 
@@ -87,6 +88,11 @@ class Pretend:
         self.sent.append(data)
         if self.port == 5025 and data.startswith(b"*IDN?"):
             self.pending = SR830
+        if self.port == 9090 and data.startswith(b"{"):   # an attoDRY's eNSPIRE controller says what it is
+            ask = json.loads(data)
+            assert ask["method"] == "com.attocube.cryostat.interface.system.getDeviceType" and ask["api"] == 2
+            self.pending = (json.dumps({"jsonrpc": "2.0", "id": ask["id"], "result": [0, "attoDRY2100XL"]})
+                            + "\n").encode()
 
     def recv(self, n):
         if not self.pending:
@@ -101,10 +107,11 @@ class Pretend:
 @pytest.fixture
 def network(monkeypatch):
     """192.168.77.0/24: an SR830 on a SCPI socket at .20, a Keysight generator that announces itself (HiSLIP) at
-    .31, a chiller's Modbus at .40, a Moxa serial server at .55, and the lab's own lock-in at .12."""
+    .31, a chiller's Modbus at .40, an attoDRY's eNSPIRE controller at .45, a Moxa serial server at .55, and the
+    lab's own lock-in at .12."""
     pytest.importorskip("mcp")
     from labharness import discovery, survey
-    open_ports = {("192.168.77.20", 5025), ("192.168.77.31", 4880), ("192.168.77.40", 502),
+    open_ports = {("192.168.77.20", 5025), ("192.168.77.31", 4880), ("192.168.77.40", 502), ("192.168.77.45", 9090),
                   ("192.168.77.55", 4001), ("192.168.77.12", 5025), (OWN, 5025)}
     touched = []
 
@@ -138,7 +145,7 @@ def test_kelvin_finds_instruments_on_the_network(network, tmp_path):
     said = rt.find_on_network()
     lines = said.splitlines()
     assert lines[0].startswith("Looked on %s (ports 111 502 1234" % NET)
-    assert lines[0].endswith("and for instruments that announce themselves: 4 addresses answered")
+    assert lines[0].endswith("and for instruments that announce themselves: 5 addresses answered")
     srs = next(ln for ln in lines if ln.startswith("- 192.168.77.20:"))
     assert "answers 'Stanford_Research_Systems,SR830,s/n86813,ver1.07' → card srs/sr830" in srs
     assert "add_instrument TCPIP0::192.168.77.20::5025::SOCKET" in srs
@@ -147,6 +154,9 @@ def test_kelvin_finds_instruments_on_the_network(network, tmp_path):
     assert "draft_card TCPIP0::192.168.77.31::hislip0::INSTR" in gen
     assert "Modbus TCP" in next(ln for ln in lines if ln.startswith("- 192.168.77.40:"))
     assert "serial device server (Moxa NPort)" in next(ln for ln in lines if ln.startswith("- 192.168.77.55:"))
+    cryo = next(ln for ln in lines if ln.startswith("- 192.168.77.45:"))
+    assert "jsonrpc://192.168.77.45:9090 answers 'attocube,attoDRY2100XL' → card attocube/attodry-enspire" in cryo
+    assert rt.found_info["jsonrpc://192.168.77.45:9090"]["card_id"] == "attocube/attodry-enspire"
     assert "In the lab already, left alone: lockin (192.168.77.12)" in lines and "smu" not in said
 
     assert not [t for t in network if t[0] in ("192.168.77.12", OWN)]   # the lab's own and this computer: untouched

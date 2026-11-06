@@ -5886,7 +5886,9 @@
       const lab = d.lab || { set: [], read: [] };
       QUEUE.units = new Map(lab.set.concat(lab.read).map((p) => [p.key, p.unit || ""]));
       $("step-set-keys").replaceChildren(...lab.set.filter((p) => !p.action).map((p) => h("option", { value: p.key }, p.unit || "")));
-      $("step-read-keys").replaceChildren(...lab.read.map((p) => h("option", { value: p.key }, p.unit || "")));
+      const rank = (p) => (p.group === "reading" ? 0 : 1);   // readings (a lock-in's X, Y, R) before settings
+      $("step-read-keys").replaceChildren(...lab.read.slice().sort((a, b) => rank(a) - rank(b))
+        .map((p) => h("option", { value: p.key }, p.unit || "")));
       stepChanged();
     }, () => { QUEUE.keys = null; });
     return QUEUE.keys;
@@ -6689,6 +6691,19 @@
     const i = ED.insts.get(name);
     return !i ? [] : what === "read" ? i.read : what === "setup" ? i.set : i.set.filter((p) => !p.action);
   }
+  // a parameter menu's choices grouped as the Lab panel shows an instrument: what a row records, its readings first
+  // (a lock-in's X, Y, R and θ, then its outputs and settings); what a loop changes, its outputs first
+  const ED_GROUPS = { read: [["reading", "Readings"], ["output", "Outputs"], ["setting", "Settings"]],
+                      set: [["output", "Outputs"], ["setting", "Settings"], ["action", "Actions"]] };
+  const edGroup = (p) => p.group || (p.action ? "action" : p.drive ? "output" : "setting");
+  function edOptions(list, what, opt) {
+    const order = ED_GROUPS[what === "read" ? "read" : "set"];
+    const groups = order.map(([g, name]) => [name, list.filter((p) => edGroup(p) === g)]).filter(([, ps]) => ps.length);
+    const rest = list.filter((p) => !order.some(([g]) => g === edGroup(p)));
+    if (groups.length < 2) return list.map((p) => opt(p.param, edParamText(p)));
+    return groups.map(([name, ps]) => h("optgroup", { label: name }, ...ps.map((p) => opt(p.param, edParamText(p)))))
+      .concat(rest.map((p) => opt(p.param, edParamText(p))));
+  }
   // what a row changes or records: an instrument, then one of its parameters. opts: f (what the row is: data-f, for the
   // focus), vars (a variable may be chosen instead, a name of your own that Computed works settings out from), time
   // (or a time series), mode ("var" or "time": the row is one). Another instrument keeps the parameter of the same
@@ -6715,14 +6730,20 @@
       if (v === ED_VAR) return pick(mode === "var" ? key : "", "var");
       if (v === ED_TIME) return pick("", "time");
       const list = edParams(v, what), i = ED.insts.get(v) || {};
-      const p = list.find((q) => q.param === pname) || list.find((q) => (what === "read" ? q.param === i.headline : q.drive)) || list[0];
+      // what a scan records from it, at first: a camera's frame or a spectrometer's spectrum (its headline is its
+      // detector's temperature), else its headline (a lock-in's R), else its first reading; what a loop changes: its
+      // first output
+      const p = list.find((q) => q.param === pname)
+        || (what === "read" && /camera|spectrometer/.test(i.kind || "") ? list.find((q) => q.type) : null)
+        || list.find((q) => (what === "read" ? q.param === i.headline : q.drive))
+        || (what === "read" ? list.find((q) => edGroup(q) === "reading") : null) || list[0];
       pick(p ? v + "." + p.param : "", "inst");
     });
     const out = [inst];
     if (mode === "inst") {
       const list = edParams(iname, what);
       const par = h("select", { class: "ed-in ed-par", "aria-label": label + ": parameter", "data-f": opts.f + "-p" },
-        ...list.map((p) => opt(p.param, edParamText(p))),
+        ...edOptions(list, what, opt),
         ...(list.some((p) => p.param === pname) ? [] : [opt(pname, pname + (ED.insts.has(iname) ? (what === "read" ? " (not a reading)" : " (can't be set)") : ""))]));
       par.value = pname;
       par.addEventListener("change", () => pick(iname + "." + par.value, "param"));

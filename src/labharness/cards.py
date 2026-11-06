@@ -276,9 +276,20 @@ class ParamSpec:
         return str(value) + (" " + self.unit if self.unit and self.numeric else "")
 
     def distance(self, value: Any) -> float:
-        """How far a drive value is from safe (0 = at safe)."""
+        """How far a drive value is from safe (0 = at safe). Two values count as safe beside the safe value itself:
+        one a hair from it (a read-back's last digits), and one nearer zero than a safe value that is the end of its
+        limits nearest zero, the least the instrument outputs: an SR860's sine out reads 0 V under its least, 1 nV,
+        and was shown as on. A gate held at -0.5 V under limits [0, 10] is still away."""
         if self.numeric:
-            return abs(value - self.safe)
+            d = abs(value - self.safe)
+            if d and self.limits:
+                lo, hi = self.limits
+                if d <= 1e-9 * max(abs(lo), abs(hi), abs(self.safe)):
+                    return 0.0
+                least = lo if abs(lo) <= abs(hi) else hi
+                if self.safe == least and (0 <= value <= self.safe or self.safe <= value <= 0):
+                    return 0.0
+            return d
         if self.type == "enum":
             names = list(self.values or {})
             return abs(names.index(value) - names.index(self.safe))
@@ -333,6 +344,7 @@ class Card:
     bound: Dict[str, str] = field(default_factory=dict)             # the values this copy was made with
     data: Dict[str, Any] = field(default_factory=dict, repr=False)  # as written, to bind other values
     library: Dict[str, Any] = field(default_factory=dict)            # the maker's module or DLL (library.py)
+    jsonrpc: Dict[str, Any] = field(default_factory=dict)            # its JSON-RPC interface (jsonrpc.py)
     requires: List[str] = field(default_factory=list)   # the maker's Python packages its driver imports (envs.py)
     actions: Dict[str, "Action"] = field(default_factory=dict)   # named commands: trigger, arm, fire a burst
     # hardware-timed, buffered measurements a plan runs (techniques.py): cyclic voltammetry, a scope's burst capture
@@ -885,12 +897,15 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         err("display.headline", "%r is not a readable parameter" % headline)
     library = _library(data.get("library"), params, identify, err)
     actions = _actions(data.get("actions"), params, err)
+    jsonrpc = _jsonrpc(data.get("jsonrpc"), params, identify, actions, err)
+    if library and jsonrpc:
+        err("jsonrpc", "a card speaks through its maker's library or JSON-RPC, not both")
     techniques: Dict[str, Any] = {}
     if data.get("techniques") is not None:
         from .techniques import parse as parse_techniques
         techniques = parse_techniques(data["techniques"], params, card_vars, actions, err)
-        if library and techniques:
-            err("techniques", "a card with a library has no techniques yet (they are for text commands)")
+        if (library or jsonrpc) and techniques:
+            err("techniques", "a card with a library or JSON-RPC has no techniques yet (they are for text commands)")
         for tname, tech in techniques.items():   # never a reset (its drives could jump), never a blocked command
             for where, command in tech.commands():
                 sent = re.sub(r"\{[A-Za-z_][A-Za-z0-9_]*\}", "0", command)
@@ -906,6 +921,8 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
                                                           "wait" % (c, other.name))
     if library and on_connect:
         err("on_connect", "a card with a library connects with library.open")
+    if jsonrpc and on_connect:
+        err("on_connect", "a card with JSON-RPC connects with jsonrpc.open")
 
     if errors:
         raise CardError(source, errors)
@@ -917,7 +934,8 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         reset=reset, blocked=blocked, twin=data.get("twin"), headline=headline,
         notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")), manual_url=manual_url,
         source=source, connection=connection, idn_query=as_sent(identify.get("query") or "*IDN?"), usb_ids=usb_ids,
-        on_connect=on_connect, vars=card_vars, bound=chosen, data=original, library=library, actions=actions,
+        on_connect=on_connect, vars=card_vars, bound=chosen, data=original, library=library, jsonrpc=jsonrpc,
+        actions=actions,
         requires=[r.strip() for r in requires], techniques=techniques,
     )
 
@@ -1066,6 +1084,94 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
         if not m or m.group(1).upper() != "GET" or not LIB_READS.match(m.group(2).rsplit(".", 1)[-1]):
             err("identify.query", "with a library, GET <a function that reads the model or serial number>")
     out["toggles"] = toggles
+    return out
+
+
+RPC_METHOD = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+RPC_CALL = re.compile(r"^\s*(SET|GET)\s+(" + RPC_METHOD + r")(?![\w.])", re.I)
+RPC_RESERVED = ("jsonrpc", "method", "params", "id")
+
+
+def _rpc_reads(method: str) -> bool:
+    """A method whose name only reads (getTemperature, isCryostatSane): what a reading or the identity may call."""
+    last = method.rsplit(".", 1)[-1]
+    return bool(LIB_READS.match(last)) and not LIB_ACTS.match(last)
+
+
+def _jsonrpc(spec: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any], actions: Dict[str, "Action"],
+             err: Callable[[str, str], None]) -> Dict[str, Any]:
+    """How the instrument speaks JSON-RPC; see jsonrpc.py. Checked so that readings and the identity call only
+    methods whose names read, and every command is GET or SET <method> [arguments]."""
+    if spec is None:
+        return {}
+    if not isinstance(spec, dict) or not spec:
+        err("jsonrpc", "a mapping: port, fields, errors, identity, switches")
+        return {}
+    method = re.compile("^" + RPC_METHOD + "$")
+    out = dict(spec)
+    port = spec.get("port")
+    if port is not None and (isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536):
+        err("jsonrpc.port", "the TCP port it listens on, when the address names none (attocube: 9090)")
+    if spec.get("transport", "tcp") not in ("tcp", "http"):
+        err("jsonrpc.transport", "tcp (a JSON request per line over a TCP connection) or http (each one POSTed)")
+    if spec.get("path") is not None and not re.match(r"^/\S*$", str(spec["path"])):
+        err("jsonrpc.path", "the path requests are POSTed to, with transport: http (e.g. /jsonrpc)")
+    fields = spec.get("fields") or {}
+    if not isinstance(fields, dict) or any(k in RPC_RESERVED or not isinstance(v, (str, int, float, bool))
+                                           for k, v in fields.items()):
+        err("jsonrpc.fields", "what every request carries besides jsonrpc, method, params and id, e.g. {api: 2}")
+    errors = spec.get("errors", "first")
+    if errors not in ("first", "none") and (isinstance(errors, bool) or not isinstance(errors, int)):
+        err("jsonrpc.errors", "where the instrument's own error number is in an answer's list: first, none, or its "
+                              "position (0 means fine)")
+    errors_at = spec.get("errors_at") or {}
+    if not isinstance(errors_at, dict) or not all(method.match(str(k)) and isinstance(v, int)
+                                                  and not isinstance(v, bool) for k, v in errors_at.items()):
+        err("jsonrpc.errors_at", "methods whose error number is elsewhere in the answer: {<method>: <position>}")
+    identity = spec.get("identity") or []
+    if not isinstance(identity, list) or not all(isinstance(m, str) and method.match(m) and _rpc_reads(m)
+                                                 for m in identity):
+        err("jsonrpc.identity", "the methods that read who it is (getDeviceType, getSerialNumber...), in order")
+    switches = spec.get("switches") or {}
+    if not isinstance(switches, dict):
+        err("jsonrpc.switches", "a mapping of name: {on: <method>, off: <method>}")
+        switches = {}
+    switches = dict(switches)
+    for name, sw in list(switches.items()):
+        if isinstance(sw, dict):   # YAML reads a bare on: and off: as true and false
+            sw = switches[name] = {("on" if k is True else "off" if k is False else k): v for k, v in sw.items()}
+        if not method.match(str(name)) or not isinstance(sw, dict) or not all(
+                isinstance(sw.get(k), str) and method.match(sw[k]) for k in ("on", "off")):
+            err("jsonrpc.switches.%s" % name, "needs on and off: the methods that switch it on and off")
+    for key in ("open", "close"):
+        steps = spec.get(key) or []
+        if not isinstance(steps, list) or not all(isinstance(s, str) and re.match("^" + RPC_METHOD + r"(\s|$)",
+                                                                                  s.strip()) for s in steps):
+            err("jsonrpc." + key, "a list of calls: <method> [arguments]")
+    for p in params.values():
+        for tmpl, verb in ((p.set_cmd, "SET"), (p.get_cmd, "GET")):
+            if tmpl is None:
+                continue
+            m = RPC_CALL.match(tmpl.text)
+            path = "parameters.%s.%s" % (p.name, verb.lower())
+            if not m or m.group(1).upper() != verb:
+                err(path, "with JSON-RPC, write %s <method> [arguments]%s"
+                    % (verb, " {value}" if verb == "SET" else ""))
+            elif verb == "GET" and not _rpc_reads(m.group(2)):
+                err(path, "%s does not look like a method that only reads (get..., is..., has...); a reading must "
+                          "never start anything" % m.group(2))
+    for a in actions.values():
+        for c in a.send:
+            m = RPC_CALL.match(c)
+            if not m or m.group(1).upper() != "SET":
+                err("actions.%s.send" % a.name, "with JSON-RPC, SET <method> [arguments]")
+    query = str(identify.get("query") or "")
+    if query and query != "*IDN?":
+        m = RPC_CALL.match(query)
+        if not m or m.group(1).upper() != "GET" or not _rpc_reads(m.group(2)):
+            err("identify.query", "with JSON-RPC, GET <a method that reads the model>; or list them under "
+                                  "jsonrpc.identity")
+    out["switches"] = switches
     return out
 
 

@@ -43,7 +43,7 @@ def same_card(a: Card, b: Card) -> bool:
 
 def connection_of(card: Card) -> Tuple[Any, ...]:
     """What a connection is made with: a change here needs the instrument connected again."""
-    return (card.connection, card.on_connect, card.library, card.requires)
+    return (card.connection, card.on_connect, card.library, card.jsonrpc, card.requires)
 
 
 CONNECTING = "Kelvin is connecting it as it starts"   # an instrument of a lab opened before connecting (later=True)
@@ -190,6 +190,46 @@ class Lab:
         inst = self.instruments[ic.name] = Instrument(ic.name, bound, backend, ic, self.stops)
         return inst
 
+    def replace(self, ic: InstrumentConfig, card: Card) -> Callable[[], None]:
+        """An instrument of this lab connected as its lab config entry now says: another card (this lab's version of
+        Kelvin's), another address, other connection settings or card variables. Its connection is closed first (a
+        serial port opens once), then made anew; one that can't be made is raised, and the instrument is as it was
+        (connected again with its old card and address, or set aside with why). Returns what puts it back so (its
+        new connection answered as another instrument, or its entry could not be kept). One a person switched off
+        is refused (ValueError): nothing may be sent to it, its closing neither."""
+        inst = self.instruments[ic.name]   # KeyError: not in this lab
+        if not inst.enabled and inst.unavailable is None:
+            raise ValueError(OFF_TEXT % ic.name)
+        bound = card.bind(ic.vars)
+        was = inst.unavailable
+        if was is None:
+            inst.backend.close()
+            inst.backend = Unavailable(ic.name, "connecting again with its new entry")
+
+        def back() -> None:   # its old card and address, connected again where it was connected
+            if was is not None:
+                inst.backend = Unavailable(ic.name, was)
+                return
+            try:
+                inst.backend = self._factory(ic.name, inst.card, inst.config.address)
+            except Exception as e:
+                inst.backend = Unavailable(ic.name, first_line(e))
+        try:
+            backend = self._factory(ic.name, bound, ic.address)
+        except Exception:
+            back()
+            raise
+        self.registry.put(card)
+        self.config.instruments[ic.name] = ic
+        new = self.instruments[ic.name] = Instrument(ic.name, bound, backend, ic, self.stops)
+
+        def undo() -> None:
+            new.close()
+            self.config.instruments[ic.name] = inst.config
+            self.instruments[ic.name] = inst
+            back()
+        return undo
+
     def remove(self, name: str) -> None:
         """Take out an instrument just added (its entry could not be kept in the lab config): closed, then forgotten."""
         inst = self.instruments.pop(name)
@@ -291,8 +331,8 @@ class Lab:
                 for spec in card.drives:
                     lim = inst.limits(spec.name)
                     if spec.numeric and lim and spec.get_cmd is not None:
-                        v = inst.read(spec.name)
-                        if v is not None and not lim[0] <= v <= lim[1]:
+                        v = inst.read(spec.name)   # beyond them but at safe is not: an SR860's sine out off reads 0 V
+                        if v is not None and not lim[0] <= v <= lim[1] and spec.distance(v) > 0:
                             problems.append("%s = %s is outside %s limits" % (spec.name, spec.show(v), inst.limits_where(spec.name)))
             except (InstrumentLost, Garbled) as e:   # already in words: which instrument, which bus, what to check
                 problems.append(str(e))
