@@ -2,13 +2,22 @@
 
 - A Stop during an experiment's rehearsal is never a clean rehearsal: auto mode and the queue then run nothing (1.1).
 - A Stop while a run is approved or starting is never lost: its Python never starts (1.2).
+- A script waiting on *OPC? with a long timeout of its own stops within a second, the instrument cleared; a direct read
+  that runs out of time leaves the instrument owing its reply, dropped before the next command (1.3).
+- A thread of the script's own that goes on reading never keeps its run going after a Stop (1.4).
+- A process that is still there after Kelvin ended it never skips the way back to safe (1.5).
 """
 import threading
 import time
 
-from labharness import scriptrun
+import pytest
+
+from labharness import adapters, scriptrun
+from labharness.adapters import set_resource_manager
 from labharness.eventlog import EventLog
 from labharness.gate import SafetyGate, ScriptedApprover
+from labharness.homelab import build_lab
+from test_hardware import Bus, Device, Resource
 from test_lab_experiments import SLOW, auto_approved, keep_as, rt_keysight  # noqa: F401 (a fixture)
 from test_script_runs import SWEEP, _python, folder, lab, output, run, script_runtime, write  # noqa: F401 (fixtures)
 
@@ -181,3 +190,150 @@ def test_a_stop_before_a_script_starts_is_never_forgotten_by_its_approval(lab, f
     said = rt.run_script("sweep.py")
     assert said.startswith("script not run: a person pressed Stop before it started"), said
     assert lab.instrument("smu").read("output") is False
+
+
+# ------------------------------------------------------------------ 1.3 a script's own long wait
+
+class Sweeping(Resource):
+    """A VISA session to an instrument in a long sweep: its *OPC? is answered only once the sweep ends (long after the
+    script's 40 s here), each read waiting out its timeout as VISA's does; a device clear ends the wait."""
+
+    def __init__(self, dev):
+        super().__init__(dev)
+        self.owes = False
+        self.cleared = 0
+
+    def write(self, cmd):
+        if cmd.strip() == "*OPC?":
+            self.owes = True
+            return
+        super().write(cmd)
+
+    def query(self, cmd, delay=None):
+        if cmd.strip() == "*OPC?":
+            self.write(cmd)
+            return self.read()
+        return super().query(cmd, delay)
+
+    def read(self):
+        if self.owes:
+            time.sleep(float(self.timeout or 3000) / 1000.0)
+            raise TimeoutError("VI_ERROR_TMO")
+        return super().read()
+
+    def clear(self):
+        self.cleared += 1
+        self.owes = False
+
+
+class SweepingBus(Bus):
+    def open_resource(self, name):
+        self.res = Sweeping(self.devices[name])
+        return self.res
+
+
+@pytest.fixture
+def sweeping():
+    bus = SweepingBus({"GPIB0::24::INSTR": Device("keithley/2400")})
+    set_resource_manager(bus)
+    yield bus
+    set_resource_manager(None)
+
+
+VISA_LAB = """
+lab: Sweep bench
+instruments:
+  smu: { card: keithley/2400, address: "GPIB0::24::INSTR", limits: { V: [-5, 5] }, rates: { V: 5 } }
+"""
+
+
+def test_a_stop_ends_a_scripts_long_wait_for_opc_within_a_second(sweeping, folder, tmp_path, monkeypatch):
+    monkeypatch.setattr(adapters, "WAIT_SLICE_MS", 200)
+    lab = build_lab(VISA_LAB)
+    write(folder, "long_wait.py", """
+        import pyvisa
+        smu = pyvisa.ResourceManager().open_resource("GPIB0::24::INSTR")
+        smu.timeout = 40000          # a long sweep: the script waits up to 40 s for it
+        try:
+            print(smu.query("*OPC?"))
+        finally:
+            print("finally ran")
+    """)
+    t0 = time.monotonic()
+    gate, request, report = run(lab, folder, tmp_path, "long_wait.py", stop_after=1.5)
+    assert time.monotonic() - t0 < 15, report.message                      # not the script's 40 s
+    assert report.status == "aborted" and "stop requested" in report.message, report.message
+    assert sweeping.res.cleared >= 1                     # its late answer is never taken for another command's
+    assert "finally ran" in output(report)
+    assert "KEITHLEY" in lab.instrument("smu").query_raw("*IDN?")          # in step after it
+
+
+def test_a_direct_read_that_times_out_leaves_the_instrument_owing_its_reply(sweeping, folder, tmp_path):
+    lab = build_lab(VISA_LAB)
+    write(folder, "read.py", """
+        import pyvisa
+        smu = pyvisa.ResourceManager().open_resource("GPIB0::24::INSTR")
+        try:
+            smu.read()                   # nothing was asked: it times out
+        except Exception as e:
+            print("read failed:", type(e).__name__)
+        print(smu.query("*IDN?"))
+    """)
+    gate, request, report = run(lab, folder, tmp_path, "read.py")
+    assert report.status == "done", report.message
+    out = output(report)
+    assert "read failed" in out and "KEITHLEY" in out, out
+    assert sweeping.res.cleared >= 1   # what it may still send was dropped, never read as the *IDN? reply
+
+
+# ------------------------------------------------------------------ 1.4 a thread of the script's own
+
+def test_a_scripts_own_polling_thread_never_keeps_its_run_going_after_a_stop(lab, folder, tmp_path, monkeypatch):
+    monkeypatch.setattr(scriptrun, "GRACE_S", 1.0)
+    monkeypatch.setattr(scriptrun, "MAX_GRACE_S", 60.0)
+    write(folder, "poller.py", """
+        import threading, time, pyvisa
+        rm = pyvisa.ResourceManager()
+        smu = rm.open_resource("GPIB0::24::INSTR")
+        lockin = rm.open_resource("GPIB0::8::INSTR")
+
+        def watch():   # a live plot's readings, in a thread of its own (not a daemon)
+            while True:
+                lockin.query("SOURce:FREQuency?")
+                time.sleep(0.2)
+        threading.Thread(target=watch).start()
+        smu.write("SOUR:VOLT 0.5")
+        for k in range(10000):
+            time.sleep(0.1)
+    """)
+    events = []
+    t0 = time.monotonic()
+    gate, request, report = run(lab, folder, tmp_path, "poller.py", stop_after=1.5, progress=events.append)
+    assert time.monotonic() - t0 < 20, report.message   # not MAX_GRACE_S
+    assert report.status == "aborted" and "its main script ended" in report.message, report.message
+    kinds = [(e.get("event"), e.get("phase")) for e in events]
+    assert ("phase", "stopping") in kinds and kinds.index(("phase", "stopping")) < kinds.index(("end", None)), kinds
+    assert lab.instrument("smu").read("V") == 0   # back to safe
+
+
+# ------------------------------------------------------------------ 1.5 a process that outlives its kill
+
+def test_a_script_process_that_outlives_its_kill_still_goes_back_to_safe(lab, folder, tmp_path, monkeypatch):
+    monkeypatch.setattr(scriptrun, "GRACE_S", 1.0)
+    monkeypatch.setattr(scriptrun, "END_WAIT_S", 1.0, raising=False)
+    monkeypatch.setattr(scriptrun._Job, "end", lambda self: None)   # ended, and still there (stuck in a driver)
+    write(folder, "stuck.py", """
+        import time, pyvisa
+        smu = pyvisa.ResourceManager().open_resource("GPIB0::24::INSTR")
+        smu.write("OUTP ON")
+        smu.write("SOUR:VOLT 2")
+        while True:
+            try:
+                time.sleep(0.2)
+            except KeyboardInterrupt:
+                pass
+    """)
+    gate, request, report = run(lab, folder, tmp_path, "stuck.py", stop_after=1.0)
+    assert report.status == "aborted" and "so Kelvin ended it" in report.message, report.message
+    assert any("was still there" in w for w in report.warnings), report.warnings
+    assert lab.instrument("smu").read("output") is False   # back to safe all the same
