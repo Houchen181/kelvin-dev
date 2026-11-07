@@ -2925,29 +2925,55 @@ class LabRuntime:
         """A person is about to touch the sample (connect it, rewire, flip a breakout box): stop what runs, bring
         everything that applies something to the sample (sources, excitations, light, RF) to safe with its outputs
         off, and hold every drive where it is until a person unlocks (hands_off). Temperature, field and positions
-        stay as they are. Measuring still works. Waits for a stopped plan to finish its own safe-stop steps."""
-        self.hands = {"by": by, "since": datetime.now().isoformat(timespec="seconds")}
+        stay as they are. Measuring still works. Waits HANDS_WAIT_S for a stopped plan to finish its own safe-stop
+        steps (a magnet's ramp down can take half an hour); past that it says so, and the rest goes to safe in the
+        background as soon as the stopped work has ended, unless a person has unlocked meanwhile."""
+        hands = {"by": by, "since": datetime.now().isoformat(timespec="seconds")}
+        self.hands = hands
         self.lab.hands_on = self.hands   # at once: nothing moves away from safe from here on, even before the stop lands
         self.stop(by, report=False)
-        with self.lock:
-            lines: List[str] = []
-            kept: List[str] = []
-            held: List[str] = []
-            with self.gate.acting_as(by):
-                for name, inst in self.lab.instruments.items():
-                    if not inst.enabled:
-                        continue
-                    if protection.applies_to_sample(inst.card):
-                        lines += [r.message for r in self.gate.to_safe(name)]
-                    else:
-                        (held if protection.holds_position(inst.card) else kept).append(name)
-            lines = lines or ["everything that reaches the sample was already at safe"]
-            if kept:
-                lines.append("kept as they are (they don't touch the sample): %s" % ", ".join(kept))
-            if held:
-                lines.append("held where they are, nothing on them moves until you unlock: %s" % ", ".join(held))
-            self.gate.log.write("hands_on", by=by, steps=lines)
-            self._refresh()
+        what = self.held_by()
+        if self.lock.acquire(timeout=HANDS_WAIT_S):
+            try:
+                return self._hands_to_safe(by)
+            finally:
+                self.lock.release()
+
+        def later() -> None:
+            if not self.lock.acquire(timeout=AFTER_STOP_S):
+                self.gate.log.write("hands_on", by=by, steps=["the stopped work had not ended after %s: nothing was "
+                                                              "put to safe by the hands-on lock" % _dur(AFTER_STOP_S)])
+                return
+            try:
+                if self.hands is hands:   # still on (a person may have unlocked, or locked again, meanwhile)
+                    self._hands_to_safe(by)
+            finally:
+                self.lock.release()
+        threading.Thread(target=later, daemon=True, name="kelvin-hands-on").start()
+        return ["Kelvin stopped %s, which is still ending: everything that reaches the sample goes to safe as soon as "
+                "it has. Nothing moves away from safe meanwhile." % what]
+
+    def _hands_to_safe(self, by: str) -> List[str]:
+        """Hands on the sample, with the lab: what reaches the sample to safe, outputs off; the rest held or kept."""
+        started = time.time()
+        lines: List[str] = []
+        kept: List[str] = []
+        held: List[str] = []
+        with self.gate.acting_as(by):
+            for name, inst in self.lab.instruments.items():
+                if not inst.enabled:
+                    continue
+                if protection.applies_to_sample(inst.card):
+                    lines += [r.message for r in self.gate.to_safe(name)]
+                else:
+                    (held if protection.holds_position(inst.card) else kept).append(name)
+        lines = lines or ["everything that reaches the sample was already at safe"]
+        if kept:
+            lines.append("kept as they are (they don't touch the sample): %s" % ", ".join(kept))
+        if held:
+            lines.append("held where they are, nothing on them moves until you unlock: %s" % ", ".join(held))
+        self.gate.log.write("hands_on", by=by, steps=lines)
+        self._look_after(started)
         return lines
 
     def owner_check(self, pin: Any) -> None:
@@ -2959,12 +2985,12 @@ class LabRuntime:
     def hands_off(self, by: str, pin: Any = None) -> List[str]:
         """The person is done with the sample: drives may move again (each still within limits and approvals).
         The mounted device's caps are written into the instruments again, in case one was replaced or reset. With
-        an owner's PIN set, only with it (PermissionError)."""
+        an owner's PIN set, only with it (PermissionError). Two flags: no lab lock, so it never waits behind a run (the
+        caps wait for Kelvin to be idle, as always)."""
         self.owner_check(pin)
-        with self.lock:
-            self.hands = None
-            self.lab.hands_on = None
-            self.gate.log.write("hands_off", by=by)
+        self.hands = None
+        self.lab.hands_on = None
+        self.gate.log.write("hands_off", by=by)
         self.audit_event("Hands on the sample unlocked", by)
         return self._write_caps(by)
 
@@ -5816,10 +5842,12 @@ class LabRuntime:
 
     def switch_instrument(self, name: str, on: bool, by: str) -> None:
         """A person switches an instrument on or off for this lab (Lab panel). Off: Kelvin sends it nothing at all
-        (lab.py Lab.switch). Not while a plan or the queue runs. Raises KeyError, RuntimeError, or AdapterError when
-        switching on cannot connect. Off for one that isn't connected (still connecting, or set aside with why) waits
-        for nothing, not even the lab: nothing of it is in use (an open that hung in a maker's driver held the lab,
-        and this switch behind it, for good)."""
+        (lab.py Lab.switch). Not while a plan or the queue runs: said at once (it waited out the whole run, then
+        switched as the run ended, though its own check said no). Behind other work it waits BUSY_WAIT_S at most, then
+        says what has the lab (LabBusy); it holds only this instrument, so the others stay readable meanwhile. Raises
+        KeyError, RuntimeError, or AdapterError when switching on cannot connect. Off for one that isn't connected
+        (still connecting, or set aside with why) waits for nothing, not even the lab: nothing of it is in use (an open
+        that hung in a maker's driver held the lab, and this switch behind it, for good)."""
         lab = self.lab
         inst = lab.instruments.get(name)
         if not on and inst is not None and not inst.enabled:
@@ -5828,13 +5856,16 @@ class LabRuntime:
                 if was is not None:   # (one off already: nothing to do, nor to log)
                     self.gate.log.write("instrument_switched", by=by, instrument=name, on=False, was=was)
                 return
-        with self.lock:
+        if inst is None:
+            raise KeyError("no instrument %r in %s" % (name, lab.config.name))
+        refused = "A plan or the queue is running; stop it first, then switch %s %s." % (name, "on" if on else "off")
+        if self.running_now():
+            raise RuntimeError(refused)
+        with self._person_work("switching %s %s" % (name, "on" if on else "off"), uses=[name]):
             if name not in self.lab.instruments:
                 raise KeyError("no instrument %r in %s" % (name, self.lab.config.name))
-            live = self.live or {}
-            if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
-                raise RuntimeError("A plan or the queue is running; stop it first, then switch %s %s."
-                                   % (name, "on" if on else "off"))
+            if self.running_now():   # started meanwhile, between items of the queue
+                raise RuntimeError(refused)
             inst = self.lab.instruments[name]
             if inst.enabled == on and not inst.unavailable:
                 return
@@ -5843,12 +5874,12 @@ class LabRuntime:
             except Exception as e:   # on, not connected, and why: never taken for "switched off" afterwards
                 self.gate.log.write("switch_on_failed" if on else "switch_off_failed", by=by, instrument=name,
                                     error=str(e).splitlines()[0][:300] if str(e) else type(e).__name__)
-                self._refresh()
+                self._refresh(CLOSING_WAIT_S, only=[name])
                 raise
             self.gate.log.write("instrument_switched", by=by, instrument=name, on=on)
             if on:
                 self._caps_if_waiting()
-            self._refresh()
+            self._refresh(CLOSING_WAIT_S, only=[name])
 
     def ask_to_switch_on(self, name: str, why: str) -> str:
         """Kelvin needs an instrument whose connection a person turned off (the Lab panel's switch): it asks them,
@@ -5894,17 +5925,17 @@ class LabRuntime:
 
     def scan_found(self) -> List[Dict[str, Any]]:
         """Connected instruments as data, each with a suggested name. Raises AdapterError without VISA.
-        What the scan looked through, and why it found what it did, goes to last_survey."""
+        What the scan looked through, and why it found what it did, goes to last_survey. Not while a plan or the queue
+        runs (a scan asks every instrument on their buses who it is), said at once; behind other work it waits
+        BUSY_WAIT_S at most (LabBusy)."""
         from ..discovery import scan_survey
         in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()
                   if not ic.address.startswith("sim://")}
-        with self.lock:
-            self.busy = "scanning for instruments"
-            try:
-                found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network,
-                                            catalog=self.collection)
-            finally:
-                self.busy = None
+        if self.running_now():
+            raise LabBusy("Kelvin is busy with %s; scan when it has finished, or stop it first." % self.held_by())
+        with self._person_work("scanning for instruments"):
+            found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network,
+                                        catalog=self.collection)
         self._remember_scan(found, looked)
         taken = [n for n in self.lab.config.instruments if not self.lab.config.instruments[n].address.startswith("sim://")]
         out = []
@@ -7727,7 +7758,25 @@ class LabRuntime:
             self.gate.log.write("card_try", by="agent", card=card.id, address=address,
                                 answered=sum(1 for r in result["readings"] if "value" in r))
             return cardtry.summary(result)
-        return self._do("trying card %s" % card.id, run)
+        from ..scriptrun import lab_name
+        here = lab_name(self.lab, address)   # the lab's instrument there, however its address is spelled
+        return self._do("trying card %s" % card.id, run, uses=[here] if here else [])
+
+    def card_try(self, card: Any, address: str) -> Dict[str, Any]:
+        """Set up's Try, a person's: the card on the address they typed (cardtry.try_card), as one change to the lab,
+        never beside a running plan, the queue or another change (it once read and wrote a lab instrument in the middle
+        of a run): behind such work it waits BUSY_WAIT_S at most, then says what has the lab (LabBusy). On an
+        instrument of the lab, however its address is spelled (GPIB::12 is GPIB0::12::INSTR, COM3 is ASRL3::INSTR),
+        through the lab's own connection, holding that instrument; elsewhere holding none, so readings go on. Raises
+        what try_card raises (AdapterError, OSError...)."""
+        from .. import cardtry
+        from ..scriptrun import lab_name
+        if self.running_now():   # said at once, not after a wait
+            raise LabBusy("Kelvin is busy with %s; try the card when it has finished, or stop it first."
+                          % self.held_by())
+        here = lab_name(self.lab, address)
+        with self._person_work("trying card %s on %s" % (card.id, address), uses=[here] if here else []):
+            return cardtry.try_card(card, address, self.lab)
 
     def save_card(self, text: str, by: str = "agent", version: bool = False) -> str:
         """version: the card takes the id of one of Kelvin's cards (its own or the collection's) on purpose, as this
@@ -8448,7 +8497,8 @@ class LabRuntime:
                 name, " (it will use %s)" % news if news else "")
         if inst.enabled and card is None:
             return "%s is connected, with its card as it is now" % name
-        with self.lock:
+
+        def run() -> str:   # one change to the lab, as any other: behind a run it says so rather than wait it out
             try:
                 news = self.lab.reconnect(name, card)
             except Exception as e:
@@ -8457,11 +8507,12 @@ class LabRuntime:
             self.gate.log.write("instrument_connected", by=by, instrument=name, card=inst.card.id,
                                 reloaded=bool(news))
             self._caps_if_waiting()
-            self._refresh()
-        health = self.lab.health_check([name])[0]
-        return "%s is connected now%s%s" % (name, ", with " + news if news else "",
-                                            ": " + "; ".join(health.problems) if health.problems else
-                                            " and answers as its card expects")
+            self._refresh(CLOSING_WAIT_S, only=[name])
+            health = self.lab.health_check([name])[0]
+            return "%s is connected now%s%s" % (name, ", with " + news if news else "",
+                                                ": " + "; ".join(health.problems) if health.problems else
+                                                " and answers as its card expects")
+        return self._do("connecting %s" % name, run, uses=[name])
 
     def _fetch_files(self, env: str, source: str) -> str:
         """A maker's files into an environment: a folder or file on this computer, or a web address. A Python package
@@ -10283,14 +10334,13 @@ class LabRuntime:
     def mark_reviewed(self, by: str = "human") -> List[str]:
         """A person reviewed the limits of the instruments Kelvin added (their lab config has no marks now, and
         nothing else changed): from now on they count as the person's, with nothing to reconnect. Only the portal
-        calls this; no agent tool can."""
-        with self.lock:
-            names = self.lab.config.unreviewed()
-            for ic in self.lab.config.instruments.values():
-                ic.added_by = ""
-            self.lab.config.observe_only = False
-            self.gate.log.write("lab_reviewed", by=by, instruments=names)
-            return names
+        calls this; no agent tool can. Marks only: no lab lock, so it never waits behind a run."""
+        names = self.lab.config.unreviewed()
+        for ic in self.lab.config.instruments.values():
+            ic.added_by = ""
+        self.lab.config.observe_only = False
+        self.gate.log.write("lab_reviewed", by=by, instruments=names)
+        return names
 
     def switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str = "human",
                    idle: Optional[Callable[[], bool]] = None, renamed: Optional[Dict[str, str]] = None) -> List[str]:
@@ -10344,10 +10394,24 @@ class LabRuntime:
 
     def _switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str,
                     renamed: Optional[Dict[str, str]] = None) -> List[str]:
-        with self.lock:
+        """Refused while a plan or the queue runs (a queue switched under went on with a gate that had forgotten its
+        approval, or took a Stop from that morning for one pressed now), and behind other work after BUSY_WAIT_S
+        (LabBusy), never waiting it out to switch hours later. The new gate goes on from the old one's stops and the
+        queue's approved actions (SafetyGate.take_over); the new lab from its count of stops."""
+        def refused() -> None:
             if self.live and self.live.get("status") == "running":
                 raise RuntimeError("a plan is running; wait for it to finish or stop it first")
+            if self.queue.state in ("running", "pausing"):
+                raise RuntimeError("the queue is running; pause it or stop it first, then switch the lab")
+        refused()
+        waited = self._take_lab()
+        if waited is not None:
+            raise LabBusy(self._busy_said(waited))
+        try:
+            refused()   # checked again with the lab: the queue may have started meanwhile
             old = self.lab
+            if old is not lab:   # its waits, and the work lined up behind a Stop, count on from the old lab's stops
+                lab.stops.count = max(lab.stops.count, old.stops.count)
             kept = self._carry_over(old, lab, renamed) if old is not lab else []
             # the old lab's own connections closed before the new lab opens its own, each on a thread of its own and
             # all within SWITCH_CLOSE_S, as when Kelvin quits: a camera library whose closing never returned held the
@@ -10366,7 +10430,9 @@ class LabRuntime:
             self._follow_lab_folder(lab, info, by)
             for new, was in (renamed or {}).items():   # before the sample's protection and the watches hold again
                 self._renamed_here(was, new)
+            was_gate = self.gate
             self.gate = SafetyGate(lab, self.approver, self._new_log(lab.clock), envelope, operator="agent")
+            self.gate.take_over(was_gate)   # its stops, the latest stop's reason, its trips, the queue's actions
             self.engine = RunEngine(self.gate, self._store())
             self.engine.progress = self._on_progress
             self._apply_protection(recheck=True)
@@ -10379,14 +10445,18 @@ class LabRuntime:
             self._restore_watches()              # the ones kept for this lab come back
             if running:
                 self.monitor.start()
-            self._status = {}
+            with self._status_lock:
+                self._status, self._status_held = {}, {}
             with self._readings_lock:
                 self._readings = {}   # the old lab's: an instrument of the same name may be another one
-            self._refresh()
+            self._looked, self._settings_at = {}, {}
+            self._refresh(CLOSING_WAIT_S)
             self.gate.log.write("lab_changed", by=by, lab=lab.config.name, instruments=sorted(lab.instruments),
                                 kind=info.get("kind"), kept=kept or None, set_aside=info.get("set_aside") or None,
                                 still_closing=still or None)
             results = [str(r) for r in self.engine.preflight()]
+        finally:
+            self.lock.release()
         return results
 
     def scan(self) -> str:

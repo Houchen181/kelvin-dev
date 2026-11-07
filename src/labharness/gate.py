@@ -546,6 +546,18 @@ class SafetyGate:
     def stop_generation(self) -> int:
         return self._stop_gen
 
+    def take_over(self, old: "SafetyGate") -> None:
+        """This gate replaces `old` (the lab was switched): it goes on from old's count of stops, the latest stop's
+        reason, its guard trips and the queue's approved actions. What compares against them (the work lined up
+        behind a Stop, a paused queue's next item, the queue's count of trips) reads this gate from now on: a gate
+        that started again at 0 once took a Stop pressed that morning for one pressed now ("stopped before it
+        started"), and forgot what the queue's card had approved. Approval mode is not carried: a new lab starts in
+        ask mode."""
+        self._stop_gen = max(self._stop_gen, old._stop_gen)
+        self.stop_reason = old.stop_reason
+        self.trip_count = max(self.trip_count, old.trip_count)
+        self.queue_actions = old.queue_actions
+
     # ------------------------------------------------------------------ auto mode
 
     def auto_verdict(self, inst: Instrument, spec: ParamSpec, values: List[Any]) -> Tuple[bool, str]:

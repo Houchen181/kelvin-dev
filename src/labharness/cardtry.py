@@ -31,11 +31,16 @@ def _clone_without_connect(card: Card) -> Card:
 
 
 def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
-    """{identity, matches, readings: [{name, label, value, unit, error, skipped}], errors, address, reused}"""
+    """{identity, matches, readings: [{name, label, value, unit, error, skipped}], errors, address, reused}
+    An instrument of the lab is asked through the lab's own connection, however the address is spelled (GPIB::12 is
+    GPIB0::12::INSTR, COM3 is ASRL3::INSTR): another spelling once opened a second session to it, and on a COM port
+    the error then blamed another program."""
+    from .scriptrun import canonical
     reuse = None
     if lab is not None:
+        want = canonical(address)
         for name, inst in lab.instruments.items():
-            if inst.config.address == address and not inst.simulated:
+            if canonical(inst.config.address) == want and not inst.simulated:
                 if card.library or "://" in address and not address.lower().startswith(("serial://", "prologix://")):
                     raise AdapterError("%s is connected in the lab as %s: save this card and use it for %s, or take %s "
                                        "out of the lab config (Lab, Set up) to try another card on it."

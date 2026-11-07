@@ -36,7 +36,8 @@ from ..configversions import ConfigVersions, widens as config_widens
 from .. import central, edition, expstore
 from ..homeboard import FILE as HOME_FILE, HomeBoard
 from ..agent.approval import WebApprover
-from ..agent.runtime import SETUP_STEPS, KeptAlready, LabRuntime, Underway, Viewer, not_shown, writable_folder
+from ..agent.runtime import (SETUP_STEPS, KeptAlready, LabBusy, LabRuntime, Underway, Viewer, not_shown,
+                             writable_folder)
 from ..agent.server import build_server
 from ..adapters import AdapterError
 from ..autosetup import AutoSetup, log as setup_log, reviewed as mark_reviewed
@@ -477,7 +478,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             runtime.refresh_cards([c.id for c in collection.cards() if c.id not in runtime.lab.registry])
         return status
 
-    setup = AutoSetup(runtime, settings, home, can_switch=lambda: busy_problem() is None, make_card=write_card)
+    setup = AutoSetup(runtime, settings, home, can_switch=lambda: busy_problem(setup_too=False) is None,
+                      make_card=write_card)
     runtime.card_writer = write_card                      # draft_card: a card for an instrument someone named
 
     def vi_model(purpose: str, attribution: Dict[str, Any]) -> Callable[[str, str], Tuple[str, str]]:
@@ -1727,8 +1729,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         k = request.scope.get("kelvin") or {}
         by = "human (phone %s)" % k["device"].get("name") if k.get("device") else "human (portal)"
         lines: List[str] = []
-        if body.get("on") is True:
-            lines = await asyncio.to_thread(runtime.hands_on, by)
+        if body.get("on") is True:   # it only makes the lab safer: never behind other work for a shared thread
+            lines = await own_thread(runtime.hands_on, by)
         else:
             if role_of(request) == "watch":
                 return error(403, "This phone can lock, not unlock. Unlock on the Kelvin computer.")
@@ -2266,8 +2268,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         address = str(body.get("address") or "").strip()
         if not address:
             return error(400, "Give the address to try it on, as in the lab config.")
-        try:
-            result = await asyncio.to_thread(cardtry.try_card, card, address, runtime.lab)
+        try:   # as one change to the lab: never beside a run, nor a second session to a lab instrument
+            result = await asyncio.to_thread(runtime.card_try, card, address)
+        except LabBusy as e:
+            return error(409, str(e))
         except Exception as e:
             return error(400, "Could not try it: %s" % (str(e).splitlines()[0][:300] if str(e) else type(e).__name__))
         runtime.gate.log.write("card_try", by="human", card=card.id, address=address,
@@ -2678,12 +2682,21 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     # ------------------------------------------------------------------ the lab Kelvin controls (people only)
 
-    def busy_problem() -> Optional[str]:
+    def busy_problem(setup_too: bool = True) -> Optional[str]:
+        """What keeps a person's change to the lab's set-up (Save and connect, Scan, Set up, moving the data folder,
+        reading the lab's programs) from going ahead now, said at once: Kelvin answering, a run, the queue (Save and
+        connect once switched the lab under a running queue, and a Scan swept the GPIB board it used), or the
+        instrument set-up at work. setup_too=False: the set-up's own switch of labs asks."""
         if agent.answering():
             return "Kelvin is answering; wait for it or press stop first."
         live = runtime.live
         if live and live.get("status") == "running":
             return "A plan is running; wait for it to finish or stop it first."
+        if runtime.queue.state in ("running", "pausing"):
+            return "The sequence is running; pause it or stop it first."
+        if setup_too and runtime.setting_up:
+            said = str((runtime.setup_status or {}).get("message") or "").rstrip(".")
+            return "Kelvin is setting up the instruments%s; wait for it to finish." % (" (%s)" % said if said else "")
         return None
 
     async def lab_view(request: Request) -> Response:
@@ -2844,7 +2857,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     async def setup_view(request: Request) -> Response:
         """GET: where setting up the connected instruments is. POST: a person asks Kelvin to set them up again."""
         if request.method == "POST":
-            problem = busy_problem()
+            problem = busy_problem(setup_too=False)   # one already at work: its status, as it goes on
             if problem:
                 return error(409, problem)
             setup.start("asked")
@@ -3127,6 +3140,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         try:
             found = await asyncio.to_thread(runtime.scan_found)
             return JSONResponse({"found": found, "survey": runtime.last_survey})
+        except LabBusy as e:
+            return error(409, str(e))
         except AdapterError as e:
             return error(503, str(e))
 
