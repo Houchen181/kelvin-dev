@@ -212,11 +212,12 @@ def test_save_and_connect_is_refused_while_the_queue_runs_and_the_queue_runs_on(
     rt.stop("human (portal)", report=False)                                    # a Stop pressed earlier that day
     rt.queue_add("step: settle_a_bit\nwait: 1.5\n", by="human")
     rt.queue_add(PLAN_IV, by="human")
+    other = build_virtual_lab(clock=RealClock(), seed=1)   # built first: building it is no part of the refusal's time
     assert rt.queue_start(by="human").startswith("queue started"), rt.queue.reason
     wait_until(lambda: rt.queue.items[0].status == "running", "the queue never started")
     t0 = time.monotonic()
     with pytest.raises(RuntimeError, match="the queue is running"):
-        rt.switch_lab(build_virtual_lab(clock=RealClock(), seed=1), None, INFO, "human (portal)")
+        rt.switch_lab(other, None, INFO, "human (portal)")
     assert time.monotonic() - t0 < 1.0
     rt._queue_thread.join(30)
     assert [i.status for i in rt.queue.items] == ["done", "done"], [(i.status, i.message) for i in rt.queue.items]
