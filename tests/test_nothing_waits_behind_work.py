@@ -297,6 +297,35 @@ def test_instruments_connect_beside_a_run_that_doesnt_use_them(tmp_path, monkeyp
     t.join(5)
 
 
+def test_connecting_beside_a_run_leaves_the_devices_limits_as_they_are(tmp_path, monkeypatch):
+    """Holding the lab to the mounted device's protection again clears its limits first, then sets them: never beside
+    a run, which sets values against them meanwhile. They hold for the instruments still connecting already (set as
+    the lab opened, kept by a reconnect), and the caps are written into the instruments once Kelvin is idle."""
+    from labharness import protection
+    monkeypatch.setattr(rtmod, "CONNECT_WAIT_S", 0.2)
+    lab, rt = later_lab(tmp_path)
+    rt.mounted = {"protection": {"limits": {"smu.V": [-1, 1]}}, "device_name": "chip 7"}
+    applied = []
+    monkeypatch.setattr(protection, "apply", lambda *a, **k: applied.append(threading.get_ident()) or [])
+    lab.reconnect("lockin")
+    held, done = threading.Event(), threading.Event()
+
+    def a_run():
+        with rt.lock, rt.lock.only(["lockin"]):
+            held.set()
+            done.wait(20)
+    t = threading.Thread(target=a_run, daemon=True)
+    t.start()
+    assert held.wait(5)
+    rt.caps_waiting = False
+    assert rt.connect_pending()["connected"] == ["smu", "tc"]
+    assert applied == [] and rt.caps_waiting                                   # nothing cleared beside the run
+    done.set()
+    t.join(5)
+    rt.connect_pending()
+    assert applied == [threading.get_ident()]                                  # with the lab free, as before
+
+
 def test_an_instrument_the_work_holds_says_what_it_waits_for_and_connects_after(tmp_path, monkeypatch):
     monkeypatch.setattr(rtmod, "CONNECT_WAIT_S", 0.2)
     lab, rt = later_lab(tmp_path)

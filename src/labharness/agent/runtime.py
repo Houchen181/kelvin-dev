@@ -8484,9 +8484,13 @@ class LabRuntime:
             left = waiting
         got = self.lock.acquire(timeout=CONNECT_WAIT_S)   # the lab, if it is free: a run may have it for hours
         try:
-            self._apply_protection(recheck=True)   # the mounted device's caps: written now if they can be, else
-            if got:                                # when Kelvin is next idle (caps_waiting)
+            if got:   # the mounted device's protection held again, its caps written now if they can be
+                self._apply_protection(recheck=True)
                 self._caps_if_waiting()
+            else:   # a run has the lab: holding the protection again clears its limits first, never beside work that
+                # sets values against them; they hold for these instruments already (set as the lab opened, kept by a
+                # reconnect), and the caps are written into the instruments when Kelvin is next idle
+                self.caps_waiting = bool((self.mounted or {}).get("protection"))
             self._look_after(started, also=done)
         finally:
             if got:
