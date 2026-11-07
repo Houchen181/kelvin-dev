@@ -303,6 +303,7 @@ class Monitor:
         self._doing_since: Optional[float] = None
         self._slowest: Tuple[str, float] = ("", 0.0)   # the slowest check of this look, and how long it took
         self._late: Optional[Alarm] = None         # "Kelvin's watching is held up", while it is
+        self._record: Optional[Alarm] = None       # "the lab's record can't be written", while it can't
         self._unchecked: Dict[int, float] = {}     # interlocks not checked lately, their reading busy: since (lab time)
         self._safing: Dict[str, _Safing] = {}      # the latest to-safe of each drive (instr.param)
         self._safe_last: Dict[str, _Safing] = {}   # and of each instrument: its next waits for it
@@ -483,7 +484,7 @@ class Monitor:
 
     def tick(self) -> None:
         """One look at the lab: the watches, the set points, the interlocks, the error queues, whether each instrument
-        answers, the buses and the instruments' health, each on its own: one that fails never keeps
+        answers, the buses, the instruments' health and the lab's record, each on its own: one that fails never keeps
         the others from their turn (its error is raised once they have had it)."""
         began = self.last_tick = self._pass_began = time.time()
         self._doing, self._doing_since, self._slowest = None, None, ("", 0.0)
@@ -498,7 +499,8 @@ class Monitor:
                                            ("checking that the instruments answer", self._check_alive, (now,)),
                                            # first: a hung bus is one alarm, and its instruments' own don't go up
                                            ("checking the GPIB buses", self._check_buses, ()),
-                                           ("checking the instruments' health", self._check_health, (now,))):
+                                           ("checking the instruments' health", self._check_health, (now,)),
+                                           ("checking the lab's record", self._check_record, ())):
                     self._at(doing)
                     try:
                         check(*args)
@@ -1314,3 +1316,28 @@ class Monitor:
                 self._tell(a, "", instrument=name)
             elif not err and name in self._errors:
                 self._clear(self._errors.pop(name).id, "%s reports no more errors" % name)
+
+    # ------------------------------------------------------------------ the lab's record
+
+    def _check_record(self) -> None:
+        """The lab's record (events.jsonl), while it can't be written (its folder's drive or network share went away,
+        a full disk): one alarm says so. Kelvin keeps what happens meanwhile, and writes it there as soon as it can
+        (EventLog: tried again every so often, also from here); then the alarm clears."""
+        log = getattr(self.gate, "log", None)
+        flush = getattr(log, "flush", None)
+        if getattr(log, "trouble", None) and flush is not None:
+            flush()   # it may be back (no more often than the log's own retries)
+        trouble = getattr(log, "trouble", None)
+        with self._lock:
+            on = self._record
+            if trouble and on is None:
+                a = self._record = self._new("record", "the lab's record", "The lab's record can't be written: %s"
+                                             % trouble, source="record")
+            elif not trouble and on is not None:
+                self._record = None
+        if trouble and on is None:
+            self._tell(a, "Kelvin keeps what happens meanwhile and writes it there as soon as it can. Runs can't keep "
+                          "their data there either: check that the data folder's drive or network share is there, "
+                          "with room.")
+        elif not trouble and on is not None:
+            self._clear(on.id, "the lab's record is written again")

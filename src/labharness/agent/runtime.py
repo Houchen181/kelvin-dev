@@ -1819,7 +1819,10 @@ class LabRuntime:
                 self.queue.state, self.queue.reason = "pausing", "stopped by %s" % by
                 self.queue.save()
         self.gate.request_abort()
-        self.gate.log.write("stop", by=by, account=self.user, declined=declined, note=note or None)
+        try:
+            self.gate.log.write("stop", by=by, account=self.user, declined=declined, note=note or None)
+        except Exception:   # the stop went out all the same; a record that can't be written has its own alarm
+            pass
         if report:
             threading.Thread(target=self._after_stop, args=(by, self.gate.stop_generation), daemon=True,
                              name="kelvin-after-stop").start()
@@ -1983,6 +1986,7 @@ class LabRuntime:
             return "invalid plan: %s" % e, None
         meta = self._attribute(plan)
         apart = meta.pop("_apart", "")
+        before = (self.live or {}).get("run_id")
         try:
             with self._device_protection(meta) as held, \
                     self.lock.only(self._involved(self._uses(plan_text, plan.requires))):   # the rest stay readable
@@ -1990,6 +1994,9 @@ class LabRuntime:
                                          notes=self._dry_run_note(plan_text))
         except RunFolderError as e:   # nowhere to keep it: said in words, not a bare tool error (l09, l10)
             return "not run: %s" % e, None
+        finally:   # one that ended on an error on its way out ends in the live view too, as a script's does
+            if (self.live or {}).get("run_id") != before:
+                self._live_ended((self.live or {}).get("run_id"))
         with self.lock.only([]):   # writing its report uses no instrument: all of them can be read meanwhile
             made = self._auto_report(report.run_id)
         if report.run_id:
@@ -4123,10 +4130,15 @@ class LabRuntime:
                         apart = meta.pop("_apart", "")   # kept with the item, said where its chat sees the queue
                         if item.library:   # a scan run again, its settings restored: noted under its own entry
                             meta["library"] = item.library
-                        with self._device_protection(meta), self.lock.only(uses + self._involved(plan.requires)):
-                            report = self.engine.run(plan, meta=dict(meta, queue={
-                                "item": item.id, "position": position, "note": item.note}), folder=item.folder,
-                                since=since)
+                        before = (self.live or {}).get("run_id")
+                        try:
+                            with self._device_protection(meta), self.lock.only(uses + self._involved(plan.requires)):
+                                report = self.engine.run(plan, meta=dict(meta, queue={
+                                    "item": item.id, "position": position, "note": item.note}), folder=item.folder,
+                                    since=since)
+                        finally:   # one that ended on an error on its way out ends in the live view too
+                            if (self.live or {}).get("run_id") != before:
+                                self._live_ended((self.live or {}).get("run_id"))
                         status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():
                             status = "failed"
