@@ -309,3 +309,105 @@ def test_on_labsim_a_2400_left_measuring_continuously_and_a_2450_in_2400_mode(la
         smu.write("output", False)
     finally:
         lab.close()
+
+
+# ------------------------------------------------------------------ Kelvin's own looks, slow
+
+class Counting:
+    """A connection that counts what is asked of it, around a twin."""
+    def __init__(self, inner):
+        self.inner, self.asked = inner, []
+        self.simulated = getattr(inner, "simulated", False)
+
+    def query(self, cmd):
+        self.asked.append(cmd)
+        return self.inner.query(cmd)
+
+    def write(self, cmd):
+        self.inner.write(cmd)
+
+    def close(self):
+        pass
+
+
+def test_the_lab_panel_reads_an_instrument_every_30_s_and_its_settings_every_2_minutes(tmp_path):
+    import time as _time
+    from labharness.agent import runtime as rtmod
+    rt = runtime(tmp_path)
+    smu = rt.lab.instruments["smu"]
+    smu.backend = Counting(smu.backend)
+    rt._looked.clear()   # (the runtime looked as it started)
+    rt._settings_at.clear()
+    rt._status_at = 0.0
+    rt.ui_state()
+    first = list(smu.backend.asked)
+    assert first and any(c.upper().startswith(":SOUR:VOLT:RANG") or "RANG" in c.upper() for c in first)   # settings too
+    for _ in range(3):   # the page asks every 4 s: nothing more is sent within 30 s
+        rt._status_at = 0.0
+        rt.ui_state()
+    assert smu.backend.asked == first
+    smu.write("V", 0.5)   # Kelvin changed it: the next look reads it at once
+    rt._status_at = 0.0
+    rt.ui_state()
+    assert len(smu.backend.asked) > len(first) and rt._status["smu"]["V"] == 0.5
+    first = list(smu.backend.asked)
+    rt._looked["smu"] = _time.time() - rtmod.LOOK_S - 1   # 30 s later: its readings and outputs, not its settings
+    rt._status_at = 0.0
+    rt.ui_state()
+    again = smu.backend.asked[len(first):]
+    assert again and not any("RANG" in c.upper() or "NPLC" in c.upper() for c in again)
+    assert "V_range" in rt._status["smu"]   # a setting not read now shows as it was read
+    smu.backend.asked.clear()
+    rt.ui_state(fresh=["smu"])   # a row just opened: read now, settings too
+    assert any("RANG" in c.upper() for c in smu.backend.asked)
+
+
+def test_nothing_is_read_in_the_background_on_a_bus_a_run_uses(tmp_path, monkeypatch):
+    rt = runtime(tmp_path, GPIB_LAB.replace("GPIB0::15::INSTR", "sim://smu").replace("GPIB0::10::INSTR", "sim://lu")
+                 .replace("GPIB0::9::INSTR", "sim://lb"))
+    for name, addr in (("smu", "GPIB0::15::INSTR"), ("lockin_upper", "GPIB0::10::INSTR"),
+                       ("lockin_bottom", "GPIB0::9::INSTR")):
+        inst = rt.lab.instruments[name]
+        inst.config.address = addr
+        inst.backend = Counting(inst.backend)
+        inst.backend.simulated = False
+    monkeypatch.setattr(rt.lock, "owner", lambda: (1, frozenset({"smu"})))   # a run uses the 2400
+    rt._looked.clear()
+    rt._status_at = 0.0
+    rt.ui_state()
+    assert not rt.lab.instruments["lockin_upper"].backend.asked   # same bus: left to the run
+    assert "measuring on GPIB0" in rt._status_held["lockin_upper"]
+
+
+def test_error_queues_wait_while_a_plan_runs(tmp_path):
+    rt = runtime(tmp_path)
+    smu = rt.lab.instruments["smu"]
+    smu.backend = Counting(smu.backend)
+    smu.backend.simulated = False
+    rt.gate._asked = {"smu.V": 1.0}   # a plan runs
+    try:
+        rt.monitor._check_errors(10 ** 6)
+    finally:
+        rt.gate._asked = None
+    assert not smu.backend.asked
+    rt.monitor._check_errors(2 * 10 ** 6)
+    assert smu.backend.asked   # after it, once a minute as before
+
+
+def test_a_retry_of_a_silent_instrument_waits_a_second_at_most():
+    from labharness.adapters import VisaBackend
+    from labharness import builtin_registry
+
+    class Res:
+        timeout, read_termination, write_termination = 5000, None, None
+
+        def close(self):
+            pass
+
+    class RM:
+        def open_resource(self, name):
+            return Res()
+    smu = VisaBackend("smu", builtin_registry().get("keithley/2400"), "GPIB0::15::INSTR", rm=RM())
+    with smu.brief(1000):
+        assert smu.res.timeout == 1000
+    assert smu.res.timeout == 5000

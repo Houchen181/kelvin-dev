@@ -64,6 +64,10 @@ BUSY_WAIT_S = 30.0   # how long a request waits for the lab while another holds 
 READ_WAIT_S = 10.0   # how long a reading waits for another reading of the same instrument, before it gives the latest
 UI_LISTS = ("pending", "history", "unavailable", "unreviewed", "drafts", "watches", "alarms", "notices",
             "instruments", "events")   # the Lab panel's parts that are lists
+LOOK_S = 30.0       # the Lab panel reads an instrument by itself at most this often (a run's points show meanwhile)
+SETTINGS_S = 120.0  # and its settings, which change only when someone changes them, this often
+LAB_STATUS_S = 10.0  # lab_status (the agent's look) reads again what was read longer ago than this
+RETRY_MS = 1000     # a retry of an instrument that stopped answering waits this long at most: the bus is everyone's
 PANEL_WAIT_S = 0.2   # the same, for the Lab panel's look every few seconds: it shows the latest values meanwhile
 AFTER_STOP_S = 900.0   # how long the card after a Stop waits, in the background, for the stopped work to end
 MAX_CONFIG_CHARS = 30000   # of the lab config shown at once; an instrument's own entry is always shown whole
@@ -637,6 +641,8 @@ class LabRuntime:
         self._busy_whose: Optional[Dict[str, Any]] = None   # the marks of the unshared work busy names (_whose_now)
         self._status: Dict[str, Dict[str, Any]] = {}
         self._status_at = 0.0
+        self._looked: Dict[str, float] = {}        # when the Lab panel last read each instrument
+        self._settings_at: Dict[str, float] = {}   # and its settings
         self._ui_last: Dict[Any, Dict[str, Any]] = {}   # each viewer's Lab panel parts as they last worked out
         self._ui_failed: Dict[str, float] = {}   # when a part last failed to, said in the log
         self.live: Optional[Dict[str, Any]] = None   # the run in progress (or the last one), for live displays
@@ -1034,18 +1040,37 @@ class LabRuntime:
 
     # ------------------------------------------------------------------ plumbing
 
-    def _refresh(self, wait: Optional[float] = None) -> None:
-        """Look at every instrument, for lab_status and the Lab panel: each read now, with its own lock and never the
+    def _refresh(self, wait: Optional[float] = None, look_s: float = 0.0, fresh: Iterable[str] = ()) -> None:
+        """Look at every instrument, for lab_status and the Lab panel: each read with its own lock and never the
         lab's, except one that the work changing the lab uses (a run's) or that another reading has had for longer
-        than `wait` (READ_WAIT_S): that one shows the latest values Kelvin has, and why (_status_held)."""
+        than `wait` (READ_WAIT_S): that one shows the latest values Kelvin has, and why (_status_held). look_s: one
+        read less than this long ago shows what it read then (its settings are read every SETTINGS_S), and nothing is
+        read on a GPIB bus the work under way uses (_busy_buses); fresh: read now all the same (a row just opened)."""
+        from ..adapters import BUSES, bus_of
+        fresh = set(fresh)
+        busy = self._busy_buses() if look_s else set()
         try:
             status: Dict[str, Dict[str, Any]] = {}
             held: Dict[str, str] = {}
+            now = time.time()
             for name, inst in list(self.lab.instruments.items()):
                 if not inst.enabled:
                     continue
-                from ..adapters import BUSES, bus_of
-                hung = None if inst.simulated else BUSES.text(bus_of(inst.config.address))
+                kept = {p: v for p, (v, _, _) in self._kept(name).items()}
+                bus = None if inst.simulated else bus_of(inst.config.address)
+                if look_s and self.lock.holds(name):   # the work under way uses it: said so, as a reading would
+                    held[name] = "it is in use: %s" % self.held_by()
+                    status[name] = kept
+                    continue
+                if look_s and bus and (busy is None or bus in busy) and name not in fresh:
+                    held[name] = "measuring on %s: its latest values meanwhile" % bus   # the run has the bus
+                    status[name] = kept
+                    continue
+                looked = self._looked.get(name, 0.0)
+                if look_s and name not in fresh and now - looked < look_s and inst.changed_at <= looked:
+                    status[name] = kept   # read lately, and nothing sent to it since: what it read then
+                    continue
+                hung = BUSES.text(bus)
                 if hung:   # nothing is sent on its bus now: its latest values, and why
                     held[name] = hung
                     status[name] = {p: v for p, (v, _, _) in self._kept(name).items()}
@@ -1057,16 +1082,36 @@ class LabRuntime:
                         time.strftime("%H:%M:%S", time.localtime(rest)))
                     status[name] = {p: v for p, (v, _, _) in self._kept(name).items()}
                     continue
+                settings = not look_s or name in fresh or now - self._settings_at.get(name, 0.0) >= SETTINGS_S
+                brief = getattr(inst.backend, "brief", None) if inst.health.fails else None
                 with self._reading(name, wait) as why:
                     if why is None:
-                        status.update(self.lab.snapshot([name]))
-                        self._keep(name, status.get(name) or {}, "read")
+                        with brief(RETRY_MS) if brief is not None else contextlib.nullcontext():
+                            values = self.lab.snapshot([name], settings=settings).get(name) or {}
+                        self._keep(name, values, "read")
+                        status[name] = dict(kept, **values)   # a setting not read now: as it was read last
+                        self._looked[name] = time.time()
+                        if settings:
+                            self._settings_at[name] = time.time()
                 if why is not None:
                     held[name] = why
                     status[name] = {p: v for p, (v, _, _) in self._kept(name).items()}
             self._status, self._status_held, self._status_at = status, held, time.time()
         except Exception:
             pass
+
+    def _busy_buses(self) -> Optional[set]:
+        """The GPIB buses the work under way (a run, the queue, a change) uses, which Kelvin's own looks leave to it:
+        every bus when it holds the whole lab (None). A bus carries one exchange at a time, so a look in between would
+        hold the run's next command up."""
+        from ..adapters import bus_of
+        thread, names = self.lock.owner()
+        if thread is None:
+            return set()
+        if names is None:
+            return None
+        return {b for b in (bus_of(i.config.address) for n, i in list(self.lab.instruments.items())
+                            if n in names and not i.simulated) if b}
 
     @contextlib.contextmanager
     def _reading(self, name: str, wait: Optional[float] = None) -> Iterator[Optional[str]]:
@@ -1327,7 +1372,7 @@ class LabRuntime:
         uses (a run) isn't asked, and shows its latest values with how old each is."""
         def run() -> str:
             self.last_active = time.monotonic()
-            self._refresh()
+            self._refresh(look_s=LAB_STATUS_S)   # values from the last few seconds stand: the bus is everyone's
             sim = all(i.simulated for i in self.lab.instruments.values())
             lines = ["%s%s" % (self.lab.config.name, " (simulated)" if sim else "")]
             owner, scope = self.lock.owner()
@@ -10015,11 +10060,13 @@ class LabRuntime:
                 self.audit_event("auto mode on", by)
         return self.approval_mode()
 
-    def ui_state(self) -> Dict[str, Any]:
+    def ui_state(self, fresh: Iterable[str] = ()) -> Dict[str, Any]:
+        """fresh: instruments a person just opened in the Lab panel: read now, whenever they were last."""
         # keep the panel live, beside whatever else Kelvin does: never the lab's lock, and an instrument the work in
-        # progress uses (a run's) shows its latest values
-        if time.time() - self._status_at > 2.0:
-            self._refresh(PANEL_WAIT_S)
+        # progress uses (a run's) shows its latest values; each read at most every LOOK_S (_refresh)
+        fresh = [n for n in fresh if n in self.lab.instruments]
+        if fresh or time.time() - self._status_at > 2.0:
+            self._refresh(PANEL_WAIT_S, look_s=LOOK_S, fresh=fresh)
         status = {}
         for name, values in dict(self._status).items():
             inst = self.lab.instruments.get(name)

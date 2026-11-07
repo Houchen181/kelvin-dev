@@ -312,8 +312,10 @@ class Lab:
     def read(self, instr: str, param: str) -> Any:
         return self.instrument(instr).read(param)
 
-    def snapshot(self, names: Optional[Iterable[str]] = None) -> Dict[str, Dict[str, Any]]:
-        """Every readable scalar parameter of every instrument (or of these)."""
+    def snapshot(self, names: Optional[Iterable[str]] = None, settings: bool = True) -> Dict[str, Dict[str, Any]]:
+        """Every readable scalar parameter of every instrument (or of these). settings=False: its readings and outputs
+        only, not its settings (a lock-in's time constant, a source's range), which change only when someone changes
+        them (the Lab panel reads those less often)."""
         snap: Dict[str, Dict[str, Any]] = {}
         for name, inst in self.instruments.items():
             if not inst.enabled or (names is not None and name not in names):
@@ -325,6 +327,8 @@ class Lab:
                 if spec.type in ("trace", "image") or spec.acquires or (spec.get_cmd is None and
                                                                         spec.name not in inst._last):
                     continue   # traces, frames and acquisitions are read when asked or measured, not to look
+                if not settings and spec.set_cmd is not None and not spec.is_drive:
+                    continue   # a setting: read at its own, slower pace
                 if silent:   # it did not answer: each other reading would only wait as long again
                     values[spec.name] = "ERROR: not read: %s did not answer" % name
                     continue

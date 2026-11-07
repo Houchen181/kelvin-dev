@@ -171,6 +171,7 @@ class Instrument:
         # what its card's checks before readings (health: before) found lately: check -> (when, holds, reply)
         self._checked: Dict[Tuple[int, int], Tuple[float, bool, str]] = {}
         self._cache_lock = threading.Lock()
+        self.changed_at = 0.0   # when a command last went to it that may change it: the Lab panel looks at once
 
     def _forget(self) -> None:
         """A command that can change what its checks look at went to it (an action, a raw command, a setting of what
@@ -438,6 +439,7 @@ class Instrument:
         action = self.card.actions[name]
         said = []
         self._forget()
+        self.changed_at = time.time()
         for c in action.send:
             if is_query(c, bool(self.card.connection.get("enq"))):
                 said.append(self._io(self.backend.query, c).strip())
@@ -484,6 +486,7 @@ class Instrument:
         spec = self.spec(param)
         if self._touches_checks(spec):
             self._forget()
+        self.changed_at = time.time()
         self._io(self.backend.write, spec.set_cmd.render(spec.to_wire(value)))
         self._last[param] = value
 
@@ -491,10 +494,12 @@ class Instrument:
         # a maker's driver says its identity itself, without asking the instrument: that shows nothing about it
         local = hasattr(self.backend, "identity") and command.strip().upper() in ("*IDN?", self.card.idn_query.upper())
         self._forget()   # a raw query may change what it does (:INIT;*OPC?)
+        self.changed_at = time.time()
         return self._io(self.backend.query, command, alive=not local)
 
     def write_raw(self, command: str) -> None:
         self._forget()
+        self.changed_at = time.time()
         self._io(self.backend.write, command)
 
     def instrument_error(self) -> Optional[str]:

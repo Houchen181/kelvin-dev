@@ -426,6 +426,24 @@ class VisaBackend:
         if why:
             raise AdapterError("%s: %s" % (self.name, why))
 
+    def brief(self, ms: int) -> Any:
+        """Its exchanges wait ms at most meanwhile (a with block): a retry of one that stopped answering then holds
+        the bus that long, not its card's whole timeout, in front of every other instrument on it."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def short() -> Any:
+            with self.lock:
+                res = self.res
+                before = res.timeout
+                res.timeout = min(int(before or ms), ms)
+                try:
+                    yield
+                finally:
+                    if self.res is res:
+                        res.timeout = before
+        return short()
+
     def resync(self) -> None:
         """Back in step after its bus was cleared: a device clear, then asked who it is until it answers as itself."""
         with self.lock:

@@ -256,6 +256,7 @@ def test_stop_ends_a_turn_whose_tool_an_instrument_holds_up(parts, monkeypatch):
         release.wait(20)
         return query(cmd, *a, **k)
     monkeypatch.setattr(backend, "query", hung)
+    runtime._looked.clear()   # its values are older than lab_status reuses: it reads the instruments
     status = [{"type": "tool_call", "id": "c1", "name": "lab_status", "input": {}}]
 
     async def main():

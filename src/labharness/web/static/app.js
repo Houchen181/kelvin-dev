@@ -4692,6 +4692,7 @@
   // on the list (0: none), later: a redraw waiting for it to be let go
   // rename: the instrument whose name is being changed ({name, value typed, msg, bad, busy})
   const OPEN = new Set(), SHOW_SETTINGS = new Set();
+  const FRESH = new Set();   // rows just opened: the next look reads them at once (each is read every 30 s otherwise)
   const PANEL = { filter: "", activeOnly: store("lh.activeOnly") === "1", instruments: [], loose: new Map(),
                   everyone: store("lh.labEveryone") === "1", switching: new Map(), refused: new Map(), eventsShown: "",
                   switchedAt: new Map(), rows: new Map(), order: "", pressed: 0, later: false,
@@ -4766,7 +4767,7 @@
       h("span", { class: "inst-headline" }, hv, hu ? h("span", { class: "hu" }, hu) : null),
       count, chev);
     row.addEventListener("click", () => {
-      if (open) OPEN.delete(inst.name); else OPEN.add(inst.name);
+      if (open) OPEN.delete(inst.name); else { OPEN.add(inst.name); FRESH.add(inst.name); pollState(); }
       renderInstruments();
     });
     // on/off for this experiment: off, Kelvin sends it nothing at all until a person switches it on (lab.py). The one
@@ -4994,7 +4995,10 @@
   async function pollState() {
     let s;
     const sent = Date.now();
-    try { s = await api("/api/state"); } catch (e) { return; }
+    const opened = [...FRESH];   // rows just opened: read at once
+    FRESH.clear();
+    try { s = opened.length ? await api("/api/state?fresh=" + encodeURIComponent(opened.join(","))) : await api("/api/state"); }
+    catch (e) { opened.forEach((n) => FRESH.add(n)); return; }
     $("agent-state").textContent = s.busy ? String(s.busy).charAt(0).toUpperCase() + String(s.busy).slice(1) : "Idle";
     $("agent-state").classList.toggle("busy", !!s.busy);
     s.instruments = PANEL.instruments = freshInstruments(s.instruments, sent);   // Home reads the same

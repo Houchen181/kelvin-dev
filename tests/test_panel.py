@@ -41,6 +41,7 @@ def test_unresponsive_instrument_shows_as_error(tmp_path):
     rt = LabRuntime(lab, ScriptedApprover([]), tmp_path, demo_envelope(lab))
     lab.instruments["lockin"].backend.fault = "offline"
     rt._status_at = 0  # force a refresh
+    rt._looked.clear()   # 30 s later: the panel reads it again (it reads each at most every 30 s)
     lockin = panel(rt)["lockin"]
     assert lockin["state"] == "error"
     assert all(r["value"] == "no response" for r in lockin["readings"])

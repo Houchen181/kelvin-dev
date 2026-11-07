@@ -270,6 +270,7 @@ class Monitor:
         self._suspect: Dict[str, float] = {}      # output switches read off under a running plan once: since when
         self._comms: Dict[str, Alarm] = {}        # instruments whose replies arrive garbled (latched)
         self._buses: Dict[str, Alarm] = {}        # GPIB buses that stopped answering, by bus
+        self._alive_asked: Dict[str, float] = {}  # when each was last found answering (wall time) by _check_alive
         self._bus_probe_at: Dict[str, float] = {}
         self._garbles_seen: Dict[str, int] = {}   # garbled replies already counted, by instrument
         self._garbled_lab: Dict[str, float] = {}  # lab time the latest garbled reply was seen
@@ -900,6 +901,10 @@ class Monitor:
         for name, inst in list(self.lab.instruments.items()):
             if inst.simulated or not inst.enabled or self._on_hung_bus(inst):
                 continue
+            answered = inst.health.answered_at
+            if answered is not None and answered > self._alive_asked.get(name, 0.0):
+                self._last_alive_check[name] = now   # it answered something since (the run talks to it): nothing sent
+                self._alive_asked[name] = time.time()
             if now - self._last_alive_check.get(name, -1e18) >= ALIVE_EVERY:
                 self._last_alive_check[name] = now
                 probe = self._probe(inst)
@@ -908,6 +913,8 @@ class Monitor:
                         probe()
                 except Exception:
                     continue   # its health says it, if it didn't answer
+                finally:   # after the question: its own answer is not "answered since"
+                    self._alive_asked[name] = time.time()
             if now - self._last_reset_check.get(name, -1e18) >= RESET_EVERY:
                 self._last_reset_check[name] = now
                 self._check_reset(name, inst, asked, now)
@@ -973,6 +980,8 @@ class Monitor:
     def _check_errors(self, now: float) -> None:
         """Real instruments' own error queues, once a minute (lab time). That it answered or didn't goes into its
         health."""
+        if getattr(self.gate, "_asked", None) is not None:
+            return   # while a plan or a queue item runs, the bus is its own: the error queues wait for it to end
         for name, inst in list(self.lab.instruments.items()):
             if inst.simulated or inst.card.error_query is None or not inst.enabled or self._on_hung_bus(inst):
                 continue

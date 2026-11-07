@@ -3592,7 +3592,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
 
     async def state(request: Request) -> Response:
-        data = await asyncio.to_thread(runtime.ui_state)  # may read instruments; keep the server responsive
+        fresh = [n for n in str(request.query_params.get("fresh") or "").split(",") if n][:20]   # rows just opened
+        data = await asyncio.to_thread(runtime.ui_state, fresh)  # may read instruments; keep the server responsive
         data["active"] = agent.active
         data["answering"] = agent.answering()   # every chat answering now: the portal marks them
         data["wakes"], data["woke"] = agent.waker.view(), agent.waker.latest()
