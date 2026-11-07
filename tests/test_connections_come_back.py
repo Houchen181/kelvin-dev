@@ -211,6 +211,31 @@ def test_the_lab_decides_whether_it_is_the_same_instrument(tmp_path, monkeypatch
     assert inst.reopen() == IDN and not inst.backend.broken
 
 
+def test_another_one_of_its_model_is_set_aside_and_never_tried_again(tmp_path, monkeypatch):
+    """4.1 with 6.2: a session made anew finds another instrument of the same model at the address (not the serial
+    number it was set up with: two identical ones swapped at their ports). It is set aside with what it answered, as
+    the health check sets one aside: the reconnector stops trying it (kept broken, it was asked who it is every
+    minute), and the set-up asks a person whether it is the one to use."""
+    lab, rm, device = a_lab(monkeypatch)
+    inst = lab.instruments["smu"]
+    inst.kept_serial = "1083680"                                              # its first set-up's (hold_serials)
+    m, _ = watching(lab, tmp_path)
+    rm.power_off()
+    with pytest.raises(InstrumentLost):
+        inst.query_raw("*IDN?")
+    device.on, device.idn = True, IDN.replace("1083680", "4120001")          # the other 2400, at its port
+    due(inst)
+    m.tick()
+    settled(m)
+    assert "set up with serial number 1083680" in lab.unavailable.get("smu", ""), lab.unavailable
+    assert lab.swaps["smu"][1] == device.idn                                  # what answered, for the person's yes
+    sent = len(device.sent)
+    due(inst)
+    m.tick()
+    settled(m)
+    assert len(device.sent) == sent                                           # never asked again
+
+
 def test_a_gpib_instrument_nothing_listens_at_keeps_its_session(tmp_path, monkeypatch):
     lab, rm, device = a_lab(monkeypatch, address="GPIB0::24::INSTR")
     inst = lab.instruments["smu"]

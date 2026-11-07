@@ -1135,11 +1135,20 @@ class Monitor:
                              daemon=True).start()
 
     def _reconnect(self, name: str, inst: Any) -> None:
+        """One connection made anew (_check_reconnect). Another instrument of its model answering there (its serial
+        number isn't the one it was set up with: two identical ones swapped at their ports) is set aside with what it
+        answered, as the health check sets one aside: nothing more is sent to it, the reconnector stops trying it, and
+        the set-up asks a person whether it is the one to use. Kept broken, it was asked who it is every minute."""
         try:
             idn = inst.reopen()
             log.info("%s: connected again (it answered %r)", name, idn)
         except Exception as e:   # not back yet, or another instrument answers there: its health says it
             log.info("%s: not connected again yet: %s", name, str(e).splitlines()[0][:200] if str(e) else e)
+            cause = e.__cause__ if e.__cause__ is not None else e
+            problem = getattr(cause, "problem", None)
+            from .lab import swapped
+            if problem and swapped(problem) and hasattr(self.lab, "set_aside"):
+                self.lab.set_aside(name, str(cause), getattr(cause, "idn", ""))
         finally:
             self._reopening.discard(name)
 

@@ -727,8 +727,10 @@ class VisaBackend:
                         problem = check(idn)
                     if problem:
                         self.broken = "answers as %r now" % idn[:60]
-                        raise AdapterError("%s answers again, but not as itself: %s. Kelvin sends it nothing until the "
-                                           "instrument there is the one in the lab config" % (self.name, problem))
+                        wrong = AdapterError("%s answers again, but not as itself: %s. Kelvin sends it nothing until "
+                                             "the instrument there is the one in the lab config" % (self.name, problem))
+                        wrong.idn, wrong.problem = idn, problem   # what answered, for the lab to set it aside and ask
+                        raise wrong
                 self.broken, self.owed = "", False
                 self._start()
             except BaseException:
