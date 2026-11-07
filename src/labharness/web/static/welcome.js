@@ -10,6 +10,7 @@
 (() => {
   let K = null;   // window.Kelvin, from kelvin:ready
   const SETUP_BUSY = new Set(["connecting", "scanning", "drafting", "reading"]);
+  const LONG_MS = 60000;   // a scan this long: "Still scanning…", with Wait and Skip
   const STEPS = [["workspace", "Workspace"], ["model", "Model"], ["instruments", "Instruments"]];
   const KEYS = [["anthropic_api_key", "Claude"], ["openai_api_key", "OpenAI"], ["gemini_api_key", "Gemini"]];
   const W = {
@@ -23,7 +24,10 @@
     gpt: { signed: null, waiting: false, timer: 0, msg: "" },
     cc: null,
     local: { url: "", typed: "", msg: "" },
-    scan: { phase: "idle", found: [], ticked: new Set(), added: new Set(), msg: "", full: "" },
+    // ctl: the scan's or the add's own AbortController while it is under way; since: when the scan began; patient:
+    // when the person last said Wait; timer: the redraw that asks again after LONG_MS
+    scan: { phase: "idle", found: [], ticked: new Set(), added: new Set(), msg: "", full: "", ctl: null, since: 0,
+            patient: 0, timer: 0 },
   };
 
   // ------------------------------------------------------------------ helpers
@@ -116,6 +120,14 @@
     if (el) el.querySelectorAll("button").forEach((b) => { b.disabled = true; });
   }
   function end() { W.busy = Math.max(0, W.busy - 1); footer(); }
+  // a scan or an add under way, let go of: Back, the dots, Skip and the scan's own Skip never wait for it (a scan of a
+  // hung GPIB bus or a port that doesn't answer once held every way on for minutes, with the app behind inert). What
+  // Kelvin does meanwhile goes on by itself; Lab, Set up… shows it
+  function letGo() {
+    const s = W.scan;
+    if (s.ctl) { s.ctl.abort(); s.ctl = null; }
+    clearTimeout(s.timer);
+  }
 
   // ------------------------------------------------------------------ step 1: Workspace
   // the lab's scripts folders: Add folder… (the computer's folder picker in the Kelvin app, Kelvin's folder browser in
@@ -449,13 +461,21 @@
   }
   function scanBlock() {
     const s = W.scan, busy = s.phase === "scanning" || s.phase === "adding", setup = setupBusy();
+    const now = Date.now(), long = s.phase === "scanning" && now - s.since >= LONG_MS && now - s.patient >= LONG_MS;
     let val = null;
     if (s.msg) val = value(s.msg, "bad", s.full);
+    else if (long) val = value("Still scanning… " + Math.floor((now - s.since) / 60000) + " min so far", "",
+      "A port or a GPIB bus that doesn't answer can hold a scan up. Wait for it, or skip it: Lab, Set up… scans again " +
+      "whenever you like");
     else if (s.phase === "none") val = value("None found");
+    else if (s.phase === "skipped") val = value("Skipped: Lab, Set up… scans whenever you like");
     else if (s.phase === "found") val = value(s.found.length + " found");
     else if (s.phase === "added") val = value(s.added.size + " added", "ok");
     const ctl = [busy ? spinner() : null];
-    if (s.phase === "idle" || s.phase === "scanning") {
+    if (long) {   // a minute on: wait on, or let it go (Kelvin's own scan finishes by itself)
+      ctl.push(btn("Wait", "small", () => { s.patient = Date.now(); remind(); redraw("scan"); }, { f: "wait" }),
+        btn("Skip", "small", () => { letGo(); }, { f: "skip-scan" }));
+    } else if (s.phase === "idle" || s.phase === "scanning" || s.phase === "skipped") {
       ctl.push(btn("Scan", "small primary", scan, { f: "scan", disabled: busy || setup }));
     } else ctl.push(btn("Scan again", "small", scan, { f: "scan", disabled: busy || setup }));
     if (s.phase !== "scanning" && s.found.some((f) => canAdd(f) && !s.added.has(f.address))) {
@@ -480,22 +500,35 @@
         f.idn || f.how || null);
     })));
   }
+  function remind() {   // the scan's row asks again (Still scanning…) LONG_MS from now
+    const s = W.scan;
+    clearTimeout(s.timer);
+    s.timer = setTimeout(() => { if (W.open && s.phase === "scanning") redraw("scan"); }, LONG_MS + 50);
+  }
   async function scan() {
     const s = W.scan;
-    Object.assign(s, { phase: "scanning", found: [], added: new Set(), msg: "", full: "" });
+    const ctl = new AbortController();
+    Object.assign(s, { phase: "scanning", found: [], added: new Set(), msg: "", full: "", ctl, since: Date.now(),
+                       patient: 0 });
     W.busy += 1;
     footer();
     redraw("scan");
     redraw("found");
+    remind();
     try {
-      const r = await K.api("/api/instruments/scan", { body: {} });
+      const r = await K.api("/api/instruments/scan", { body: {}, signal: ctl.signal });
       s.found = Array.isArray(r.found) ? r.found : [];
       s.ticked = new Set(s.found.filter(canAdd).map((f) => f.address));
       s.phase = s.found.length ? "found" : "none";
     } catch (e) {   // 503: no VISA on this computer, so nothing to find
-      s.phase = e.status === 503 ? "none" : "error";
-      if (e.status !== 503) Object.assign(s, { msg: short(e), full: e.message });
+      if (ctl.signal.aborted) s.phase = "skipped";   // let go of (letGo): not an error
+      else {
+        s.phase = e.status === 503 ? "none" : "error";
+        if (e.status !== 503) Object.assign(s, { msg: short(e), full: e.message });
+      }
     }
+    if (s.ctl === ctl) s.ctl = null;
+    clearTimeout(s.timer);
     end();
     redraw("scan");
     redraw("found");
@@ -507,23 +540,27 @@
     if (!chosen.length) return true;
     const items = chosen.map((f) => ({ name: f.suggested || "instr", card: f.card_id, address: f.address,
                                        note: String(f.idn || "").slice(0, 60) }));
+    const ctl = new AbortController(), signal = ctl.signal;
     s.phase = "adding";
-    Object.assign(s, { msg: "", full: "" });
+    Object.assign(s, { msg: "", full: "", ctl });
     begin(button);
     redraw("scan");
     redraw("found");
     try {
-      const lab = await K.api("/api/lab");
-      const draft = await K.api("/api/instruments/draft", { body: { items, base: lab.yaml || "" } });
-      await K.api("/api/lab", { body: { yaml: draft.yaml, why: "first start" } });
+      const lab = await K.api("/api/lab", { signal });
+      const draft = await K.api("/api/instruments/draft", { body: { items, base: lab.yaml || "" }, signal });
+      await K.api("/api/lab", { body: { yaml: draft.yaml, why: "first start" }, signal });
       for (const f of chosen) s.added.add(f.address);
       s.phase = "added";
       safe(K.pollState);
       return true;
-    } catch (e) {
-      Object.assign(s, { phase: "found", msg: short(e), full: e.message });
+    } catch (e) {   // let go of (letGo): no refusal to show; what Kelvin had begun, it finishes (Lab, Set up… shows it)
+      Object.assign(s, signal.aborted ? { phase: "found" } : { phase: "found", msg: short(e), full: e.message });
       return false;
-    } finally { end(); redraw("scan"); redraw("found"); refocus(button ? (s.phase === "added" ? "" : "add") : null); }
+    } finally {
+      if (s.ctl === ctl) s.ctl = null;
+      end(); redraw("scan"); redraw("found"); refocus(button ? (s.phase === "added" ? "" : "add") : null);
+    }
   }
 
   // ------------------------------------------------------------------ the page
@@ -569,8 +606,12 @@
     const busy = W.busy > 0 || W.moving;
     e.back.hidden = W.step === 0;   // nothing before the first step
     e.next.textContent = W.step === STEPS.length - 1 ? "Done" : "Next";
-    e.back.disabled = e.next.disabled = e.skip.disabled = busy;
-    e.dots.forEach((d, i) => { d.disabled = busy || i > W.seen; });   // only to a step already seen
+    e.next.disabled = busy;
+    // Back, the dots and Skip let go of a scan or an add under way (letGo), never wait for it: only Next's own steps
+    // (W.moving) keep Back and the dots, as it moves the page itself; Skip ends the page whatever goes on
+    e.back.disabled = W.moving;
+    e.skip.disabled = false;
+    e.dots.forEach((d, i) => { d.disabled = W.moving || i > W.seen; });   // only to a step already seen
     e.spin.hidden = !W.moving;   // an action in the card shows its own
   }
   function render() {
@@ -640,7 +681,8 @@
   }
   // Back and the dots: a step already seen, as it was left; nothing is imported or saved on the way
   function goTo(target) {
-    if (!W.open || W.moving || W.busy || target === W.step || target < 0 || target > W.seen) return;
+    if (!W.open || W.moving || target === W.step || target < 0 || target > W.seen) return;
+    letGo();   // a scan or an add under way is let go of, never waited out
     toStep(target);
     refocus();
   }
@@ -688,6 +730,7 @@
   async function finish() {
     if (!W.open || W.finishing) return;
     W.finishing = true;
+    letGo();   // Skip during a scan or an add: the page goes at once (Kelvin finishes what it began by itself)
     K.store("lh.welcome", "done");
     W.typed = {};
     W.local.typed = "";
