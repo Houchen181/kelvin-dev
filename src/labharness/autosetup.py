@@ -277,11 +277,12 @@ class AutoSetup:
         """Connect the person's lab, one instrument after another, saying which (the portal shows it)."""
         rt = self.runtime
 
-        def progress(name: str, i: int, n: int) -> None:
+        def progress(name: str, i: int, n: int, waiting: str = "") -> None:
             inst = rt.lab.instruments.get(name)
             model = " (%s)" % inst.card.model.split(" (")[0] if inst is not None else ""
-            self._set("connecting", message="Connecting %s%s, %d of %d" % (name, model, i + 1, n), step=i + 1,
-                      steps=n)
+            self._set("connecting", message="Connecting %s%s, %d of %d%s" % (
+                name, model, i + 1, n, ": waiting for %s, which has the lab" % waiting if waiting else ""),
+                step=i + 1, steps=n)
         result = rt.connect_pending(progress)
         missing = result["not_connected"]
         message = ("Connected %s" % ", ".join(result["connected"]) if result["connected"] else "No instrument connected")

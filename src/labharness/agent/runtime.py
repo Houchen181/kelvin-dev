@@ -8447,37 +8447,89 @@ class LabRuntime:
         at a time, holding the lab for each only: a request for one already connected doesn't wait for the rest. One
         that can't be connected is set aside with why, as at any start; so is one whose driver doesn't finish opening
         in time (lab.open_deadline), and the rest are connected all the same. A person may switch one off while it
-        connects (switch_instrument waits for nothing then). progress(name, i, n) before each."""
+        connects (switch_instrument waits for nothing then). progress(name, i, n) before each, and progress(name, i, n,
+        waiting) for one that waits for the work under way.
+        Work that has the lab meanwhile (a run started on the instruments already connected) never holds the rest up
+        for its whole length: each waits CONNECT_WAIT_S for the lab, then one that work doesn't use, nor its GPIB bus,
+        is connected beside it under its own lock; the others wait for it, and say so ("waiting for the running plan
+        ..."), then connect as soon as it lets them."""
         lab = self.lab
         names = lab.connecting
+        started = time.time()
         done: List[str] = []
-        for i, name in enumerate(names):
-            if self.lab is not lab:   # a person switched labs meanwhile
-                break
-            if name not in lab.connecting:   # a person switched it off meanwhile (or it connected another way)
-                continue
-            if progress is not None:
-                progress(name, i, len(names))
-            with self.lock:
-                if self.lab is not lab:   # checked again with the lab: a switch of labs may have just taken it
+        left, told = list(names), set()
+        while left:
+            waiting: List[str] = []
+            for name in left:
+                if self.lab is not lab:   # a person switched labs meanwhile
                     break
-                if name not in lab.connecting:
+                if name not in lab.connecting:   # a person switched it off meanwhile (or it connected another way)
                     continue
-                self.busy = "connecting %s" % name
+                i = names.index(name)
+                if progress is not None and name not in told:
+                    told.add(name)
+                    progress(name, i, len(names))
+                what = self._connect_one(lab, name, done)
+                if what is None:
+                    continue
+                waiting.append(name)
+                lab.connecting_waits(name, what)   # the Lab panel and the agent say what it waits for
+                if progress is not None:
+                    try:
+                        progress(name, i, len(names), what)
+                    except TypeError:   # a progress that takes no reason
+                        pass
+            if self.lab is not lab:
+                break
+            left = waiting
+        got = self.lock.acquire(timeout=CONNECT_WAIT_S)   # the lab, if it is free: a run may have it for hours
+        try:
+            self._apply_protection(recheck=True)   # the mounted device's caps: written now if they can be, else
+            if got:                                # when Kelvin is next idle (caps_waiting)
+                self._caps_if_waiting()
+            self._look_after(started, also=done)
+        finally:
+            if got:
+                self.lock.release()
+        missing = {n: why for n, why in lab.unavailable.items() if n in names}
+        self.gate.log.write("lab_connected", lab=lab.config.name, instruments=done, not_connected=missing or None)
+        return {"connected": done, "not_connected": missing}
+
+    def _connect_one(self, lab: Lab, name: str, done: List[str]) -> Optional[str]:
+        """One instrument of a lab opened before connecting (connect_pending): with the lab, if it comes free within
+        CONNECT_WAIT_S; else beside the work that has it, under the instrument's own lock, when that work uses
+        neither the instrument nor its GPIB bus. None once it is connected (added to done) or set aside with why;
+        else what it waits for, in words."""
+        from ..adapters import bus_of
+        if self.lock.acquire(timeout=CONNECT_WAIT_S, names=[name]):
+            try:
+                if self.lab is not lab or name not in lab.connecting:   # checked again with the lab
+                    return None
+                before, self.busy = self._busy, "connecting %s" % name
                 try:
                     lab.reconnect(name)
                     done.append(name)
                 except Exception:
                     pass   # set aside with why: the Lab panel says it (and offers the install a missing package needs)
                 finally:
-                    self.busy = None
-        with self.lock:
-            self._apply_protection(recheck=True)   # the mounted device's caps, written now that they can be
-            self._caps_if_waiting()
-            self._refresh()
-        missing = {n: why for n, why in lab.unavailable.items() if n in names}
-        self.gate.log.write("lab_connected", lab=lab.config.name, instruments=done, not_connected=missing or None)
-        return {"connected": done, "not_connected": missing}
+                    self.busy = before
+                return None
+            finally:
+                self.lock.release()
+        inst = lab.instruments.get(name)
+        bus = bus_of(inst.config.address) if inst is not None else None
+        buses = self._busy_buses()
+        if inst is not None and not self.lock.holds(name) and not (bus and (buses is None or bus in buses)):
+            with self.lock.reading(name, CONNECT_WAIT_S) as why:
+                if why is None:
+                    if self.lab is lab and name in lab.connecting:
+                        try:
+                            lab.reconnect(name)
+                            done.append(name)
+                        except Exception:
+                            pass
+                    return None
+        return self.held_by()
 
     def reconnect_instrument(self, name: str, by: str = "agent") -> str:
         """Connect an instrument of the lab that could not be connected, once what stopped it is fixed (a package
@@ -10378,11 +10430,11 @@ class LabRuntime:
         to it, unclosed, with what Kelvin set on them (renamed: new name -> old, one a person renamed). Returns their
         names."""
         from ..instrument import Unavailable
-        from ..lab import CONNECTING
         kept = []
+        connecting = set(new.connecting)
         for name, inst in new.instruments.items():
             was = old.instruments.get((renamed or {}).get(name, name))
-            if inst.unavailable != CONNECTING or was is None or not was.enabled or was.simulated:
+            if name not in connecting or was is None or not was.enabled or was.simulated:
                 continue
             a, b = was.config, inst.config
             if (a.address, a.card, a.connection, a.vars) != (b.address, b.card, b.connection, b.vars):
