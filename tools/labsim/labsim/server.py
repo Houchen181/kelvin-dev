@@ -482,6 +482,19 @@ class Server:
                         inst.device_clear()
                     self.world.note("%s %sged" % (a[0], cmd))
                     return {"ok": True}
+                if cmd == "drop":   # power and unplug leave a session working once the instrument is back; NI-VISA's
+                    # USB and LAN sessions don't survive a power cycle, a replug or a reboot (nor a USB-serial
+                    # adapter's): every call on one opened before says the session is gone, and a new one works.
+                    # GPIB sessions do survive, as on a real board
+                    inst = self._inst(a[0])
+                    gone = [sid for sid, s in self.sessions.items() if s.inst is inst and (
+                        s.bus in ("usb", "vxi11", "hislip", "socket")
+                        or (s.bus == "asrl" and (self.ports.get(s.key) or {}).get("usb")))]
+                    for sid in gone:
+                        self.sessions.pop(sid, None)
+                    self.world.note("%s: %d session%s ended (a power cycle or a replug)"
+                                    % (a[0], len(gone), "" if len(gone) == 1 else "s"))
+                    return {"ok": True, "msg": "%d session%s ended" % (len(gone), "" if len(gone) == 1 else "s")}
                 if cmd == "fault":
                     inst = self._inst(a[0])
                     on = len(a) < 3 or a[2] != "off"

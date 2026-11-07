@@ -7,6 +7,8 @@
   python -m labsim log NAME [N]                  what NAME was sent and answered
   python -m labsim power NAME on|off             switch an instrument off or on (it comes back reset)
   python -m labsim unplug NAME | plug NAME       pull or put back its cable
+  python -m labsim drop NAME                     end its open USB and LAN sessions, as NI-VISA's end at a power cycle,
+                                                 a replug or a reboot (a new session works; GPIB's survive)
   python -m labsim fault NAME FAULT [on|off]     dead, garble, slow, noisy, sensor_openA, heater_open, ...
   python -m labsim hold NAME|RESOURCE [on|off]   another program holds it (opening gives "resource busy")
   python -m labsim set PATH VALUE                change the world: cryo.stage 4.2, sample.damaged none ...
@@ -212,7 +214,7 @@ def main(argv=None) -> None:
     s.set_defaults(fn=cmd_status)
     s = sub.add_parser("log"); s.add_argument("name"); s.add_argument("n", nargs="?", type=int, default=40)
     s.add_argument("--home", default=argparse.SUPPRESS); s.set_defaults(fn=cmd_log)
-    for name in ("power", "unplug", "plug", "hold"):
+    for name in ("power", "unplug", "plug", "hold", "drop"):
         s = sub.add_parser(name); s.add_argument("name"); s.add_argument("--home", default=argparse.SUPPRESS)
         if name in ("power", "hold"):
             s.add_argument("state", nargs="?" if name == "hold" else None, choices=["on", "off"])

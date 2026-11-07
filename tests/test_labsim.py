@@ -148,6 +148,38 @@ def test_a_kelvin_lab_on_a_labsim_bench(labsim_bench, tmp_path):
         lab.close()
 
 
+CQED_LAB = """lab: labsim cQED
+instruments:
+  vna: {card: keysight/pna, address: "TCPIP0::A-N5222B-11204::hislip0::INSTR"}
+  mxc: {card: lakeshore/350, address: "GPIB0::12::INSTR"}
+"""
+
+
+def test_a_session_ended_as_at_a_reboot_is_made_anew_checked_first(labsim_bench, tmp_path):
+    """`labsim drop` ends a LAN or USB session as NI-VISA's ends at a reboot, a power cycle or a replug (a GPIB one
+    survives): every call on it says the session is gone, and Kelvin makes it anew, the instrument checked to be the
+    same before anything else is sent (review of 0.3.45, 4.1: it said VI_ERROR_INV_OBJECT until a person switched the
+    instrument off and on)."""
+    from labharness.homelab import build_lab
+    bench = labsim_bench("cqed")
+    (tmp_path / "lab.yaml").write_text(CQED_LAB, encoding="utf-8")
+    lab = build_lab(tmp_path / "lab.yaml", partial=True)
+    try:
+        assert lab.unavailable == {}
+        start = lab.read("vna", "f_start")
+        assert bench.ctl("drop", "vna")["msg"] == "1 session ended"
+        assert bench.ctl("drop", "mxc")["msg"] == "0 sessions ended"         # GPIB: it survives
+        with pytest.raises(Exception, match="INV_OBJECT"):
+            lab.read("vna", "f_start")
+        vna = lab.instruments["vna"]
+        assert vna.backend.broken and vna.backend.reopens_by_itself()
+        assert lab.read("mxc", "T_A") is not None                            # the rest of the lab as it was
+        assert vna.reopen().startswith("Keysight Technologies,N5222B")       # made anew, as itself
+        assert lab.read("vna", "f_start") == start and not vna.backend.broken
+    finally:
+        lab.close()
+
+
 PPMS_LAB = """lab: labsim PPMS
 instruments:
   ppms:

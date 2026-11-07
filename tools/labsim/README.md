@@ -94,6 +94,7 @@ resource, `COMn`, or `sdk:<kind>:<serial>`) and what it is wired to (`connect: {
 |---|---|
 | `python -m labsim power NAME off` | Switched off: no listeners on GPIB, no answer elsewhere. `on` brings it back with its power-on settings |
 | `python -m labsim unplug NAME` / `plug NAME` | Cable pulled: USB and LAN sessions error, the device leaves the listing |
+| `python -m labsim drop NAME` | Its open USB, LAN and USB-serial sessions end, as NI-VISA's do at a power cycle, a replug or a reboot: every call on one says the session is gone (VI_ERROR_INV_OBJECT), and a new session works. GPIB sessions survive. `power` and `plug` alone leave the old session working |
 | `python -m labsim hold NAME` | Another program holds it: opening gives "resource busy" |
 | `python -m labsim fault NAME dead\|garble\|slow\|noisy` | No replies, corrupted replies, 2 s late replies, 10x noise |
 | `python -m labsim fault tc sensor_openA` / `heater_open` | A broken thermometer (reads 0, RDGST 128) or heater (no heating, HTRST 1) |
