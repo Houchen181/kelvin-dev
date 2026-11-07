@@ -13,6 +13,7 @@ parameter its own auto range.
 """
 from __future__ import annotations
 
+import difflib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,21 @@ ON_TRIP = ("safe", "hold")
 # words a lab's own name for a setting can't be: a run's columns, and what conditions and expressions say
 NOT_NAMES = {"i", "t", "time", "repeat", "stabilizing", "gap_s", "on", "off", "true", "false", "and", "or", "not",
              "if", "else", "pi", "col"}
+# what Kelvin reads in a lab config, and nothing else: a key outside these is refused, saying what it may have meant. A
+# misspelled one was ignored as if it weren't there: `limit:` left a source at its maker's ±210 V, `interlock:` meant no
+# interlocks at all, and `adress:` made a simulated twin that read 0.0 into runs (review of 0.3.45, 6.1)
+TOP_KEYS = ("lab", "instruments", "interlocks", "safe_actions", "watch", "auto_fraction", "observe_only", "names")
+ENTRY_KEYS = ("card", "address", "trust", "limits", "rates", "guards", "auto", "connection", "vars", "added_by")
+INTERLOCK_KEYS = ("drive", "require")
+WATCH_KEYS = ("read", "above", "below", "for", "every", "then", "stop_run", "note")
+GUARD_KEYS = ("read", "max_abs", "on_trip")
+
+
+def unknown_key(key: Any, known: Tuple[str, ...], where: str) -> str:
+    """Why a key of a lab config is refused, in words: what it may have meant, and what Kelvin reads there."""
+    near = difflib.get_close_matches(str(key), known, n=1, cutoff=0.6)
+    return "not something Kelvin reads in %s%s (it reads %s; a note to yourself goes after a #)" % (
+        where, ": did you mean %s?" % near[0] if near else "", ", ".join(known))
 
 
 class ConfigError(ValueError):
@@ -145,9 +161,16 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
 
     if not isinstance(data, dict):
         raise ConfigError(src, ["a lab config must be a mapping"])
+    for key in data:
+        if str(key) not in TOP_KEYS:
+            err(str(key), unknown_key(key, TOP_KEYS, "a lab config"))
     raw_instruments = data.get("instruments") or {}   # none yet: a lab whose instruments are still to be set up
     if not isinstance(raw_instruments, dict):
         raise ConfigError(src, ["instruments: each instrument's name, with its card and address"])
+    # an entry with no address is a simulated instrument (sim://) only in a lab that is all simulated (the tests' labs,
+    # a demo): beside real instruments it is a forgotten or misspelled address, and a twin reading 0.0 into runs
+    simulated = all(str(d.get("address")).startswith("sim://") for d in raw_instruments.values()
+                    if isinstance(d, dict) and d.get("address") is not None)
 
     instruments: Dict[str, InstrumentConfig] = {}
     cards: Dict[str, Card] = {}
@@ -167,6 +190,18 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
             err(path + ".card", e.args[0])
             continue
         cards[name] = card
+        for key in d:
+            if str(key) not in ENTRY_KEYS:
+                err("%s.%s" % (path, key), unknown_key(key, ENTRY_KEYS, "an instrument's entry"))
+        address = d.get("address")
+        if address is None or not str(address).strip():
+            if "address" in d:
+                err(path + ".address", "empty: say where Kelvin reaches the instrument, as in GPIB0::24::INSTR or "
+                                       "serial://COM3")
+            elif not simulated:
+                err(path + ".address", "missing: say where Kelvin reaches the instrument, as in GPIB0::24::INSTR or "
+                                       "serial://COM3 (only a lab that is all simulated leaves it out)")
+            address = "sim://" + name
         trust = d.get("trust", "ask")
         if trust not in TRUST:
             err(path + ".trust", "must be ask or envelope")
@@ -249,7 +284,7 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
                                     "reviewed the limits")
             added_by = "kelvin"
         instruments[name] = InstrumentConfig(
-            name=name, card=card.id, address=str(d.get("address", "sim://" + name)),
+            name=name, card=card.id, address=str(address),
             trust=trust, limits=limits, rates=rates, auto=auto, connection=connection, vars=card_vars,
             added_by=added_by)
 
@@ -273,6 +308,10 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
                 if not isinstance(g, dict) or "read" not in g or "max_abs" not in g:
                     err(path, "a guard needs read and max_abs")
                     continue
+                stray = [k for k in g if str(k) not in GUARD_KEYS]
+                if stray:
+                    err("%s.%s" % (path, stray[0]), unknown_key(stray[0], GUARD_KEYS, "a guard"))
+                    continue
                 key = str(g["read"]) if "." in str(g["read"]) else "%s.%s" % (name, g["read"])
                 on_trip = g.get("on_trip", "safe")
                 if on_trip not in ON_TRIP:
@@ -285,6 +324,10 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
     interlocks: List[Interlock] = []
     for i, lk in enumerate(data.get("interlocks") or []):
         path = "interlocks[%d]" % i
+        stray = [k for k in lk if str(k) not in INTERLOCK_KEYS] if isinstance(lk, dict) else []
+        if stray:   # a misspelled require: the interlock would hold nothing
+            err("%s.%s" % (path, stray[0]), unknown_key(stray[0], INTERLOCK_KEYS, "an interlock"))
+            continue
         try:
             cond = parse_condition(lk.get("require"))
         except (ValueError, AttributeError) as e:
@@ -316,6 +359,10 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
         path = "watch[%d]" % i
         if not isinstance(w, dict):
             err(path, "must be a mapping: {read, above, below, for, every, then}")
+            continue
+        stray = [k for k in w if str(k) not in WATCH_KEYS]
+        if stray:   # a misspelled then or stop_run: the watch would only say what it was set to do
+            err("%s.%s" % (path, stray[0]), unknown_key(stray[0], WATCH_KEYS, "a watch"))
             continue
         spec = _lookup(cards, str(w.get("read")))
         if spec is None or spec.get_cmd is None or not spec.numeric:

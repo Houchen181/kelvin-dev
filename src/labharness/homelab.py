@@ -22,6 +22,8 @@ DATA = Path(__file__).parent / "data"
 NO_LAB = "My lab"   # the name of the lab Kelvin has before a person sets theirs up
 SET_ASIDE = ("set aside: its entry in lab.yaml has a problem (%s). Kelvin sends it nothing until the entry is fixed "
              "(Lab, Set up…, then Save and connect); the rest of the lab works")
+LEFT_OUT = ("left out of the lab: %s. Kelvin can't use it until that is fixed (Lab, Cards…, or its entry in Lab, Set "
+            "up…, then Save and connect); the rest of the lab works")
 INSTALLED = ".kelvin-instruments.json"   # the cards `kic install` (the collection's own tool) copied, by SHA-256
 
 
@@ -195,13 +197,21 @@ def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[
     return lab
 
 
-def set_aside_problems(source: Any, registry: CardRegistry, error: ConfigError) -> Optional[Tuple[Dict[str, Any],
-                                                                                                   Dict[str, str]]]:
-    """A lab config whose only problems are in instruments' own entries (a limit beyond what a changed card now
-    allows, a rate, a guard, an auto rule, a connection setting): the config with each such instrument reduced to its
-    card and address, and what is wrong with each. They join the lab never connected (build_lab set_aside), and the
-    rest of the lab works: one stale limit once kept the whole lab from opening, saying so only in the log. None
-    when a problem is anywhere else (an unknown card, the interlocks, the watches), as then no lab can be trusted."""
+def set_aside_problems(source: Any, registry: CardRegistry,
+                       error: ConfigError) -> Optional[Tuple[Dict[str, Any], Dict[str, str], Dict[str, str]]]:
+    """A lab config whose problems are each one instrument's own: (the config Kelvin opens, the instruments set aside,
+    the instruments left out), each with what is wrong. One stale limit, or one deleted card, once kept the whole lab
+    from opening, saying so only in the log.
+
+    Set aside: an entry with a problem of its own (a limit beyond what a changed card now allows, a rate, a guard, an
+    auto rule, a connection setting, a key Kelvin doesn't read, a missing address) is reduced to its card and address.
+    It joins the lab never connected (build_lab set_aside), so nothing reaches it, and the rest of the lab works.
+    Left out: an entry Kelvin can't make an instrument of at all: a card it no longer has (deleted in Lab, Cards…, the
+    instrument collection's while it is switched off, a card file it can't read), or an entry that isn't one. What
+    leaned on it goes with it: an interlock or a watch that reads it sets aside the drives it holds (they never move
+    unguarded), and an interlock or a safe action on its own drives is dropped (nothing drives them in this lab).
+    None when a problem is anywhere else (the interlocks, the watches, a key of the lab config itself), as then no lab
+    can be trusted. `error`: what loading the config raised."""
     try:
         data, _ = read_yaml(source)
     except Exception:
@@ -209,19 +219,99 @@ def set_aside_problems(source: Any, registry: CardRegistry, error: ConfigError) 
     instruments = data.get("instruments") if isinstance(data, dict) else None
     if not isinstance(instruments, dict):
         return None
+    out: Dict[str, str] = {}
+    for name, d in instruments.items():
+        name = str(name)
+        if not name.isidentifier():
+            out[name] = LEFT_OUT % ("its name %r is not a simple name (letters, digits and _)" % name)
+        elif not isinstance(d, dict):
+            out[name] = LEFT_OUT % "its entry is not a mapping of its card, address and settings"
+        elif str(d.get("card")) not in registry:
+            out[name] = LEFT_OUT % ("Kelvin has no card %s (deleted in Lab, Cards…, the instrument collection's while "
+                                    "it is switched off, or a card file Kelvin can't read)" % d.get("card"))
+    kept = {str(n): d for n, d in instruments.items() if str(n) not in out}
     why: Dict[str, List[str]] = {}
-    for err in error.errors:
-        m = re.match(r"instruments\.(\w+)\.(limits|rates|auto|guards|connection|vars|trust|added_by)\b", err)
-        if not m or not isinstance(instruments.get(m.group(1)), dict):
-            return None
-        why.setdefault(m.group(1), []).append(err.split(".", 2)[-1])
-    data = dict(data, instruments={name: ({k: v for k, v in d.items() if k in ("card", "address")} if name in why else d)
-                                   for name, d in instruments.items()})
-    try:
-        load_lab_config(data, registry)
-    except ConfigError:
+    data = dict(data, instruments=kept)
+    if out:
+        data = _without(data, set(out), why)
+    if data is None:
         return None
-    return data, {name: "; ".join(w) for name, w in why.items()}
+
+    def trial() -> Dict[str, Any]:   # each set-aside entry as its card and address: never connected, so never opened
+        return dict(data, instruments={n: (_reduced(n, d) if n in why else d) for n, d in kept.items()})
+
+    try:
+        load_lab_config(trial(), registry)
+    except ConfigError as e:
+        for err in e.errors:
+            m = re.match(r"instruments\.(\w+)\.(\w+)", err)
+            if not m or m.group(1) not in kept or m.group(2) == "card":
+                return None
+            why.setdefault(m.group(1), []).append(err.split(".", 2)[-1])
+        try:
+            load_lab_config(trial(), registry)
+        except ConfigError:
+            return None
+    return trial(), {name: "; ".join(w) for name, w in why.items()}, out
+
+
+def _reduced(name: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+    """A set-aside instrument's entry: its card and address alone (an address missing or empty: a placeholder, as it
+    is never connected)."""
+    keep = {k: v for k, v in entry.items() if k in ("card", "address")}
+    if keep.get("address") is None or not str(keep["address"]).strip():
+        keep["address"] = "sim://" + name
+    return keep
+
+
+def _without(data: Dict[str, Any], gone: set, why: Dict[str, List[str]]) -> Optional[Dict[str, Any]]:
+    """The lab config without what leans on the instruments left out (`gone`): an interlock or a watch that reads one
+    goes, and the instruments whose drives it held or sent to safe are set aside (why); an interlock, a watch's step
+    or a safe action on a drive of one goes (nothing drives it here). None for a part Kelvin can't read."""
+    from .conditions import parse_condition
+
+    def instrument(key: Any) -> str:
+        return str(key or "").partition(".")[0]
+
+    def hold(name: str, text: str) -> None:
+        if name and name not in gone:
+            why.setdefault(name, []).append(text)
+    out = dict(data)
+    if data.get("interlocks"):
+        if not isinstance(data["interlocks"], list):
+            return None
+        kept = []
+        for lk in data["interlocks"]:
+            if isinstance(lk, dict) and instrument(lk.get("drive")) in gone:
+                continue
+            try:
+                reads = parse_condition(lk.get("require")).key if isinstance(lk, dict) else ""
+            except (ValueError, AttributeError):
+                reads = ""
+            if instrument(reads) in gone:
+                hold(instrument(lk.get("drive")), "its interlock needs %s, and %s is left out of the lab"
+                     % (lk.get("require"), instrument(reads)))
+                continue
+            kept.append(lk)
+        out["interlocks"] = kept
+    if data.get("watch"):
+        if not isinstance(data["watch"], list):
+            return None
+        kept = []
+        for w in data["watch"]:
+            then = w.get("then") if isinstance(w, dict) else None
+            if isinstance(w, dict) and instrument(w.get("read")) in gone:
+                for key in then if isinstance(then, dict) else {}:
+                    hold(instrument(key), "a watch on %s sends %s to safe, and %s is left out of the lab"
+                         % (w.get("read"), key, instrument(w.get("read"))))
+                continue
+            if isinstance(then, dict):
+                w = dict(w, then={k: v for k, v in then.items() if instrument(k) not in gone})
+            kept.append(w)
+        out["watch"] = kept
+    if isinstance(data.get("safe_actions"), dict):
+        out["safe_actions"] = {k: v for k, v in data["safe_actions"].items() if instrument(k) not in gone}
+    return out
 
 
 def open_home_lab(home: Any, switched_off: Optional[SwitchedOff] = None, collection: Any = None,
@@ -245,8 +335,10 @@ def open_home_lab(home: Any, switched_off: Optional[SwitchedOff] = None, collect
                 found = set_aside_problems(path, registry, e)
                 if found is None:
                     raise
-                config, aside = found
+                config, aside, out = found
                 info["set_aside"] = aside
+                if out:   # not in the lab at all: the Lab panel says so with the instruments not connected
+                    info["left_out"] = out
             lab = build_lab(config, registry=registry, switched_off=switched_off, partial=connect, later=not connect,
                             set_aside=aside)
             return lab, None, dict(info, kind="file")
