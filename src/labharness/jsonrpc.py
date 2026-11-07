@@ -37,9 +37,9 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Set, Tuple
 
-from .adapters import AdapterError
+from .adapters import AdapterError, LinkLost, NoAnswer
 from .cards import RPC_CALL, Card
-from .drivers import DriverBackend
+from .drivers import DriverBackend, link_failed
 
 TOKEN = re.compile(r'"(?:[^"\\]|\\.)*"|\S+')
 MAX_ANSWER = 1 << 20   # bytes one answer may take; more is not an instrument's answer
@@ -150,8 +150,8 @@ class JsonRpcInstrument(DriverBackend):
         try:
             self.sock = self.connect((self.host, int(self.port)), self.timeout)
         except OSError as e:
-            raise AdapterError("%s: could not reach %s:%s (%s). Is it on, at this address, and on this computer's "
-                               "network?" % (self.name, self.host, self.port, e)) from e
+            raise link_failed(self.name, "could not reach %s:%s. Is it on, at this address, and on this computer's "
+                                         "network?" % (self.host, self.port), e) from e
         try:
             self.sock.settimeout(self.timeout)
         except (OSError, AttributeError):
@@ -191,13 +191,13 @@ class JsonRpcInstrument(DriverBackend):
             try:
                 chunk = self.sock.recv(65536)
             except socket.timeout:   # the link stays: a late answer is told apart by its id
-                raise AdapterError("%s: no answer within %g s" % (self.name, self.timeout))
+                raise NoAnswer("%s: no answer within %g s" % (self.name, self.timeout))
             except OSError as e:
                 self._drop()
-                raise AdapterError("%s: lost the connection to %s:%s (%s)" % (self.name, self.host, self.port, e))
+                raise link_failed(self.name, "lost the connection to %s:%s" % (self.host, self.port), e) from e
             if not chunk:
                 self._drop()
-                raise AdapterError("%s: the instrument closed the connection" % self.name)
+                raise LinkLost("%s: the instrument closed the connection" % self.name)
             self.buf += chunk.decode("utf-8", "replace")
 
     def _over_tcp(self, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -207,7 +207,7 @@ class JsonRpcInstrument(DriverBackend):
             self.sock.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8"))
         except OSError as e:
             self._drop()
-            raise AdapterError("%s: lost the connection to %s:%s (%s)" % (self.name, self.host, self.port, e))
+            raise link_failed(self.name, "lost the connection to %s:%s" % (self.host, self.port), e) from e
         while True:
             answer = self._answer()
             if answer.get("id") == request["id"]:
@@ -225,7 +225,11 @@ class JsonRpcInstrument(DriverBackend):
             body = e.read(MAX_ANSWER + 1) if hasattr(e, "read") else b""
             if not body.strip().startswith(b"{"):
                 raise AdapterError("%s: %s answered HTTP %s" % (self.name, url, e.code))
-        except (OSError, ValueError) as e:
+        except OSError as e:   # urllib's URLError too: refused, unreachable, or no answer in time
+            reason = getattr(e, "reason", None)
+            raise link_failed(self.name, "could not reach %s" % url,
+                              reason if isinstance(reason, BaseException) else e) from e
+        except ValueError as e:
             raise AdapterError("%s: could not reach %s (%s)" % (self.name, url, e))
         try:
             answer = json.loads(body.decode("utf-8", "replace"))

@@ -73,8 +73,11 @@ def as_text(value: Any) -> str:
 
 
 class HttpInstrument:
-    """write(command) / query(command) / close(), like a VISA backend."""
+    """write(command) / query(command) / close(), like a VISA backend. Each request makes its own connection, so
+    nothing is left to remake; one the instrument refused or didn't answer is said as a lost instrument (LinkLost,
+    NoAnswer), and its alarm goes up (it was not counted as lost at all)."""
     simulated = False
+    quiet_close = True   # nothing stays open to close
 
     def __init__(self, name: str, card: Any, address: str, module: Any = None):
         import threading
@@ -117,8 +120,11 @@ class HttpInstrument:
         except urllib.error.HTTPError as e:
             detail = e.read()[:200].decode("utf-8", "replace") if hasattr(e, "read") else ""
             raise AdapterError("%s: %s %s answered HTTP %d %s" % (self.name, method, path, e.code, detail.strip()))
-        except (urllib.error.URLError, OSError) as e:
-            raise AdapterError("%s: could not reach %s (%s)" % (self.name, self.base, getattr(e, "reason", e)))
+        except (urllib.error.URLError, OSError) as e:   # refused, unreachable, or no answer in time
+            from .drivers import link_failed   # (drivers imports this module)
+            reason = getattr(e, "reason", None)
+            raise link_failed(self.name, "could not reach %s" % self.base,
+                              reason if isinstance(reason, BaseException) else e) from e
         text = raw.decode("utf-8", "replace").strip()
         if not text:
             return None

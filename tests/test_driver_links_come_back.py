@@ -307,6 +307,131 @@ instruments:
         lab.close()
 
 
+# ------------------------------------------------------------------ Modbus, JSON-RPC and web APIs
+
+def compressor_card():
+    return type("C", (), {"connection": {"timeout_ms": 300}, "idn_query": "*IDN?", "model": "CP2800",
+                          "vendor": "Cryomech", "on_connect": []})()
+
+
+class Adapter:
+    """A USB-serial adapter: pulled, its port fails (as pyserial says on Windows) and can't be opened; plugged back,
+    a new open works. A Modbus RTU device answers every read with 1.5 as a float32."""
+
+    def __init__(self):
+        import serial
+        self.serial, self.pulled, self.opened = serial, False, 0
+        adapter = self
+
+        class Port:
+            def __init__(self, port, baud=9600, **kw):
+                if adapter.pulled:
+                    raise serial.SerialException("could not open port %r: FileNotFoundError(2, 'The system cannot "
+                                                 "find the file specified.', None, 2)" % port)
+                adapter.opened += 1
+                self.reply = b""
+
+            def reset_input_buffer(self):
+                pass
+
+            def write(self, frame):
+                if adapter.pulled:
+                    raise serial.SerialException("WriteFile failed (PermissionError(13, 'The device does not "
+                                                 "recognize the command.', None, 22))")
+                import struct
+                from labharness.modbus import crc16
+                head = bytes([frame[0], frame[1], 4]) + struct.pack(">f", 1.5)
+                self.reply = head + crc16(head)
+
+            def read(self, n):
+                chunk, self.reply = self.reply[:n], self.reply[n:]
+                return chunk
+
+            def close(self):
+                pass
+
+        self.Port = Port
+
+
+def test_a_modbus_rtu_device_whose_adapter_was_replugged_is_reached_again(monkeypatch):
+    from labharness.modbus import ModbusInstrument
+    adapter = Adapter()
+    monkeypatch.setattr(adapter.serial, "Serial", adapter.Port)
+    comp = ModbusInstrument("comp", compressor_card(), "modbus://COM7?unit=1")
+    assert comp.query("READ 30008 float32") == "1.5"
+    adapter.pulled = True
+    e = raised(lambda: comp.query("READ 30008 float32"))
+    assert isinstance(e, LinkLost) and lost_kind(e) == "gone"
+    assert isinstance(raised(lambda: comp.query("READ 30008 float32")), LinkLost)   # still out: said again
+    adapter.pulled = False
+    assert comp.query("READ 30008 float32") == "1.5" and adapter.opened == 2          # plugged back: opened again
+    assert ModbusInstrument.quiet_close
+
+
+def test_a_modbus_device_that_doesnt_answer_is_lost_and_a_garbled_one_is_not():
+    from labharness.modbus import ModbusInstrument
+    replies = []
+    comp = ModbusInstrument("comp", compressor_card(), "modbus://10.0.0.5?unit=1",
+                            module={"transport": lambda frame: replies.pop(0) if replies else b""})
+    assert lost_kind(raised(lambda: comp.query("READ 30008 float32"))) == "silent"   # no reply at all
+    rtu = ModbusInstrument("comp", compressor_card(), "modbus://COM5?unit=1",
+                           module={"transport": lambda frame: b"", "rtu": True})
+    assert lost_kind(raised(lambda: rtu.query("READ 30008 float32"))) == "silent"
+    replies.append(b"\x00\x01\x00")                                                  # three bytes: it answered, garbled
+    assert lost_kind(raised(lambda: comp.query("READ 30008 float32"))) is None
+
+
+class Rpc:
+    def __init__(self, mode):
+        self.mode = mode
+
+    def create_connection(self, address, timeout):
+        return self
+
+    def settimeout(self, t):
+        pass
+
+    def sendall(self, data):
+        if self.mode == "reset":
+            raise ConnectionResetError(10054, "An existing connection was forcibly closed by the remote host")
+
+    def recv(self, n):
+        if self.mode == "silent":
+            raise socket.timeout("timed out")
+        return b""
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("mode, kind", [("silent", "silent"), ("reset", "gone"), ("closed", "gone")])
+def test_a_json_rpc_controller_that_went_silent_or_away_is_lost(mode, kind):
+    from labharness.jsonrpc import JsonRpcInstrument
+    card = builtin_registry().get("attocube/attodry-enspire")
+    dry = JsonRpcInstrument("dry", card, "jsonrpc://10.0.0.40:9090", module=Rpc(mode))
+    query = next(p.get_cmd.render() for p in card.params.values() if p.get_cmd is not None)
+    assert lost_kind(raised(lambda: dry.query(query))) == kind
+
+
+def test_a_web_api_that_refuses_or_doesnt_answer_is_lost():
+    import urllib.error
+    from labharness.webapi import HttpInstrument
+    card = builtin_registry().get("lightcon/pharos")
+
+    def refused(req, timeout=None, **kw):
+        raise urllib.error.URLError(ConnectionRefusedError(10061, "No connection could be made because the target "
+                                                                  "machine actively refused it"))
+
+    def silent(req, timeout=None, **kw):
+        raise urllib.error.URLError(socket.timeout("timed out"))
+    e = raised(lambda: HttpInstrument("fs", card, "http://10.0.0.7:20022/v1", module=refused).query(
+        "GET /Basic/ActualOutputPower"))
+    assert isinstance(e, LinkLost) and "could not reach http://10.0.0.7:20022/v1" in str(e)
+    e = raised(lambda: HttpInstrument("fs", card, "http://10.0.0.7:20022/v1", module=silent).query(
+        "GET /Basic/ActualOutputPower"))
+    assert isinstance(e, NoAnswer)
+
+
 # ------------------------------------------------------------------ Quantum Design MultiVu (drivers.py)
 
 class MultiVuServer:
