@@ -107,6 +107,7 @@ class Lab:
         self.pace: Any = None
         self._factory = backend_factory
         self._parked: Dict[str, Any] = {}   # connections set aside unclosed when switched off (closing would send)
+        self._set_aside: List[Any] = []     # those of instruments taken out of the lab, likewise (take_out)
         off = set(switched_off(config.name)) if switched_off else set()
         self.instruments: Dict[str, Instrument] = {}
         for name, ic in config.instruments.items():
@@ -298,6 +299,30 @@ class Lab:
         self.instruments = {k: v for k, v in self.instruments.items() if k != name}
         self._parked.pop(name, None)
         inst.close()
+
+    def take_out(self, name: str) -> str:
+        """Take an instrument out of this lab for good (its entry left the lab config: remove_instrument): forgotten,
+        its entry first, then the instrument (each a new dictionary: see _publish). Its connection is closed where
+        that sends the instrument nothing (a VISA session) or Kelvin closes it when it quits anyway (a camera); a
+        maker's driver, whose closing could send something (a pulse generator stops its outputs), is set aside as it
+        is, as a switched-off instrument's is, and left so when Kelvin quits. Returns "closed", "set aside", or "" (it
+        had no connection of its own: switched off, never connected, simulated)."""
+        inst = self.instruments[name]   # KeyError: not in this lab
+        self.config.instruments = {k: v for k, v in self.config.instruments.items() if k != name}
+        self.instruments = {k: v for k, v in self.instruments.items() if k != name}
+        simulated = inst.simulated
+        backend = self._parked.pop(name, None) or inst.backend
+        inst.backend = OffBackend(name)   # whatever still holds the instrument sends it nothing from now on
+        if isinstance(backend, OffBackend):
+            return ""
+        if simulated or getattr(backend, "quiet_close", False) or getattr(backend, "close_at_quit", False):
+            try:
+                backend.close()
+            except Exception:
+                pass
+            return "" if simulated else "closed"
+        self._set_aside.append(backend)
+        return "set aside"
 
     def resolve(self, key: str) -> Tuple[Instrument, ParamSpec]:
         key = self.config.names.get(key, key)   # the lab's own name for it (names:): Vbg for dac.CH0

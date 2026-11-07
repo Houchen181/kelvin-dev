@@ -303,6 +303,8 @@ def event_line(e: Dict[str, Any]) -> str:
     elif kind == "instrument_switched":
         text = "%s %s" % (e.get("instrument"), "connected to Kelvin" if e.get("on") else
                           "disconnected from Kelvin: Kelvin sends it nothing")
+    elif kind == "instrument_removed":
+        text = "took %s (%s at %s) out of the lab" % (e.get("instrument"), e.get("card"), e.get("address"))
     elif kind in ("signed_in", "signed_out"):
         text = kind.replace("_", " ")
     elif kind == "computer_task":
@@ -8694,6 +8696,152 @@ class LabRuntime:
                 ". Its outputs ask a person until they review it (another card)" if "added_by" in changes else "")
         return self._do("changing an instrument", run)
 
+    def remove_instrument(self, name: str, by: str = "agent") -> str:
+        """Take an instrument out of the lab, as a person asks (one gone for good, a duplicate, one added at the wrong
+        address): its entry leaves the lab config with the comment lines right above it (the rest and its comments
+        kept; the config history keeps the version before, so a person can put it back), and the lab forgets it,
+        letting go of its connection without sending it anything (Lab.take_out). It drives nothing, so Kelvin
+        approves it itself (after text from the web, a person does); while an output of it that reaches the sample is
+        on, as read now, a person decides, as Kelvin could then no longer bring it to safe (not for a second entry of
+        an instrument the lab keeps under another name). Refused while a plan or the queue runs, and while another
+        rule in the lab config names it (an interlock, a watch, a safe action, another instrument's guard), which is a
+        person's to change. The watches on its readings end with it; its folder (manual, calibration), its past runs
+        and the lab's names: for it stay (a name waits for its instrument)."""
+        from ..adapters import resource_name, timed_out
+        from ..discovery import remove_entry
+        from ..homelab import lab_registry
+        from ..instrument import InstrumentLost
+        from ..labconfig import ConfigError, load_lab_config
+        if self.home is None or self.lab_info.get("kind") != "file":
+            return "not removed: this lab has no lab config file to change (Lab setup makes one)"
+        name = (name or "").strip()
+        if name not in self.lab.instruments:
+            return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments) or "none")
+        registry = lab_registry(self.home, self.collection)
+        lab_file = self.home / "lab.yaml"
+
+        def without(text: str) -> str:   # checked as the lab would open it: KeyError, ConfigError
+            new_text = remove_entry(text, name)
+            load_lab_config(new_text, registry)
+            return new_text
+
+        def run() -> str:
+            live = self.live or {}
+            if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
+                return "not removed: a plan or the queue is running; remove it when it has finished"
+            inst = self.lab.instruments.get(name)
+            if inst is None:
+                return "%s is not in the lab any more" % name
+            text = lab_file.read_text(encoding="utf-8") if lab_file.exists() else ""
+            try:
+                new_text = without(text)
+            except KeyError:
+                return "not removed: %s is not in the lab config file (Lab setup)" % name
+            except ConfigError as e:
+                try:
+                    load_lab_config(text, registry)
+                except ConfigError as was:
+                    return ("not removed: your lab config has problems (fix them in Lab setup): "
+                            + "; ".join(was.errors[:4]))
+                return ("not removed: other rules in the lab config name %s (%s). They are the person's: they take "
+                        "them out in Lab, Set up… (Lab config), then you can remove %s"
+                        % (name, "; ".join(e.errors[:4]), name))
+            except (ValueError, yaml.YAMLError) as e:
+                return "not removed: %s" % (str(e).splitlines()[0] if str(e) else type(e).__name__)
+            there = resource_name(inst.config.address)
+            twins = [n for n, i in self.lab.instruments.items()   # the same instrument, under another name
+                     if n != name and resource_name(i.config.address) == there]
+            silent = False   # read once first: one that doesn't answer isn't asked more (each read could time out)
+            if inst.enabled and not twins:
+                first = next((s for s in inst.card.drives if s.get_cmd is not None or s.name in inst._last), None)
+                try:
+                    if first is not None:
+                        inst.read(first.name)
+                except Exception as e:   # one that answers, garbled or with an error, is read as usual
+                    silent = isinstance(e, InstrumentLost) or timed_out(e)
+            on, left = False, []
+            if inst.enabled and not twins and not silent:   # as _outputs_on and left_on say it
+                named = {s.applies_when for s in inst.card.drives if s.applies_when}
+                switches = [s for s in inst.card.drives if s.enables or s.name in named]
+                on = protection.applies_to_sample(inst.card) and bool(self._away(inst, switches or inst.card.drives))
+                left = self._left_on_of(name, inst)
+            notes: List[str] = []
+            if twins:
+                notes.append("The same instrument stays in the lab as %s." % ", ".join(twins))
+            elif on:   # what Kelvin can bring to safe now, and no longer once it is out
+                notes.append("Left on: %s. Kelvin can't bring it to safe once it is out: Bring to safe and Hands on "
+                             "the sample leave it as it is." % (", ".join(left) or "its output"))
+            elif left:
+                notes.append("Left as it is: %s." % ", ".join(left))
+            if silent:
+                notes.append("%s didn't answer, so Kelvin can't tell whether its outputs are on: check it at the "
+                             "instrument." % name)
+            elif inst.unavailable is not None:
+                notes.append("Kelvin had no connection to it.")
+            elif not inst.enabled:
+                notes.append("Kelvin's connection to it was off, so Kelvin didn't read it: its outputs stay as they "
+                             "are.")
+            request = ApprovalRequest(("Remove %s from the lab while it is on?" if on else "Remove %s from the lab?")
+                                      % name, [
+                "%s (%s at %s) leaves the lab config, and Kelvin lets go of its connection without sending it "
+                "anything." % (name, inst.card.model, inst.config.address)] + notes + [
+                "Its folder, its past runs and the lab config history stay: it can be put back."])
+            if on:   # the person's call: Kelvin gives up what it could still do for the sample
+                approved = self.gate.ask(request)
+            else:
+                approved = self.gate.auto_simple(request, "taking an instrument out of the lab sends it nothing") \
+                    or self.gate.ask(request)
+            if not approved:
+                note = " (%s)" % request.note if request.note else ""
+                return "declined: the person did not want %s removed%s" % (name, note)
+            try:
+                fresh = lab_file.read_text(encoding="utf-8") if lab_file.exists() else ""
+                if fresh != text:   # a person changed it meanwhile: it goes from theirs
+                    new_text = without(fresh)
+                tmp = lab_file.with_suffix(".tmp")
+                tmp.write_text(new_text, encoding="utf-8")
+                tmp.replace(lab_file)
+            except OSError as e:
+                return "not removed: Kelvin could not save the lab config (%s). It is as it was." % e
+            except (KeyError, ConfigError, ValueError, yaml.YAMLError):
+                return "not removed: the lab config changed while Kelvin was removing %s; try again" % name
+            how = self.lab.take_out(name)
+            ended = []
+            for w in list(self.monitor.watches.values()):   # they could only say it can't be read now
+                if w.key.split(".")[0] == name:
+                    try:
+                        self.monitor.remove(w.id, why="%s was taken out of the lab" % name)
+                    except KeyError:
+                        continue
+                    self.unshared_watches.pop(w.id, None)
+                    ended.append(w.rule())
+            if ended:
+                self._save_watches()
+            self._refresh()
+            self.config_changed("Kelvin (%s)" % by, "removed %s" % name, "removed")
+            self._apply_protection(recheck=True)
+            guarded = [k for k in self.protection_missing if k.split(".")[0] == name]
+            if guarded:
+                notes.append("The mounted sample's protection names %s (%s): it holds again if an instrument of that "
+                             "name comes back." % (name, ", ".join(guarded)))
+            self.gate.log.write("instrument_removed", by=by, instrument=name, card=inst.card.id,
+                                address=inst.config.address, connection=how or None, watches=ended or None)
+            self.notifier("setup", "Kelvin removed %s from the lab" % name, " ".join(
+                ["%s at %s." % (inst.card.model, inst.config.address)] + notes))
+            self.lab_changed("removed")
+            said = ["removed %s (%s at %s) from the lab config" % (name, inst.card.id, inst.config.address)]
+            if how == "closed":
+                said.append("its connection is closed")
+            elif how == "set aside":
+                said.append("its maker's driver stays connected until Kelvin quits, as closing it could send the "
+                            "instrument something")
+            if ended:
+                said.append("its watches ended (%s)" % "; ".join(ended))
+            return "; ".join(said) + ". " + " ".join(notes + [
+                "Its folder (manual, calibration), its past runs and the lab config history stay: a person can put it "
+                "back (Settings, Instruments, Lab config history)."])
+        return self._do("removing an instrument", run)
+
     def refresh_cards(self, ids: Iterable[str]) -> None:
         """After cards changed (the user's, or a new copy of the collection): the card the lab's registry has for each
         of these ids, by the same layers a lab is opened with (homelab.lab_registry). Instruments already
@@ -9635,41 +9783,46 @@ class LabRuntime:
         out: List[str] = []
         for name, inst in sorted(self.lab.instruments.items(),
                                  key=lambda kv: not protection.applies_to_sample(kv[1].card)):
-            if not inst.enabled:
+            if inst.enabled:
+                out += self._left_on_of(name, inst)
+        return out
+
+    def _left_on_of(self, name: str, inst: Any) -> List[str]:
+        """What of one instrument is away from safe now, as left_on says it."""
+        out: List[str] = []
+        hows = {n for p in inst.card.drives for n in (p.rate_param, p.range_param, p.autorange_param,
+                                                      p.current_limit) if n}
+        for spec in inst.card.drives:
+            if spec.name in hows or spec.type in ("str", "trace", "image") or \
+                    (spec.get_cmd is None and spec.name not in inst._last):
                 continue
-            hows = {n for p in inst.card.drives for n in (p.rate_param, p.range_param, p.autorange_param,
-                                                          p.current_limit) if n}
-            for spec in inst.card.drives:
-                if spec.name in hows or spec.type in ("str", "trace", "image") or \
-                        (spec.get_cmd is None and spec.name not in inst._last):
+            try:
+                v = inst.read(spec.name)
+                if v is None:
                     continue
                 try:
-                    v = inst.read(spec.name)
-                    if v is None:
-                        continue
-                    try:
-                        there = inst.read(spec.readback) if spec.readback and spec.ramp == "instrument" else None
-                    except Exception:
-                        there = None   # its reading can't be read: by its set point, as before
-                    if spec.distance(v) == 0 and not reading_away(spec, there):
-                        continue
-                    switch = self.gate._switch_of(inst, spec)
-                    state = self.gate._current(inst, switch) if switch is not None else None
+                    there = inst.read(spec.readback) if spec.readback and spec.ramp == "instrument" else None
                 except Exception:
+                    there = None   # its reading can't be read: by its set point, as before
+                if spec.distance(v) == 0 and not reading_away(spec, there):
                     continue
-                if state is not None and switch.distance(state) == 0:
-                    continue   # its switch is off: it doesn't reach the sample
-                text = "%s.%s %s" % (name, spec.name, spec.show(v))
-                notes = []
-                if spec.readback:
-                    try:
-                        notes.append("%s %s" % (spec.readback, inst.spec(spec.readback).show(inst.read(spec.readback))))
-                    except Exception:
-                        pass
-                    stuck = self.gate._no_rate(inst, spec)   # Bring to safe doesn't change a rate: say what does
-                    if stuck:
-                        notes.append(stuck)
-                out.append(text + (" (%s)" % "; ".join(notes) if notes else ""))
+                switch = self.gate._switch_of(inst, spec)
+                state = self.gate._current(inst, switch) if switch is not None else None
+            except Exception:
+                continue
+            if state is not None and switch.distance(state) == 0:
+                continue   # its switch is off: it doesn't reach the sample
+            text = "%s.%s %s" % (name, spec.name, spec.show(v))
+            notes = []
+            if spec.readback:
+                try:
+                    notes.append("%s %s" % (spec.readback, inst.spec(spec.readback).show(inst.read(spec.readback))))
+                except Exception:
+                    pass
+                stuck = self.gate._no_rate(inst, spec)   # Bring to safe doesn't change a rate: say what does
+                if stuck:
+                    notes.append(stuck)
+            out.append(text + (" (%s)" % "; ".join(notes) if notes else ""))
         return out
 
     def _after_stop(self, by: str, gen: int) -> None:

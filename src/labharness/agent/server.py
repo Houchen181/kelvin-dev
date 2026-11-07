@@ -699,6 +699,20 @@ def build_server(rt: LabRuntime) -> MCPServer:
         nothing; a connection that fails, or answers as another instrument, leaves it as it was."""
         return rt.change_instrument(instrument, address, card, connection, vars)
 
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True,
+                                             openWorldHint=False), structured_output=False)
+    @cancellable
+    def remove_instrument(instrument: str) -> str:
+        """Take an instrument out of the lab, once the person asks: one gone for good, a duplicate, one added at the
+        wrong address or with the wrong card. Its entry leaves the lab config and Kelvin lets go of its connection,
+        sending it nothing; watches on it end. While an output of it that reaches the sample is on, the person is
+        asked first, as Kelvin could then no longer bring it to safe. Refused while a plan or the queue runs, and
+        while another rule in the lab config names it (an interlock, a watch, a safe action, another instrument's
+        guard: the person's to take out in Lab setup). Its folder, past runs and the lab config history stay, so a
+        person can put it back. To keep it but leave it alone for now, the person turns Kelvin's connection to it off
+        in the Lab panel instead."""
+        return rt.remove_instrument(instrument)
+
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
     def do_action(instrument: str, action: str) -> str:

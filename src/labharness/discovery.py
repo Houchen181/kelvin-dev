@@ -798,9 +798,12 @@ def add_names(text: str, names: Dict[str, str]) -> str:
 
 
 def _instrument_lines(lines: List[str], name: str) -> Tuple[int, int]:
-    """Where one instrument's entry is in the lab config's lines: its name's line, and the line after its block."""
+    """Where one instrument's entry is in the lab config's lines: its name's line, and the line after its block. Only
+    under instruments: (names:, after it, has keys too: Vg: smu.V)."""
     start = next((i for i, l in enumerate(lines) if re.match(r"^instruments\s*:", l)), len(lines))
-    at = next((i for i in range(start + 1, len(lines))
+    stop = next((i for i in range(start + 1, len(lines))   # the lab config's next part
+                 if lines[i].strip() and not lines[i].startswith((" ", "\t", "#"))), len(lines))
+    at = next((i for i in range(start + 1, stop)
                if re.match(r"^(\s+)%s\s*:" % re.escape(name), lines[i])), None)
     if at is None:
         raise KeyError("no instrument %r in the lab config" % name)
@@ -929,6 +932,24 @@ def change_entry(text: str, name: str, changes: Dict[str, Any]) -> str:
             after = max([k for k, l in enumerate(out) if re.match(r"^\s*(card|address)\s*:", l)], default=-1)
             out.insert(after + 1, " " * child + written(key, changes[key]))
     return "\n".join(lines[:at + 1] + out + lines[end:])
+
+
+def remove_entry(text: str, name: str) -> str:
+    """The lab config text without one instrument's entry: its lines, and the comment lines right above it at its
+    indent, which are its own; the rest of the text and its comments kept (the blank line after it goes where it
+    would follow another blank line or instruments: itself). KeyError: no such instrument."""
+    lines = text.split("\n")
+    at, end = _instrument_lines(lines, name)
+    indent = len(lines[at]) - len(lines[at].lstrip())
+    start = at
+    while start > 0 and lines[start - 1].lstrip().startswith("#") and \
+            len(lines[start - 1]) - len(lines[start - 1].lstrip()) == indent:
+        start -= 1
+    before = lines[start - 1] if start > 0 else ""
+    if end < len(lines) - 1 and not lines[end].strip() and \
+            (not before.strip() or re.match(r"^instruments\s*:", before)):
+        end += 1
+    return "\n".join(lines[:start] + lines[end:])
 
 
 def set_limits(text: str, name: str, limits: Dict[str, Optional[Sequence[float]]], reviewed: bool = False) -> str:

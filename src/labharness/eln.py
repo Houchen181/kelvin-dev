@@ -26,8 +26,8 @@ MAX_DAY_LINES = 400    # the day's lab record, its latest lines
 DAY_TYPES = {"ask", "answer", "run_start", "run_end", "run_refused", "run_declined", "trip", "alarm", "alarm_cleared",
              "stop", "lab_changed", "approval_mode", "preflight", "queue_start", "queue_end", "queue_declined",
              "queue_pause", "mount", "unmount", "protection", "limits", "lab_reviewed", "hands_on", "hands_off",
-             "owner_pin", "calibration", "instrument_switched", "instrument_added", "incident", "incident_safe",
-             "idle_off", "data_folder", "report", "watch", "review", "queue_pause_taken_back"}
+             "owner_pin", "calibration", "instrument_switched", "instrument_added", "instrument_removed", "incident",
+             "incident_safe", "idle_off", "data_folder", "report", "watch", "review", "queue_pause_taken_back"}
 
 
 def _cell(text: Any) -> str:
