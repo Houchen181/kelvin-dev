@@ -43,6 +43,11 @@ from .cards import Card
 SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick", "lib",
            "nidaq", "seabreeze", "shamrock", "picam", "lightfield", "pylon", "andor", "anc300", "anc350", "modbus",
            "uvc", "genicam", "jsonrpc")
+# how long opening takes at most, for the makers' drivers that take longer than a lab waits for any (lab.OPEN_S, 60 s)
+# by themselves: LightField starting its program, PICam's helper starting PICam (60 s) then opening the camera (30 s),
+# the lib:// helper starting (30 s) and loading the maker's library (60 s), an Andor spectrograph's library starting,
+# QICK's name server and board each answering within its own time (rfsoc.CALL_S)
+OPEN_S = {"lightfield": 300.0, "picam": 120.0, "lib": 150.0, "shamrock": 120.0, "qick": 150.0}
 _COMMAND = re.compile(r"^\s*(SET|GET)\s+(\S+)(?:\s+(\S+))?\s*$", re.I)
 
 
@@ -859,6 +864,13 @@ def open_driver(name: str, card: Card, address: str) -> DriverBackend:
         module, cls = LATER[scheme]
         DRIVERS[scheme] = getattr(importlib.import_module("." + module, __package__), cls)
     backend = DRIVERS[scheme](name, card, address, MODULES.get(scheme))
-    for command in card.on_connect:   # configuration only (wiring, delays, limits); parse_card refuses drives here
-        backend.write(command)
+    try:
+        for command in card.on_connect:   # configuration only (wiring, delays, limits); parse_card refuses drives here
+            backend.write(command)
+    except BaseException:   # not connected after all: let go of it, or it would hold the instrument (a camera opens once)
+        try:
+            backend.close()
+        except Exception:
+            pass
+        raise
     return backend

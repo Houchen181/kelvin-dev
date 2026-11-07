@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextvars
+import logging
 import re
 import threading
 import time
@@ -9,14 +10,25 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .cards import Card, CardRegistry, ParamSpec, num
-from .adapters import timed_out
+from .adapters import AdapterError, timed_out
 from .clock import SimClock, Stops
-from .instrument import (NOT_CONNECTED, OFF_TEXT, Garbled, Instrument, InstrumentFault, InstrumentLost, NotHere,
-                         NotNow, OffBackend, Unavailable)
+from .instrument import (NOT_CONNECTED, OFF_TEXT, Garbled, Instrument, InstrumentFault, InstrumentLost, InstrumentOff,
+                         NotHere, NotNow, OffBackend, Unavailable)
 from .labconfig import InstrumentConfig, LabConfig
 
+log = logging.getLogger("kelvin")
 BackendFactory = Callable[[str, Card, str], Any]
 SwitchedOff = Callable[[str], Iterable[str]]   # a lab's name -> the instruments a person switched off in it
+# how long an instrument's driver may take to open it (a maker's driver that takes longer by itself is given its own
+# time: open_deadline): past it the instrument is set aside with why and the lab goes on. A camera SDK's open that
+# never returned held the lab, the first start and every restart for good (review of 0.3.45)
+OPEN_S = 60.0
+ENDED_CLOSE_S = 10.0   # a connection that ended by itself (its driver didn't return) is closed waiting this long at most
+CONNECTING_AGAIN = "Kelvin is connecting it"   # while a person's switch on (Lab panel) opens it
+
+
+class OpenTimedOut(AdapterError):
+    """An instrument's driver didn't finish opening it in time (open_deadline): it is set aside, said in words."""
 
 
 @dataclass
@@ -57,7 +69,8 @@ def real_backend_factory(name: str, card: Card, address: str) -> Any:
 
 def _ended(backend: Any) -> str:
     """Why a connection that still counts as made has ended by itself, or "": a camera library's helper Kelvin ended
-    after a call that hung (princeton.py) is gone, and reconnecting it makes a fresh one."""
+    after a call that hung (princeton.py), or a maker's driver whose call didn't return in time (drivers.py
+    DriverBackend.bounded), is gone, and reconnecting it makes a fresh one."""
     helper = getattr(backend, "helper", None)
     return str(getattr(backend, "gone", "") or getattr(helper, "gone", "") or "")
 
@@ -67,6 +80,64 @@ def _close_quietly(inst: Instrument) -> None:
         inst.close()
     except Exception:
         pass   # closing: nothing more to do with it
+
+
+def _close_backend(backend: Any) -> None:
+    try:
+        backend.close()
+    except Exception:
+        pass   # closing: nothing more to do with it
+
+
+def _let_go(backend: Any, within: float = ENDED_CLOSE_S) -> bool:
+    """A connection closed on a thread of its own, waiting at most `within` seconds: one that ended because its driver
+    didn't return may not return from closing either, and must not hold the lab. True if it closed in time."""
+    t = threading.Thread(target=_close_backend, args=(backend,), name="kelvin-close", daemon=True)
+    t.start()
+    t.join(within)
+    return not t.is_alive()
+
+
+def _close_now(backend: Any) -> None:
+    """Close a connection: at once, or on a thread of its own (bounded) when it ended by itself (_let_go)."""
+    if _ended(backend):
+        _let_go(backend)
+    else:
+        backend.close()
+
+
+def open_deadline(card: Card, address: str) -> float:
+    """How long an instrument's driver may take to open it: OPEN_S (a VISA session opens in seconds, its card's
+    configuration commands with it); longer for a maker's driver that takes longer by itself (drivers.OPEN_S:
+    LightField starting, PICam's helper, the lib:// helper), and a lib:// card's own open steps (each a call into the
+    maker's library, at the card's timeout) on top. A card whose own timeout is long (a Thorlabs KDC101's 70 s) has
+    two exchanges' worth of it at least, so that an open that fails says why in its own words (a timeout on a hung
+    GPIB bus), not only that it took too long."""
+    from .drivers import OPEN_S as OWN
+    scheme = address.split("://", 1)[0].lower() if "://" in address else ""
+    try:
+        each = max(0.0, float((card.connection or {}).get("timeout_ms") or 0) / 1000.0)
+    except (TypeError, ValueError):
+        each = 0.0
+    limit = max(OPEN_S, OWN.get(scheme, 0.0), 2 * each + 15.0 if each else 0.0)
+    steps = (card.library or {}).get("open") or []
+    if scheme == "lib" and steps:
+        limit += len(steps) * (each or 10.0)
+    return limit
+
+
+def open_hung_text(name: str, limit: float, address: str) -> str:
+    """An instrument whose driver didn't finish opening it in time, in words: what may hold it, and what helps."""
+    from .drivers import is_driver_address
+    try:
+        from .others import holders
+        running = holders()
+    except Exception:
+        running = []
+    return ("%s: its driver didn't finish opening it within %d s, so Kelvin went on without it: is the instrument on, "
+            "and not open in %s%s? If opening hangs again, turn the instrument itself off and on, then connect it "
+            "again" % (name, round(limit), "its maker's software or another program" if is_driver_address(address)
+                       else "another program", " (running now: %s)" % ", ".join(running) if running else ""))
 
 
 def first_line(e: BaseException) -> str:
@@ -90,12 +161,13 @@ BUS_WINDOW_S = 120.0   # instruments on one GPIB bus that stop answering this cl
 class Lab:
     def __init__(self, config: LabConfig, registry: CardRegistry, backend_factory: BackendFactory,
                  clock: Any, world: Any = None, switched_off: Optional[SwitchedOff] = None, partial: bool = False,
-                 later: bool = False):
+                 later: bool = False, deadline: bool = True):
         """switched_off: the instruments a person switched off (Lab panel). They are never connected, so nothing,
         not even the connecting, is sent to them. partial: an instrument that can't be connected is set aside, with
         the reason, and the others are used (otherwise its error is raised). later: none is connected yet, so Kelvin
         opens at once (connecting can take minutes: timeouts, makers' drivers); each waits, as connecting, until
-        reconnect connects it."""
+        reconnect connects it. deadline: each connection is opened on a thread of its own and waited for at most
+        open_deadline (_open); False for a twin, whose simulated instruments open at once."""
         self.config = config
         self.registry = registry
         self.clock = clock
@@ -106,6 +178,11 @@ class Lab:
         self.timing: Any = None
         self.pace: Any = None
         self._factory = backend_factory
+        self._deadline = deadline
+        # an instrument's connection changes under this only, and never across I/O: a person may switch off one that
+        # is still connecting without waiting for the lab (an open can take a minute), and the connection made
+        # meanwhile is then not the lab's (_take)
+        self._swap = threading.Lock()
         self._parked: Dict[str, Any] = {}   # connections set aside unclosed when switched off (closing would send)
         self._set_aside: List[Any] = []     # those of instruments taken out of the lab, likewise (take_out)
         off = set(switched_off(config.name)) if switched_off else set()
@@ -118,12 +195,85 @@ class Lab:
                 backend = Unavailable(name, CONNECTING)
             else:
                 try:
-                    backend = backend_factory(name, card, ic.address)
+                    backend = self._open(name, card, ic.address)
                 except Exception as e:
                     if not partial:
                         raise
                     backend = Unavailable(name, first_line(e))
             self.instruments[name] = Instrument(name, card, backend, ic, self.stops)
+
+    def _open(self, name: str, card: Card, address: str) -> Any:
+        """A connection made by the lab's backend factory on a thread of its own, waited for at most open_deadline:
+        a driver that never returns from opening (a camera's SDK, a GPIB driver) can't hold the lab, a first start or
+        a restart for good. Past it OpenTimedOut is raised (the caller sets the instrument aside, with why), and the
+        connection, should it open after all, is closed again: it is never handed to the lab, so nothing Kelvin
+        doesn't know of talks to the instrument. A simulated one (sim://, a twin's) is made at once."""
+        if not self._deadline or address.startswith("sim://"):
+            return self._factory(name, card, address)
+        limit = open_deadline(card, address)
+        context = contextvars.copy_context()   # connecting_entry(name): the entry being connected, there too
+        lock = threading.Lock()
+        done = threading.Event()
+        out: Dict[str, Any] = {}
+
+        def work() -> None:
+            try:
+                backend = context.run(self._factory, name, card, address)
+            except BaseException as e:   # the caller's to raise; nothing to close
+                with lock:
+                    out["error"] = e
+                    done.set()
+                return
+            with lock:
+                if not out.get("late"):
+                    out["backend"] = backend
+                    done.set()
+                    return
+            log.warning("%s: its driver finished opening %s after Kelvin had stopped waiting; closed again, unused",
+                        name, address)
+            _close_backend(backend)
+
+        threading.Thread(target=work, name="kelvin-open-" + name, daemon=True).start()
+        done.wait(limit)
+        with lock:
+            if not done.is_set():
+                out["late"] = True
+        if out.get("late"):
+            log.warning("%s: its driver didn't finish opening %s within %g s; set aside", name, address, limit)
+            raise OpenTimedOut(open_hung_text(name, limit, address))
+        if "error" in out:
+            raise out["error"]
+        return out["backend"]
+
+    def _take(self, inst: Instrument, was: Any, backend: Any) -> bool:
+        """The instrument's connection is now `backend`, if it is still `was` (nobody switched it off meanwhile, as a
+        person may while it connects: set_off): True. False leaves it as it is; a new connection is then not the
+        lab's (_not_ours)."""
+        with self._swap:
+            if inst.backend is not was:
+                return False
+            inst.backend = backend
+            return True
+
+    def _not_ours(self, name: str, backend: Any) -> None:
+        """A connection made for an instrument a person switched off while it connected: closed where closing sends
+        nothing (a VISA session), else set aside unclosed, as switching it off would (switching on takes it back)."""
+        if getattr(backend, "quiet_close", False) or _ended(backend):
+            _let_go(backend)
+        else:
+            self._parked[name] = backend
+
+    def set_off(self, name: str) -> bool:
+        """Switch off an instrument that isn't connected (still connecting, set aside with why, or off already),
+        waiting for nothing: no connection of it is in use, so nothing is sent or closed. False when it is connected:
+        switching it off then needs the lab (switch). Raises KeyError for one not in this lab."""
+        inst = self.instruments[name]
+        with self._swap:
+            if inst.enabled:
+                return False
+            if inst.unavailable is not None:
+                inst.backend = OffBackend(name)
+            return True
 
     def instrument(self, name: str) -> Instrument:
         """The instrument to talk to; a switched-off one is refused (KeyError, so the gate refuses the command)."""
@@ -176,57 +326,74 @@ class Lab:
                 if inst.enabled and connection_of(old) != connection_of(bound):
                     if not getattr(inst.backend, "quiet_close", False):
                         return news + "; its new connection settings apply when Kelvin next opens the lab"
-                    inst.backend.close()
-                    inst.backend = Unavailable(name, "connecting again with its card as it is now")
+                    backend, inst.backend = inst.backend, Unavailable(name, "connecting again with its card as it is now")
+                    _close_now(backend)
                     news += ", connected again with its new connection settings"
         ended = _ended(inst.backend)
         if inst.unavailable is None and not ended:
             return news
         if ended:   # a connection that ended by itself (a camera's PICam helper Kelvin had to end): made anew
-            _close_quietly(inst)
-            inst.backend = Unavailable(name, ended)
+            backend, inst.backend = inst.backend, Unavailable(name, ended)
+            _let_go(backend)   # on a thread of its own: a driver that didn't return may not return from closing
+        was = inst.backend
         try:
-            inst.backend = self._factory(name, inst.card, inst.config.address)
+            backend = self._open(name, inst.card, inst.config.address)
         except Exception as e:
-            inst.backend = Unavailable(name, first_line(e))
+            self._take(inst, was, Unavailable(name, first_line(e)))
             raise
+        if not self._take(inst, was, backend):   # a person switched it off while it connected: it stays off
+            self._not_ours(name, backend)
+            raise InstrumentOff(OFF_TEXT % name)
         return news + ("; connected again (its connection had ended: %s)" % ended if ended else "")
 
     def switch(self, name: str, on: bool) -> None:
         """Switch an instrument on or off for this lab. Off sends nothing: a plain VISA session is closed (that
         sends the instrument nothing and frees it for other programs); a driver connection, whose closing could
         send something (a pulse generator stops its outputs), is set aside as it is. On connects it again, or
-        takes back the connection set aside."""
+        takes back the connection set aside. While it connects it counts as not connected (CONNECTING_AGAIN), so a
+        person can switch it off again at once (set_off)."""
         inst = self.instruments[name]   # KeyError: not in this lab
         if inst.unavailable is not None:   # not connected: on tries again, off keeps it off
             if on:
                 self.reconnect(name)
             else:
-                inst.backend = OffBackend(name)
+                self.set_off(name)
             return
         if on == inst.enabled:
             return
         if not on:
             backend, inst.backend = inst.backend, OffBackend(name)
-            if getattr(backend, "quiet_close", False):
+            if _ended(backend):   # its driver didn't return: closed on a thread of its own, made anew when on
+                _let_go(backend)
+            elif getattr(backend, "quiet_close", False):
                 backend.close()
             else:
                 self._parked[name] = backend
             return
         backend = self._parked.pop(name, None)
+        if backend is not None and _ended(backend):   # ended while set aside: a fresh connection instead
+            _let_go(backend)
+            backend = None
         if backend is None:
+            was = Unavailable(name, CONNECTING_AGAIN)
+            with self._swap:
+                inst.backend = was
             try:
-                backend = self._factory(name, inst.card, inst.config.address)
+                backend = self._open(name, inst.card, inst.config.address)
             except Exception as e:   # a person wanted it on: it is on, not connected, and says why (not "switched off")
-                inst.backend = Unavailable(name, first_line(e))
+                self._take(inst, was, Unavailable(name, first_line(e)))
                 raise
+            if not self._take(inst, was, backend):   # switched off again while it connected
+                self._not_ours(name, backend)
+                raise InstrumentOff(OFF_TEXT % name)
+            return
         inst.backend = backend
 
     def _connect(self, ic: InstrumentConfig, card: Card) -> Any:
         """A connection to an instrument as this entry says, made before the lab lists it (connecting_entry)."""
         token = _CONNECTING.set(ic)
         try:
-            return self._factory(ic.name, card, ic.address)
+            return self._open(ic.name, card, ic.address)
         finally:
             _CONNECTING.reset(token)
 
@@ -265,22 +432,29 @@ class Lab:
         bound = card.bind(ic.vars)
         was = inst.unavailable
         if was is None:
-            inst.backend.close()
-            inst.backend = Unavailable(ic.name, "connecting again with its new entry")
+            old, inst.backend = inst.backend, Unavailable(ic.name, "connecting again with its new entry")
+            _close_now(old)
+        connecting = inst.backend
 
         def back() -> None:   # its old card and address, connected again where it was connected
             if was is not None:
-                inst.backend = Unavailable(ic.name, was)
+                self._take(inst, connecting, Unavailable(ic.name, was))
                 return
             try:
-                inst.backend = self._factory(ic.name, inst.card, inst.config.address)
+                backend = self._open(ic.name, inst.card, inst.config.address)
             except Exception as e:
-                inst.backend = Unavailable(ic.name, first_line(e))
+                self._take(inst, connecting, Unavailable(ic.name, first_line(e)))
+                return
+            if not self._take(inst, connecting, backend):   # switched off meanwhile
+                self._not_ours(ic.name, backend)
         try:
             backend = self._connect(ic, bound)   # with its new connection settings, not its old entry's
         except Exception:
             back()
             raise
+        if inst.backend is not connecting:   # a person switched it off while it connected: it stays off
+            self._not_ours(ic.name, backend)
+            raise InstrumentOff(OFF_TEXT % ic.name)
         self.registry.put(card)
         new = Instrument(ic.name, bound, backend, ic, self.stops)
         self._publish(ic, new)
@@ -315,9 +489,10 @@ class Lab:
         inst.backend = OffBackend(name)   # whatever still holds the instrument sends it nothing from now on
         if isinstance(backend, OffBackend):
             return ""
-        if simulated or getattr(backend, "quiet_close", False) or getattr(backend, "close_at_quit", False):
+        if simulated or getattr(backend, "quiet_close", False) or getattr(backend, "close_at_quit", False) \
+                or _ended(backend):
             try:
-                backend.close()
+                _close_now(backend)
             except Exception:
                 pass
             return "" if simulated else "closed"
@@ -503,7 +678,7 @@ class Lab:
         clock = SimClock()
         world = World(clock, seed)
         off = set(self.switched_off) | set(self.unavailable)
-        twin = Lab(self.config, self.registry, sim_backend_factory(world), clock, world, lambda _: off)
+        twin = Lab(self.config, self.registry, sim_backend_factory(world), clock, world, lambda _: off, deadline=False)
         twin.pace = self.timing or self.pace   # readings and steps take what they take in this lab (timing.py)
         for name, inst in self.instruments.items():
             if name in off:
