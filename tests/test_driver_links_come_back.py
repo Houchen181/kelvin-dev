@@ -354,6 +354,7 @@ class Adapter:
 
 
 def test_a_modbus_rtu_device_whose_adapter_was_replugged_is_reached_again(monkeypatch):
+    pytest.importorskip("serial")   # pyserial: hardware support, not in the core install (CI's core job)
     from labharness.modbus import ModbusInstrument
     adapter = Adapter()
     monkeypatch.setattr(adapter.serial, "Serial", adapter.Port)
