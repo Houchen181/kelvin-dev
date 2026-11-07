@@ -20,7 +20,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .adapters import AdapterError, apply_serial_settings, is_serial, resource_manager, resource_name
+from .adapters import AdapterError, apply_serial_settings, is_serial, resource_manager, resource_name, timed_out
 from .cards import Card, CardRegistry
 
 SHORT_NAMES = {"source-meter": "smu", "lock-in": "lockin", "temperature-controller": "tc", "magnet-supply": "magnet",
@@ -425,6 +425,60 @@ def _ask_board(found: Found, rm: Any, registry: CardRegistry, vid_pid: str, time
     return found
 
 
+NLISTENERS = -1073807265   # VISA: nothing listens at that GPIB address (the bus says so before anything is sent)
+SWEEP_MS = 300             # how long an instrument that listens may take to answer *IDN? in a GPIB board's sweep
+
+
+def gpib_listeners(rm: Any, board: str, skip: Iterable[str] = (), timeout_ms: int = SWEEP_MS) -> List[Tuple[str, str]]:
+    """The instruments on a GPIB board ("GPIB0"), found as NI MAX's Scan for Instruments finds them: each address from
+    1 to 30 asked *IDN? in turn. NI-VISA lists only those MAX's scan found, so a lab whose MAX never scanned saw none
+    (field test). Where nothing listens the bus says so at once and nothing is sent; one that listens but doesn't
+    answer in time is device-cleared (its query isn't left pending). skip: resources not to ask (the lab's own, which
+    may be busy, and those VISA listed, asked as usual). [(resource, its reply, "" for none)]."""
+    skip = {str(s).upper() for s in skip}
+    out: List[Tuple[str, str]] = []
+    for pad in range(1, 31):
+        name = "%s::%d::INSTR" % (board, pad)
+        if name.upper() in skip:
+            continue
+        try:
+            res = rm.open_resource(name)
+        except Exception:
+            continue
+        try:
+            res.timeout = timeout_ms
+            try:
+                reply = str(res.query("*IDN?")).strip()
+            except Exception as e:
+                if getattr(e, "error_code", None) == NLISTENERS or "NLISTENERS" in str(e):
+                    continue   # nobody there
+                if not timed_out(e):
+                    continue
+                reply = ""   # it listens, and says nothing (an older instrument): its query dropped
+                try:
+                    res.clear()
+                except Exception:
+                    pass
+            out.append((name, reply))
+        finally:
+            try:
+                res.close()
+            except Exception:
+                pass
+    return out
+
+
+def _from_reply(address: str, reply: str, registry: CardRegistry, catalog: Any) -> Found:
+    """What an identity reply says of the instrument at this address: its card, or the collection's entry for it."""
+    got = Found(address, reply)
+    card = match_card(reply, registry) if reply else None
+    if card:
+        got.card_id, got.model, got.kind, got.how = card.id, card.model, card.kind, "identity reply"
+        return got
+    got.how = "no card matches the reply"
+    return look_up(got, catalog)
+
+
 def scan(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]] = None,
          timeout_ms: int = 800, network: bool = True, catalog: Any = None) -> List[Found]:
     """Every instrument VISA can see, identified. `in_lab` maps addresses already used by the lab to their names;
@@ -513,10 +567,12 @@ def _look_behind(adapter: str, registry: CardRegistry, in_lab: Dict[str, str], c
 
 def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]] = None,
                 timeout_ms: int = 800, network: bool = True, catalog: Any = None,
-                prologix_ports: Optional[Iterable[str]] = None, **survey_options: Any) -> Tuple[List[Found], Any]:
-    """The scan, and what it looked through (survey.py): VISA, the local network, USB, serial ports and GPIB, also
-    behind Prologix adapters. prologix_ports: the serial ports that may be a GPIB-USB (prologix.usb_ports, when the
-    VISA is a real one; tests give theirs)."""
+                prologix_ports: Optional[Iterable[str]] = None, gpib_sweep: Optional[bool] = None,
+                **survey_options: Any) -> Tuple[List[Found], Any]:
+    """The scan, and what it looked through (survey.py): VISA, the local network, USB, serial ports and GPIB, each
+    GPIB board asked address by address too (gpib_listeners), also behind Prologix adapters. prologix_ports: the
+    serial ports that may be a GPIB-USB (prologix.usb_ports, when the VISA is a real one; tests give theirs).
+    gpib_sweep: ask the GPIB boards address by address (by default with a real VISA)."""
     from . import prologix
     from .adapters import resource_name
     from .survey import _is_pyvisa, survey
@@ -527,11 +583,25 @@ def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[st
         prologix_ports = prologix.usb_ports() if _is_pyvisa(rm) else []
     adapters = prologix_adapters(in_lab, prologix_ports)   # a GPIB-USB's port is asked through it, not as a serial port
     resources = [r for r in looked.resources if r not in set(adapters.values())]
+    swept: Dict[str, str] = {}   # instruments found on a GPIB board address by address, with what they answered
+    if gpib_sweep if gpib_sweep is not None else _is_pyvisa(rm):
+        from .adapters import BUSES
+        from .survey import GPIB_SWEPT
+        for board in looked.gpib_boards:
+            if BUSES.text(board):
+                continue   # a hung bus: nothing more is sent on it
+            for name, reply in gpib_listeners(rm, board, set(resources) | set(in_lab)):
+                swept[name] = reply
+                looked.add(name, GPIB_SWEPT)
+                resources.append(name)
     usb = _usb_ids()
     out = []
     for name in sorted(set(resources)):
         if name in in_lab:
             out.append(Found(name, how="already in this lab", in_lab=in_lab[name]))
+            continue
+        if swept.get(name):   # asked already, on the sweep: not again
+            out.append(_from_reply(name, swept[name], registry, catalog))
             continue
         out.append(identify(name, registry, rm, timeout_ms, usb, catalog=catalog))
     for adapter in adapters:

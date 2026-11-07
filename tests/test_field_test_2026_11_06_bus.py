@@ -10,6 +10,7 @@ import types
 
 import pytest
 
+from labharness import builtin_registry
 from labharness.adapters import AdapterError, set_resource_manager
 from labharness.homelab import build_lab
 from labharness.instrument import InstrumentFault, InstrumentLost
@@ -411,3 +412,61 @@ def test_a_retry_of_a_silent_instrument_waits_a_second_at_most():
     with smu.brief(1000):
         assert smu.res.timeout == 1000
     assert smu.res.timeout == 5000
+
+
+# ------------------------------------------------------------------ a GPIB board NI MAX never scanned
+
+class NoListener(Exception):
+    error_code = -1073807265   # VI_ERROR_NLISTENERS
+
+
+class Answering:
+    def __init__(self, idn, asked):
+        self.idn, self.asked, self.timeout, self.cleared = idn, asked, None, 0
+
+    def query(self, cmd):
+        self.asked.append(cmd)
+        if self.idn is None:
+            raise NoListener("VI_ERROR_NLISTENERS: no listeners")
+        if self.idn == "":
+            raise TimeoutError("VI_ERROR_TMO")
+        return self.idn
+
+    def clear(self):
+        self.cleared += 1
+
+    def close(self):
+        pass
+
+
+class UnscannedBoard:
+    """NI-VISA as a lab whose NI MAX never scanned GPIB0 has it: the board, and only the instrument MAX found once."""
+    def __init__(self, devices, listed):
+        self.devices, self.listed, self.asked = devices, listed, {}
+
+    def list_resources(self, query="?*::INSTR"):
+        return ("GPIB0::INTFC",) if "INTFC" in query else tuple(self.listed)
+
+    def open_resource(self, name):
+        return Answering(self.devices.get(name), self.asked.setdefault(name, []))
+
+
+UnscannedBoard.__module__ = "pyvisa.stand_in"   # read as a real VISA by the scan
+
+
+def test_kelvin_finds_gpib_instruments_ni_max_never_scanned():
+    from labharness.discovery import scan_survey
+    board = UnscannedBoard({"GPIB0::9::INSTR": "Stanford_Research_Systems,SR830,s/n86422,ver1.07",
+                            "GPIB0::24::INSTR": "KEITHLEY INSTRUMENTS INC.,MODEL 2400,1083680,C27",
+                            "GPIB0::30::INSTR": "KEITHLEY INSTRUMENTS,MODEL 2400,04453531,1.6.7c",
+                            "GPIB0::7::INSTR": ""},   # listens, says nothing (an older instrument)
+                           listed=["GPIB0::9::INSTR"])
+    found, looked = scan_survey(builtin_registry(), board, in_lab={"GPIB0::15::INSTR": "k2400_bg"}, network=False,
+                                prologix_ports=[], gpib_sweep=True, usb_list=lambda: [], ports=lambda: [])
+    by = {f.address: f for f in found}
+    assert by["GPIB0::24::INSTR"].card_id == "keithley/2400" and by["GPIB0::30::INSTR"].card_id == "keithley/2400"
+    assert by["GPIB0::9::INSTR"].card_id == "srs/sr830"
+    assert "GPIB0::7::INSTR" in by and not by["GPIB0::7::INSTR"].card_id
+    assert board.asked.get("GPIB0::15::INSTR") is None   # the lab's own instrument: never asked
+    assert board.asked["GPIB0::24::INSTR"] == ["*IDN?"]   # asked once, on the sweep
+    assert "3 instruments found on the bus address by address" in " ".join(looked.lines())   # 24, 30 and 7

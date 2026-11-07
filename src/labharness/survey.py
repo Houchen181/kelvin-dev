@@ -52,6 +52,9 @@ def use_bundled_libusb() -> bool:
     return _libusb_ready
 
 
+GPIB_SWEPT = "GPIB, found on the bus"   # how an instrument Kelvin found address by address was found
+
+
 @dataclass
 class Survey:
     visa: str = ""
@@ -61,6 +64,7 @@ class Survey:
     serial_ports: List[str] = field(default_factory=list)
     usb: List[Dict[str, Any]] = field(default_factory=list)  # instrument-like USB devices
     gpib_adapters: Optional[int] = None
+    gpib_boards: List[str] = field(default_factory=list)    # their names ("GPIB0"): each asked address by address
     prologix: List[str] = field(default_factory=list)       # Prologix adapters the scan asked behind, in words
     libraries: List[str] = field(default_factory=list)      # what makers' programs saw (PICam, LightField), in words
     problems: List[str] = field(default_factory=list)       # things to fix, each with what to do
@@ -86,6 +90,9 @@ class Survey:
         out.append("USB instruments: " + (", ".join(usb) if usb else "none"))
         if self.gpib_adapters is not None or self.prologix:
             cards = ["%d in VISA" % self.gpib_adapters] if self.gpib_adapters else []
+            swept = sum(1 for h in self.via.values() if h.startswith(GPIB_SWEPT))
+            if swept:
+                cards.append("%s found on the bus address by address" % _count(swept, "instrument", "none"))
             out.append("GPIB adapters: " + ("; ".join(cards + self.prologix) or "none"))
         return out + self.libraries + ["To fix: " + p for p in self.problems]
 
@@ -276,7 +283,9 @@ def survey(rm: Any, network: bool = True, usb: bool = True, mdns_seconds: float 
         s.network = "searched the local network (VXI-11 broadcast and mDNS)"
     if real:
         try:
-            s.gpib_adapters = len(list(rm.list_resources("GPIB?*::INTFC")))
+            boards = [str(r) for r in rm.list_resources("GPIB?*::INTFC")]
+            s.gpib_adapters = len(boards)
+            s.gpib_boards = sorted({b.split("::")[0].upper() for b in boards})
         except Exception:
             s.gpib_adapters = 0
     s.serial_ports = (ports or serial_ports)()
