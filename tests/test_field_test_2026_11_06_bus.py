@@ -470,3 +470,139 @@ def test_kelvin_finds_gpib_instruments_ni_max_never_scanned():
     assert board.asked.get("GPIB0::15::INSTR") is None   # the lab's own instrument: never asked
     assert board.asked["GPIB0::24::INSTR"] == ["*IDN?"]   # asked once, on the sweep
     assert "3 instruments found on the bus address by address" in " ".join(looked.lines())   # 24, 30 and 7
+
+
+def test_a_gpib_usb_adapter_that_works_is_never_said_to_need_a_driver(monkeypatch):
+    from labharness import survey
+    adapter = [{"vid": 0x3923, "pid": 0x7618, "maker": "National Instruments", "usbtmc": False, "visible": False}]
+    working = UnscannedBoard({}, listed=["GPIB0::9::INSTR"])   # NI-VISA lists GPIB0: the adapter works
+    s = survey.survey(working, network=False, usb_list=lambda: [dict(d) for d in adapter], ports=lambda: [])
+    assert s.gpib_boards == ["GPIB0"] and not s.problems, s.problems
+
+    class NoBoard(UnscannedBoard):
+        def list_resources(self, query="?*::INSTR"):
+            return () if "INTFC" in query else tuple(self.listed)
+    NoBoard.__module__ = "pyvisa.stand_in"
+    monkeypatch.setattr(survey, "_serial_ids", lambda: set())
+    monkeypatch.setattr(survey, "ni4882", lambda: "here")
+    s = survey.survey(NoBoard({}, listed=[]), network=False, usb_list=lambda: [dict(d) for d in adapter],
+                      ports=lambda: [])
+    assert len(s.problems) == 1 and "NI-488.2 is installed but VISA lists no GPIB board" in s.problems[0]
+    monkeypatch.setattr(survey, "ni4882", lambda: "32-bit")
+    s = survey.survey(NoBoard({}, listed=[]), network=False, usb_list=lambda: [dict(d) for d in adapter],
+                      ports=lambda: [])
+    assert "for 32-bit programs only" in s.problems[0]
+    monkeypatch.setattr(survey, "ni4882", lambda: "")
+    s = survey.survey(NoBoard({}, listed=[]), network=False, usb_list=lambda: [dict(d) for d in adapter],
+                      ports=lambda: [])
+    assert "install NI-488.2" in s.problems[0]
+
+
+# ------------------------------------------------------------------ the installed VISA, wherever PATH points
+
+class BuiltinLib:
+    """pyvisa-py, Kelvin's built-in VISA: no GPIB."""
+
+
+class InstalledLib:
+    """NI-VISA (or another maker's), loaded."""
+
+
+BuiltinLib.__module__ = "pyvisa_py.highlevel"
+InstalledLib.__module__ = "pyvisa.ctwrapper.highlevel"
+
+
+class StandInRM:
+    def __init__(self, lib):
+        self.visalib, self.closed = lib, False
+
+    def close(self):
+        self.closed = True
+
+    def list_resources(self, query="?*::INSTR"):
+        return ()
+
+    def open_resource(self, name):
+        if isinstance(self.visalib, BuiltinLib) and name.startswith("GPIB"):
+            raise ValueError("Please install linux-gpib (Linux) or gpib-ctypes (Windows, Linux) to use this "
+                             "resource type.")
+        raise AssertionError("not opened in these tests")
+
+
+StandInRM.__module__ = "pyvisa.highlevel"
+
+
+class StandInPyvisa:
+    """pyvisa on a computer whose NI-VISA is in the Windows system folder: its own search (along PATH) misses it and
+    gives the built-in one; loading it by its path works, or (loads=False) doesn't."""
+
+    def __init__(self, loads):
+        self.loads, self.made = loads, []
+
+    def ResourceManager(self, spec=""):
+        if spec in ("", "@py"):
+            rm = StandInRM(BuiltinLib())
+        elif self.loads:
+            rm = StandInRM(InstalledLib())
+        else:
+            raise OSError("Could not find module '%s' (or one of its dependencies)" % spec)
+        self.made.append((spec, rm))
+        return rm
+
+
+def test_kelvin_finds_the_installed_visa_in_the_windows_system_folder_whatever_path_says(monkeypatch, tmp_path):
+    """A lab computer with NI-VISA and NI-488.2 (NI MAX found its GPIB instruments) was told to install them: PyVISA
+    looks for the VISA library along PATH alone, and gave Kelvin its built-in VISA, which has no GPIB, when it found
+    none there."""
+    from labharness import adapters, survey
+    monkeypatch.setattr(adapters, "VISA_NOTE", "")
+    library = str(tmp_path / "visa64.dll")
+    monkeypatch.setattr(survey, "installed_visa_libraries", lambda: [library])
+    pyvisa = StandInPyvisa(loads=True)
+    rm = adapters._installed_or_builtin(pyvisa)
+    assert isinstance(rm.visalib, InstalledLib) and pyvisa.made[-1][0] == library
+    assert pyvisa.made[0][1].closed   # the built-in one PyVISA gave: not used
+    assert adapters.VISA_NOTE == ""
+
+
+def test_an_installed_visa_that_doesnt_load_is_said_so_never_install_it(monkeypatch, tmp_path):
+    from labharness import adapters, survey
+    from labharness.adapters import VisaBackend
+    monkeypatch.setattr(adapters, "VISA_NOTE", "")
+    library = str(tmp_path / "visa64.dll")   # not a library: it doesn't load, however it's loaded
+    monkeypatch.setattr(survey, "installed_visa_libraries", lambda: [library])
+    rm = adapters._installed_or_builtin(StandInPyvisa(loads=False))
+    assert isinstance(rm.visalib, BuiltinLib)
+    note = adapters.VISA_NOTE
+    assert "didn't load in Kelvin" in note and library in note and "repair NI-VISA" in note
+    # the scan says that, and only that: no "install NI-488.2" for the GPIB-USB adapter that is plugged in
+    monkeypatch.setattr(survey, "_serial_ids", lambda: set())
+    monkeypatch.setattr(survey, "ni4882", lambda: "here")
+    adapter = [{"vid": 0x3923, "pid": 0x7618, "maker": "National Instruments", "usbtmc": False, "visible": False}]
+    s = survey.survey(rm, network=False, usb_list=lambda: [dict(d) for d in adapter], ports=lambda: [])
+    assert s.problems == [note] and s.visa == "Kelvin's built-in VISA (pyvisa-py)"
+    # and so does connecting a GPIB instrument, rather than pyvisa-py's "install gpib-ctypes"
+    with pytest.raises(AdapterError) as e:
+        VisaBackend("lockin", builtin_registry().get("srs/sr830"), "GPIB0::8::INSTR", rm=rm)
+    assert "can't reach GPIB0::8::INSTR" in str(e.value) and "repair NI-VISA" in str(e.value)
+    assert "gpib-ctypes" not in str(e.value)
+
+
+def test_with_no_visa_installed_gpib_says_what_to_install(monkeypatch):
+    from labharness import adapters, survey
+    from labharness.adapters import VisaBackend
+    monkeypatch.setattr(adapters, "VISA_NOTE", "")
+    monkeypatch.setattr(survey, "installed_visa_libraries", lambda: [])
+    rm = adapters._installed_or_builtin(StandInPyvisa(loads=True))
+    assert isinstance(rm.visalib, BuiltinLib) and adapters.VISA_NOTE == ""
+    with pytest.raises(AdapterError) as e:
+        VisaBackend("lockin", builtin_registry().get("srs/sr830"), "GPIB0::8::INSTR", rm=rm)
+    assert "GPIB needs a VISA installed on this computer" in str(e.value)
+    monkeypatch.setattr(survey, "_serial_ids", lambda: set())
+    adapter = [{"vid": 0x3923, "pid": 0x7618, "maker": "National Instruments", "usbtmc": False, "visible": False}]
+    monkeypatch.setattr(survey, "ni4882", lambda: "here")
+    s = survey.survey(rm, network=False, usb_list=lambda: [dict(d) for d in adapter], ports=lambda: [])
+    assert len(s.problems) == 1 and "install NI-VISA, which Kelvin reaches GPIB through" in s.problems[0]
+    monkeypatch.setattr(survey, "ni4882", lambda: "")
+    s = survey.survey(rm, network=False, usb_list=lambda: [dict(d) for d in adapter], ports=lambda: [])
+    assert "install NI-488.2 with NI-VISA" in s.problems[0]

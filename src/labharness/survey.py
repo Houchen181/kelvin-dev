@@ -53,6 +53,7 @@ def use_bundled_libusb() -> bool:
 
 
 GPIB_SWEPT = "GPIB, found on the bus"   # how an instrument Kelvin found address by address was found
+GPIB_USB_MAKERS = (0x3923, 0x0957)   # National Instruments, Keysight (Agilent): makers of GPIB-USB adapters
 
 
 @dataclass
@@ -214,6 +215,15 @@ def usb_devices() -> List[Dict[str, Any]]:
     return out
 
 
+def _serial_ids() -> set:
+    """(VID, PID) of each USB-serial port: such a device is reached as a COM port, not through VISA's USB."""
+    try:
+        from serial.tools import list_ports
+        return {(p.vid, p.pid) for p in list_ports.comports() if p.vid is not None}
+    except Exception:
+        return set()
+
+
 def serial_ports() -> List[str]:
     try:
         from serial.tools import list_ports
@@ -223,13 +233,63 @@ def serial_ports() -> List[str]:
             for p in sorted(list_ports.comports(), key=lambda p: p.device)]
 
 
-def _usb_advice(u: Dict[str, Any]) -> str:
+def system_folder() -> str:
+    """Windows' folder of system libraries (C:\\Windows\\System32), as Windows itself says, whatever PATH says:
+    where VISA and NI-488.2 put theirs."""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(260)
+        if ctypes.windll.kernel32.GetSystemDirectoryW(buf, 260):
+            return buf.value
+    except Exception:
+        pass
+    return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+
+
+def installed_visa_libraries() -> List[str]:
+    """The installed VISA's library (NI-VISA, Keysight IO Libraries, R&S VISA), where the VISA standard puts it: the
+    Windows system folder. PyVISA looks for it along PATH alone (adapters.resource_manager looks here too)."""
+    if not sys.platform.startswith("win"):
+        return []
+    system = system_folder()
+    names = ("visa64.dll", "visa32.dll") if sys.maxsize > 2 ** 32 else ("visa32.dll",)
+    return [p for p in (os.path.join(system, n) for n in names) if os.path.isfile(p)]
+
+
+def ni4882() -> str:
+    """NI-488.2, the driver of NI's GPIB adapters, on this computer: "here", "32-bit" (for 32-bit programs only,
+    which Kelvin, a 64-bit program, can't use) or "" (not installed). Its library is in Windows' system folders."""
+    if not sys.platform.startswith("win"):
+        return ""
+    system = system_folder()
+    if sys.maxsize <= 2 ** 32:
+        return "here" if any(os.path.isfile(os.path.join(system, n)) for n in ("ni4882.dll", "gpib-32.dll")) else ""
+    if os.path.isfile(os.path.join(system, "ni4882.dll")):
+        return "here"
+    wow = os.path.join(os.path.dirname(system), "SysWOW64")
+    return "32-bit" if any(os.path.isfile(os.path.join(wow, n)) for n in ("ni4882.dll", "gpib-32.dll")) else ""
+
+
+def _usb_advice(u: Dict[str, Any], builtin: bool = False) -> str:
+    """What to do about a USB device that looks like an instrument and that Kelvin can't reach. builtin: Kelvin uses
+    its built-in VISA, there being no VISA installed."""
     who = "%s instrument (USB %04x:%04x)" % (u["maker"] or "A USB", u["vid"], u["pid"]) if u["maker"] else \
         "a USB instrument (%04x:%04x)" % (u["vid"], u["pid"])
     who = who[0].upper() + who[1:]
-    if u["vid"] == 0x3923 and not u["usbtmc"]:
-        return ("A National Instruments adapter (USB %04x:%04x, probably GPIB-USB) is plugged in, but VISA has no "
-                "GPIB adapter: install NI-488.2 (with NI-VISA)" % (u["vid"], u["pid"]))
+    if u["vid"] == 0x3923 and not u["usbtmc"]:   # a GPIB-USB adapter (or an NI DAQ device), and VISA lists no board
+        what = "A National Instruments device (USB %04x:%04x) is plugged in. If it is a GPIB-USB adapter, " % (
+            u["vid"], u["pid"])
+        part = ni4882()
+        if builtin:   # Kelvin reaches GPIB through an installed VISA
+            return what + ("install NI-VISA, which Kelvin reaches GPIB through (NI-488.2 is installed)" if part == "here"
+                           else "install NI-488.2 with NI-VISA") + "; a DAQ device is NI-DAQmx's"
+        if part == "here":
+            return what + ("NI-488.2 is installed but VISA lists no GPIB board: check it in NI MAX (Devices and "
+                           "Interfaces), or unplug it and plug it in again. A DAQ device is NI-DAQmx's")
+        if part == "32-bit":
+            return what + ("NI-488.2 is installed for 32-bit programs only, and Kelvin is 64-bit: reinstall NI-488.2 "
+                           "with its 64-bit support. A DAQ device is NI-DAQmx's")
+        return what + "install NI-488.2; a DAQ device is NI-DAQmx's"
     if sys.platform.startswith("win"):
         return ("%s is plugged in, but Windows has no driver that lets Kelvin open it: install the maker's IO software "
                 "(Keysight IO Libraries Suite or NI-VISA), which brings the USB driver, then scan again" % who)
@@ -265,6 +325,11 @@ def survey(rm: Any, network: bool = True, usb: bool = True, mdns_seconds: float 
            ports: Optional[Callable[[], List[str]]] = None) -> Survey:
     """Look through every place an instrument can be. The callables replace the real lookups in tests."""
     s = Survey(visa=describe_visa(rm))
+    from .adapters import VISA_NOTE
+    builtin = _is_pyvisa(rm) and _is_builtin(rm)
+    unloaded = builtin and bool(VISA_NOTE)   # an installed VISA is here and didn't load: everything else follows
+    if unloaded:
+        s.problems.append(VISA_NOTE)
     try:
         for r in rm.list_resources("?*::INSTR"):
             s.add(str(r), "VISA")
@@ -291,10 +356,15 @@ def survey(rm: Any, network: bool = True, usb: bool = True, mdns_seconds: float 
     s.serial_ports = (ports or serial_ports)()
     if usb:
         s.usb = (usb_list or (usb_devices if real else (lambda: [])))()
+        serial = _serial_ids()
         for u in s.usb:
             u["visible"] = any(_key(r)[:3] == ("USB", "%04x" % u["vid"], "%04x" % u["pid"]) for r in s.resources)
-            if not u["visible"]:
-                s.problems.append(_usb_advice(u))
+            if not u["visible"] and not u["usbtmc"]:
+                # only a USBTMC instrument is one VISA opens over USB. Another is reached its own way: a GPIB-USB
+                # adapter is a GPIB board (GPIB0, listed above), a USB-serial one a COM port, a DAQ device NI-DAQmx's
+                u["visible"] = bool(s.gpib_adapters) or (u["vid"], u["pid"]) in serial or u["vid"] not in GPIB_USB_MAKERS
+            if not u["visible"] and not unloaded:
+                s.problems.append(_usb_advice(u, builtin))
     return s
 
 

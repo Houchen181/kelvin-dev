@@ -18,16 +18,20 @@ PyVISA uses the installed VISA (NI-VISA, Keysight IO Libraries) when there is on
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
+import sys
 import threading
 import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .cards import Card, parity_name, serial_settings
 
+log = logging.getLogger("kelvin")
 _rm: Any = None
 _rm_own = False   # whether Kelvin made _rm itself
+VISA_NOTE = ""    # why the VISA installed on this computer isn't the one Kelvin uses, when it is there and didn't load
 _rm_lock = threading.Lock()
 # PyVISA warns of a reply that ended at the bus's end-of-message mark (GPIB's EOI) without the line end: whole all the
 # same, and a field test's log had six such warnings in an afternoon
@@ -153,14 +157,73 @@ def resource_manager() -> Any:
             from .survey import use_bundled_libusb
             use_bundled_libusb()   # Kelvin's own libusb, for USB instruments without a vendor VISA
             choice = os.environ.get("KELVIN_VISA_BACKEND")
-            if choice:
-                _rm = pyvisa.ResourceManager(choice)
-            else:
-                try:
-                    _rm = pyvisa.ResourceManager()          # NI-VISA / Keysight / R&S VISA if installed
-                except Exception:
-                    _rm = pyvisa.ResourceManager("@py")     # pure Python: GPIB needs a driver, USB needs libusb
+            _rm = pyvisa.ResourceManager(choice) if choice else _installed_or_builtin(pyvisa)
+            try:
+                from .survey import describe_visa
+                log.info("VISA: %s", describe_visa(_rm))
+            except Exception:
+                pass
         return _rm
+
+
+def _said(e: BaseException) -> str:
+    return " ".join(str(e).split())[:240] or type(e).__name__
+
+
+def _installed_or_builtin(pyvisa: Any) -> Any:
+    """The installed VISA (NI-VISA, Keysight IO Libraries, R&S VISA) where there is one, else Kelvin's built-in VISA
+    (pyvisa-py: no GPIB, USB through libusb). PyVISA looks for the installed one along PATH alone, and gives the
+    built-in one, without a word, when it finds none there or can't load what it finds: so Kelvin also looks in the
+    Windows system folder, where the VISA standard puts it, loads it the way Windows' other programs (NI MAX) do when
+    Python's own way can't, and keeps why in VISA_NOTE when one is there and still doesn't load."""
+    global VISA_NOTE
+    from .survey import _is_builtin, installed_visa_libraries
+    failed: List[str] = []
+    rm = None
+    try:
+        rm = pyvisa.ResourceManager()   # the installed VISA PyVISA finds along PATH, or the built-in one
+        if not _is_builtin(rm):
+            VISA_NOTE = ""
+            return rm
+    except Exception as e:   # what it found along PATH didn't load
+        failed.append(_said(e))
+    for path in installed_visa_libraries():
+        try:
+            found = _load_installed(pyvisa, path)
+        except Exception as e:
+            failed.append("%s: %s" % (path, _said(e)))
+            continue
+        log.info("VISA: %s, found in the Windows system folder", path)
+        if rm is not None:
+            try:
+                rm.close()   # the built-in one, not used
+            except Exception:
+                pass
+        VISA_NOTE = ""
+        return found
+    VISA_NOTE = ("This computer's VISA didn't load in Kelvin (%s), so Kelvin uses its built-in VISA, which can't reach "
+                 "GPIB: repair NI-VISA (or your maker's VISA) in Windows' Apps, then restart Kelvin"
+                 % "; ".join(failed)[:400]) if failed else ""
+    if VISA_NOTE:
+        log.warning("%s", VISA_NOTE)
+    return rm if rm is not None else pyvisa.ResourceManager("@py")
+
+
+def _load_installed(pyvisa: Any, path: str) -> Any:
+    """PyVISA's resource manager over the VISA library at path. Python looks for the libraries that one needs in the
+    system folders and the library's own, never along PATH as Windows' other programs do: when PyVISA can't load it,
+    it is loaded first as those programs load it, and PyVISA's own load then finds it loaded."""
+    try:
+        return pyvisa.ResourceManager(path)
+    except Exception as first:
+        if not sys.platform.startswith("win"):
+            raise
+        import ctypes
+        try:
+            ctypes.WinDLL(path, winmode=0x8)   # LOAD_WITH_ALTERED_SEARCH_PATH: its folder, Windows', then PATH
+        except OSError:
+            raise first
+        return pyvisa.ResourceManager(path)
 
 
 def close_resource_manager() -> None:
@@ -352,12 +415,33 @@ class VisaBackend:
         self._open()
 
     def _open(self) -> None:
+        rm = self._rm
         try:
-            self.res = (self._rm or resource_manager()).open_resource(self.resource)
+            rm = rm or resource_manager()
+            self.res = rm.open_resource(self.resource)
         except AdapterError:
             raise
         except Exception as e:
+            from .survey import _is_builtin, ni4882
+            gpib = self.resource.upper().startswith("GPIB")
+            if gpib and rm is not None and _is_builtin(rm):   # Kelvin's built-in VISA has no GPIB
+                if VISA_NOTE:
+                    raise AdapterError("%s: can't reach %s. %s." % (self.name, self.resource, VISA_NOTE)) from e
+                raise AdapterError("%s: can't reach %s: GPIB needs a VISA installed on this computer (NI-VISA with "
+                                   "NI-488.2 for an NI GPIB adapter), and Kelvin found none. Install it, then restart "
+                                   "Kelvin." % (self.name, self.resource)) from e
             if "LIBRARY_NFOUND" in str(e):
+                part = ni4882() if gpib else ""
+                if part == "here":   # there, and VISA couldn't load it all the same
+                    raise AdapterError(
+                        "%s: this computer's VISA couldn't load the GPIB library it needs to reach %s "
+                        "(VI_ERROR_LIBRARY_NFOUND), though NI-488.2 is installed: repair NI-488.2 and NI-VISA in "
+                        "Windows' Apps, then restart Kelvin." % (self.name, self.resource)) from e
+                if part == "32-bit":
+                    raise AdapterError(
+                        "%s: this computer's VISA can't reach %s: NI-488.2 is installed for 32-bit programs only, and "
+                        "Kelvin is 64-bit: reinstall NI-488.2 with its 64-bit support, then restart Kelvin."
+                        % (self.name, self.resource)) from e
                 raise AdapterError("%s: this computer's VISA cannot reach %s: its interface driver is missing (for GPIB, "
                                    "install NI-488.2 or your GPIB adapter's driver)." % (self.name, self.resource)) from e
             from .others import holders_text   # who may hold it: another Kelvin still closing, MATLAB, NI MAX...
