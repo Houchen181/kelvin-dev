@@ -155,6 +155,7 @@ def connection_of(card: Card) -> Tuple[Any, ...]:
 
 
 CONNECTING = "Kelvin is connecting it as it starts"
+WAITS = "Kelvin connects it as soon as the lab is free; waiting for "   # + what has the lab (connecting_waits)
 BUS_WINDOW_S = 120.0   # instruments on one GPIB bus that stop answering this close together: the bus hung   # an instrument of a lab opened before connecting (later=True)
 
 
@@ -297,8 +298,16 @@ class Lab:
 
     @property
     def connecting(self) -> List[str]:
-        """The instruments still to be connected (a lab opened with later=True)."""
-        return [name for name, why in self.unavailable.items() if why == CONNECTING]
+        """The instruments still to be connected (a lab opened with later=True), whatever they wait for."""
+        return [name for name, why in self.unavailable.items() if why == CONNECTING or why.startswith(WAITS)]
+
+    def connecting_waits(self, name: str, what: str) -> None:
+        """One still to be connected waits for the work that has the lab (a run started meanwhile): it says so, in the
+        Lab panel and to the agent, and is still to be connected (connecting)."""
+        inst = self.instruments.get(name)
+        with self._swap:
+            if inst is not None and isinstance(inst.backend, Unavailable) and name in self.connecting:
+                inst.backend.reason = WAITS + what
 
     def away(self, name: str) -> Optional[str]:
         """Why an instrument of this lab is not in use (switched off, or not connected), or None."""

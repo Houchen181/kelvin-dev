@@ -83,6 +83,7 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/scpi.py` | SCPI command templates (short/long forms, optional nodes, compound commands) |
 | `src/labharness/labconfig.py` | Lab config (lab limits, rates, guards, interlocks, trust) and project envelopes |
 | `src/labharness/gate.py` | The safety gate |
+| `src/labharness/lablock.py` | Who works the lab: one change at a time (the lab's lock), and readings beside it, each instrument's own lock. A change says which instruments it uses as it takes the lab (`acquire(names=…)`), and waits only for the readings of those; a person's action that can't have the lab within 30 s says what has it (`runtime.LabBusy`, 409), never waiting out a run |
 | `src/labharness/plans.py`, `engine.py` | Plan format; validate → preflight (reused for 10 min for measuring plans) → approve → run → log; a dry run only when asked or in auto mode |
 | `src/labharness/reports/` | Reports: gathering runs and the log (`collect.py`), shared plot layout (`chart.py`), the PDF and PowerPoint writers |
 | `src/labharness/web/remote.py`, `relay.py` | Phone access: each phone's token and role, the network listener, the firewall rule; phones through the Kelvin hub |

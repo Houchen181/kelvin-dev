@@ -76,6 +76,20 @@ class Busy(RuntimeError):
 
 
 _patience = threading.local()
+_ended = threading.local()
+
+
+@contextlib.contextmanager
+def ended_by(stopped: Callable[[], bool]) -> Iterator[None]:
+    """On this thread (a chat's reading), a long wait on an instrument (an acquisition, a wait for *OPC?) also ends
+    when stopped() says so, as at a person's Stop: a Stop in the chat that asked for the reading ends it, while the
+    lab's work and the other chats' readings go on (only the Stop for everything reached it before)."""
+    before = getattr(_ended, "now", None)
+    _ended.now = stopped
+    try:
+        yield
+    finally:
+        _ended.now = before
 
 
 @contextlib.contextmanager
@@ -489,14 +503,18 @@ class Instrument:
             if spec.wait_s and before is not None:
                 res.timeout = spec.wait_s * 1000.0
             start = self.stops.count
+            also = getattr(_ended, "now", None)   # this thread's own stop too (ended_by: a chat's reading)
+
+            def stopped() -> bool:
+                return self.stops.since(start) or (also is not None and bool(also()))
             waiting = getattr(self.backend, "query_waiting", None)
             for c in spec.get_before:
-                if self.stops.since(start):
+                if stopped():
                     raise Stopped("%s.%s: stopped by a person before the instrument was done" % (self.name, spec.name))
                 if not is_query(c, bool(self.card.connection.get("enq"))):
                     self._io(self.backend.write, c)
                 elif waiting is not None and spec.wait_s:   # *OPC?: answers when the acquisition is done
-                    self._io(waiting, c, spec.wait_s, lambda: self.stops.since(start))   # or a stop ends the wait
+                    self._io(waiting, c, spec.wait_s, stopped)   # or a stop ends the wait
                 else:
                     self._io(self.backend.query, c)
             if spec.type == "trace":

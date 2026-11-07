@@ -404,7 +404,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def get_value(instrument: str, parameter: str) -> str:
         """Read one parameter (a trace is summarized; record traces with a plan to keep them). While a run uses the
         instrument, its latest value instead (the run's last point), with how old it is."""
-        return at_most("%s.%s" % (instrument, parameter), lambda: rt.get(instrument, parameter))
+        # an acquisition (a sweep) gets the time its card gives it: a 2-minute sweep was said not to answer at 60 s
+        seconds = max(TOOL_IO_S, rt.acquisition_s(instrument, parameter) + 30.0)
+        return at_most("%s.%s" % (instrument, parameter), lambda: rt.get(instrument, parameter), seconds)
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
