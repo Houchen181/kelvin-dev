@@ -105,17 +105,41 @@ class AutoSetup:
         self.racks: Dict[str, Any] = {}   # their Special Measure rack, by address: (its instrument, the rack in words)
         self._drafted = False      # the first lab config is written: the scripts come too late to shape it
         self._scripts_lock = threading.Lock()
+        self._running = False      # a set-up runs (start): another start waits for it (lab changed: runs after it)
+        self._again = False
+        self._missing: Dict[str, str] = {}
 
     @property
     def lab_file(self) -> Path:
         return self.home / "lab.yaml"
 
     def start(self, reason: str = "start") -> bool:
-        if self._thread is not None and self._thread.is_alive():
-            return False
-        self._thread = threading.Thread(target=self.run, args=(reason,), name="kelvin-autosetup", daemon=True)
-        self._thread.start()
+        """The set-up, in the background. One asked for after a change of the lab while one runs (Save and connect
+        during the start's set-up) runs once that one ends: its instruments once got no folder, settings or manual
+        until the next start."""
+        with self._scripts_lock:
+            if self._running:
+                if reason == "lab changed":
+                    self._again = True
+                return False
+            self._running, self._again = True, False
+            self._thread = threading.Thread(target=self._runs, args=(reason,), name="kelvin-autosetup", daemon=True)
+            self._thread.start()
         return True
+
+    def _runs(self, reason: str) -> None:
+        try:
+            self.run(reason)
+            while True:   # a change of the lab while it ran: what is new set up too
+                with self._scripts_lock:
+                    if not self._again:
+                        self._running = False   # with the lock: a start from now on starts anew
+                        return
+                    self._again = False
+                self.run("lab changed")
+        finally:
+            with self._scripts_lock:
+                self._running = False
 
     def join(self, timeout: Optional[float] = None) -> None:
         if self._thread is not None:
@@ -262,25 +286,39 @@ class AutoSetup:
                 found_by_address = {f["address"]: f for f in found}
                 matched = [f for f in found if f.get("card_id") and not f.get("in_lab")]
                 unknown = [f for f in found if f.get("idn") and not f.get("card_id") and not f.get("in_lab")]
-                written, card_problems = self._write_cards(unknown, matched)
-                matched = self._with_scripts(matched + written, found)
-                unknown = [f for f in unknown if f["address"] not in {w["address"] for w in matched}]
-                for f in found:
-                    log.info("  %s: %s", f["address"], f.get("idn") or f.get("how") or "no answer")
-                if not matched and card_problems:
-                    return self._done(" ".join(card_problems), found=0, unknown=len(unknown),
-                                      lines=looked.get("lines") or [])
-                if not matched:
-                    named = [f["model"] for f in unknown if f.get("collection") and f.get("model")]
-                    return self._done(looked.get("reason") or (
-                        "%d instrument%s answered but Kelvin has no card for %s yet%s; make one in Lab setup"
-                        % (len(unknown), "" if len(unknown) == 1 else "s", "it" if len(unknown) == 1 else "them",
-                           " (%s)" % ", ".join(named) if named else "")
-                        if unknown else "No instruments found on this computer"),
-                        found=0, unknown=len(unknown), lines=looked.get("lines") or [])
-                if not self._connect(matched, started):
-                    return self.status
-                user_lab = True
+                if matched and unknown and self.make_card is not None and self.settings.get("auto_cards") != "off":
+                    # the ones Kelvin knows connect first: writing the others' cards takes minutes of model calls
+                    # (5.7), and each comes in as it is written (add_instrument), the ones connected meanwhile untouched
+                    first = self._with_scripts(matched, found)
+                    for f in found:
+                        log.info("  %s: %s", f["address"], f.get("idn") or f.get("how") or "no answer")
+                    if not self._connect(first, started):
+                        return self.status
+                    user_lab = True
+                    taken = {w["address"] for w in first}
+                    written, _ = self._write_cards([f for f in unknown if f["address"] not in taken], first)
+                    self._add_written(written)
+                    matched, unknown = [], []
+                else:
+                    written, card_problems = self._write_cards(unknown, matched)
+                    matched = self._with_scripts(matched + written, found)
+                    unknown = [f for f in unknown if f["address"] not in {w["address"] for w in matched}]
+                    for f in found:
+                        log.info("  %s: %s", f["address"], f.get("idn") or f.get("how") or "no answer")
+                    if not matched and card_problems:
+                        return self._done(" ".join(card_problems), found=0, unknown=len(unknown),
+                                          lines=looked.get("lines") or [])
+                    if not matched:
+                        named = [f["model"] for f in unknown if f.get("collection") and f.get("model")]
+                        return self._done(looked.get("reason") or (
+                            "%d instrument%s answered but Kelvin has no card for %s yet%s; make one in Lab setup"
+                            % (len(unknown), "" if len(unknown) == 1 else "s", "it" if len(unknown) == 1 else "them",
+                               " (%s)" % ", ".join(named) if named else "")
+                            if unknown else "No instruments found on this computer"),
+                            found=0, unknown=len(unknown), lines=looked.get("lines") or [])
+                    if not self._connect(matched, started):
+                        return self.status
+                    user_lab = True
             if not user_lab:
                 return self._done(rt.lab_info.get("error") or "No instruments set up yet")
             swaps = self._check_identities()   # another instrument of the same model at an instrument's address (6.2)
@@ -329,6 +367,22 @@ class AutoSetup:
             log.exception("Instrument setup failed")
             self._set("failed", message="Setting up instruments failed: %s" % profiles._first_line(e))
             return self.status
+
+    def _add_written(self, written: List[Dict[str, Any]]) -> None:
+        """Instruments whose cards were written after the known ones connected: each added to the lab as it comes
+        (add_instrument: its entry, then it alone connected; the others stay as they are). One that can't be added is
+        said with the set-up's last words."""
+        rt = self.runtime
+        for w in written:
+            self._set("connecting", message="Adding %s (%s), whose card Kelvin wrote" % (w.get("suggested"),
+                                                                                        w.get("model")))
+            try:
+                said = rt.add_instrument(w["address"], card=w["card_id"], name=w.get("suggested") or "", by="setup")
+            except Exception as e:
+                said = "not added: %s" % profiles._first_line(e)
+            log.info("  %s: %s", w["address"], said.splitlines()[0] if said else "")
+            if not said.startswith("added"):
+                self._card_problems.append("%s: %s." % (w.get("suggested") or w["address"], said.rstrip(".")))
 
     def _check_identities(self) -> Dict[str, Any]:
         """Each instrument with a kept serial number asked who it is (one query, the instrument held for it, never

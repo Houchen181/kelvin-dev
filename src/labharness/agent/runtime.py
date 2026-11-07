@@ -5949,11 +5949,12 @@ class LabRuntime:
         with self._person_work("scanning for instruments"):
             found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network,
                                         catalog=self.collection, progress=asking)
+        self._moved(found)
         self._remember_scan(found, looked)
         taken = [n for n in self.lab.config.instruments if not self.lab.config.instruments[n].address.startswith("sim://")]
         out = []
-        for f in found:
-            name = f.suggest_name(taken) if f.card_id and not f.in_lab else None
+        for f in found:   # one of the lab's that moved is no new instrument: no name offered for it
+            name = f.suggest_name(taken) if f.card_id and not f.in_lab and not getattr(f, "moved_from", None) else None
             if name:
                 taken.append(name)
             out.append(dict(vars(f), suggested=name))
@@ -10545,6 +10546,31 @@ class LabRuntime:
             self.lock.release()
         return results
 
+    def _moved(self, found: List[Any]) -> None:
+        """A found instrument with the model and the kept serial number of one of the lab's at another address: that
+        one, moved (a USB-serial port renumbered after a replug, a new DHCP address). Said as such, with how to use it
+        there (change its address), and never offered as a new instrument: a scan once offered tc2 for tc at COM5."""
+        from ..adapters import resource_name
+        from ..profiles import kept_serial, parse_idn
+        if self.home is None:
+            return
+        for f in found:
+            if f.in_lab or not f.card_id or not f.idn:
+                continue
+            serial = parse_idn(f.idn).get("serial", "").strip().lower()
+            if not serial:
+                continue
+            for name, inst in list(self.lab.instruments.items()):
+                ic = inst.config
+                if inst.simulated or inst.card.id != f.card_id or resource_name(ic.address) == resource_name(f.address):
+                    continue
+                if kept_serial(self.home, name, inst.card.id, ic.address).strip().lower() == serial:
+                    f.moved_from = name
+                    f.how = ("%s of this lab (serial number %s), now at %s instead of %s: change its address to use it "
+                             "here (Lab, Set up…, its row; or change_instrument %s with address %s)"
+                             % (name, serial, f.address, ic.address, name, f.address))
+                    break
+
     def scan(self) -> str:
         """Which instruments are connected, matched to cards. Read-only: it only asks who they are."""
         def run() -> str:
@@ -10558,6 +10584,7 @@ class LabRuntime:
                                             catalog=self.collection)
             except AdapterError as e:
                 return str(e)
+            self._moved(found)
             self._remember_scan(found, looked)
             if not found:
                 return "\n".join([reason(found, looked)] + looked.lines())

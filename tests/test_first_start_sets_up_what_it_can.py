@@ -430,6 +430,98 @@ def test_the_set_up_asks_a_person_about_a_swapped_instrument(tmp_path, yes):
         set_resource_manager(None)
 
 
+def test_a_scan_says_an_instrument_moved_rather_than_offer_it_as_a_new_one(tmp_path, monkeypatch):
+    from labharness import discovery, profiles
+    from labharness.homelab import open_home_lab
+    monkeypatch.setattr(discovery, "_usb_ids", lambda: {})
+    monkeypatch.setattr(discovery, "_bluetooth_ports", lambda: set())
+    idn = "LSCI,MODEL336,LSA1234/LSA1234,2.9"
+    (tmp_path / "lab.yaml").write_text('lab: Bench\ninstruments:\n  tc:\n    card: lakeshore/336\n'
+                                       '    address: "ASRL3::INSTR"\n', encoding="utf-8")
+    profiles.write_profile(tmp_path, "tc", builtin_registry().get("lakeshore/336"), "ASRL3::INSTR", idn=idn)
+    b = Bus({"ASRL5::INSTR": Device("lakeshore/336", idn=idn, name="ls",   # replugged: COM5 now, not COM3
+                                    serial={"baud_rate": 57600, "data_bits": 7, "parity": "odd"})})
+    set_resource_manager(b)
+    try:
+        lab, _, info = open_home_lab(tmp_path)
+        rt = LabRuntime(lab, ScriptedApprover([]), tmp_path / "data")
+        rt.home, rt.lab_info, rt.scan_network = tmp_path, dict(info), False
+        found = {f["address"]: f for f in rt.scan_found()}
+        moved = found["ASRL5::INSTR"]
+        assert moved["moved_from"] == "tc" and moved["suggested"] is None          # not "tc2"
+        assert "tc of this lab (serial number lsa1234/lsa1234), now at ASRL5::INSTR instead of ASRL3::INSTR" \
+            in moved["how"]
+    finally:
+        set_resource_manager(None)
+
+
+# ---------------------------------------------------------------------- 5.7
+
+WIDGET = """card: 1
+id: acme/widget-9000
+model: ACME Widget 9000
+vendor: ACME
+kind: source-meter
+status: draft
+identify: { idn: "^ACME,WIDGET 9000" }
+parameters:
+  V: { label: Voltage, kind: drive, unit: V, set: "VOLT {value}", get: "VOLT?", limits: [-10, 10], safe: 0,
+       ramp: gate, max_rate: 1 }
+  I: { label: Current, kind: measure, unit: A, get: "CURR?" }
+"""
+
+
+def test_the_known_instruments_are_in_use_before_the_others_cards_are_written(tmp_path):
+    from labharness.carddraft import save as save_card
+    widget = Device(idn="ACME,WIDGET 9000,1,1.0")
+    widget.twin = type("Answers", (), {"query": staticmethod(lambda cmd: "0"), "write": staticmethod(lambda cmd: None)})()
+    b = Bus({"GPIB0::24::INSTR": Device("keithley/2400", name="k2400"), "GPIB0::5::INSTR": widget})
+    set_resource_manager(b)
+    try:
+        rt = first_runtime(tmp_path)
+        rt.cards_dir, rt.scan_network = tmp_path / "cards", False
+        seen = []
+
+        def make_card(found):   # minutes of model calls, in the lab
+            seen.append((rt.lab_info.get("kind"), sorted(n for n, i in rt.lab.instruments.items() if i.enabled)))
+            save_card(tmp_path / "cards", WIDGET, [c.id for c in builtin_registry()], by="kelvin")
+            return {"card_id": "acme/widget-9000", "model": "ACME Widget 9000", "kind": "source-meter",
+                    "manual": {"url": "https://www.acme.example/m.pdf", "data": b"", "kind": "pdf"}}
+        status = AutoSetup(rt, {}, tmp_path, fetch=lambda u: b"", scan=scanner(b), make_card=make_card).run()
+        assert len(seen) == 1 and seen[0][0] == "file" and len(seen[0][1]) == 1   # the 2400 in use meanwhile
+        assert len([i for i in rt.lab.instruments.values() if i.enabled]) == 2, status   # then the widget, added
+        assert any(ic.card == "acme/widget-9000" for ic in rt.lab.config.instruments.values())
+    finally:
+        set_resource_manager(None)
+
+
+def test_a_set_up_asked_for_after_a_change_of_the_lab_runs_after_the_one_running(tmp_path):
+    import threading
+    import time
+    rt = first_runtime(tmp_path)
+    setup = AutoSetup(rt, {}, tmp_path, fetch=lambda u: b"")
+    reasons, go = [], threading.Event()
+
+    def run(reason="start"):
+        reasons.append(reason)
+        if len(reasons) == 1:
+            go.wait(5)
+        return {}
+    setup.run = run
+    assert setup.start("start")
+    end = time.monotonic() + 5
+    while reasons != ["start"] and time.monotonic() < end:
+        time.sleep(0.01)
+    assert not setup.start("lab changed")                                       # Save and connect meanwhile
+    assert not setup.start("asked")
+    go.set()
+    setup.join(5)
+    assert reasons == ["start", "lab changed"]                                  # its instruments set up too
+    assert setup.start("asked")
+    setup.join(5)
+    assert reasons == ["start", "lab changed", "asked"]
+
+
 def test_the_draft_is_written_only_as_a_new_file(tmp_path):
     from labharness.autosetup import _write_new
     path = tmp_path / "lab.yaml"
