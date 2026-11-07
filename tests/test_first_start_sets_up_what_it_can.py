@@ -257,6 +257,114 @@ def test_a_bus_with_an_old_silent_instrument_is_not_taken_for_a_hung_one():
                                                             "KEITHLEY INSTRUMENTS INC.,MODEL 2400,1,C30")]
 
 
+# ---------------------------------------------------------------------- 5.5: a silent instrument isn't asked on and on
+
+class AnswersOnlyWhoItIs:
+    """A connection whose instrument answers its identity and nothing else (each other query times out)."""
+    quiet_close = True
+
+    def __init__(self, idn):
+        self.idn, self.asked = idn, []
+
+    def query(self, cmd):
+        self.asked.append(cmd)
+        if cmd.strip().upper() == "*IDN?":
+            return self.idn
+        raise TimeoutError("VI_ERROR_TMO")
+
+    def write(self, cmd):
+        self.asked.append(cmd)
+
+    def close(self):
+        pass
+
+
+def silent_lab(card, idn):
+    from labharness.clock import SimClock
+    from labharness.lab import Lab
+    from labharness.labconfig import load_lab_config
+    registry = builtin_registry()
+    backend = AnswersOnlyWhoItIs(idn)
+    cfg = load_lab_config({"lab": "bench", "instruments": {"x": {"card": card, "address": "GPIB0::8::INSTR"}}},
+                          registry)
+    return Lab(cfg, registry, lambda name, c, address: backend, SimClock()), backend
+
+
+def test_the_health_check_stops_at_an_instrument_that_doesnt_answer():
+    lab, backend = silent_lab("srs/sr830", "Stanford_Research_Systems,SR830,s/n12345,ver1.07")
+    result = lab.health_check(["x"])[0]
+    assert not result.ok and result.problems
+    readings = [c for c in backend.asked if c.strip().upper() != "*IDN?"]
+    assert len(readings) <= 3, backend.asked   # its 11 readings each waited their timeout (36 s) before
+
+
+def test_the_set_ups_read_stops_at_a_silent_instrument_and_skips_acquisitions():
+    from labharness import profiles
+    lab, backend = silent_lab("keithley/2400", "KEITHLEY INSTRUMENTS INC.,MODEL 2400,1234567,C30")
+    values = profiles.read_values(lab.instruments["x"])
+    asked = [v for v in values.values() if not str(v).startswith("ERROR: not read")]
+    assert len(asked) == 1 and len(values) >= 10                                # 1 asked; 26 timeouts (78 s) before
+    assert all(str(v).startswith("ERROR: not read: x did not answer") for v in list(values.values())[1:])
+
+    class Spec:
+        def __init__(self, name, **k):
+            self.name, self.type, self.acquires, self.get_cmd = name, k.get("type", "scalar"), k.get("acquires", False), "Q?"
+
+    class Camera:
+        name, _last, read_ = "cam", {}, []
+        card = type("C", (), {"params": {"peak": Spec("peak", acquires=True), "frame": Spec("frame", type="image"),
+                                         "temperature": Spec("temperature")}})()
+
+        def read(self, p):
+            Camera.read_.append(p)
+            return 1.0
+    assert profiles.read_values(Camera()) == {"temperature": 1.0} and Camera.read_ == ["temperature"]
+
+
+def test_the_set_ups_read_holds_only_its_instrument_and_never_waits_out_a_run(tmp_path, monkeypatch):
+    import threading
+    from labharness import profiles
+    from labharness.lablock import LabLock
+    monkeypatch.setattr(profiles, "PREPARE_WAIT_S", 0.3)
+    lab, backend = silent_lab("srs/sr830", "Stanford_Research_Systems,SR830,s/n12345,ver1.07")
+    lock, said = LabLock(), []
+    held, done = threading.Event(), threading.Event()
+
+    def a_run():   # the whole lab, as a run that names every instrument
+        with lock:
+            held.set()
+            done.wait(10)
+    t = threading.Thread(target=a_run, daemon=True)
+    t.start()
+    assert held.wait(5)
+    report = profiles.prepare(tmp_path, lab, lock, manuals=False, busy=said.append)
+    assert report["x"]["settings"].startswith("not read now: other work has it") and backend.asked == []
+    done.set()
+    t.join(5)
+    report = profiles.prepare(tmp_path, lab, lock, manuals=False, busy=said.append)
+    assert "did not answer" in report["x"]["settings"] and said == ["reading the settings of x", None]
+    assert profiles.unprepared(tmp_path, lab) == []                              # it has its folder now
+
+
+def test_after_a_change_of_the_lab_only_the_new_instruments_are_read(tmp_path, bus):
+    from labharness import profiles
+    rt = first_runtime(tmp_path)
+    AutoSetup(rt, {}, tmp_path, fetch=lambda u: b"", scan=scanner(bus)).run()
+    assert profiles.unprepared(tmp_path, rt.lab) == [n for n in rt.lab.instruments if not rt.lab.instruments[n].enabled]
+    read = []
+    real = profiles.prepare
+
+    def counting(*a, **k):
+        read.append(k.get("names"))   # None: every instrument, as each Save and connect read them before
+        return real(*a, **k)
+    profiles.prepare = counting
+    try:
+        status = AutoSetup(rt, {}, tmp_path, fetch=lambda u: b"").run("lab changed")
+    finally:
+        profiles.prepare = real
+    assert read == [[]] and status["state"] == "done"                          # nothing new: nothing read again
+
+
 def test_the_draft_is_written_only_as_a_new_file(tmp_path):
     from labharness.autosetup import _write_new
     path = tmp_path / "lab.yaml"

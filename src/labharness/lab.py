@@ -615,6 +615,9 @@ class Lab:
                     except NotNow as e:   # that reading only, not the instrument: said, and kept for plans
                         not_now[spec.name] = str(e)
                     except Exception as e:
+                        if isinstance(e, InstrumentLost) or timed_out(e):
+                            raise   # it doesn't answer: each other reading would only wait as long again (an
+                            # SR830 that didn't took 36 s, the lab held, at every start and Save and connect)
                         dead.append("%s (%s)" % (spec.name, str(e).splitlines()[0][:60] if str(e) else type(e).__name__))
                 if dead:
                     problems.append("cannot read " + ", ".join(dead))

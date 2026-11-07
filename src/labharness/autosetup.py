@@ -284,7 +284,11 @@ class AutoSetup:
             if not user_lab:
                 return self._done(rt.lab_info.get("error") or "No instruments set up yet")
             names = sorted(n for n, i in rt.lab.instruments.items() if not i.simulated and i.enabled)
-            self._set("reading", message="Reading the settings of %s" % ", ".join(names),
+            # after a change of the lab (Save and connect, an instrument added), only what is new: the rest have their
+            # folders, and each one read again cost a minute of timeouts on a lab with one silent instrument
+            reading = names if reason != "lab changed" else [n for n in profiles.unprepared(self.home, rt.lab)
+                                                              if n in names]
+            self._set("reading", message="Reading the settings of %s" % (", ".join(reading) or "nothing new"),
                       instruments=names, unreviewed=rt.lab.config.unreviewed())
             for name, ic in list(rt.lab.config.instruments.items()):   # manuals found while writing cards: no second download
                 m = self._manuals.pop(ic.address, None)
@@ -293,8 +297,13 @@ class AutoSetup:
                         profiles.store_manual(self.home, name, rt.lab.instruments[name].card, m["data"], m["url"])
                     except Exception as e:
                         log.info("  could not keep the %s manual: %s", name, profiles._first_line(e))
-            report = profiles.prepare(self.home, rt.lab, rt.lock, found_by_address,
-                                      manuals=manuals, fetch=self.fetch)
+            def busy(text: Optional[str]) -> None:   # the Lab panel's busy line says which instrument is read now
+                try:
+                    rt.busy = text
+                except Exception:
+                    pass
+            report = profiles.prepare(self.home, rt.lab, rt.lock, found_by_address, manuals=manuals,
+                                      fetch=self.fetch, names=reading, busy=busy)
             fetched = [n for n, r in report.items() if "pages" in str(r.get("manual", ""))]
             missing = [n for n, r in report.items() if str(r.get("manual", "")).startswith("not fetched")]
             log.info("Instrument setup: %s; %s", ", ".join(names), report)
