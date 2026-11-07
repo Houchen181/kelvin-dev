@@ -5673,10 +5673,13 @@ class LabRuntime:
     # ------------------------------------------------------------------ for the approval page
 
     def _unavailable_view(self) -> List[Dict[str, Any]]:
-        """The lab's instruments that could not be connected: why, in words, and the install that would fix it."""
+        """The lab's instruments that could not be connected: why, in words, and the install that would fix it; and
+        those its lab config names but Kelvin left out of it (a card it no longer has: homelab.set_aside_problems)."""
         from .. import envs
-        return [{"name": n, "why": envs.for_people(why), "install": envs.needed(why)}
+        rows = [{"name": n, "why": envs.for_people(why), "install": envs.needed(why)}
                 for n, why in self.lab.unavailable.items()]
+        return rows + [{"name": n, "why": why, "install": None}
+                       for n, why in ((self.lab_info or {}).get("left_out") or {}).items() if n not in self.lab.instruments]
 
     def instruments(self) -> List[Dict[str, Any]]:
         """Each instrument for the lab panel: its readings, outputs (drives) and settings, and a state."""

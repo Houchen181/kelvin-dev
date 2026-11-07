@@ -58,16 +58,16 @@ def test_back_and_the_dots_go_only_to_a_step_seen_and_save_nothing():
     go = _code(_function(JS, "goTo"))
     guard = re.search(r"if \(([^)]*)\) return;", go)
     assert guard and "target > W.seen" in guard.group(1) and "target < 0" in guard.group(1)
-    assert "W.moving" in guard.group(1) and "W.busy" in guard.group(1)
-    assert "toStep(target);" in go
+    assert "W.moving" in guard.group(1) and "W.busy" not in guard.group(1)   # a scan under way is let go of
+    assert "toStep(target);" in go and go.index("letGo();") < go.index("toStep(target);")
     to = _code(_function(JS, "toStep"))
     assert "W.seen = Math.max(W.seen, step);" in to
     for part, code in (("goTo", go), ("toStep", to)):
         for call in SAVES:
             assert call not in code, (part, call)
-    # a dot is offered only for a step already seen (or none while busy); Back is not on the first step
+    # a dot is offered only for a step already seen (none while Next applies a step); Back is not on the first step
     foot = _code(_function(JS, "footer"))
-    assert "e.dots.forEach((d, i) => { d.disabled = busy || i > W.seen; });" in foot
+    assert "e.dots.forEach((d, i) => { d.disabled = W.moving || i > W.seen; });" in foot
     assert "e.back.hidden = W.step === 0;" in foot
     assert 'e.next.textContent = W.step === STEPS.length - 1 ? "Done" : "Next";' in foot
 
@@ -129,3 +129,40 @@ def test_a_lab_with_more_scripts_makes_the_column_taller_once_on_the_first_step(
     # measured when a step is drawn and when the scripts come in; nothing else sets it
     assert "fitColumn();" in _code(_function(JS, "render")) and "fitColumn();" in _code(_function(JS, "loadFiles"))
     assert _code(JS).count("--wl-h") == 2 and _code(JS).count("fitColumn()") == 3
+
+
+# ---------------------------------------------------------------------- a way out while Scan or Add runs (review of
+# 0.3.45, 5.6: Skip, Back, Next and the dots were all disabled for as long as a scan or an add took, with the app behind
+# the page inert, so a scan of a hung GPIB bus or a port that never answered held the person for minutes)
+
+def test_back_the_dots_and_skip_stay_offered_while_a_scan_or_an_add_runs():
+    foot = _code(_function(JS, "footer"))
+    assert "e.next.disabled = busy;" in foot                                 # Next waits: it would apply the step
+    assert "e.back.disabled = W.moving;" in foot and "e.skip.disabled = false;" in foot
+    assert "e.skip.disabled = busy" not in foot and "e.back.disabled = e.next.disabled" not in foot
+
+
+def test_back_the_dots_and_skip_let_go_of_a_scan_or_an_add_never_wait_for_it():
+    let_go = _code(_function(JS, "letGo"))
+    assert "if (s.ctl) { s.ctl.abort(); s.ctl = null; }" in let_go and "clearTimeout(s.timer);" in let_go
+    assert "letGo();" in _code(_function(JS, "goTo")) and "letGo();" in _code(_function(JS, "finish"))
+    scan = _code(_function(JS, "scan"))
+    assert "const ctl = new AbortController();" in scan
+    assert 'K.api("/api/instruments/scan", { body: {}, signal: ctl.signal })' in scan
+    assert 'if (ctl.signal.aborted) s.phase = "skipped";' in scan              # let go of: no error shown
+    add = _code(_function(JS, "addFound"))
+    assert "const ctl = new AbortController(), signal = ctl.signal;" in add
+    assert add.count("signal })") == 3                                        # the lab, the draft and the save
+    assert 'signal.aborted ? { phase: "found" }' in add
+
+
+def test_a_scan_a_minute_long_offers_wait_and_skip():
+    assert "const LONG_MS = 60000;" in JS
+    block = _code(_function(JS, "scanBlock"))
+    assert 'now - s.since >= LONG_MS && now - s.patient >= LONG_MS' in block
+    assert '"Still scanning… "' in block
+    assert 'btn("Wait", "small", () => { s.patient = Date.now(); remind(); redraw("scan"); }' in block
+    assert 'btn("Skip", "small", () => { letGo(); }, { f: "skip-scan" })' in block
+    remind = _code(_function(JS, "remind"))
+    assert "setTimeout(" in remind and "LONG_MS" in remind and 'redraw("scan")' in remind
+    assert "remind();" in _code(_function(JS, "scan"))                         # asked again a minute after it began

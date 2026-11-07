@@ -97,6 +97,12 @@ SOON_S = 5.0   # a person's action that waits longer (for an approval card) is a
 LATER_KEEP_S = 600   # how long such an action's answer is kept after it ends, for the page to fetch (/api/later)
 
 
+def and_list(names: Iterable[Any]) -> str:
+    """Names in words: "smu", "smu and tc", "smu, tc and li"."""
+    names = [str(n) for n in names]
+    return "" if not names else names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
 def make_providers(settings: Settings, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
     """The model connections: the Kelvin hub's for a person signed in with their Kelvin account (hubmodels.py), a
     model server on this computer, the ChatGPT plan; and in Kelvin from source (edition.own_keys) the person's own
@@ -398,6 +404,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     def collection_on() -> Optional[Collection]:
         """The instrument collection while it is switched on in Settings (it is, unless switched off)."""
         return collection if settings.get("collection") != "off" else None
+
+    def collection_only() -> Dict[str, str]:
+        """The lab's instruments whose card only the instrument collection has (neither Kelvin itself nor the lab's own
+        cards), with that card: switched off, the collection would leave them out of the lab from its next start."""
+        without = lab_registry(home, None)
+        return {n: ic.card for n, ic in runtime.lab.config.instruments.items() if ic.card not in without}
 
     runtime.collection = collection_on()
     default_data = home / "lab"                           # runs, record and reports unless the user chose a folder
@@ -2248,6 +2260,16 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         body = await request.json()
         card_id = str(body.get("id") or "")
         mine = runtime.cards_dir is not None and (runtime.cards_dir / carddraft.file_for(card_id)).exists()
+        # an instrument of the lab with this card, and no other card of its id (Kelvin's own, the collection's): it
+        # would be left out of the lab from its next start. Said, naming it, and nothing deleted (review of 0.3.45, 6.3)
+        users = sorted(n for n, ic in runtime.lab.config.instruments.items() if ic.card == card_id)
+        if mine and users and card_id not in kelvin_ids(collection_on()):
+            return error(409, "%s %s this card, and Kelvin has no other card %s: deleting it would leave %s out of "
+                              "your lab from its next start. Give %s another card first (Lab, Set up…), or take %s out "
+                              "of the lab config; then delete the card." % (
+                                  and_list(users), "uses" if len(users) == 1 else "use", card_id,
+                                  "it" if len(users) == 1 else "them", "it" if len(users) == 1 else "them",
+                                  "it" if len(users) == 1 else "them"))
         was = card_before(card_id) if mine else None
         if was is not None and config_widens("cards/" + carddraft.file_for(card_id), was, None):
             refused = needs_owner(body, "Deleting a reviewed card")
@@ -3811,6 +3833,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 values = await request.json()
                 if isinstance(values, dict) and not edition.own_keys():   # the app takes no API keys
                     values = {k: v for k, v in values.items() if k not in OWN_KEYS}
+                if was_on and isinstance(values, dict) and "collection" in values and \
+                        str(values["collection"]).strip().lower() in ("off", "false", "0", "no"):
+                    stranded = collection_only()   # the lab's instruments only the collection has a card for
+                    if stranded:   # said, naming them, and nothing changed (review of 0.3.45, 6.3)
+                        names, cards = sorted(stranded), sorted(set(stranded.values()))
+                        return error(409, "%s %s the instrument collection's %s %s, which Kelvin doesn't have itself: "
+                                          "with the collection switched off, %s would be left out of your lab from its "
+                                          "next start. Make your lab's version of %s first (Lab, Cards…, Make your "
+                                          "version), or leave the collection on." % (
+                                              and_list(names), "uses" if len(names) == 1 else "use",
+                                              "card" if len(cards) == 1 else "cards", and_list(cards),
+                                              "it" if len(names) == 1 else "they",
+                                              "it" if len(cards) == 1 else "them"))
                 settings.update(values)
             except ValueError as e:
                 return error(400, str(e))

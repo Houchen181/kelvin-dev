@@ -29,11 +29,17 @@ def test_no_lab_config_yet_is_a_lab_with_no_instruments(tmp_path):
 
 
 def test_a_lab_config_kelvin_cant_read_leaves_no_instruments_and_says_why(tmp_path):
+    (tmp_path / "lab.yaml").write_text("lab: Bench 2\ninstruments: [smu, lockin]\n", encoding="utf-8")
+    lab, _, info = homelab.open_home_lab(tmp_path)
+    assert not lab.instruments and info["kind"] == "none" and info["has_file"]
+    assert info["error"].startswith("Your lab (lab.yaml) could not be opened") and "instruments:" in info["error"]
+    # an entry whose card Kelvin doesn't have is left out alone, saying why; the lab is the person's (review of 0.3.45,
+    # 6.3: it emptied the whole lab)
     (tmp_path / "lab.yaml").write_text("lab: Bench 2\ninstruments:\n  smu: {card: no/such-card, address: "
                                        "\"GPIB0::24::INSTR\"}\n", encoding="utf-8")
     lab, _, info = homelab.open_home_lab(tmp_path)
-    assert not lab.instruments and info["kind"] == "none" and info["has_file"]
-    assert info["error"].startswith("Your lab (lab.yaml) could not be opened") and "no/such-card" in info["error"]
+    assert not lab.instruments and info["kind"] == "file" and info["error"] is None
+    assert "Kelvin has no card no/such-card" in info["left_out"]["smu"]
 
 
 def test_a_lab_none_of_whose_instruments_connect_stays_the_lab(tmp_path, monkeypatch):
