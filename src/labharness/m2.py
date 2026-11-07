@@ -10,7 +10,11 @@ Card commands, one ICE-BLOC operation each (from M Squared's "SolsTiS 3 TCP/IP P
     SET move_wave_t wavelength={value}      an op that acts: name=value pairs, comma-separated; numbers go as [n]
     SET etalon_lock operation={value}       with bool_text [on, off]
 A non-zero status in the reply to an op that acts is an error, and so is a parse_fail reply. Long tasks asked with
-report=finished send a final report later (<op>_f_r); Kelvin keeps the newest one per op: GET move_wave_t_f_r#report."""
+report=finished send a final report later (<op>_f_r); Kelvin keeps the newest one per op: GET move_wave_t_f_r#report.
+
+A link that broke (the laser closed it, restarted, or the network dropped) is dropped, said as a lost instrument
+(LinkLost), and made again, start_link and all, at the next exchange: it was never remade, and only a restart of Kelvin
+helped. A reply that doesn't come in time is NoAnswer; the link stays, as a late reply is told apart by its id."""
 from __future__ import annotations
 
 import json
@@ -19,9 +23,9 @@ import socket
 import urllib.parse
 from typing import Any, Dict, Optional
 
-from .adapters import AdapterError
+from .adapters import AdapterError, LinkLost, NoAnswer
 from .cards import Card
-from .drivers import DriverBackend
+from .drivers import DriverBackend, link_failed, ran_out
 
 READ_OPS = re.compile(r"^(get_|poll_)|_status$|^ping$|^status$")
 PARSE_ERRORS = {1: "the JSON could not be parsed, or the link was refused (wrong IP address)",
@@ -60,6 +64,8 @@ def parameters(text: Any) -> Dict[str, Any]:
 
 
 class M2Laser(DriverBackend):
+    quiet_close = True   # closing the link sends the laser nothing
+
     def __init__(self, name: str, card: Card, address: str, module: Any = None):
         super().__init__(name, card, address)
         url = urllib.parse.urlparse(address)
@@ -67,28 +73,48 @@ class M2Laser(DriverBackend):
             raise AdapterError("%s: an M Squared laser's address is m2://<laser ip>:<port>, with the port set on the "
                                "laser's Network page (Remote interface)" % name)
         q = dict(urllib.parse.parse_qsl(url.query))
-        self.host = url.hostname
-        timeout = float(card.connection.get("timeout_ms", 5000)) / 1000.0
-        connect = getattr(module, "create_connection", None) or socket.create_connection   # tests pass a fake
-        try:
-            self.sock = connect((url.hostname, url.port), timeout)
-        except OSError as e:
-            raise AdapterError("%s: could not reach %s:%d (%s). Check the laser is on and its Remote interface is "
-                               "enabled on that port." % (name, url.hostname, url.port, e)) from e
+        self.host, self.port = url.hostname, url.port
+        self.client_ip = q.get("client_ip")
+        self.timeout = float(card.connection.get("timeout_ms", 5000)) / 1000.0
+        self.connect = getattr(module, "create_connection", None) or socket.create_connection   # tests pass a fake
+        self.sock: Any = None
         self.buf = ""
         self.tx = 0
         self.reports: Dict[str, Dict[str, Any]] = {}
-        client = q.get("client_ip") or self.sock.getsockname()[0]
+        self._connect()
+
+    def _connect(self) -> None:
+        """The link, and the laser's yes to it (start_link, from this computer's address)."""
+        try:
+            self.sock = self.connect((self.host, self.port), self.timeout)
+        except OSError as e:
+            raise link_failed(self.name, "could not reach %s:%d. Check the laser is on and its Remote interface is "
+                                         "enabled on that port" % (self.host, self.port), e) from e
+        self.buf = ""
+        client = self.client_ip or self.sock.getsockname()[0]
         try:
             reply = self._call("start_link", {"ip_address": client})
+        except (LinkLost, NoAnswer):
+            self._drop()
+            raise
         except AdapterError as e:
-            self.close()
+            self._drop()
             raise AdapterError("%s: the laser refused the link from %s (%s). On the laser's Network page, the Remote "
-                               "interface address must be %s." % (name, client, e, client)) from e
+                               "interface address must be %s." % (self.name, client, e, client)) from e
         if str(reply.get("status", "")).lower() != "ok":
-            self.close()
+            self._drop()
             raise AdapterError("%s: the laser refused the link from %s. On the laser's Network page, the Remote "
-                               "interface address must be %s." % (name, client, client))
+                               "interface address must be %s." % (self.name, client, client))
+
+    def _drop(self) -> None:
+        """The link let go of: the next exchange makes a new one."""
+        sock, self.sock = self.sock, None
+        self.buf = ""
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     def _receive(self) -> Dict[str, Any]:
         dec = json.JSONDecoder()
@@ -109,13 +135,18 @@ class M2Laser(DriverBackend):
                 continue
             try:
                 chunk = self.sock.recv(4096)
-            except OSError as e:   # socket.timeout too
-                raise AdapterError("%s: no reply from the laser (%s)" % (self.name, e)) from e
+            except OSError as e:   # socket.timeout too: the link stays (a late reply is told apart by its id)
+                if not ran_out(e):
+                    self._drop()
+                raise link_failed(self.name, "no reply from the laser", e) from e
             if not chunk:
-                raise AdapterError("%s: the laser closed the link" % self.name)
+                self._drop()
+                raise LinkLost("%s: the laser closed the link" % self.name)
             self.buf += chunk.decode("ascii", "replace")
 
     def _call(self, op: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if self.sock is None:   # dropped after a failure: made again (the failed op is never sent again)
+            self._connect()
         self.tx = self.tx % 16383 + 1
         msg: Dict[str, Any] = {"transmission_id": [self.tx], "op": op}
         if params:
@@ -123,7 +154,8 @@ class M2Laser(DriverBackend):
         try:
             self.sock.sendall(json.dumps({"message": msg}).encode("ascii"))
         except OSError as e:
-            raise AdapterError("%s: lost the link to the laser (%s)" % (self.name, e)) from e
+            self._drop()
+            raise link_failed(self.name, "lost the link to the laser", e) from e
         while True:
             m = self._receive()
             got = str(m.get("op", ""))
@@ -169,7 +201,4 @@ class M2Laser(DriverBackend):
         return "M Squared,%s,%s" % (self.card.model, self.host)
 
     def close(self) -> None:
-        try:
-            self.sock.close()
-        except OSError:
-            pass
+        self._drop()

@@ -33,12 +33,13 @@ from __future__ import annotations
 import logging
 import math
 import re
+import socket
 import threading
 import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import envs
-from .adapters import AdapterError
+from .adapters import AdapterError, LinkLost, NoAnswer, timed_out
 from .cards import Card
 
 log = logging.getLogger("kelvin")
@@ -80,6 +81,23 @@ def _number(text: str) -> Any:
     return int(v) if v.is_integer() and "." not in text and "e" not in low else v
 
 
+def ran_out(e: BaseException) -> bool:
+    """A link's error that says only that the answer didn't come in time (a socket's timeout, which Python 3.9 doesn't
+    count as a TimeoutError), not that the link broke."""
+    if isinstance(e, (TimeoutError, socket.timeout)) or timed_out(e) or "timed out" in str(e).lower():
+        return True
+    cause = getattr(e, "reason", None) or e.__cause__   # urllib wraps a timeout in a URLError's reason
+    return cause is not None and cause is not e and isinstance(cause, BaseException) and ran_out(cause)
+
+
+def link_failed(name: str, what: str, e: BaseException) -> AdapterError:
+    """A maker's link that failed, as the error a driver raises for it (with e as its cause): NoAnswer when the answer
+    only didn't come in time, LinkLost when the link broke (a connection reset, refused or closed, a port that went
+    away). Either says the instrument is lost (adapters.lost_kind), so its alarm goes up and its readings stop asking."""
+    detail = str(e).splitlines()[0][:200] if str(e).strip() else type(e).__name__
+    return (NoAnswer if ran_out(e) else LinkLost)("%s: %s (%s)" % (name, what, detail))
+
+
 def _fmt(v: Any) -> str:
     if isinstance(v, str):
         return v
@@ -115,11 +133,12 @@ class DriverBackend:
 
     def check_gone(self) -> None:
         """Refuses at once once this connection has ended (gone): its driver may still be stuck in the call that
-        didn't return, and a call behind it would only wait as long."""
+        didn't return, and a call behind it would only wait as long. LinkLost: the instrument counts as lost (its
+        alarm, and connecting it again makes a fresh connection: lab._ended)."""
         if self.gone:
-            raise AdapterError("%s: not connected any more: %s; connect it again (Lab panel: its connection off, then "
-                               "on). If that hangs too, close its maker's software, turn the instrument off and on, "
-                               "and restart Kelvin" % (self.name, self.gone))
+            raise LinkLost("%s: not connected any more: %s; connect it again (Lab panel: its connection off, then "
+                           "on). If that hangs too, close its maker's software, turn the instrument off and on, "
+                           "and restart Kelvin" % (self.name, self.gone))
 
     def bounded(self, limit: float, what: str, fn: Callable[..., Any], *args: Any) -> Any:
         """fn(*args), a call into the maker's driver in Kelvin's own process, waited for at most `limit` seconds on a
@@ -263,8 +282,13 @@ def discover_zhinst(module: Any = None) -> List[Tuple[str, str]]:
 class MultiVu(DriverBackend):
     """Paths: temperature, temperature/setpoint, temperature/rate (K/min); field, field/setpoint, field/rate (T/s;
     MultiVu works in oersted, 1 T = 10 000 Oe); chamber. Setting a setpoint starts the approach at the rate
-    set last (MultiVu itself ramps)."""
+    set last (MultiVu itself ramps).
+
+    A link to MultiPyVu's server that broke (MultiVu or its server restarted, the network dropped) is dropped, said as
+    a lost instrument (LinkLost, NoAnswer), and made again at the next exchange: it was never remade, and only a
+    restart of Kelvin helped."""
     OE_PER_T = 1e4
+    quiet_close = True   # closing tells MultiPyVu's server this client leaves: the system stays as it is
 
     def __init__(self, name: str, card: Card, address: str, module: Any = None):
         super().__init__(name, card, address)
@@ -277,18 +301,60 @@ class MultiVu(DriverBackend):
             except ImportError as e:
                 raise AdapterError("%s needs Quantum Design's MultiPyVu (and its server running next to MultiVu): %s"
                                    % (name, envs.missing("MultiPyVu"))) from e
-        try:
-            self.client = module.Client(host=self.host, port=self.port)
-            self.client.open()
-        except Exception as e:
-            raise AdapterError("%s: could not reach the MultiPyVu server at %s:%d: %s" % (name, self.host, self.port, e)) from e
+        self.module = module
+        self.client: Any = None
+        self._connect()
         self.t_rate = 1.0          # K/min
         self.b_rate = 0.001        # T/s
         self.t_set: Optional[float] = None
         self.b_set: Optional[float] = None
 
+    def _connect(self) -> None:
+        try:
+            client = self.module.Client(host=self.host, port=self.port)
+            client.open()
+        except Exception as e:
+            raise link_failed(self.name, "could not reach the MultiPyVu server at %s:%d" % (self.host, self.port),
+                              e) from e
+        self.client = client
+
+    def _drop(self) -> None:
+        client, self.client = self.client, None
+        if client is not None:
+            try:
+                client.close_client()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _broken(e: BaseException) -> bool:
+        """MultiPyVu's error says the link failed (its server closed, refused or timed out), not a refusal of
+        MultiVu's."""
+        return isinstance(e, OSError) or bool(re.search(r"connect|clos(e|ed|ing)\b|socket|timed? ?out|broken pipe|reset",
+                                                         "%s %s" % (type(e).__name__, e), re.I))
+
+    def _through(self, fn: Callable[[Any], Any]) -> Any:
+        """fn(client): on the link, made again first if a failure dropped it."""
+        if self.client is None:
+            self._connect()
+        try:
+            return fn(self.client)
+        except AdapterError:
+            raise
+        except Exception as e:
+            if not self._broken(e):
+                raise
+            self._drop()   # the next exchange connects again
+            raise link_failed(self.name, "the link to the MultiPyVu server at %s:%d failed" % (self.host, self.port),
+                              e) from e
+
     def set(self, path: str, value: Any) -> None:
-        c = self.client
+        self._through(lambda c: self._set(c, path, value))
+
+    def get(self, path: str) -> Any:
+        return self._through(lambda c: self._get(c, path))
+
+    def _set(self, c: Any, path: str, value: Any) -> None:
         if path == "temperature/rate":
             self.t_rate = float(value)
         elif path == "field/rate":
@@ -302,8 +368,7 @@ class MultiVu(DriverBackend):
         else:
             raise AdapterError("%s: MultiVu has no setting %r" % (self.name, path))
 
-    def get(self, path: str) -> Any:
-        c = self.client
+    def _get(self, c: Any, path: str) -> Any:
         if path == "temperature":
             return float(c.get_temperature()[0])
         if path == "field":
@@ -324,10 +389,7 @@ class MultiVu(DriverBackend):
         return "Quantum Design,MultiVu,%s:%d" % (self.host, self.port)
 
     def close(self) -> None:
-        try:
-            self.client.close_client()
-        except Exception:
-            pass
+        self._drop()
 
 
 # ------------------------------------------------------------------ pulse generators and photon counters (spin experiments)
