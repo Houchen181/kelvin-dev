@@ -27,6 +27,7 @@ HOME = Path.home() / "Kelvin"
 log = logging.getLogger("kelvin")
 START_WAIT_S = 30.0   # how long a second Kelvin waits for the first to show its portal, or to finish closing
 CLOSE_WAIT_S = 20.0   # how long Kelvin waits for its portal to stop (and its instruments to close) as it quits
+QUIT_REQUESTS_S = 3.0   # how long, as it quits, the portal waits for the requests it is still answering
 QUIT_DEADLINE_S = 40.0   # and then for everything: past it, where it is stuck goes to faults.log and it quits anyway
 _faults: Any = None   # faults.log, kept open: Python writes where every thread was if Kelvin crashes (faulthandler)
 
@@ -492,8 +493,6 @@ def _run(args: argparse.Namespace, home: Path) -> int:
             updater.install(os.getpid(), relaunch=True)
             return 0
 
-    import uvicorn
-
     port = args.port or _free_port()
     # the person's own instruments (lab.yaml), none until they set them up; with the instrument collection's cards
     # (the copy here) unless it is switched off. The instruments are connected once the window is open (the
@@ -522,7 +521,7 @@ def _run(args: argparse.Namespace, home: Path) -> int:
                      on_exit=lambda: (closer["fn"] or quit_event.set)(), sync_collection=not args.self_test,
                      on_show=lambda: (shower["fn"] or (lambda: None))())
     agent = app.app.state.agent
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_config=None, log_level="warning"))
+    server = _server(app, port)
     thread = threading.Thread(target=server.run, name="kelvin-server", daemon=True)
     thread.start()
     deadline = time.time() + 30
@@ -553,10 +552,7 @@ def _run(args: argparse.Namespace, home: Path) -> int:
             lock.write_text(json.dumps({"port": port, "pid": os.getpid(), "closing": True}), encoding="utf-8")
         except OSError:
             pass
-        server.should_exit = True   # its portal stops, and with it the agent, the watches and the instruments
-        thread.join(CLOSE_WAIT_S)
-        if thread.is_alive():
-            log.warning("Kelvin's portal had not stopped after %.0f s; quitting anyway", CLOSE_WAIT_S)
+        _stop_server(server, thread, runtime)   # its portal stops, and with it the agent, the watches, the instruments
         if updater is not None and settings.updates == "auto" and updater.state.get("state") != "installing":
             ready = updater.pending()   # automatic updates install when Kelvin closes
             if ready and not ready.get("tried") and sys.platform.startswith("win"):
@@ -570,6 +566,36 @@ def _run(args: argparse.Namespace, home: Path) -> int:
                 lock.unlink()
         except Exception:   # gone, or not this Kelvin's (another program's file, cut short): left as it is
             pass
+
+
+def _server(app: Any, port: int) -> Any:
+    """The portal's server. As Kelvin quits, it waits QUIT_REQUESTS_S at most for the requests it is still answering
+    (a chat's stream, a scan, a sequence's start), then ends them: uvicorn's own default waits for them for ever, and
+    the portal's closing, which lets go of the instruments, comes after them. A quit during a request skipped it, and
+    a camera left open stays unusable for every program until the computer's processes are ended."""
+    import uvicorn
+    return uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_config=None, log_level="warning",
+                                         timeout_graceful_shutdown=QUIT_REQUESTS_S))
+
+
+def _stop_server(server: Any, thread: threading.Thread, runtime: Any) -> None:
+    """The portal stopped, and with it the agent, the watches and the instruments (its own closing lets go of them).
+    One that hasn't stopped after CLOSE_WAIT_S never got that far, or is still at it (a part of its closing that hangs,
+    worker threads all taken by instruments that don't answer): the instruments are let go of here, once
+    (close_instruments waits for a closing under way rather than closing anything twice)."""
+    server.should_exit = True
+    thread.join(CLOSE_WAIT_S)
+    if not thread.is_alive():
+        return
+    log.warning("Kelvin's portal had not stopped after %.0f s; quitting anyway", CLOSE_WAIT_S)
+    from .web.app import CLOSE_INSTRUMENTS_S
+    try:
+        stuck = runtime.close_instruments(CLOSE_INSTRUMENTS_S)
+    except Exception:
+        log.exception("could not close the instruments as Kelvin quits")
+        return
+    if stuck:
+        log.warning("still closing as Kelvin quits: %s", ", ".join(stuck))
 
 
 if __name__ == "__main__":

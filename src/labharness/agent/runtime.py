@@ -71,6 +71,7 @@ RETRY_MS = 1000     # a retry of an instrument that stopped answering waits this
 PANEL_WAIT_S = 0.2   # the same, for the Lab panel's look every few seconds: it shows the latest values meanwhile
 AFTER_STOP_S = 900.0   # how long the card after a Stop waits, in the background, for the stopped work to end
 SWITCH_CLOSE_S = 15.0   # how long the old lab's connections may take to close as the lab changes (each on its own thread)
+STILL_CLOSING = "(an earlier closing, still under way)"   # close_instruments' answer while another call closes them
 MAX_CONFIG_CHARS = 30000   # of the lab config shown at once; an instrument's own entry is always shown whole
 SETUP_STEPS = ("connecting", "scanning", "drafting", "reading")   # the instrument setup at work (autosetup.py)
 # a rehearsal is never a run (field tests: run_plan with dry_run: true went on to run for real)
@@ -764,6 +765,8 @@ class LabRuntime:
         self.last_active = time.monotonic()   # the last command, run or queue item: outputs left on idle go to safe
         self._watching: Optional[threading.Thread] = None
         self._watching_stop = threading.Event()
+        self._closing = threading.Lock()   # close_instruments, once: held while it closes
+        self._closed: Optional[List[str]] = None   # what it left still closing, once it has closed them
         subscribe = getattr(approver, "subscribe", None)
         if subscribe:  # a person is needed: tell them, wherever they are
             subscribe(lambda r: None if r.get("auto") else self.tell(
@@ -9801,12 +9804,23 @@ class LabRuntime:
         after `within` seconds, left as they are. VISA itself is closed last, once every session of it is (closed by
         Python's exit instead, it complained of sessions gone before it). A field test's Kelvin quit without closing
         its camera, and the camera library stayed unusable for every program until the computer's processes were
-        ended."""
-        stuck = self.lab.close(within=within, quitting=True)
-        if not stuck:
-            from ..adapters import close_resource_manager
-            close_resource_manager()
-        return stuck
+        ended.
+
+        Once: Kelvin's quit calls it again when the portal's own closing never got this far (desktop._stop_server).
+        A call while another is still closing waits for that one, `within` seconds at most, and closes nothing a second
+        time: two closings of one camera at once could upset its library."""
+        if not self._closing.acquire(timeout=max(0.0, within)):
+            return [STILL_CLOSING]
+        try:
+            if self._closed is None:
+                stuck = self.lab.close(within=within, quitting=True)
+                if not stuck:
+                    from ..adapters import close_resource_manager
+                    close_resource_manager()
+                self._closed = stuck
+            return list(self._closed)
+        finally:
+            self._closing.release()
 
     def _keep_watch(self) -> None:
         while not self._watching_stop.wait(BACKGROUND_S):
