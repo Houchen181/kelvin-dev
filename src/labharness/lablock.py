@@ -41,18 +41,22 @@ class LabLock:
 
     # ------------------------------------------------------------------ the work that changes the lab
 
-    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+    def acquire(self, blocking: bool = True, timeout: float = -1, names: Optional[Iterable[str]] = None) -> bool:
         """As an RLock's. Work that takes it holds every instrument, once the readings of them under way have
-        finished, until it says which ones it uses (only). Taken again on its own thread (code that knows nothing of
-        what the work said), it holds them all again until that release."""
+        finished, until it says which ones it uses (only). names: it says so as it takes it (a set, a run), and waits
+        only for the readings of those: one chat's reading of a 10-minute sweep held every change from every chat for
+        up to SETTLE_S, though they never touched the analyzer. Taken again on its own thread (code that knows nothing
+        of what the work said), it holds them all again until that release; with names, it adds those to what it
+        holds."""
         if not self._lock.acquire(blocking, timeout):
             return False
         me = threading.get_ident()
         was = self._stack[-1] if self._stack else frozenset()   # free: it held none
-        self._stack.append(None)
-        self._now = (me, None)
-        if was is not None:
-            self._settle(lambda name: name not in was)
+        new = None if names is None or was is None else was | frozenset(names)
+        self._stack.append(new)
+        self._now = (me, new)
+        if was is not None and new != was:
+            self._settle(lambda name: name not in was and (new is None or name in new))
         return True
 
     def release(self) -> None:
@@ -73,7 +77,9 @@ class LabLock:
     def only(self, names: Iterable[str]) -> Iterator[None]:
         """The work that has the lock uses only these instruments for a while (a run: those its plan names), so the
         others can be read meanwhile. Within work that said so already, it adds to what that holds. Afterwards it
-        holds what it held before, once the readings of what it takes back have finished."""
+        holds what it held before. It doesn't wait for the readings that began meanwhile to finish: a command of its
+        own to one of those instruments waits for that reading's exchange on the connection's own lock, and only
+        then (waiting for them all once cost every change another SETTLE_S behind one chat's long acquisition)."""
         me = threading.get_ident()
         if self._now[0] != me:
             raise RuntimeError("only the work that has the lab's lock says which instruments it uses")
@@ -88,8 +94,6 @@ class LabLock:
         finally:
             self._stack[-1] = old
             self._now = (me, old)
-            if old is None:
-                self._settle(lambda name: name not in new)
 
     def holds(self, name: str) -> bool:
         """Whether work on another thread holds this instrument now (its own work reads it as it likes)."""

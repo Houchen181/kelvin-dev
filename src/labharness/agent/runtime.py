@@ -32,6 +32,7 @@ from ..cards import ParamSpec, num, plot_points, thin, trace_x
 from ..engine import RunEngine, RunReport
 from ..eventlog import EventLog, RunFolderError, RunFolders, RunStore, plan_text
 from ..gate import ApprovalRequest, Approver, SafetyGate, _dur, reading_away
+from ..instrument import ended_by
 from ..lab import Lab
 from ..lablock import HELD, LabLock
 from ..labconfig import Allowed, ConfigError, Envelope, load_lab_config
@@ -69,6 +70,9 @@ SETTINGS_S = 120.0  # and its settings, which change only when someone changes t
 LAB_STATUS_S = 10.0  # lab_status (the agent's look) reads again what was read longer ago than this
 RETRY_MS = 1000     # a retry of an instrument that stopped answering waits this long at most: the bus is everyone's
 PANEL_WAIT_S = 0.2   # the same, for the Lab panel's look every few seconds: it shows the latest values meanwhile
+CLOSING_WAIT_S = 0.5   # and for the look at what a change touched, as it ends (_look_after), while it still has the lab
+CONNECT_WAIT_S = 1.0   # how long connect_pending waits for the lab per instrument, before connecting it beside the work
+HANDS_WAIT_S = 10.0    # how long Hands on the sample waits for the stopped work, before finishing in the background
 AFTER_STOP_S = 900.0   # how long the card after a Stop waits, in the background, for the stopped work to end
 SWITCH_CLOSE_S = 15.0   # how long the old lab's connections may take to close as the lab changes (each on its own thread)
 MAX_CONFIG_CHARS = 30000   # of the lab config shown at once; an instrument's own entry is always shown whole
@@ -446,6 +450,13 @@ class ClientCall:
         self.cancelled = False
 
 
+class LabBusy(RuntimeError):
+    """A person's action (the Lab panel's switch, Scan, Save and connect, a card's Try) that needs the lab while other
+    work has it for longer than the action waits (a run, the queue, an approval card, a ramp): nothing was done, and
+    the words say what has the lab. The portal answers 409 with them. The review of 0.3.45 found such an action waiting
+    out a whole run, then acting when it ended, hours after the person had pressed it."""
+
+
 # whose a piece of work is: the project and chat it is filed under, and the marks that keep it unshared (an
 # incognito chat, a chat that keeps unshared work's marks, the rules it ran under, a confidential or unpublished
 # project)
@@ -644,8 +655,15 @@ class LabRuntime:
         self._busy_whose: Optional[Dict[str, Any]] = None   # the marks of the unshared work busy names (_whose_now)
         self._status: Dict[str, Dict[str, Any]] = {}
         self._status_at = 0.0
+        self._status_lock = threading.Lock()   # a look at part of the lab merges what it read into _status
         self._looked: Dict[str, float] = {}        # when the Lab panel last read each instrument
         self._settings_at: Dict[str, float] = {}   # and its settings
+        # the readings under way, each instrument's (what is read, since when, how long its card lets it take): a
+        # reading that waits for one says what it waits for (an analyzer's sweep is not an instrument that won't answer)
+        self._reading_now: Dict[str, Tuple[str, float, float]] = {}
+        # the chats' readings under way, each with what ends it: a Stop in that chat (stop_readings)
+        self._readers: Dict[str, List[threading.Event]] = {}
+        self._readers_lock = threading.Lock()
         self._ui_last: Dict[Any, Dict[str, Any]] = {}   # each viewer's Lab panel parts as they last worked out
         self._ui_failed: Dict[str, float] = {}   # when a part last failed to, said in the log
         self.live: Optional[Dict[str, Any]] = None   # the run in progress (or the last one), for live displays
@@ -1043,21 +1061,24 @@ class LabRuntime:
 
     # ------------------------------------------------------------------ plumbing
 
-    def _refresh(self, wait: Optional[float] = None, look_s: float = 0.0, fresh: Iterable[str] = ()) -> None:
+    def _refresh(self, wait: Optional[float] = None, look_s: float = 0.0, fresh: Iterable[str] = (),
+                 only: Optional[Iterable[str]] = None) -> None:
         """Look at every instrument, for lab_status and the Lab panel: each read with its own lock and never the
         lab's, except one that the work changing the lab uses (a run's) or that another reading has had for longer
         than `wait` (READ_WAIT_S): that one shows the latest values Kelvin has, and why (_status_held). look_s: one
         read less than this long ago shows what it read then (its settings are read every SETTINGS_S), and nothing is
-        read on a GPIB bus the work under way uses (_busy_buses); fresh: read now all the same (a row just opened)."""
+        read on a GPIB bus the work under way uses (_busy_buses); fresh: read now all the same (a row just opened).
+        only: look at these instruments alone (what a change touched: _look_after); the others stay as they were."""
         from ..adapters import BUSES, bus_of
         fresh = set(fresh)
+        part = None if only is None else set(only)
         busy = self._busy_buses() if look_s else set()
         try:
             status: Dict[str, Dict[str, Any]] = {}
             held: Dict[str, str] = {}
             now = time.time()
             for name, inst in list(self.lab.instruments.items()):
-                if not inst.enabled:
+                if not inst.enabled or (part is not None and name not in part):
                     continue
                 kept = {p: v for p, (v, _, _) in self._kept(name).items()}
                 bus = None if inst.simulated else bus_of(inst.config.address)
@@ -1099,7 +1120,15 @@ class LabRuntime:
                 if why is not None:
                     held[name] = why
                     status[name] = {p: v for p, (v, _, _) in self._kept(name).items()}
-            self._status, self._status_held, self._status_at = status, held, time.time()
+            with self._status_lock:
+                if part is None:
+                    self._status, self._status_held, self._status_at = status, held, time.time()
+                else:   # merged into the last look: what it looked at is as it found it now, the rest as it was
+                    merged = {n: v for n, v in self._status.items() if n not in part}
+                    merged.update(status)
+                    kept = {n: w for n, w in self._status_held.items() if n not in part}
+                    kept.update(held)
+                    self._status, self._status_held = merged, kept
         except Exception:
             pass
 
@@ -1128,10 +1157,73 @@ class LabRuntime:
                 yield None
             elif why == HELD:
                 yield "it is in use: %s" % self.held_by()
-            elif wait >= 1:
-                yield "another reading of it has waited %s for its answer (is it on and connected?)" % _dur(wait)
             else:
-                yield "another reading of it is under way"
+                yield self._slow_words(name, wait)
+
+    def _slow_words(self, name: str, wait: float) -> str:
+        """Why a reading of this instrument didn't go ahead, when another reading of it had it all along: an
+        acquisition the other is waiting for, as its card allows (a sweep that takes minutes), is said as such; only
+        past that is the instrument perhaps not answering."""
+        now = self._reading_now.get(name)
+        if now is not None:
+            key, since, allowed = now
+            took = time.time() - since
+            if allowed and took <= allowed:
+                return ("another reading of it is under way: %s, an acquisition its card lets take up to %s (%s so far)"
+                        % (key, _dur(allowed), _dur(took)))
+        if wait >= 1:
+            return "another reading of it has waited %s for its answer (is it on and connected?)" % _dur(wait)
+        return "another reading of it is under way"
+
+    @contextlib.contextmanager
+    def _asked(self, instrument: str, parameter: str) -> Iterator[None]:
+        """A reading under way, which has the instrument's own lock: what it reads is noted, so a reading that waits
+        for it says what it waits for (_slow_words); and a chat's reading (its viewer's chat) ends at a Stop in that
+        chat (stop_readings), as only the Stop for everything ended it before."""
+        key = "%s.%s" % (instrument, parameter)
+        spec = self._spec(key)
+        self._reading_now[instrument] = (key, time.time(), float(getattr(spec, "wait_s", 0) or 0))
+        chat = getattr(_VIEWER.get(), "chat", None)
+        flag = threading.Event()
+        if chat:
+            with self._readers_lock:
+                self._readers.setdefault(chat, []).append(flag)
+        try:
+            with ended_by(flag.is_set):
+                yield
+        finally:
+            self._reading_now.pop(instrument, None)
+            if chat:
+                with self._readers_lock:
+                    flags = self._readers.get(chat) or []
+                    if flag in flags:
+                        flags.remove(flag)
+                    if not flags:
+                        self._readers.pop(chat, None)
+
+    def stop_readings(self, chat: str) -> int:
+        """A Stop in one chat: the readings under way for that chat end (an acquisition, a sweep it waits for), each
+        as at a person's Stop. The work changing the lab and the other chats' readings go on. Returns how many were
+        told to end."""
+        with self._readers_lock:
+            flags = list(self._readers.get(chat) or [])
+        for flag in flags:
+            flag.set()
+        return len(flags)
+
+    def _look_after(self, since: float, also: Iterable[str] = ()) -> None:
+        """The look at the lab as a piece of work ends, while it still has the lab: only the instruments it sent
+        something that may change them (changed_at since `since`), and also; each waits CLOSING_WAIT_S at most for a
+        reading of it under way, and shows its latest values meanwhile. The rest stay as the last look found them, and
+        the Lab panel reads by itself what changed (changed_at) or is due. A whole read of the lab after each change
+        cost 54 instrument reads for one set of a lock-in's time constant on a 10-instrument lab, and up to
+        READ_WAIT_S for each instrument another chat was reading."""
+        names = set(also)
+        for name, inst in list(self.lab.instruments.items()):
+            if inst.enabled and inst.changed_at >= since:
+                names.add(name)
+        if names:
+            self._refresh(CLOSING_WAIT_S, only=names)
 
     def _keep(self, name: str, values: Dict[str, Any], how: str) -> None:
         """These values of an instrument, as its latest (a reading that failed is none: the one before stays)."""
@@ -1280,15 +1372,12 @@ class LabRuntime:
         if call is not None:
             call.waiting = True
         try:
-            if not self.lock.acquire(timeout=2.0):
-                if self.busy_for(BUSY_WAIT_S):   # a run, the queue or an approval card may take hours: answer now
-                    return self._busy_answer()
-                t0 = time.monotonic() - 2.0
-                if not self.lock.acquire(timeout=BUSY_WAIT_S):   # never a chat stuck behind an instrument that hangs
-                    return self._busy_answer(time.monotonic() - t0)
+            waited = self._take_lab(None if uses is None else self._involved(uses))
         finally:
             if call is not None:
                 call.waiting = False
+        if waited is not None:
+            return self._busy_answer(waited or None)
         try:
             if call is not None and call.cancelled:
                 return "not run: the client cancelled this call while it waited for the lab"
@@ -1298,17 +1387,65 @@ class LabRuntime:
             self._acted = self._acted or stoppable
             held, self._holder = self._holder, call or self._holder
             self.busy, self.last_active = what, time.monotonic()
+            started = time.time()
             try:
-                if uses is None:
-                    return fn()
-                with self.lock.only(self._involved(uses)):
-                    return fn()
+                return fn()
             finally:
                 self.busy, self._holder, self.last_active = None, held, time.monotonic()
                 self._caps_if_waiting()
-                self._refresh()
+                self._look_after(started)
         finally:
             self.lock.release()
+
+    def _take_lab(self, names: Optional[Iterable[str]] = None) -> Optional[float]:
+        """The lab's lock for a piece of work, holding these instruments (None: every one), so it waits only for the
+        readings of those under way (LabLock.acquire): taken within BUSY_WAIT_S, never longer, and given up at once
+        when what has the lab will have it for longer (a run, the queue, an approval card). None once taken; else how
+        long it waited (0: not at all)."""
+        if self.lock.acquire(timeout=2.0, names=names):
+            return None
+        if self.busy_for(BUSY_WAIT_S):   # a run, the queue or an approval card may take hours: answer now
+            return 0.0
+        t0 = time.monotonic() - 2.0
+        if self.lock.acquire(timeout=BUSY_WAIT_S, names=names):   # never stuck behind an instrument that hangs
+            return None
+        return time.monotonic() - t0
+
+    def _busy_said(self, waited: float = 0.0) -> str:
+        """Why a person's action can't have the lab now (LabBusy), in the portal's words: what has it."""
+        return "Kelvin is busy with %s%s; try again when that is done, or press Stop." % (
+            self.held_by(), " (this waited %s for it)" % _dur(waited) if waited else "")
+
+    @contextlib.contextmanager
+    def _person_work(self, what: str, uses: Optional[Iterable[str]] = None) -> Iterator[None]:
+        """A person's action from the portal (a switch, a Scan, Save and connect, a card's Try) as the one change to
+        the lab now, as _do is the agent's: the lab is taken within BUSY_WAIT_S or LabBusy says what has it, so the
+        action never waits out a run and then acts when nobody expects it. uses: the instruments it works on (with
+        _involved), which readings leave alone while the others stay readable; None: all of them. As it ends, a look
+        at what it touched (_look_after)."""
+        waited = self._take_lab(None if uses is None else self._involved(uses))
+        if waited is not None:
+            raise LabBusy(self._busy_said(waited))
+        before, started = self._busy, time.time()
+        try:
+            self.busy, self.last_active = what, time.monotonic()
+            try:
+                yield
+            finally:
+                self.busy, self.last_active = before, time.monotonic()
+                self._look_after(started)
+        finally:
+            self.lock.release()
+
+    def running_now(self) -> Optional[str]:
+        """What a person's change to the lab's set-up waits for, said at once rather than waited out: a running plan
+        or script, or the queue. None when neither runs."""
+        live = self.live or {}
+        if live.get("status") == "running":
+            return "the running %s %s" % ("script" if live.get("script") else "plan", live.get("plan"))
+        if self.queue.state in ("running", "pausing"):
+            return "the queue"
+        return None
 
     def _spec(self, key: str) -> Optional[ParamSpec]:
         try:
@@ -1486,6 +1623,18 @@ class LabRuntime:
                 return instr, param
         return instrument, parameter
 
+    def acquisition_s(self, instrument: str, parameter: str) -> float:
+        """How long a reading of this may take by its own card: an acquisition's wait (a sweep, *OPC?); 0 for any
+        other reading. get_value waits that long for it, rather than say the instrument doesn't answer."""
+        try:
+            instrument, parameter = self._named_pair(instrument, parameter)
+            spec = self._spec("%s.%s" % (instrument, parameter))
+        except Exception:
+            return 0.0
+        if spec is None or not (spec.acquires or spec.get_before):
+            return 0.0
+        return float(spec.wait_s or 0)
+
     def get(self, instrument: str, parameter: str) -> str:
         """get_value: read now, beside whatever else Kelvin does; while the work changing the lab uses the instrument
         (a run), its latest value instead, as a reading then could upset what the work does there."""
@@ -1496,7 +1645,8 @@ class LabRuntime:
             return self.gate.get(instrument, parameter).message   # refused, saying why; nothing is sent
         with self._reading(instrument) as why:
             if why is None:
-                r = self.gate.get(instrument, parameter)
+                with self._asked(instrument, parameter):   # a Stop in this chat ends it
+                    r = self.gate.get(instrument, parameter)
                 if r.ok:
                     self._keep(instrument, {parameter: r.value}, "read")
                 if r.ok and isinstance(r.value, list):
@@ -1736,7 +1886,7 @@ class LabRuntime:
             self.last_active = time.monotonic()
             with self._reading(instrument) as why:
                 if why is None:
-                    with self.gate.acting_as(by):
+                    with self.gate.acting_as(by), self._asked(instrument, arg.strip()):
                         r = self.gate.get(instrument, arg.strip())
             if why is not None:
                 if self._spec("%s.%s" % (instrument, arg.strip())) is None:
@@ -1744,12 +1894,13 @@ class LabRuntime:
                 return {"ok": False, "action": "busy", "message": self._not_read(instrument, arg.strip(), why)}
             shown = r.value if r.value is None or isinstance(r.value, (str, int, float, bool)) else str(r.value)[:200]
             return {"ok": r.ok, "action": r.action, "message": r.message, "value": shown}
-        if not self.lock.acquire(blocking=False):
+        if not self.lock.acquire(blocking=False, names=self._involved([instrument])):   # waits for its readings only
             return {"ok": False, "action": "busy",
                     "message": "Kelvin is busy (%s); wait for it, or stop it first" % self.held_by()}
+        started = time.time()
         try:
             self.busy, self._acted, self.last_active = "terminal: %s %s" % (instrument, arg), True, time.monotonic()
-            with self.gate.acting_as(by), self.lock.only(self._involved([instrument])):
+            with self.gate.acting_as(by):
                 if op == "raw":
                     r = self.gate.raw(instrument, arg.strip())
                 else:
@@ -1758,7 +1909,7 @@ class LabRuntime:
             return {"ok": r.ok, "action": r.action, "message": r.message, "value": shown}
         finally:
             self.busy = None
-            self._refresh()
+            self._look_after(started)
             self.lock.release()
 
     def where(self, request: ApprovalRequest) -> Optional[str]:
@@ -2697,6 +2848,7 @@ class LabRuntime:
         if not self.lock.acquire(blocking=False):
             self.caps_waiting = True
             return ["the instruments' own caps are written when Kelvin is idle (now %s)" % (self.busy_shown() or "busy")]
+        started = time.time()
         try:
             with self.gate.acting_as(by):
                 lines, done = protection.write_caps(self.gate, self.lab, prot)
@@ -2706,7 +2858,7 @@ class LabRuntime:
             self.caps_waiting = True
             return ["the instruments' own caps were not written: %s" % e]
         finally:
-            self._refresh()
+            self._look_after(started)
             self.lock.release()
 
     def _caps_if_waiting(self) -> None:
@@ -4146,6 +4298,7 @@ class LabRuntime:
                 return False, "stopped before it started"
             self.busy, self._acted = "queue %d/%d: %s" % (position, len(q.items), item.name), True
             self._queue_now.item = item.id   # its run's live view names it (_on_progress): its block's progress
+            started = time.time()
             try:   # filed as the item was queued, never under a chat whose call goes on meanwhile (attributed)
                 uses = self._involved(self._uses(item.text))   # the instruments it uses; the rest stay readable
                 whose = item.whose()
@@ -4188,7 +4341,7 @@ class LabRuntime:
                 self.busy = None
                 self._queue_now.item = None
                 self._caps_if_waiting()
-                self._refresh()
+                self._look_after(started)
 
     def _queue_step(self, item: Item, gen: Optional[int] = None) -> Tuple[bool, str]:
         from ..engine import _Abort
@@ -8762,7 +8915,7 @@ class LabRuntime:
             except (OSError, KeyError, ConfigError, ValueError, yaml.YAMLError) as e:
                 undo()
                 return "not changed: Kelvin could not save the lab config (%s). It is as it was." % e
-            self._refresh()
+            self._refresh(CLOSING_WAIT_S, only=[name])   # the one it changed; the rest as they were
             self.config_changed("Kelvin (%s)" % by, "changed %s: %s" % (name, "; ".join(said)), "changed")
             self._apply_protection(recheck=True)
             self.gate.log.write("instrument_changed", by=by, instrument=name, card=the_card.id, address=ic.address,
@@ -8896,7 +9049,7 @@ class LabRuntime:
                     ended.append(w.rule())
             if ended:
                 self._save_watches()
-            self._refresh()
+            self._refresh(CLOSING_WAIT_S, only=[name])   # gone from what the panel and lab_status show
             self.config_changed("Kelvin (%s)" % by, "removed %s" % name, "removed")
             self._apply_protection(recheck=True)
             guarded = [k for k in self.protection_missing if k.split(".")[0] == name]
@@ -9847,10 +10000,11 @@ class LabRuntime:
 
     def _outputs_to_safe(self, names: Iterable[str], by: str) -> List[str]:
         lines: List[str] = []
+        started = time.time()
         with self.gate.acting_as(by):
             for name in names:
                 lines += [r.message for r in self.gate.to_safe(name)]
-        self._refresh()
+        self._look_after(started)
         return lines
 
     def left_on(self) -> List[str]:
@@ -9938,10 +10092,11 @@ class LabRuntime:
         did, and what is still on."""
         self.stop(by, note="bring to safe", report=False)
         with self.lock:
+            started = time.time()
             with self.gate.acting_as(by):
                 lines = [r.message for r in self.gate.all_to_safe(by)] or ["everything was at safe already"]
             left = self.left_on()
-            self._refresh()
+            self._look_after(started)
         if self.incident is not None and self.incident.get("kind") == "stop":
             self.incident = None   # done: the card goes
         self.gate.log.write("bring_to_safe", by=by, steps=lines, left=left or None)
