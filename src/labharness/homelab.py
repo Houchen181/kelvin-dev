@@ -249,6 +249,11 @@ def open_home_lab(home: Any, switched_off: Optional[SwitchedOff] = None, collect
                 info["set_aside"] = aside
             lab = build_lab(config, registry=registry, switched_off=switched_off, partial=connect, later=not connect,
                             set_aside=aside)
+            try:   # each instrument's serial number from its first set-up, checked with who it says it is (6.2)
+                from .profiles import hold_serials
+                hold_serials(home, lab)
+            except Exception:   # never a reason the lab doesn't open
+                pass
             return lab, None, dict(info, kind="file")
         except Exception as e:
             from . import envs

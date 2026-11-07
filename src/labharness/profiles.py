@@ -84,11 +84,50 @@ def write_profile(home: Any, name: str, card: Any, address: str, connection: Opt
                     "connection": dict(card.connection, **(connection or {})), "updated": time.time()})
     if idn:
         profile.update({"identity": idn, "parsed": parse_idn(idn), "identified_by": how or "identity reply"})
+        serial = parse_idn(idn).get("serial", "")
+        if serial and not _kept_for(profile, card.id, address):   # the first set-up's, kept (6.2): see kept_serial
+            profile["serial_number"] = {"serial": serial, "card": card.id, "address": address, "since": time.time()}
     if framing:   # the serial settings the instrument answered with
         profile["answered_with"] = framing
     profile.setdefault("found", time.time())
     _write_json(path, profile)
     return profile
+
+
+def _kept_for(profile: Dict[str, Any], card: str, address: str) -> str:
+    kept = profile.get("serial_number")
+    if isinstance(kept, dict) and kept.get("serial") and kept.get("card") == card and kept.get("address") == address:
+        return str(kept["serial"])
+    return ""
+
+
+def kept_serial(home: Any, name: str, card: str, address: str) -> str:
+    """The serial number the instrument answered with when it was first set up as `name`, while its lab config entry
+    is of this card and address ('' when none is kept: an identity without one, or an entry changed since). Every
+    set-up after the first writes its identity again, never this: two identical instruments that swapped ports pass
+    the model check, and only this tells them apart (review of 0.3.45, 6.2)."""
+    try:
+        return _kept_for(_read_json(folder(home, name) / "instrument.json"), card, address)
+    except KeyError:
+        return ""
+
+
+def hold_serials(home: Any, lab: Any) -> None:
+    """Each real instrument of the lab holds its kept serial number (inst.kept_serial), which identity_problem
+    compares with what it answers: at the health check, the set-up's identity check and a connection made again."""
+    for name, inst in list(lab.instruments.items()):
+        if not inst.simulated:
+            inst.kept_serial = kept_serial(home, name, inst.card.id, inst.config.address) or None
+
+
+def accept_serial(home: Any, name: str, serial: str, card: str, address: str) -> None:
+    """A person said the instrument that answers now is the one to use as `name` (a replacement, a repaired one):
+    its serial number is kept from now on."""
+    path = folder(home, name) / "instrument.json"
+    profile = _read_json(path)
+    profile["serial_number"] = {"serial": serial, "card": card, "address": address, "since": time.time(),
+                                "accepted": True}
+    _write_json(path, profile)
 
 
 def read_values(inst: Any) -> Dict[str, Any]:

@@ -283,6 +283,7 @@ class AutoSetup:
                 user_lab = True
             if not user_lab:
                 return self._done(rt.lab_info.get("error") or "No instruments set up yet")
+            swaps = self._check_identities()   # another instrument of the same model at an instrument's address (6.2)
             names = sorted(n for n, i in rt.lab.instruments.items() if not i.simulated and i.enabled)
             # after a change of the lab (Save and connect, an instrument added), only what is new: the rest have their
             # folders, and each one read again cost a minute of timeouts on a lab with one silent instrument
@@ -304,6 +305,8 @@ class AutoSetup:
                     pass
             report = profiles.prepare(self.home, rt.lab, rt.lock, found_by_address, manuals=manuals,
                                       fetch=self.fetch, names=reading, busy=busy)
+            profiles.hold_serials(self.home, rt.lab)   # the serial numbers kept now (the first set-up's, just written)
+            kept_aside = self._ask_swapped(swaps)
             fetched = [n for n, r in report.items() if "pages" in str(r.get("manual", ""))]
             missing = [n for n, r in report.items() if str(r.get("manual", "")).startswith("not fetched")]
             log.info("Instrument setup: %s; %s", ", ".join(names), report)
@@ -326,6 +329,63 @@ class AutoSetup:
             log.exception("Instrument setup failed")
             self._set("failed", message="Setting up instruments failed: %s" % profiles._first_line(e))
             return self.status
+
+    def _check_identities(self) -> Dict[str, Any]:
+        """Each instrument with a kept serial number asked who it is (one query, the instrument held for it, never
+        waiting out a run): one that answers with another serial number of the same model is set aside (Lab.
+        check_identity). Swapped USB-serial cables or DHCP addresses once had Kelvin drive the other cryostat's
+        controller. {name: (why, what it answered)}."""
+        rt = self.runtime
+        profiles.hold_serials(self.home, rt.lab)
+        out: Dict[str, Any] = {}
+        for name, inst in list(rt.lab.instruments.items()):
+            if inst.simulated or not inst.enabled or not getattr(inst, "kept_serial", None):
+                continue
+            if not profiles._take(rt.lock, name, 10.0):   # other work has it: asked at the next set-up
+                continue
+            try:
+                rt.lab.check_identity([name])
+            finally:
+                rt.lock.release()
+        away = rt.lab.unavailable   # the swapped ones, set aside: now, or by a health check before (at start, a run)
+        return {n: v for n, v in dict(getattr(rt.lab, "swaps", {})).items() if n in away}
+
+    def _ask_swapped(self, swaps: Dict[str, Any]) -> List[str]:
+        """A person says, for each instrument set aside as another one of the same model, whether the one that answers
+        now is the one to use (a replacement, one back from repair): yes keeps its serial number and connects it again;
+        no, or no answer, leaves it set aside. Never auto mode's to answer. The ones left aside."""
+        from .gate import ApprovalRequest
+        from .profiles import parse_idn
+        rt = self.runtime
+        aside = []
+        for name, (why, idn) in swaps.items():
+            inst = rt.lab.instruments.get(name)
+            if inst is None:
+                continue
+            serial = parse_idn(idn).get("serial", "")
+            rt.notifier("setup", "%s set aside: another instrument of its model answers there" % name, why)
+            self._set("asking", message="Is the instrument at %s your %s? It answers with serial number %s"
+                      % (inst.config.address, name, serial))
+            request = ApprovalRequest("Use the instrument at %s as %s?" % (inst.config.address, name), [
+                why, "Yes, if it is the one to use as %s now (a replacement, or back from repair): Kelvin keeps serial "
+                     "number %s for it and connects it again. No: it stays set aside." % (name, serial)])
+            try:
+                yes = bool(rt.approver.approve(request))
+            except Exception:
+                yes = False
+            if not yes:
+                aside.append(name)
+                self._missing[name] = why
+                continue
+            profiles.accept_serial(self.home, name, serial, inst.card.id, inst.config.address)
+            profiles.hold_serials(self.home, rt.lab)
+            getattr(rt.lab, "swaps", {}).pop(name, None)
+            try:
+                rt.lab.reconnect(name)
+            except Exception as e:   # set aside again with why: said
+                self._missing[name] = profiles._first_line(e)
+                aside.append(name)
+        return aside
 
     def _connect_pending(self) -> None:
         """Connect the person's lab, one instrument after another, saying which (the portal shows it)."""

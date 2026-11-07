@@ -365,6 +365,71 @@ def test_after_a_change_of_the_lab_only_the_new_instruments_are_read(tmp_path, b
     assert read == [[]] and status["state"] == "done"                          # nothing new: nothing read again
 
 
+# ---------------------------------------------------------------------- 6.2: swapped identical instruments
+
+SMU = "lab: Bench\ninstruments:\n  smu:\n    card: keithley/2400\n    address: \"GPIB0::24::INSTR\"\n"
+FIRST, OTHER = "KEITHLEY INSTRUMENTS INC.,MODEL 2400,1111111,C30", "KEITHLEY INSTRUMENTS INC.,MODEL 2400,2222222,C30"
+
+
+def test_the_first_set_ups_serial_number_is_kept_whatever_answers_later(tmp_path):
+    from labharness import profiles
+    card = builtin_registry().get("keithley/2400")
+    profiles.write_profile(tmp_path, "smu", card, "GPIB0::24::INSTR", idn=FIRST)
+    profiles.write_profile(tmp_path, "smu", card, "GPIB0::24::INSTR", idn=OTHER)   # a later start: not taken
+    assert profiles.kept_serial(tmp_path, "smu", card.id, "GPIB0::24::INSTR") == "1111111"
+    assert profiles.kept_serial(tmp_path, "smu", card.id, "GPIB0::7::INSTR") == ""      # another entry: none
+    profiles.write_profile(tmp_path, "smu", card, "GPIB0::7::INSTR", idn=OTHER)        # moved by a person: anew
+    assert profiles.kept_serial(tmp_path, "smu", card.id, "GPIB0::7::INSTR") == "2222222"
+
+
+def swapped_home(tmp_path, answering):
+    from labharness import profiles
+    from labharness.homelab import open_home_lab
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "lab.yaml").write_text(SMU, encoding="utf-8")
+    profiles.write_profile(tmp_path, "smu", builtin_registry().get("keithley/2400"), "GPIB0::24::INSTR", idn=FIRST)
+    b = Bus({"GPIB0::24::INSTR": Device("keithley/2400", idn=answering, name="k2400")})
+    set_resource_manager(b)
+    lab, _, info = open_home_lab(tmp_path)
+    return lab, info
+
+
+def test_another_instrument_of_the_same_model_is_set_aside_at_the_health_check(tmp_path):
+    from labharness.lab import swapped
+    try:
+        lab, _ = swapped_home(tmp_path, OTHER)
+        assert lab.instruments["smu"].kept_serial == "1111111" and lab.instruments["smu"].enabled
+        result = lab.health_check(["smu"])[0]
+        assert not result.ok and swapped(result.problems[0]) and "serial number 2222222" in result.problems[0]
+        assert not lab.instruments["smu"].enabled and swapped(lab.unavailable["smu"])   # nothing more reaches it
+        same, _ = swapped_home(tmp_path / "ok", FIRST)
+        assert same.health_check(["smu"])[0].ok                                        # the one it was set up with
+    finally:
+        set_resource_manager(None)
+
+
+@pytest.mark.parametrize("yes", [False, True])
+def test_the_set_up_asks_a_person_about_a_swapped_instrument(tmp_path, yes):
+    from labharness import profiles
+    from labharness.lab import swapped
+    try:
+        lab, info = swapped_home(tmp_path, OTHER)
+        rt = LabRuntime(lab, ScriptedApprover([yes]), tmp_path / "data")
+        rt.home, rt.lab_info = tmp_path, dict(info)
+        status = AutoSetup(rt, {}, tmp_path, fetch=lambda u: b"").run("asked")
+        asked = rt.approver.requests
+        assert len(asked) == 1 and "Use the instrument at GPIB0::24::INSTR as smu?" in str(asked[0])
+        if yes:   # a replacement: kept as smu from now on, and used
+            assert rt.lab.instruments["smu"].enabled and profiles.kept_serial(
+                tmp_path, "smu", "keithley/2400", "GPIB0::24::INSTR") == "2222222"
+        else:     # left aside, and said
+            assert swapped(rt.lab.unavailable["smu"]) and "not connected: smu (smu answers with serial number 2222222" \
+                in status["message"]
+            assert profiles.kept_serial(tmp_path, "smu", "keithley/2400", "GPIB0::24::INSTR") == "1111111"
+    finally:
+        set_resource_manager(None)
+
+
 def test_the_draft_is_written_only_as_a_new_file(tmp_path):
     from labharness.autosetup import _write_new
     path = tmp_path / "lab.yaml"
