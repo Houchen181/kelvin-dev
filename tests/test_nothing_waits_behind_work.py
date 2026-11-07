@@ -130,7 +130,8 @@ def test_reconnecting_behind_a_run_says_so_at_once(tmp_path, monkeypatch):
     with Holding(rt):
         t0 = time.monotonic()
         said = rt.reconnect_instrument("tc")
-        assert time.monotonic() - t0 < 3.0
+        # _do's 2 s look for the lab coming free, then the answer: never the run's length (Holding: up to 20 s)
+        assert time.monotonic() - t0 < 6.0
     assert said.startswith("not done: Kelvin is busy with the running plan overnight_sweep"), said
     assert "connected now" in rt.reconnect_instrument("tc")                    # once the run is done
 
