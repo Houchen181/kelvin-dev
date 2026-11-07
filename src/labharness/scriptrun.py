@@ -518,7 +518,9 @@ def python_for(script: Path, source: str, roots: Sequence[Path], configured: str
 
 def canonical(address: str) -> str:
     """An address as a VISA resource, so the script's spelling and the lab's compare (GPIB::24 = GPIB0::24::INSTR,
-    COM3 = ASRL3::INSTR, USB ids in hex or decimal)."""
+    COM3 = ASRL3::INSTR, USB ids in hex or decimal, a USB instrument's default interface 0 written or not, TCPIP::
+    for TCPIP0:: whatever follows). Two spellings of one lab instrument once read as "not in this lab", and a person's
+    yes then let the script open its own session to it, past the safety gate."""
     a = (address or "").strip()
     if a.lower().startswith("sim://"):
         return a.lower()
@@ -527,11 +529,59 @@ def canonical(address: str) -> str:
     if m:
         try:
             return "USB%s::0X%04X::0X%04X::%s%s::%s" % (m.group(1) or "0", int(m.group(2), 0), int(m.group(3), 0),
-                                                       m.group(4), "::" + m.group(5) if m.group(5) else "",
-                                                       m.group(6) or "INSTR")
+                                                       m.group(4), "::" + m.group(5) if m.group(5) not in (None, "0")
+                                                       else "", m.group(6) or "INSTR")
         except ValueError:
             return a
+    m = re.match(r"^TCPIP::(.+)$", a)   # VISA's board 0, left out
+    if m:
+        return "TCPIP0::" + m.group(1)
     return a
+
+
+def _way(address: str) -> Optional[Tuple[str, str, str]]:
+    """Where an address goes: (kind, the device, the way into it). A LAN instrument by its host, the way the instrument
+    itself (VXI-11's instN, HiSLIP: "itself ..."), a port, or a device behind a gateway (gpib0,5); a GPIB instrument
+    by its board and primary address, the way its secondary address; a USB instrument by its ids and serial number,
+    the way its interface; a serial port. None where Kelvin can't tell (sim://, a Prologix adapter's address)."""
+    a = canonical(address)
+    m = re.match(r"^TCPIP\d+::([^:]+)(?:::(.+?))?::(INSTR|SOCKET)$", a)
+    if m:
+        host, middle, end = m.groups()
+        if end == "SOCKET":
+            return ("LAN", host, "port " + (middle or ""))
+        if middle is None or re.match(r"^(INST|HISLIP)\d+$", middle):
+            return ("LAN", host, "itself " + (middle or "INST0"))
+        return ("LAN", host, "device " + middle)
+    m = re.match(r"^GPIB(\d+)::(\d+)(?:::(\d+))?", a)
+    if m:
+        return ("GPIB", "%s::%s" % m.group(1, 2), m.group(3) or "")
+    m = re.match(r"^USB\d+::(0X[0-9A-F]+)::(0X[0-9A-F]+)::([^:]+)(?:::(\d+))?", a)
+    if m:
+        return ("USB", "::".join(m.group(1, 2, 3)), m.group(4) or "")
+    m = re.match(r"^ASRL([^:]+)::", a)
+    if m:
+        return ("serial", m.group(1), "")
+    return None
+
+
+def same_device(lab: Any, address: str) -> Optional[str]:
+    """The lab instrument an address reaches another way than the lab's own address, if any: a LAN instrument's raw
+    port beside its VXI-11 or HiSLIP (or the other way round), a GPIB secondary address, another USB interface.
+    Commands sent there skip the safety gate as surely as at the lab's own address: a script's raw socket to a LAN
+    instrument's port 5025 once went through without asking anyone. Two ports of one terminal server, or two devices
+    behind one gateway, are two instruments, not one."""
+    want = _way(address)
+    if want is None:
+        return None
+    for name, ic in lab.config.instruments.items():
+        have = _way(ic.address)
+        if have is None or have[:2] != want[:2] or have == want:   # another device, or the lab's own way in
+            continue
+        if want[0] == "LAN" and not (have[2].startswith("itself") or want[2].startswith("itself")):
+            continue   # two ports of a terminal server, or two devices behind a gateway: two instruments
+        return name
+    return None
 
 
 def lab_name(lab: Any, address: str) -> Optional[str]:
@@ -565,6 +615,10 @@ def outside(lab: Any, address: str) -> str:
     if under:
         return ("%s, the Prologix adapter this lab's %s %s behind: commands sent through it skip the safety gate"
                 % (address, ", ".join(under), "is" if len(under) == 1 else "are"))
+    other = same_device(lab, address)
+    if other:
+        return ("%s, which reaches this lab's %s another way than its address in the lab (%s): commands sent there skip "
+                "the safety gate" % (address, other, lab.config.instruments[other].address))
     return "%s, which is not in this lab: Kelvin can't check what it sends there" % address
 
 
@@ -1044,11 +1098,78 @@ class _Job:
             self.handle = None
 
 
+RECV_BYTES = 1 << 20   # what the script's stand-in sends is read a megabyte at a time
+LISTEN_BACKLOG = 128   # connections of the stand-in waiting to be taken (a pool of processes connects at once)
+MAX_OUTPUT = 20 * 2 ** 20   # of what a script prints, kept in output.txt; the rest is read, left out, and said
+
+
+class _Output:
+    """What a script prints, into output.txt: MAX_OUTPUT at most (a script printing in a loop all night had no end to
+    it), then how much more there was. Read from the script's pipe on a thread of its own, all of it, so the script
+    never waits on a full pipe; a process it started that keeps the pipe open is not waited for at the end."""
+
+    def __init__(self, path: Path, cap: Optional[int] = None):
+        self.file = open(path, "wb")
+        self.cap = MAX_OUTPUT if cap is None else cap
+        self.kept = self.left = 0
+        self.lock = threading.Lock()
+        self.thread: Optional[threading.Thread] = None
+
+    def read(self, stream: Any) -> None:
+        self.thread = threading.Thread(target=self._copy, args=(stream,), daemon=True, name="kelvin-script-output")
+        self.thread.start()
+
+    def _copy(self, stream: Any) -> None:
+        try:
+            for chunk in iter(lambda: stream.read1(65536), b""):
+                with self.lock:
+                    room = self.cap - self.kept if not self.file.closed else 0
+                    part = chunk[:max(0, room)]
+                    if part:
+                        self.file.write(part)
+                        self.file.flush()   # the tail is read as the run ends; a person may look meanwhile
+                    self.kept += len(part)
+                    self.left += len(chunk) - len(part)
+        except (OSError, ValueError):
+            pass
+
+    def close(self, wait: float = 5.0) -> None:
+        if self.thread is not None:
+            self.thread.join(wait)
+        with self.lock:
+            if self.left:
+                self.file.write(("\n[Kelvin kept the first %s of what the script printed, and left out %s more]\n"
+                                 % (_size(self.cap), _size(self.left))).encode("utf-8"))
+            self.file.close()
+
+
+def _size(n: int) -> str:
+    return "%.1f MB" % (n / 2 ** 20) if n >= 2 ** 20 else "%d kB" % max(1, n // 1024)
+
+
 class _Conn:
+    """A connection of the script's stand-in, read a line at a time. A line can be a camera's whole frame (record() of
+    an image): adding each piece to bytes, and looking for its end from the start each time, took 19 s for one
+    72 MB point. The bytes grow in place, and the look goes on from where it stopped."""
+
     def __init__(self, sock: socket.socket):
         self.sock = sock
-        self.buf = b""
+        self.buf = bytearray()
+        self.looked = 0   # no line ends in buf before this
         self.ok = False
+
+    def lines(self, data: bytes) -> Iterator[bytes]:
+        """The lines these bytes complete, each as it ends; what follows waits for the rest of its line."""
+        self.buf += data
+        while True:
+            end = self.buf.find(b"\n", self.looked)
+            if end < 0:
+                self.looked = len(self.buf)
+                return
+            line = bytes(self.buf[:end])
+            del self.buf[:end + 1]
+            self.looked = 0
+            yield line
 
 
 class ScriptRun:
@@ -1699,7 +1820,8 @@ class ScriptRun:
             return {"instrument": name}
         if self.rehearsal:
             raise _Refuse("refused: a rehearsal reaches only the simulated lab, not %s" % address)
-        if canonical(address) in self.allowed or kind == "socket" and not behind(self.lab, address):
+        if canonical(address) in self.allowed or kind == "socket" and not behind(self.lab, address) \
+                and not same_device(self.lab, address):
             return {}   # a person allowed it, or a socket that reaches no lab instrument
         request = ApprovalRequest("Let %s open %s?" % (self.prep.name, address), [
             "%s opens %s, so it runs as the script wrote it" % (self.prep.name, outside(self.lab, address))])
@@ -1893,12 +2015,12 @@ class ScriptRun:
         killed = False
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("127.0.0.1", 0))
-        server.listen(8)
+        server.listen(LISTEN_BACKLOG)   # 8 once refused some of a pool's processes as they connected at once
         server.setblocking(False)
         sel = selectors.DefaultSelector()
         sel.register(server, selectors.EVENT_READ)
         conns: Dict[socket.socket, _Conn] = {}
-        out = open(output_path, "wb")
+        out = _Output(output_path)
         job: Optional[_Job] = None
         approved = gate.preapproved(self.grants)   # what the person approved holds for the whole run
         approved.__enter__()
@@ -1911,9 +2033,11 @@ class ScriptRun:
                     proc = subprocess.Popen(self._command_line(run_dir, source_file),
                                             cwd=str(run_dir if self.rehearsal else prep.path.parent),
                                             env=self._environ(server.getsockname()[1], run_dir),
-                                            stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT,
                                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                                             start_new_session=os.name != "nt")
+                    out.read(proc.stdout)
                 except OSError as e:
                     self.failed = "the script's Python did not start (%s)" % (e.strerror or e)
             if proc is not None:
@@ -1923,25 +2047,27 @@ class ScriptRun:
             while proc is not None:
                 for key, _ in sel.select(timeout=0.2):
                     if key.fileobj is server:
-                        try:
-                            sock, _ = server.accept()
-                        except OSError:
-                            continue
-                        sock.setblocking(True)
-                        sock.settimeout(60)
-                        conns[sock] = _Conn(sock)
-                        sel.register(sock, selectors.EVENT_READ)
+                        while True:   # every connection waiting now: a pool's processes connect at once
+                            try:
+                                sock, _ = server.accept()
+                            except OSError:
+                                break
+                            sock.setblocking(True)
+                            sock.settimeout(60)
+                            conns[sock] = _Conn(sock)
+                            sel.register(sock, selectors.EVENT_READ)
                         continue
                     conn = conns[key.fileobj]
                     try:
-                        data = conn.sock.recv(65536)
+                        data = conn.sock.recv(RECV_BYTES)
                     except OSError:
                         data = b""
-                    conn.buf += data
                     keep = bool(data)
-                    while keep and b"\n" in conn.buf:
-                        line, conn.buf = conn.buf.split(b"\n", 1)
-                        keep = self._serve(conn, line, conns)
+                    if keep:
+                        for line in conn.lines(data):
+                            keep = self._serve(conn, line, conns)
+                            if not keep:
+                                break
                     if not keep:   # it hung up, or it was not the script's
                         sel.unregister(conn.sock)
                         conns.pop(conn.sock, None)
@@ -1968,7 +2094,8 @@ class ScriptRun:
                 c.sock.close()
             sel.close()
             server.close()
-            out.close()
+            out.close(0.5 if proc is not None and proc.poll() is None else 5.0)   # one that outlived its end: its pipe
+            # stays open, and is not waited for
             self._flush()
             self.ended = True
             with self._log_lock:

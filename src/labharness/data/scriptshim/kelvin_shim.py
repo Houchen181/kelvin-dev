@@ -701,6 +701,7 @@ def install():
         except Exception as e:   # never let a script reach the instruments unwatched
             raise RuntimeError("Kelvin could not put its stand-in into %s (%s: %s)" % (name, type(e).__name__, e))
     _patch_socket()
+    _no_input()
     sys.meta_path.insert(0, _Libraries())
     time.sleep = _LINK.sleep
     if os.environ.get("KELVIN_REHEARSAL"):
@@ -710,6 +711,25 @@ def install():
                "one of the lab's experiments reaches the lab only through kelvin.lab")
     _install_api()
     return _LINK
+
+
+class NoInput(EOFError):
+    """input() in a script Kelvin runs: nobody is there to type an answer."""
+
+
+def _no_input():
+    """input() says why it gets no answer, rather than end the script with a bare EOFError ("EOF when reading a
+    line"): nobody sits at a keyboard for a script Kelvin runs. A script that catches EOFError still does."""
+    import builtins
+
+    def no_input(prompt=""):
+        if prompt:
+            sys.stdout.write(str(prompt))
+            sys.stdout.flush()
+        raise NoInput("input(): nobody can type an answer to a script Kelvin runs. Give the value as one of the "
+                      "script's settings instead (a constant near its top, such as VMAX = 5, which a run's params "
+                      "change), as a command-line argument (args), or in a file the script reads")
+    builtins.input = no_input
 
 
 def _rehearsing():
