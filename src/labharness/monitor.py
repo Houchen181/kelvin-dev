@@ -21,6 +21,7 @@ Durations are in lab time (the lab clock), so tests on a simulated clock behave 
 from __future__ import annotations
 
 import itertools
+import logging
 import math
 import re
 import threading
@@ -29,6 +30,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .instrument import Busy, Garbled, InstrumentLost, SensorError, patience
+
+log = logging.getLogger("kelvin")
 
 FAILS_BEFORE_ALARM = 3       # failed exchanges in a row before "doesn't answer" (one that can't reach it at all: one)
 WAIT_S = 1.0                 # the longest the monitor waits for an instrument whose connection other work has (an
@@ -323,6 +326,7 @@ class Monitor:
         self._alive_asked: Dict[str, float] = {}  # when each was last found answering (wall time) by _check_alive
         self._bus_probe_at: Dict[str, float] = {}
         self._garbles_seen: Dict[str, int] = {}   # garbled replies already counted, by instrument
+        self._reopening: set = set()              # instruments whose connection is being made anew now (reconnector)
         self._garbled_lab: Dict[str, float] = {}  # lab time the latest garbled reply was seen
         self._last_interlock_check = -1e18
         self._broken: Dict[int, Alarm] = {}   # interlocks found broken (by their place in the lab config)
@@ -497,6 +501,7 @@ class Monitor:
                                            ("checking the interlocks", self._check_interlocks, (now,)),
                                            ("reading the error queues", self._check_errors, (now,)),
                                            ("checking that the instruments answer", self._check_alive, (now,)),
+                                           ("connecting again what lost its connection", self._check_reconnect, ()),
                                            # first: a hung bus is one alarm, and its instruments' own don't go up
                                            ("checking the GPIB buses", self._check_buses, ()),
                                            ("checking the instruments' health", self._check_health, (now,)),
@@ -1096,8 +1101,47 @@ class Monitor:
     def _raise_lost(self, name: str, text: str) -> Alarm:
         a = self._new("silent", name, text)
         self._silent[name] = a
-        self._tell(a, "Runs that use it stop, and plans refuse to start, until it answers again.", instrument=name)
+        inst = self.lab.instruments.get(name)
+        backend = getattr(inst, "backend", None)
+        if getattr(backend, "broken", ""):   # its session died: made anew by itself once it is back, or by a person
+            by_itself = getattr(backend, "reopens_by_itself", lambda: False)()
+            detail = ("Kelvin connects to it again by itself once it is back, checking it is the same instrument "
+                      "before sending it anything. " if by_itself else
+                      "Once it is back, switch it off and on in the Lab panel, or ask Kelvin to reconnect it: its "
+                      "card has no identity Kelvin could check it by. ")
+            self._tell(a, detail + "Runs that use it stop, and plans refuse to start, until then.", instrument=name)
+        else:
+            self._tell(a, "Runs that use it stop, and plans refuse to start, until it answers again.", instrument=name)
         return a
+
+    def _check_reconnect(self) -> None:
+        """Instruments whose connection ended by itself (a VISA session a power cycle or a replug killed:
+        backend.broken), made anew, each on a thread of its own: never in this look, which a connection that takes
+        seconds to open would hold up. Each on its health's schedule (Health.resting: 5 s after the failure that found
+        it, twice as long after each try, a minute at most), and only one that Kelvin can check is the same instrument
+        before it sends it anything (reopens_by_itself). Not one that work has (a run that used it stopped on it):
+        the next look. A session that died once said VI_ERROR_CONN_LOST to every exchange until a person switched
+        the instrument off and on (review of 0.3.45, 4.1)."""
+        for name, inst in list(self.lab.instruments.items()):
+            backend = inst.backend
+            if not getattr(backend, "broken", "") or inst.simulated or not inst.enabled or name in self._reopening:
+                continue
+            if not getattr(backend, "reopens_by_itself", lambda: False)() or inst.health.resting() is not None:
+                continue
+            if self.in_use is not None and self.in_use(name):
+                continue
+            self._reopening.add(name)
+            threading.Thread(target=self._reconnect, args=(name, inst), name="kelvin-reconnect-" + name,
+                             daemon=True).start()
+
+    def _reconnect(self, name: str, inst: Any) -> None:
+        try:
+            idn = inst.reopen()
+            log.info("%s: connected again (it answered %r)", name, idn)
+        except Exception as e:   # not back yet, or another instrument answers there: its health says it
+            log.info("%s: not connected again yet: %s", name, str(e).splitlines()[0][:200] if str(e) else e)
+        finally:
+            self._reopening.discard(name)
 
     def _check_health(self, now: Optional[float] = None) -> None:
         """The instruments' health, from every exchange with them whoever made it (a watch, a run, a set, this
@@ -1115,10 +1159,16 @@ class Monitor:
                     self._raise_lost(name, h.lost_text)
                 elif on is not None and h.fails == 0:
                     del self._silent[name]
-                    self._clear(on.id, "%s answers again (it didn't for %s)%s" % (
-                        name, _since(on.raised), "; a power cut puts an instrument back to its power-on settings "
-                        "(outputs off), so check them before going on" if any(s.enables for s in inst.card.drives)
-                        else ""))
+                    if h.reopened_at is not None and h.reopened_at >= on.raised:   # its session was made anew
+                        self._clear(on.id, "%s is connected again after %s: it answered as itself%s; a power cut puts "
+                                    "an instrument back to its power-on settings, so check its outputs before going "
+                                    "on" % (name, _since(on.raised), " (%s)" % h.reopened_as[:60]
+                                            if h.reopened_as else ""))
+                    else:
+                        self._clear(on.id, "%s answers again (it didn't for %s)%s" % (
+                            name, _since(on.raised), "; a power cut puts an instrument back to its power-on settings "
+                            "(outputs off), so check them before going on" if any(s.enables for s in inst.card.drives)
+                            else ""))
 
     def _check_buses(self) -> None:
         """GPIB buses that stopped answering (Lab.hung_buses): one alarm for the bus, not one per instrument, and

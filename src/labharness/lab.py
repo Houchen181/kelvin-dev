@@ -75,6 +75,16 @@ def _ended(backend: Any) -> str:
     return str(getattr(backend, "gone", "") or getattr(helper, "gone", "") or "")
 
 
+def _stale(inst: Instrument) -> bool:
+    """Whether a connection that counts as made needs making anew before it is used: one whose session died (a power
+    cycle, a replug: broken), one out of step after a reply it didn't send in time (owed), or one that stopped
+    answering. Only a connection that can be made anew in place (a VISA session: reopen)."""
+    backend = inst.backend
+    if getattr(backend, "reopen", None) is None:
+        return False
+    return bool(getattr(backend, "broken", "") or getattr(backend, "owed", False) or inst.health.fails)
+
+
 def _close_quietly(inst: Instrument) -> None:
     try:
         inst.close()
@@ -356,6 +366,11 @@ class Lab:
                     news += ", connected again with its new connection settings"
         ended = _ended(inst.backend)
         if inst.unavailable is None and not ended:
+            if inst.enabled and _stale(inst):   # its session died, is out of step, or it stopped answering: made
+                # anew, checked to be itself before anything is sent (it said "connected" of a dead session: review of
+                # 0.3.45, 4.1 and 4.3)
+                inst.reopen(person=True)
+                return news + ("; " if news else "") + "its connection made anew (it answered as itself)"
             return news
         if ended:   # a connection that ended by itself (a camera's PICam helper Kelvin had to end): made anew
             backend, inst.backend = inst.backend, Unavailable(name, ended)
