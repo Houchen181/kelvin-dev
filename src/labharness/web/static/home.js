@@ -23,6 +23,7 @@
   // the Lab tile's line: the first watched reading over the last ten minutes, as this page's state polls saw it, drawn in
   // a box of SW x SH stretched to the tile's width (its stroke keeps its own), from three values on
   const SPAN_S = 600, SW = 300, SH = 48;
+  const BLOCKS_AGAIN_MS = 5000;   // a failed load of the blocks is tried again this often while Home shows
   // a reading's unit with its SI prefix (cards.si: "100 ms", "4.12 µs"): 999 mK and 1.001 K are on one line
   const SI_UNITS = new Set(["V", "A", "Hz", "W", "s", "Ω", "T", "K", "F", "H", "S", "m"]);
   const SI_PREFIX = { G: 1e9, M: 1e6, k: 1e3, m: 1e-3, "µ": 1e-6, n: 1e-9, p: 1e-12, f: 1e-15 };
@@ -169,12 +170,13 @@
     p.labt.body.append(p.watchList);
     // the blocks: the rest of the height, the one part of Home that scrolls (a region)
     p.blocks = h("div", { class: "home-blocks", "data-region": "home-blocks", hidden: true });
+    p.blocksNote = h("p", { class: "home-note", role: "status", hidden: true });   // a load of them failed: said
     // a width of their own (the window, a pane, Home shown again): each block's "how long ago" measured again
     if (window.ResizeObserver) new ResizeObserver(() => guard(fitAgo)).observe(p.blocks);
     $("homeview").replaceChildren(h("div", { class: "home-col" },
       h("header", { class: "home-hello" }, p.greet, p.state, p.lab),
       h("div", { class: "home-tiles" }, p.seq.el, p.runs.el, p.labt.el),
-      p.blocks));
+      p.blocksNote, p.blocks));
   }
   function chip(t, kind, words) {
     t.chip.hidden = !words;
@@ -580,10 +582,25 @@
   // ------------------------------------------------------------------ asking the server, when something moved
   async function loadBlocks(ring) {
     const asked = ++H.blocksAsked;
+    clearTimeout(H.blocksAgain);
     let v;
-    try { v = await K.api("/api/home"); } catch (e) { return; }   // the next stamp, or showing Home, asks again
+    try { v = await K.api("/api/home", { timeout: 15000 }); }
+    catch (e) {   // said over them, and tried again while Home shows: they stayed as they were, with no word, until the
+      // next change (whose stamp this load had already taken)
+      if (asked !== H.blocksAsked) return;
+      guard(() => blocksNote("Couldn't load these blocks (" + e.message + "), so they may be out of date. Trying again…"));
+      H.blocksAgain = setTimeout(() => { if (shown()) loadBlocks(ring); }, BLOCKS_AGAIN_MS);
+      return;
+    }
     if (asked !== H.blocksAsked) return;
+    guard(() => blocksNote(""));
     guard(() => renderBlocks(Array.isArray(v.blocks) ? v.blocks : [], ring));
+  }
+  function blocksNote(words) {   // over the blocks, while a load of them fails: why they may be old
+    const note = H.parts && H.parts.blocksNote;
+    if (!note) return;
+    put(note, words);
+    note.hidden = !words;
   }
   async function loadRuns() {
     const asked = ++H.runsAsked;

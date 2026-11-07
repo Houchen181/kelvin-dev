@@ -8,8 +8,10 @@
     // Kelvin reads it), title}; answering: every chat the portal says answers now (from any window, or Kelvin's own);
     // unread: answers that came while another chat was open; asking: chats with an approval waiting
     // stopping: chats whose Stop was pressed, until they end; steered: what this window wrote to a chat answering
-    // elsewhere (another window, a phone, before a reload), until Kelvin reads it: [{text, el, seen}] by chat
-    live: new Map(), answering: new Set(), unread: new Set(), asking: new Set(), stopping: new Map(), steered: new Map() };
+    // elsewhere (another window, a phone, before a reload), until Kelvin reads it: [{text, el, seen}] by chat;
+    // cardChat: the chat of each open card that put up its amber dot, by request id (cardClosed)
+    live: new Map(), answering: new Set(), unread: new Set(), asking: new Set(), stopping: new Map(), steered: new Map(),
+    cardChat: new Map() };
   Object.defineProperty(S, "streaming", { get: () => !!S.chatId && S.live.has(S.chatId) });   // this chat is answering
   const liveHere = () => S.live.get(S.chatId);
   // the open chat answers now: in this window, or anywhere (another window, a phone, before a reload, Kelvin
@@ -499,6 +501,7 @@
       ((r.failed || []).length ? " Kelvin couldn't delete: " + r.failed.join(", ") + "." : "");
   }
 
+  const SIGNIN = { watch: 0 };   // the sign-in screen's look at what Kelvin is busy with, while it shows
   function showSignIn(session) {
     $("signin").hidden = false;
     for (const slot of $("signin").querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
@@ -521,12 +524,15 @@
       if (s.setup) $("signin-setup-text").textContent = s.setup.message + "… You can sign in meanwhile.";
       return !!s.setup;
     };
-    if (setupNote(session)) {
-      const watch = setInterval(async () => {
-        if ($("signin").hidden) { clearInterval(watch); return; }
-        try { if (!setupNote(await api("/api/session"))) clearInterval(watch); } catch (e) { /* keep what is shown */ }
-      }, 3000);
-    }
+    setupNote(session);
+    // what Kelvin is busy with, and the set-up, read again while the screen shows: a run that started or ended, or one
+    // a Stop ended, comes and goes on it (it was read once, and the sign-in screen said "running" all night). One
+    // watcher: showing the screen again (after removing someone) takes the place of the one before
+    clearInterval(SIGNIN.watch);
+    SIGNIN.watch = setInterval(async () => {
+      if ($("signin").hidden) { clearInterval(SIGNIN.watch); return; }
+      try { const s = await api("/api/session", { timeout: 8000 }); busy(s); setupNote(s); } catch (e) { /* keep what is shown */ }
+    }, 3000);
     let note = "";
     try { note = sessionStorage.getItem("kelvin-signin-msg") || ""; sessionStorage.removeItem("kelvin-signin-msg"); } catch (e) { /* no storage */ }
     if (note) say(note);
@@ -1230,21 +1236,28 @@
         if (!tab) return;
         let v = null;
         try { v = (await api("/api/live?since=" + tab.rows.length, { timeout: POLL_MS })).live; } catch (e) { await sleep(2000); continue; }
-        if (!v || v.run_id !== tab.runId) {  // we missed its end: read the record instead
-          setTabStatus(tab, "finishing");
-          await loadFinal(tab);
-          if (v && v.status === "running" && !RUNS.tabs.has(v.run_id)) noticeRun(v.run_id, v.plan);
+        try {
+          if (!v || v.run_id !== tab.runId) {  // we missed its end: read the record instead
+            setTabStatus(tab, "finishing");
+            await loadFinal(tab);
+            if (v && v.status === "running" && !RUNS.tabs.has(v.run_id)) noticeRun(v.run_id, v.plan);
+            continue;
+          }
+          if (v.since === tab.rows.length) tab.rows.push(...v.rows);
+          tab.axes = v.axes; tab.measures = v.measures;
+          if (v.trace) tab.trace = v.trace;
+          tab.done = v.done; tab.total = v.total;
+          if (v.eta_s !== tab.etaRaw || v.phase !== tab.phase) { tab.etaRaw = v.eta_s; tab.etaAt = Date.now(); }  // count down between updates
+          tab.phase = v.phase;
+          tab.inputs = v.inputs || null;
+          if (v.status !== "running") { setTabStatus(tab, "finishing"); await loadFinal(tab); continue; }
+          renderRunView(tab);
+        } catch (e) {   // a round that failed to draw: said, and the next round draws again (one exception ended the live
+          // view's polling, and the run showed no new point until the page was reloaded)
+          console.error("Kelvin's page: drawing the running run failed", e);
+          await sleep(1000);
           continue;
         }
-        if (v.since === tab.rows.length) tab.rows.push(...v.rows);
-        tab.axes = v.axes; tab.measures = v.measures;
-        if (v.trace) tab.trace = v.trace;
-        tab.done = v.done; tab.total = v.total;
-        if (v.eta_s !== tab.etaRaw || v.phase !== tab.phase) { tab.etaRaw = v.eta_s; tab.etaAt = Date.now(); }  // count down between updates
-        tab.phase = v.phase;
-        tab.inputs = v.inputs || null;
-        if (v.status !== "running") { setTabStatus(tab, "finishing"); await loadFinal(tab); continue; }
-        renderRunView(tab);
         await sleep(500);
       }
     } finally { RUNS.polling = false; }
@@ -2663,14 +2676,17 @@
     const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title, list,
       ...approvalFigures(ev.figures), lessonsOf(ev), actions);
     localizeCard(ev, { title: text, list, where });
-    let left = ev.seconds_left;
+    // when it declines itself, by the clock: its seconds left as the server said them, from when the card was drawn.
+    // Counting ticks drifted after the computer slept (a timer doesn't tick in sleep): a card said minutes were left of a
+    // request already declined. The server's own clock is never compared with this one (a phone's may differ)
+    const until = Date.now() + Math.max(0, Number(ev.seconds_left) || 0) * 1000;
     const words = cardWords();
     // its time left in seconds under 90, in whole minutes under 90 min, else in hours (inTime), in either language: a
     // request escalated to a phone may wait up to 12 hours
     const tick = () => {
+      const left = Math.round((until - Date.now()) / 1000);
       const t = left > 0 ? (words ? words.declines(left) : "Declines itself in " + inTime(left)) : "";
       if (count.textContent !== t) count.textContent = t;
-      left -= 1;
     };
     tick();
     const timer = setInterval(tick, 1000);
@@ -2684,6 +2700,7 @@
         el.classList.add("done");
         card.decided = true;
         S.approvals.delete(ev.id);
+        cardClosed(ev.id);
         refreshTitle();
       },
     };
@@ -2707,6 +2724,13 @@
     S.approvals.set(ev.id, card);
     refreshTitle();
     return card;
+  }
+  // a card closed (answered here or anywhere, declined, timed out): its chat's amber dot goes with that chat's last open
+  // card. The poll closes a card answered on a phone or in another window, and the dot stayed until the answer ended
+  function cardClosed(id) {
+    const chatId = S.cardChat.get(id);
+    if (!S.cardChat.delete(id) || [...S.cardChat.values()].includes(chatId)) return;
+    if (S.asking.delete(chatId)) renderChats();
   }
   function refreshTitle() {
     const n = S.approvals.size;
@@ -4284,6 +4308,7 @@
     S.live.delete(chatId);
     S.answering.delete(chatId);   // ended: what follows is a new message, before the next poll says so too
     S.asking.delete(chatId);
+    for (const [id, c] of S.cardChat) if (c === chatId) S.cardChat.delete(id);   // a card it left keeps no dot of a later one
     S.stopping.delete(chatId);
     const here = S.chatId === chatId;
     if (!here) {
@@ -4833,8 +4858,9 @@
       case "approval":
         reply.approval(ev);
         if (here && !ev.auto) exitFull();   // its card is in this chat, and declines itself unless someone answers
-        if (!here) {   // asked in a chat you left: say where, and take you there
+        if (!here && !ev.auto) {   // asked in a chat you left: say where, and take you there (auto mode's yes asks no one)
           S.asking.add(chatId);
+          S.cardChat.set(ev.id, chatId);   // its dot goes with that chat's last open card (cardClosed)
           renderChats();
           toast("Kelvin asks for your approval in “" + titleOf(chatId) + "”", () => openChat(chatId));
         }
@@ -4843,7 +4869,7 @@
         const card = S.approvals.get(ev.id);
         const yes = ev.answer ? ev.answer === "approved" : !!(card && card.choice);
         if (card) card.close(ev.answer || card.choice !== undefined ? (yes ? "Approved" : "Declined") : "Closed", yes);
-        if (chatId !== undefined && S.asking.delete(chatId)) renderChats();
+        cardClosed(ev.id);   // closed by a poll before: its chat's dot went then (with its chat's last open card)
         break;
       }
       case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id, ev.images, true); pollState(); break;
@@ -5180,6 +5206,30 @@
   // or an Approve then waited, in silence
   const POLL = { now: null, next: null };
   const POLL_MS = 15000;
+  // Kelvin not answering, said: a bar once no poll has had an answer for REACH_MS (Kelvin quit or crashed, its computer
+  // sleeps or is overloaded, the network to it went), gone with the first answer. The page went on showing what it
+  // last heard, as if all were well
+  const REACH = { ok: Date.now() };
+  const REACH_MS = 10000;
+  function reach(ok) {
+    const bar = $("unreachable");
+    if (!bar) return;
+    if (ok) { REACH.ok = Date.now(); bar.hidden = true; return; }
+    const quiet = Math.round((Date.now() - REACH.ok) / 1000);
+    if (quiet * 1000 < REACH_MS) return;
+    $("unreachable-text").textContent = "Kelvin isn't answering (nothing heard for " + inTime(quiet) + "): it may have " +
+      "quit, or its computer may be asleep or busy. What you see is what it last said; the page keeps asking.";
+    bar.hidden = false;
+  }
+  // one part of the state drawn: one that throws is said in the console, and the rest are drawn all the same. One part
+  // that threw skipped every part after it at every poll (the approvals and the alarms among them)
+  function part(what, fn) {
+    const failed = (e) => { console.error("Kelvin's page: drawing " + what + " failed", e); };
+    try {
+      const r = fn();
+      return r && typeof r.then === "function" ? r.catch(failed) : r;
+    } catch (e) { failed(e); return undefined; }
+  }
   function pollState() {
     if (!POLL.now) {
       POLL.now = readState().catch((e) => console.error(e)).finally(() => { POLL.now = null; });
@@ -5193,105 +5243,120 @@
     const sent = Date.now();
     const opened = [...FRESH];   // rows just opened: read at once
     FRESH.clear();
+    const slow = setTimeout(() => reach(false), REACH_MS);   // a poll that hangs says so too, before its own time is up
     try { s = await api("/api/state" + (opened.length ? "?fresh=" + encodeURIComponent(opened.join(",")) : ""), { timeout: POLL_MS }); }
-    catch (e) { opened.forEach((n) => FRESH.add(n)); return; }
-    $("agent-state").textContent = s.busy ? String(s.busy).charAt(0).toUpperCase() + String(s.busy).slice(1) : "Idle";
-    $("agent-state").classList.toggle("busy", !!s.busy);
-    s.instruments = PANEL.instruments = freshInstruments(s.instruments, sent);   // Home reads the same
-    renderInstruments();
-    let lines = s.events.map((e) => ({ text: e, user: "" }));
-    if (PANEL.everyone && !$("activity-who").hidden) { try { lines = (await api("/api/lab-log?n=25")).events; } catch (e) { /* keep this person's */ } }
-    const said = JSON.stringify(lines);
-    if (said !== PANEL.eventsShown) {   // redrawn only when it changed, so what is being read keeps its place
-      PANEL.eventsShown = said;
-      $("lab-events").replaceChildren(...lines.map((e) => {
-        const m = e.text.match(/^(\d\d:\d\d:\d\d)\s+(.*)$/);
-        const who = e.user ? e.user + ": " : "";
-        return m ? h("li", {}, h("time", {}, m[1]), h("span", {}, who + m[2])) : h("li", {}, who + e.text);
-      }));
-      const newest = lines.length && String(lines[0].text).match(/^(\d\d:\d\d)/);   // newest first: its time on the head
-      $("activity-summary").textContent = newest ? newest[1] : "";
-      LAB_TABS.top = lines.length ? String(lines[0].text) : "";   // Activity's newest line, for its tab's dot
-    }
-    labTabSeen();   // seen if its part is on the screen now, else a dot on its tab
-    wakeState(s);
-    termState(s);   // the terminal first: an approval its own command needs is asked there
-    // requests not already shown in a conversation (e.g. after a page reload)
-    // requests no conversation shows (a queue started here, another agent's run): asked in the Lab panel, and kept
-    // there until they are answered or closed, not redrawn away on the next poll
-    const open = new Set(s.pending.map((p) => p.id));
-    // a card whose request is no longer open (answered on a phone or in another window, declined, timed out) closes
-    // here too, with its answer: a chat's card kept live buttons, and the title "Approval needed", until its call
-    // ended (an hour's run). One drawn after this poll was sent may not be listed yet: the next poll looks again
-    const answered = new Map((s.history || []).filter((x) => x.id).map((x) => [x.id, x]));
-    for (const [id, card] of [...S.approvals]) {
-      if (open.has(id) || card.decided || card.at > sent) continue;
-      const was = answered.get(id);
-      card.close(was ? (was.answer === "approved" ? "Approved" : "Declined") : "Closed", !!was && was.answer === "approved");
-    }
-    let fresh = 0;
-    for (const p of s.pending) {
-      if (PANEL.loose.has(p.id) || S.approvals.has(p.id) || TERM.asked.has(p.id)) continue;
-      PANEL.loose.set(p.id, makeApproval(p));
-      fresh += 1;
-    }
-    for (const [id, card] of PANEL.loose) {
-      if (open.has(id)) continue;
-      if (!card.decided) card.close("Closed", false);
-      PANEL.loose.delete(id);
-    }
-    // changed in place, only as a request comes or goes: one not touched keeps its place, and a focused Approve its focus
-    const pend = $("lab-pending"), cards = new Set([...PANEL.loose.values()].map((c) => c.el));
-    for (const el of [...pend.children]) if (!cards.has(el)) el.remove();
-    for (const el of cards) if (el.parentNode !== pend) pend.append(el);
-    const badge = $("lab-badge");
-    badge.textContent = String(s.pending.length);
-    badge.hidden = !s.pending.length;
-    // a request no conversation shows: the Lab panel to the screen, even in full screen; there already, its head rings
-    if (fresh) Kelvin.paneShow("labpanel");
-    showMode(s.approval_mode, s.approval_rule);
-    renderAlerts(s.alarms, s.incident);
-    renderWatches(s.watches || [], s.status, s.alarms);
-    if (s.lab_memory && s.lab_memory !== LABMEM.stamp) { LABMEM.stamp = s.lab_memory; loadLabMemory(); }
-    if (s.chats && s.chats !== S.chatsStamp) { S.chatsStamp = s.chats; refreshChats(); }   // a chat made or changed elsewhere (a phone, another window)
-    teamState(s.team);
-    notifySystem(s.notices);
-    $("lab-name").textContent = s.lab;
-    const problem = s.lab_info && s.lab_info.error;
-    const missing = problem ? [] : (s.unavailable || []);
-    $("lab-problem").hidden = !problem && !missing.length;
-    if (problem || missing.length) {
-      const text = problem ? problem
-        : "Not connected: " + missing.map((m) => m.name + " (" + m.why + ")").join("; ") + " The rest of your lab is connected.";
-      if ($("lab-problem").dataset.text !== text) {   // the install button keeps its state between polls
-        $("lab-problem").dataset.text = text;
-        const offers = problem ? installOffer(s.lab_info.install)
-          : missing.filter((m) => m.install).flatMap((m) => installOffer(m.install, pollState));
-        $("lab-problem").replaceChildren(h("span", {}, text), ...offers);
+    catch (e) { opened.forEach((n) => FRESH.add(n)); reach(false); return; }
+    finally { clearTimeout(slow); }
+    reach(true);
+    part("the state line", () => {
+      $("agent-state").textContent = s.busy ? String(s.busy).charAt(0).toUpperCase() + String(s.busy).slice(1) : "Idle";
+      $("agent-state").classList.toggle("busy", !!s.busy);
+    });
+    part("the instruments", () => {
+      s.instruments = PANEL.instruments = freshInstruments(s.instruments, sent);   // Home reads the same
+      renderInstruments();
+    });
+    await part("the activity", async () => {
+      let lines = s.events.map((e) => ({ text: e, user: "" }));
+      if (PANEL.everyone && !$("activity-who").hidden) { try { lines = (await api("/api/lab-log?n=25")).events; } catch (e) { /* keep this person's */ } }
+      const said = JSON.stringify(lines);
+      if (said !== PANEL.eventsShown) {   // redrawn only when it changed, so what is being read keeps its place
+        PANEL.eventsShown = said;
+        $("lab-events").replaceChildren(...lines.map((e) => {
+          const m = e.text.match(/^(\d\d:\d\d:\d\d)\s+(.*)$/);
+          const who = e.user ? e.user + ": " : "";
+          return m ? h("li", {}, h("time", {}, m[1]), h("span", {}, who + m[2])) : h("li", {}, who + e.text);
+        }));
+        const newest = lines.length && String(lines[0].text).match(/^(\d\d:\d\d)/);   // newest first: its time on the head
+        $("activity-summary").textContent = newest ? newest[1] : "";
+        LAB_TABS.top = lines.length ? String(lines[0].text) : "";   // Activity's newest line, for its tab's dot
       }
-    } else delete $("lab-problem").dataset.text;
-    const unreviewed = s.unreviewed || [];
-    $("lab-observe").hidden = !unreviewed.length;
-    if (unreviewed.length) $("lab-observe-who").textContent = andList(unreviewed) + ".";
-    const drafts = s.drafts || [];   // real instruments whose card nobody has checked yet
-    $("lab-drafts").hidden = !drafts.length;
-    if (drafts.length) {
-      $("lab-drafts-who").textContent = andList(drafts) + ".";
-    }
-    showWhy(s);
-    const busySetup = s.setup && SETUP_BUSY.has(s.setup.state);
-    $("lab-setting-up").hidden = !busySetup;
-    if (busySetup) $("lab-setting-up").textContent = "Setting up instruments: " + (s.setup.message || "") + "…";
-    if (S.setupState && SETUP_BUSY.has(S.setupState) && s.setup && !busySetup && $("lab-dialog").open) refreshLabSetup();
-    S.setupState = s.setup && s.setup.state;
-    setupWait(s);
-    if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
-    queueFromState(s.queue);
-    showMounted(s.mounted);
-    showHands(s.hands_on);
+    });
+    part("the lab's tabs", () => { labTabSeen(); });   // seen if its part is on the screen now, else a dot on its tab
+    part("the answering chats", () => wakeState(s));
+    part("the terminal", () => { termState(s); });   // the terminal first: an approval its own command needs is asked there
+    part("the approval cards", () => {
+      // requests not already shown in a conversation (e.g. after a page reload)
+      // requests no conversation shows (a queue started here, another agent's run): asked in the Lab panel, and kept
+      // there until they are answered or closed, not redrawn away on the next poll
+      const open = new Set(s.pending.map((p) => p.id));
+      // a card whose request is no longer open (answered on a phone or in another window, declined, timed out) closes
+      // here too, with its answer: a chat's card kept live buttons, and the title "Approval needed", until its call
+      // ended (an hour's run). One drawn after this poll was sent may not be listed yet: the next poll looks again
+      const answered = new Map((s.history || []).filter((x) => x.id).map((x) => [x.id, x]));
+      for (const [id, card] of [...S.approvals]) {
+        if (open.has(id) || card.decided || card.at > sent) continue;
+        const was = answered.get(id);
+        card.close(was ? (was.answer === "approved" ? "Approved" : "Declined") : "Closed", !!was && was.answer === "approved");
+      }
+      let fresh = 0;
+      for (const p of s.pending) {
+        if (PANEL.loose.has(p.id) || S.approvals.has(p.id) || TERM.asked.has(p.id)) continue;
+        PANEL.loose.set(p.id, makeApproval(p));
+        fresh += 1;
+      }
+      for (const [id, card] of PANEL.loose) {
+        if (open.has(id)) continue;
+        if (!card.decided) card.close("Closed", false);
+        PANEL.loose.delete(id);
+      }
+      // changed in place, only as a request comes or goes: one not touched keeps its place, and a focused Approve its focus
+      const pend = $("lab-pending"), cards = new Set([...PANEL.loose.values()].map((c) => c.el));
+      for (const el of [...pend.children]) if (!cards.has(el)) el.remove();
+      for (const el of cards) if (el.parentNode !== pend) pend.append(el);
+      const badge = $("lab-badge");
+      badge.textContent = String(s.pending.length);
+      badge.hidden = !s.pending.length;
+      // a request no conversation shows: the Lab panel to the screen, even in full screen; there already, its head rings
+      if (fresh) Kelvin.paneShow("labpanel");
+    });
+    part("the approval mode", () => { showMode(s.approval_mode, s.approval_rule); });
+    part("the alarms", () => { renderAlerts(s.alarms, s.incident); });
+    part("the watches", () => { renderWatches(s.watches || [], s.status, s.alarms); });
+    part("the lab's memory", () => { if (s.lab_memory && s.lab_memory !== LABMEM.stamp) { LABMEM.stamp = s.lab_memory; loadLabMemory(); } });
+    part("the chats", () => { if (s.chats && s.chats !== S.chatsStamp) { S.chatsStamp = s.chats; refreshChats(); } });   // a chat made or changed elsewhere (a phone, another window)
+    part("the team chat", () => { teamState(s.team); });
+    part("the notifications", () => { notifySystem(s.notices); });
+    part("the lab", () => {
+      $("lab-name").textContent = s.lab;
+      const problem = s.lab_info && s.lab_info.error;
+      const missing = problem ? [] : (s.unavailable || []);
+      $("lab-problem").hidden = !problem && !missing.length;
+      if (problem || missing.length) {
+        const text = problem ? problem
+          : "Not connected: " + missing.map((m) => m.name + " (" + m.why + ")").join("; ") + " The rest of your lab is connected.";
+        if ($("lab-problem").dataset.text !== text) {   // the install button keeps its state between polls
+          $("lab-problem").dataset.text = text;
+          const offers = problem ? installOffer(s.lab_info.install)
+            : missing.filter((m) => m.install).flatMap((m) => installOffer(m.install, pollState));
+          $("lab-problem").replaceChildren(h("span", {}, text), ...offers);
+        }
+      } else delete $("lab-problem").dataset.text;
+      const unreviewed = s.unreviewed || [];
+      $("lab-observe").hidden = !unreviewed.length;
+      if (unreviewed.length) $("lab-observe-who").textContent = andList(unreviewed) + ".";
+      const drafts = s.drafts || [];   // real instruments whose card nobody has checked yet
+      $("lab-drafts").hidden = !drafts.length;
+      if (drafts.length) {
+        $("lab-drafts-who").textContent = andList(drafts) + ".";
+      }
+      showWhy(s);
+    });
+    part("the set-up", () => {
+      const busySetup = s.setup && SETUP_BUSY.has(s.setup.state);
+      $("lab-setting-up").hidden = !busySetup;
+      if (busySetup) $("lab-setting-up").textContent = "Setting up instruments: " + (s.setup.message || "") + "…";
+      if (S.setupState && SETUP_BUSY.has(S.setupState) && s.setup && !busySetup && $("lab-dialog").open) refreshLabSetup();
+      S.setupState = s.setup && s.setup.state;
+      setupWait(s);
+    });
+    part("the running run", () => { if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan); });  // e.g. a run an external agent started
+    part("the queue", () => { queueFromState(s.queue); });
+    part("the mounted device", () => { showMounted(s.mounted); });
+    part("hands on the sample", () => { showHands(s.hands_on); });
     PROT.busy = s.busy;
     S.last = s;
-    emit("state", s);
+    part("the panes", () => { emit("state", s); });
   }
   // ------------------------------------------------------------------ alarms, watches, notifications
   function incidentCard(i) {   // what the last stop left behind: outputs on, runs or a queue cut short (runtime.py)
@@ -5323,7 +5388,14 @@
     const ok = h("button", { class: "btn small", type: "button", "data-k": "ok" }, "Got it");
     ok.addEventListener("click", async () => {
       ok.disabled = true;   // one Got it per click: a double click once sent three
-      try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ }
+      try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); }
+      catch (e) {   // not taken (no connection, Kelvin busy): said, and pressed again; it stayed disabled for good, as its
+        // row is drawn again only when the alarms change. One already gone (404) goes with the next poll
+        if (e.status !== 404) {
+          ok.disabled = false;
+          toast("Got it didn't reach Kelvin (" + e.message + "): press it again.");
+        }
+      }
       pollState();
     });
     return ok;

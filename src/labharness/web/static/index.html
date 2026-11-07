@@ -122,6 +122,8 @@
     </header>
     <!-- the notice row: alarms, Hands on the sample (the only Unlock…) and the update bar, in every layout -->
     <div id="notices" class="notices">
+      <!-- no poll answered for 10 s: Kelvin quit, crashed, or its computer sleeps or is busy (app.js reach) -->
+      <div id="unreachable" class="update-bar warn" role="alert" hidden><span id="unreachable-text"></span></div>
       <div id="update-bar" class="update-bar" role="status" hidden>
         <span id="update-text"></span>
         <a id="update-notes" class="link soft" target="_blank" rel="noopener noreferrer" hidden>What's new</a>
