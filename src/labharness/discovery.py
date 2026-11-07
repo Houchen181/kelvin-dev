@@ -606,10 +606,11 @@ def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[st
         out.append(identify(name, registry, rm, timeout_ms, usb, catalog=catalog))
     for adapter in adapters:
         out += _look_behind(adapter, registry, in_lab, catalog, looked)
-    from .drivers import MODULES, discover_libraries, discover_swabian, discover_zhinst, library_notes
+    from .drivers import discover_makers, library_notes
     # instruments behind vendor software: Zurich Instruments (LabOne), Swabian Pulse Streamers and Time Taggers,
-    # NI DAQ cards, Ocean spectrometers, Andor and Basler cameras, Andor spectrographs, attocube ANC350s
-    for address, idn in discover_zhinst(MODULES.get("zhinst")) + discover_swabian() + discover_libraries():
+    # NI DAQ cards, Ocean spectrometers, Andor and Basler cameras, Andor spectrographs, attocube ANC350s (each
+    # library's listing bounded: one that never returns is left out, said in the report, and the scan goes on)
+    for address, idn in discover_makers():
         if address in in_lab:
             out.append(Found(address, how="already in this lab", in_lab=in_lab[address]))
             continue

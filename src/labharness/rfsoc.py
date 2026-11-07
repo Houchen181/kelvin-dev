@@ -30,6 +30,9 @@ from .drivers import DriverBackend
 DEFAULTS = {"output": 0, "gain": 0.0, "frequency": 100.0, "nqz": 1, "mixer": 0.0, "mode": "tone", "length": 1.0,
             "readout_length": 1.0, "trigger_delay": 0.2, "reps": 100, "phase0": 0.0}
 READINGS = ("i", "q", "magnitude", "phase")
+# each call to the board waits at most this long (or the card's connection timeout_ms, if longer): Pyro's own default
+# is forever, so a board that stopped answering held the lab for good. QICK's acquisitions are many short calls
+CALL_S = 60.0
 
 
 def load_qick() -> Any:
@@ -39,6 +42,12 @@ def load_qick() -> Any:
     except ImportError as e:
         raise AdapterError("QICK boards need qick, at the board's version where it is known, and Pyro4: %s"
                            % envs.missing("qick", "Pyro4")) from e
+    try:   # every Pyro4 proxy, the name server's that make_proxy uses too, waits at most CALL_S for an answer, not forever
+        import Pyro4   # type: ignore
+        if not getattr(Pyro4.config, "COMMTIMEOUT", 0):
+            Pyro4.config.COMMTIMEOUT = CALL_S
+    except Exception:
+        pass
     try:
         from qick.asm_v2 import AveragerProgramV2   # type: ignore
     except ImportError:   # a qick from before tProc v2, as a board with v1 firmware may run
@@ -165,6 +174,10 @@ class Qick(DriverBackend):
                                "board, in its Jupyter (http://%s:9090), run qick/pyro4/00_nameserver.ipynb, then "
                                "01_server.ipynb (Kelvin runs them with run_on_board once a person approves)."
                                % (name, proxy, url.hostname, url.port or 8888, e, url.hostname)) from e
+        try:   # Pyro4's proxy: each call times out (Pyro4.errors.TimeoutError) instead of waiting forever
+            self.soc._pyroTimeout = max(CALL_S, float(card.connection.get("timeout_ms") or 0) / 1000.0)
+        except Exception:
+            pass
         # the board's QICK and this computer's should be the same version: Pyro hands objects over as they are
         self.versions = (str(self._cfg("sw_version") or ""), str(getattr(self.qick, "version", "") or ""))
         self.firmware = str(((self._cfg("tprocs") or [{}])[0] or {}).get("type") or "")

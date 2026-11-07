@@ -30,16 +30,18 @@ The makers' libraries are not in the app: Kelvin installs the one an instrument 
 (envs.py) itself, and says so when one is missing. From source, pip install them."""
 from __future__ import annotations
 
+import logging
 import math
 import re
 import threading
 import urllib.parse
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import envs
 from .adapters import AdapterError
 from .cards import Card
 
+log = logging.getLogger("kelvin")
 SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick", "lib",
            "nidaq", "seabreeze", "shamrock", "picam", "lightfield", "pylon", "andor", "anc300", "anc350", "modbus",
            "uvc", "genicam", "jsonrpc")
@@ -93,6 +95,10 @@ def _fmt(v: Any) -> str:
 class DriverBackend:
     """write(command) / query(command) / close(), like a VISA backend or a twin."""
     simulated = False
+    # why this connection has ended by itself (a call into the maker's driver that didn't return in time: bounded), or
+    # "": once it has, nothing more is sent through it, and connecting the instrument again makes a fresh one
+    # (lab.Lab.reconnect, and switching it off and on in the Lab panel)
+    gone = ""
 
     def __init__(self, name: str, card: Card, address: str):
         self.name = name
@@ -100,14 +106,56 @@ class DriverBackend:
         self.address = address
         self.lock = threading.Lock()
 
+    @property
+    def quiet_close(self) -> bool:
+        """Closing it sends the instrument nothing: once it has ended (gone), switching it off lets it go (on a
+        thread of its own: lab._let_go) and switching it on makes a fresh one. Until then a maker's driver is set
+        aside unclosed when switched off, as its closing could send something (a pulse generator stops its outputs)."""
+        return bool(self.gone)
+
+    def check_gone(self) -> None:
+        """Refuses at once once this connection has ended (gone): its driver may still be stuck in the call that
+        didn't return, and a call behind it would only wait as long."""
+        if self.gone:
+            raise AdapterError("%s: not connected any more: %s; connect it again (Lab panel: its connection off, then "
+                               "on). If that hangs too, close its maker's software, turn the instrument off and on, "
+                               "and restart Kelvin" % (self.name, self.gone))
+
+    def bounded(self, limit: float, what: str, fn: Callable[..., Any], *args: Any) -> Any:
+        """fn(*args), a call into the maker's driver in Kelvin's own process, waited for at most `limit` seconds on a
+        thread of its own: one that never returns (a capture a camera's SDK never finishes) can't hold the instrument,
+        and the lab with it, for good. Past the limit this connection ends (gone) and AdapterError says so: the call
+        is left to return, or not, where it is (Python can't end it), and nothing more goes through this connection."""
+        self.check_gone()
+        out: Dict[str, Any] = {}
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                out["value"] = fn(*args)
+            except BaseException as e:   # the caller's to raise, if it still waits
+                out["error"] = e
+            finally:
+                done.set()
+        threading.Thread(target=run, name="kelvin-%s-call" % self.name, daemon=True).start()
+        if not done.wait(limit):
+            self.gone = "%s didn't return within %d s" % (what, round(limit))
+            log.warning("%s: %s; its connection is not used any more", self.name, self.gone)
+            self.check_gone()
+        if "error" in out:
+            raise out["error"]
+        return out["value"]
+
     def write(self, command: str) -> None:
         verb, path, value = parse_command(command)
         if verb != "SET":
             raise AdapterError("%s: %r reads, it does not set" % (self.name, command))
+        self.check_gone()
         with self.lock:
             self.set(path.lower(), _number(value))   # cards write paths in capitals; vendors use lower case
 
     def query(self, command: str) -> str:
+        self.check_gone()
         if command.strip().upper() in ("*IDN?", self.card.idn_query.strip().upper()):
             with self.lock:
                 return self.identity()
@@ -801,14 +849,65 @@ LATER = {"m2": ("m2", "M2Laser"), "toptica": ("decop", "DeCoP"), "qick": ("rfsoc
 
 def library_notes() -> List[str]:
     """What the last scan saw through the makers' programs that say so, in words for its report: PICam (cameras
-    free, or open in another program) and LightField. Nothing on a computer without Teledyne Princeton software."""
+    free, or open in another program) and LightField. Nothing on a computer without Teledyne Princeton software. And
+    the makers' libraries whose listing didn't return in time (_listed)."""
     from .lightfield import note as lightfield_note
     from .princeton import LAST
     lightfield = lightfield_note()
     picam = LAST.get("picam") or ""
     if picam.endswith("not installed here") and not lightfield:
         picam = ""
-    return [n for n in (picam, lightfield) if n] + package_notes()
+    return [n for n in (picam, lightfield) if n] + list(_UNLISTED) + package_notes()
+
+
+# ------------------------------------------------------------------ the scan's look through the makers' libraries
+
+LIST_S = 30.0   # one maker's library listing what it sees, for a scan: one that hasn't within this is left out of it
+LIST_OWN_S = {"picam": 75.0}   # PICam's listing waits for PICam to start (princeton.START_S) by itself
+_LISTING: Dict[str, threading.Thread] = {}   # each library's listing in progress: one that never returned isn't redone
+_UNLISTED: List[str] = []   # the last scan's listings that didn't return in time, in words (library_notes)
+
+
+def _listed(key: str, words: str, fn: Callable[..., List[Tuple[str, str]]], *args: Any) -> List[Tuple[str, str]]:
+    """fn(*args), a maker's library listing the instruments it sees, waited for at most its time on a thread of its
+    own: one that never returns (a camera SDK stuck on a camera left in a bad state) can't hold the scan, and the lab
+    with it, for good. It is left out of the scan, as its report says; one still running from an earlier scan isn't
+    started again (it would only wait behind it)."""
+    running = _LISTING.get(key)
+    if running is not None and running.is_alive():
+        _UNLISTED.append("%s: its listing from an earlier scan still hasn't returned, so it was left out; if its "
+                         "instruments are missing, close its maker's software and restart Kelvin" % words)
+        return []
+    out: Dict[str, Any] = {}
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            out["found"] = list(fn(*args) or [])
+        except Exception:   # a library that can't list is a library with nothing to list, as for the scan's others
+            out["found"] = []
+        finally:
+            done.set()
+    thread = threading.Thread(target=run, name="kelvin-list-" + key, daemon=True)
+    _LISTING[key] = thread
+    thread.start()
+    limit = LIST_OWN_S.get(key, LIST_S)
+    if not done.wait(limit):
+        log.warning("%s didn't finish listing its instruments within %g s; left out of the scan", words, limit)
+        _UNLISTED.append("%s didn't finish listing its instruments within %d s, so they were left out of this scan: "
+                         "is its maker's software stuck? Close it, turn the instrument off and on, and scan again"
+                         % (words, round(limit)))
+        return []
+    return out.get("found") or []
+
+
+def discover_makers() -> List[Tuple[str, str]]:
+    """(address, identity) of every instrument behind its maker's software, for a scan: Zurich Instruments (LabOne),
+    Swabian Pulse Streamers and Time Taggers, and the vendor libraries (discover_libraries), each listing bounded."""
+    del _UNLISTED[:]
+    return (_listed("zhinst", "LabOne (Zurich Instruments)", discover_zhinst, MODULES.get("zhinst"))
+            + _listed("swabian", "Swabian's software (Pulse Streamers, Time Taggers)", discover_swabian)
+            + _libraries())
 
 
 # a maker's program or driver (words in its name and maker), the package Kelvin reaches its instruments through, and
@@ -845,16 +944,24 @@ def package_notes(programs: Optional[List[Dict[str, str]]] = None) -> List[str]:
 def discover_libraries() -> List[Tuple[str, str]]:
     """(address, identity) of the instruments behind the vendor libraries installed here: NI DAQ cards, Princeton
     Instruments cameras, Andor spectrographs and sCMOS cameras, Ocean spectrometers, Basler cameras, attocube ANC350s.
-    Each library only lists what it sees; nothing is opened or set."""
+    Each library only lists what it sees; nothing is opened or set. Each listing is bounded (_listed)."""
+    del _UNLISTED[:]
+    return _libraries()
+
+
+def _libraries() -> List[Tuple[str, str]]:
     from .cameras import discover_andor, discover_pylon
     from .daq import discover_nidaq
     from .positioners import discover_attocube
     from .princeton import discover_picam
     from .spectra import discover_seabreeze, discover_shamrock
-    return (discover_nidaq(MODULES.get("nidaq")) + discover_picam(MODULES.get("picam"))
-            + discover_shamrock(MODULES.get("shamrock")) + discover_andor(MODULES)
-            + discover_seabreeze(MODULES.get("seabreeze")) + discover_pylon(MODULES.get("pylon"))
-            + discover_attocube(MODULES.get("anc350")))
+    return (_listed("nidaq", "NI-DAQmx", discover_nidaq, MODULES.get("nidaq"))
+            + _listed("picam", "PICam (Princeton Instruments cameras)", discover_picam, MODULES.get("picam"))
+            + _listed("shamrock", "Andor's spectrograph library", discover_shamrock, MODULES.get("shamrock"))
+            + _listed("andor", "Andor's camera SDK", discover_andor, MODULES)
+            + _listed("seabreeze", "seabreeze (Ocean spectrometers)", discover_seabreeze, MODULES.get("seabreeze"))
+            + _listed("pylon", "Basler's pylon", discover_pylon, MODULES.get("pylon"))
+            + _listed("anc350", "attocube's ANC350 library", discover_attocube, MODULES.get("anc350")))
 
 
 def open_driver(name: str, card: Card, address: str) -> DriverBackend:
