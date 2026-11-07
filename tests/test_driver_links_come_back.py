@@ -201,6 +201,112 @@ def test_an_m2_laser_that_restarted_is_lost_then_linked_again_by_itself():
     assert M2Laser.quiet_close
 
 
+# ------------------------------------------------------------------ attocube ANC300: its command line (positioners.py)
+
+class Anc:
+    """An ANC300 on the network: password, then its command line, each reply in its own segment, ending OK; one in
+    `slow` arrives only as the next command is sent (it came late). restart() ends every connection made before."""
+
+    def __init__(self):
+        self.values = {"getv 1": "voltage = 30.000000 V", "geta 1": "voltage = 12.500000 V",
+                       "geta 2": "voltage = 0.000000 V", "getv 2": "voltage = 45.000000 V",
+                       "ver": "attocube ANC300 controller version 1.1.0-1304 2013-10-17 08:16"}
+        self.slow, self.made = set(), []
+
+    def create_connection(self, address, timeout=None):
+        conn = AncConnection(self)
+        self.made.append(conn)
+        return conn
+
+    def restart(self):
+        for conn in self.made:
+            conn.closed = True
+
+
+class AncConnection:
+    def __init__(self, anc):
+        self.anc, self.closed, self.segments, self.late, self.authorized = anc, False, [], b"", False
+
+    def settimeout(self, t):
+        pass
+
+    def sendall(self, data):
+        if self.closed:
+            raise ConnectionResetError(10054, "An existing connection was forcibly closed by the remote host")
+        if self.late:   # the late reply arrives now, before this command's
+            self.segments.append(self.late)
+            self.late = b""
+        line = data.decode().strip()
+        if not self.authorized:
+            self.authorized = True
+            self.segments.append(b"Authorization success\r\nOK\r\n")
+            return
+        reply = (self.anc.values.get(line, "") + "\r\nOK\r\n").encode()
+        if line in self.anc.slow:
+            self.anc.slow.discard(line)
+            self.late = reply
+        else:
+            self.segments.append(reply)
+
+    def recv(self, n):
+        if self.closed:
+            return b""
+        if self.segments:
+            return self.segments.pop(0)
+        raise socket.timeout("timed out")
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def anc(monkeypatch):
+    from labharness import positioners
+    fake = Anc()
+    monkeypatch.setattr(positioners.socket, "create_connection", fake.create_connection)
+    return fake
+
+
+def test_an_anc300_reply_that_came_late_is_never_taken_for_the_next_ones(anc):
+    from labharness.positioners import Link
+    link = Link("10.0.0.10", timeout=0.3)
+    anc.slow.add("geta 1")
+    e = raised(lambda: link.command("geta 1"))
+    assert isinstance(e, NoAnswer) and lost_kind(e) == "silent"
+    assert link.command("getv 2") == ["voltage = 45.000000 V"]               # axis 2's step voltage, not axis 1's
+    assert link.command("geta 2") == ["voltage = 0.000000 V"]                # offset
+    assert link.command("getv 1") == ["voltage = 30.000000 V"]
+    assert len(anc.made) == 1                                                # put back in step on the same link
+
+
+def test_an_anc300_that_restarted_is_lost_then_reached_again_by_itself(anc):
+    from labharness.positioners import Link
+    link = Link("10.0.0.11", timeout=0.3)
+    assert link.command("getv 1") == ["voltage = 30.000000 V"]
+    anc.restart()
+    e = raised(lambda: link.command("getv 1"))
+    assert isinstance(e, LinkLost) and lost_kind(e) == "gone"
+    assert link.command("getv 1") == ["voltage = 30.000000 V"] and len(anc.made) == 2   # password and all again
+
+
+def test_an_anc300_axis_switched_off_and_on_gets_a_link_that_works(anc):
+    lab = build_lab("""
+lab: Positioners
+instruments:
+  x: { card: attocube/anc300, address: "anc300://10.0.0.12", vars: { axis: 1 } }
+""")
+    try:
+        assert lab.read("x", "voltage") == pytest.approx(30.0)
+        anc.restart()
+        assert isinstance(raised(lambda: lab.read("x", "voltage")), InstrumentLost)
+        lab.switch("x", False)                                                # its share of the link let go of
+        assert "x" not in lab._parked
+        lab.switch("x", True)
+        assert lab.read("x", "voltage") == pytest.approx(30.0) and len(anc.made) == 2
+    finally:
+        lab.close()
+
+
 # ------------------------------------------------------------------ Quantum Design MultiVu (drivers.py)
 
 class MultiVuServer:
