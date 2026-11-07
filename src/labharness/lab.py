@@ -144,6 +144,22 @@ def first_line(e: BaseException) -> str:
     return str(e).splitlines()[0][:300] if str(e).strip() else type(e).__name__
 
 
+def identity_problem(inst: Instrument, idn: str) -> Optional[str]:
+    """What is wrong with the identity an instrument answered, for this instrument of the lab; None when it is the one
+    its card is for. The model, from the card's identity pattern: a swapped address would send commands to the wrong
+    instrument. The one place Kelvin decides that an instrument is itself: before it is used (health_check), and before
+    a connection made again by itself sends it anything (review of 0.3.45: 4.1 asks it there, 6.2 adds the serial
+    number here)."""
+    card = inst.card
+    if not card.idn_pattern or re.search(card.idn_pattern, idn, re.I):
+        return None
+    from .homelab import builtin_ids
+    return ("identity %r does not match card %s (wrong address or instrument? If it is a variant the card doesn't "
+            "know, %s)" % (idn[:80], card.id, ("make this lab's version of the card with its identity: Lab, Cards…, "
+                                                 "Make your version") if card.id in builtin_ids() else
+                           "add its identity to the card: Lab, Cards…, Edit"))
+
+
 def same_card(a: Card, b: Card) -> bool:
     """The same card, as written and bound to the same variables (a card file edited since gives False)."""
     return a.id == b.id and a.data == b.data and a.bound == b.bound and a.status == b.status
@@ -573,13 +589,9 @@ class Lab:
                         problems.append(str(inst._garbled(card.idn_query, idn)))   # noise, not another instrument
                         out.append(HealthResult(name, False, problems))
                         continue
-                    if not re.search(card.idn_pattern, idn, re.I):
-                        from .homelab import builtin_ids
-                        problems.append("identity %r does not match card %s (wrong address or instrument? If it is "
-                                        "a variant the card doesn't know, %s)" % (idn[:80], card.id, (
-                                            "make this lab's version of the card with its identity: Lab, Cards…, "
-                                            "Make your version") if card.id in builtin_ids() else
-                                        "add its identity to the card: Lab, Cards…, Edit"))
+                    wrong = identity_problem(inst, idn)
+                    if wrong:
+                        problems.append(wrong)
                         out.append(HealthResult(name, False, problems))
                         continue  # nothing else is meaningful on the wrong instrument
                     variant = card.variant(idn)

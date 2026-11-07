@@ -45,6 +45,17 @@ class AdapterError(RuntimeError):
     pass
 
 
+class LinkLost(AdapterError, ConnectionError):
+    """A maker's link to an instrument broke: its socket closed, its port went away, its program or helper ended.
+    lost_kind calls it gone. A driver raises it with the error it came from as its cause, and its link is made anew
+    rather than handed back dead (review of 0.3.45, 4.2 and 4.4)."""
+
+
+class NoAnswer(AdapterError, TimeoutError):
+    """An instrument reached through a maker's link didn't answer in time. lost_kind calls it silent. A driver raises
+    it, and a reply that may still come late is never taken for the next command's (review of 0.3.45, 4.4 and 4.5)."""
+
+
 def timed_out(e: BaseException) -> bool:
     """A read that ran out of time (PyVISA's VI_ERROR_TMO), not a broken connection; also when Kelvin said it in
     words (instrument.InstrumentLost), from the error it came from."""
