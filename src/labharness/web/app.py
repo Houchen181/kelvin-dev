@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -91,6 +92,8 @@ OPERATING = ("Claude is operating this computer, so everything in Kelvin but Sto
              "until it finishes. Press Stop to end it.")
 COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument collection while it is on
 CLOSE_INSTRUMENTS_S = 10.0   # how long the instruments may take to close as Kelvin quits
+SOON_S = 5.0   # a person's action that waits longer (for an approval card) is answered at once, its end later
+LATER_KEEP_S = 600   # how long such an action's answer is kept after it ends, for the page to fetch (/api/later)
 
 
 def make_providers(settings: Settings, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
@@ -1572,17 +1575,20 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             project = body.get("project") or None
             try:
                 folder = await new_chat_folder(body, project)
-                chat = store.create(str(body.get("model") or ""), project, incognito=bool(body.get("incognito")))
+                chat = await asyncio.to_thread(store.create, str(body.get("model") or ""), project,
+                                               bool(body.get("incognito")))
             except KeyError as e:
                 return error(404, e.args[0])
             except ValueError as e:
                 return error(400, str(e))
             if folder:
                 chat["folder"] = folder
-                store.save(chat)
+                await asyncio.to_thread(store.save, chat)
                 keep_folder(folder, chat.get("project"))
             return JSONResponse(dict(chat, folder=folder or str(runtime.data_dir / "runs"), own_folder=bool(folder)))
-        return JSONResponse(store.list())
+        # the chats' files are read and written off the server's loop: one Windows says is in use is tried again for
+        # up to 2 s (ChatStore._again), and Stop and the polls waited meanwhile
+        return JSONResponse(await asyncio.to_thread(store.list))
 
     async def chat(request: Request) -> Response:
         chat_id = request.path_params["chat_id"]
@@ -1590,10 +1596,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             if request.method == "DELETE":
                 if agent.answering(chat_id):
                     return error(409, "This conversation is still running.")
-                store.delete(chat_id)
+                await asyncio.to_thread(store.delete, chat_id)
                 agent.waker.cancel(chat_id)
                 return JSONResponse({"ok": True})
-            data = store.load(chat_id)
+            data = await asyncio.to_thread(store.load, chat_id)
             if request.method == "PATCH":
                 body = await request.json()
                 title = str(body.get("title") or "").strip()[:80]
@@ -1601,7 +1607,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                     if agent.answering(chat_id):
                         return error(409, "Rename it when the current answer is done.")
                     data["title"] = title
-                    store.save(data)
+                    await asyncio.to_thread(store.save, data)
                 if "project" in body:  # file it under a project, or null to take it out
                     store.assign(chat_id, body["project"] or None)
                 if "folder" in body:   # where its runs go: a folder the person chose, or null for the data folder
@@ -1616,7 +1622,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                         keep_folder(data["folder"], store.project_of(chat_id))
                     else:
                         data.pop("folder", None)
-                    store.save(data)
+                    await asyncio.to_thread(store.save, data)
             out = dict(data, messages=[shown(m) for m in data["messages"]])
             out["folder"] = data.get("folder") or str(runtime.data_dir / "runs")   # where its runs go
             out["own_folder"] = bool(data.get("folder"))
@@ -2981,14 +2987,17 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def terminal(request: Request) -> Response:
         """A command a person typed in the terminal pane: {instrument, op: raw|get|set|describe|manual, arg, value}.
-        Same gate as Kelvin's own commands; waits (like them) while an approval is open."""
+        Same gate as Kelvin's own commands; waits (like them) while an approval is open: answered at once with 202
+        {later} meanwhile (soon), as the terminal asks y/n through the state's pending requests."""
         body = await request.json()
         instrument, op = str(body.get("instrument") or ""), str(body.get("op") or "raw")
         arg = str(body.get("arg") or "")
         if len(arg) > 2000:
             return error(400, "That command is too long.")
-        result = await asyncio.to_thread(runtime.terminal, instrument, op, arg, body.get("value"))
-        return JSONResponse(result)
+
+        async def run() -> Response:
+            return JSONResponse(await asyncio.to_thread(runtime.terminal, instrument, op, arg, body.get("value")))
+        return await soon(run())
 
     async def instrument_switch(request: Request) -> Response:
         """POST {on}: a person switches an instrument on or off for this lab. Off, Kelvin sends it nothing at all:
@@ -3462,6 +3471,50 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return StreamingResponse(events(), media_type="application/x-ndjson",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
+    later: Dict[str, Dict[str, Any]] = {}   # a person's actions answered before they ended (soon), by id
+
+    async def soon(work: Any) -> Response:
+        """A person's action that may wait for a person's answer (the queue's approval card, which a phone may answer
+        hours later): its own answer when it ends within SOON_S, else at once 202 {later, message}, and
+        /api/later/{later} gives its answer once it has one. A request is never held open for a person's answer: one
+        took one of the browser's six connections to Kelvin for as long, and with a chat's answer or two streaming
+        and the polls, Stop and Approve queued behind them in silence."""
+        task = asyncio.ensure_future(work)
+        done, _ = await asyncio.wait({task}, timeout=SOON_S)
+        if done:
+            return task.result()
+        now = time.time()
+        for key in [k for k, v in later.items() if v["task"].done() and now - v.get("ended", now) > LATER_KEEP_S]:
+            later.pop(key, None)
+        job = secrets.token_hex(8)
+        later[job] = entry = {"task": task}
+        tasks.append(task)
+
+        def ended(t: asyncio.Future) -> None:
+            entry["ended"] = time.time()
+            if t in tasks:
+                tasks.remove(t)
+        task.add_done_callback(ended)
+        return JSONResponse({"later": job, "message": "Waiting for a person's answer: the approval card is up in "
+                                                      "the Lab panel."}, status_code=202)
+
+    async def later_view(request: Request) -> Response:
+        """GET: how an action soon answered at once ended: {done: false} while it goes on, then {done: true, status,
+        body}, the answer it would have given. 404: no such action (Kelvin restarted meanwhile)."""
+        entry = later.get(request.path_params["job"])
+        if entry is None:
+            return error(404, "Kelvin no longer knows that request (it may have restarted): look at the Sequence.")
+        task = entry["task"]
+        if not task.done():
+            return JSONResponse({"done": False})
+        try:
+            res = task.result()
+            body = json.loads(bytes(res.body).decode("utf-8"))
+            status = res.status_code
+        except Exception as e:   # said in words, never a bare failure
+            body, status = {"error": "it failed: %s" % (str(e) or e.__class__.__name__)}, 500
+        return JSONResponse({"done": True, "status": status, "body": body})
+
     async def analysis_auto(request: Request) -> Response:
         """POST {run, chat, model, again}: the Analysis pane's subagent on one dataset (analyst.py): the model (the
         message box's, as the chat may use it) reads the run and decides by itself how to process and show it,
@@ -3535,23 +3588,32 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse(opinion)
 
     async def stop(request: Request) -> Response:
-        """{chat_id}: stop that chat's answer (and the lab's work when it is that chat's). Without one, the Stop for
-        everything: every chat's answer and the lab's work (its ramp or run, the queue, open approvals), also when no
-        chat is answering, as a queue runs by itself. {chat_id, lab: true}: that chat's answer and the lab's work (a
-        typed STOP)."""
+        """{chat_id}: stop that chat's answer (and the lab's work when it is that chat's call working the lab). {}: the
+        Stop for everything: every chat's answer and the lab's work (its ramp or run, the queue, open approvals), also
+        when no chat is answering, as a queue runs by itself. {chat_id, lab: true}: that chat's answer and the lab's
+        work (a typed STOP); {lab: true}: the lab's work (the terminal's /stop before it has a conversation).
+
+        Only a body that names no chat at all is the Stop for everything. A chat_id that names none (null, "": the
+        terminal's Esc before its first message) stops nothing: it once stopped every chat's answer, another chat's
+        2-hour run and the queue, when a person pressed Esc on a /get waiting for a slow instrument."""
         try:
             body = await request.json()
         except ValueError:
             body = {}
         body = body if isinstance(body, dict) else {}
-        chat_id = body.get("chat_id")
-        stopped = agent.stop(str(chat_id) if chat_id else None)
-        if not chat_id or body.get("lab"):
+        chat_id, lab = body.get("chat_id"), bool(body.get("lab"))
+        everything = "chat_id" not in body and not lab
+        stopped = agent.stop(None) if everything else agent.stop(str(chat_id)) if chat_id else False
+        if everything or lab:
             before = queue_now()
             await own_thread(runtime.stop, person(request))
             stopped = True
             tell_later(person_notices.stop_said(before, runtime.queue_started_by))
-        return JSONResponse({"ok": stopped, "message": STOPPED if stopped and (not chat_id or body.get("lab")) else ""})
+            return JSONResponse({"ok": True, "message": STOPPED})
+        if not chat_id:
+            return JSONResponse({"ok": False, "message": "Nothing stopped: no conversation was named. The lab's work "
+                                                         "stops with {lab: true}, everything with {}."})
+        return JSONResponse({"ok": stopped, "message": ""})
 
     async def safe_view(request: Request) -> Response:
         """POST: a person's Bring to safe (runtime.bring_to_safe): what runs stops, and every instrument goes to the
@@ -3837,9 +3899,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def queue(request: Request) -> Response:
         """GET: the scan queue (the portal's Sequence). POST {op, ...}: a person's change to it, answered with the
-        queue and a message (400 {error} when refused). start asks for the queue's approval as usual and returns once
-        it is answered. {op: fields, item} changes nothing: the item as written, as its mapping ({item, kind,
-        fields}), for the step row to show a step in its fields. The Sequence's own: rename {name}; skip {item} (a
+        queue and a message (400 {error} when refused). start asks for the queue's approval as usual: answered once
+        it is, or at once with 202 {later} while its card waits for a person (soon). {op: fields, item} changes
+        nothing: the item as written, as its mapping ({item, kind, fields}), for the step row to show a step in its
+        fields. The Sequence's own: rename {name}; skip {item} (a
         waiting item won't run, the running one ends and the queue goes on); duplicate {item}; params {item, params:
         {name: value | null}} for a script, or {item, wait: seconds} / {item, set: {instr.param: value | null}} for a
         step; ladder {items: [ids], key, values: [...]} (one copy of the items per value, appended)."""
@@ -3865,6 +3928,28 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             chat, never under the one whose call changes the lab meanwhile."""
             with runtime.attributed({}):
                 return fn(*args)
+
+        async def answered(msg: str, ok: bool) -> Response:
+            """The queue as it is after the change, with the change said to the chats it concerns."""
+            if not ok:
+                return error(400, msg)
+            after = await asyncio.to_thread(runtime.queue_view)
+            said = person_notices.queue_said(op, body, before, after, runtime.queue_started_by)
+            block_id = body.get("from_block") if op == "add" else None
+            if said and block_id:   # a block's button on Home: the chat that put it there hears it was taken
+                taken = next((b for b in await asyncio.to_thread(runtime.home_board.blocks) if b["id"] == block_id),
+                             None)
+                if taken is not None:
+                    where = said[0][len("You added "):].split(" ")[0]   # its number in the sequence, "#6"
+                    said = ("You added '%s' from Home to the sequence as %s." % (taken["title"], where),
+                            [taken.get("chat")], False)
+            if said:
+                await asyncio.to_thread(agent.notices.tell, said[0], said[1], "sequence", said[2])
+            return JSONResponse(dict(after, message=msg))
+
+        async def started() -> Response:
+            msg = await asyncio.to_thread(runtime.queue_start, by)
+            return await answered(msg, msg.startswith("queue started"))
         if op == "add":
             pos = body.get("position")
             msg = await asyncio.to_thread(persons, runtime.queue_add, str(body.get("text") or ""),
@@ -3883,9 +3968,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         elif op in ("move", "remove", "again", "clear"):
             msg = runtime.queue_change(op, item, body.get("position"), by)
             ok = not msg.startswith(("not changed", "unknown"))
-        elif op == "start":
-            msg = await asyncio.to_thread(runtime.queue_start, by)
-            ok = msg.startswith("queue started")
+        elif op == "start":   # its approval card may wait for a person for hours: never a request held open meanwhile
+            return await soon(started())
         elif op == "pause":   # {want}: the state the Sequence's Pause showed, "running" (Pause) or "pausing" (Pausing…,
             # whose second press takes the pause back): a queue no longer in it is left as it is, 409 saying why
             want = body.get("want")
@@ -3924,20 +4008,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             ok = not msg.startswith("not added")
         else:
             return error(400, "unknown queue operation %r" % op)
-        if not ok:
-            return error(400, msg)
-        after = await asyncio.to_thread(runtime.queue_view)
-        said = person_notices.queue_said(op, body, before, after, runtime.queue_started_by)
-        block_id = body.get("from_block") if op == "add" else None
-        if said and block_id:   # a block's button on Home: the chat that put it there hears its suggestion was taken
-            taken = next((b for b in await asyncio.to_thread(runtime.home_board.blocks) if b["id"] == block_id), None)
-            if taken is not None:
-                where = said[0][len("You added "):].split(" ")[0]   # its number in the sequence, "#6"
-                said = ("You added '%s' from Home to the sequence as %s." % (taken["title"], where),
-                        [taken.get("chat")], False)
-        if said:
-            await asyncio.to_thread(agent.notices.tell, said[0], said[1], "sequence", said[2])
-        return JSONResponse(dict(after, message=msg))
+        return await answered(msg, ok)
 
     ON_THIS_COMPUTER = "Your library and running a run again are on the Kelvin computer."
 
@@ -3946,6 +4017,24 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         one whose call changes the lab meanwhile."""
         with runtime.attributed({}):
             return fn(*args)
+
+    async def run_now(fn: Any, *args: Any, library: bool = False) -> Response:
+        """A person's Run from the Runs panel, the scan editor or the Sequence's functions: at the front of the queue
+        and started, its approval asked as the queue's. Answered with {queue, message} (and the library), or at once
+        with 202 {later} while that card waits for a person (soon)."""
+        async def run() -> Response:
+            try:
+                out = await asyncio.to_thread(as_person, fn, *args)
+                if library:
+                    out["library"] = await asyncio.to_thread(runtime.library_view)
+                return JSONResponse(out)
+            except KeyError as e:
+                return error(404, e.args[0] if e.args else "nothing like that in the library")
+            except ValueError as e:
+                return error(400, str(e))
+            except OSError as e:   # a run.h5 another program holds, a library that can't be kept: said, never a 500
+                return error(500, "Kelvin couldn't do that: %s" % (getattr(e, "strerror", None) or e))
+        return await soon(run())
 
     # the scan editor's checks, on threads of their own (a check never takes one of the server's shared threads,
     # which a Stop's work once waited for), and of an editor's checks still waiting, only its newest
@@ -3975,14 +4064,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """The person's library of scans and scripts (scanlibrary.py), for the Runs panel. GET: {scripts, scans}, the
         latest used first. POST, a person's change on this computer (no phone, no agent tool): {op: import, path}
         → {entry, check, library}; {op: rename, id, name} and {op: remove, id} → {library}; {op: run, id, params?,
-        args?, queue?, position?} → {queue, message}: at the front of the queue and started, pausing after it (it
-        returns once the queue's approval is answered), with queue: true at its end, or with position at that place
-        (1 = first), not started. The scan editor (scanedit.py): {op: parts, id?, item?} → {id, name, edited_from,
-        parts, lab, check}, a scan as its parts (a new one without id; item: a scan waiting in the queue, then also
-        {item, library}); {op: check, parts, editor?} → its check (points, time, problems, its plan's text), or
-        {superseded: true} when the same editor asked for a newer one meanwhile; {op: text, parts} → {text}: its
-        plan's text, nothing kept (Save puts it back into the queue item with /api/queue op edit); {op: save, parts,
-        from?} → {entry, new, library}, an entry of its own; {op: run, parts, from?, queue?} → {queue, message,
+        args?, queue?, position?} → {queue, message}: at the front of the queue and started, pausing after it
+        (answered once the queue's approval is, or at once with 202 {later} while its card waits: soon), with queue:
+        true at its end, or with position at that place (1 = first), not started. The scan editor (scanedit.py): {op:
+        parts, id?, item?} → {id, name, edited_from, parts, lab, check}, a scan as its parts (a new one without id;
+        item: a scan waiting in the queue, then also {item, library}); {op: check, parts, editor?} → its check
+        (points, time, problems, its plan's text), or {superseded: true} when the same editor asked for a newer one
+        meanwhile; {op: text, parts} → {text}: its plan's text, nothing kept (Save puts it back into the queue item
+        with /api/queue op edit); {op: save, parts, from?} → {entry, new, library}, an entry of its own; {op: run, parts, from?, queue?} → {queue, message,
         entry, library}: saved, then run as above. The Sequence's functions: {op: meta, id, name?, color?,
         note?} → {entry, library} (a colour is #rrggbb, "" for none); {op: files} → {folders, files: [{path, rel, name,
         kind, folder}], more, folder}, the scripts in the lab's scripts folders (folder: the first, null when none is
@@ -4010,15 +4099,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 await asyncio.to_thread(runtime.library_change, op, entry_id, body.get("name"), by)
                 out = {}
             elif op == "run" and body.get("parts") is not None:   # from the scan editor: kept, then run
-                out = await asyncio.to_thread(as_person, runtime.scan_run, body["parts"], base,
-                                              bool(body.get("queue")), by)
+                return await run_now(runtime.scan_run, body["parts"], base, bool(body.get("queue")), by,
+                                     library=True)
             elif op == "run":
                 at = body.get("position")   # the Runs panel's ⇒: after the queue item the person selected
                 if at is not None and (isinstance(at, bool) or not isinstance(at, int) or at < 1):
                     return error(400, "position is a place in the queue: 1 for the first")
-                return JSONResponse(await asyncio.to_thread(as_person, runtime.library_run, entry_id,
-                                                            body.get("params"), body.get("args"),
-                                                            bool(body.get("queue")), by, at))
+                return await run_now(runtime.library_run, entry_id, body.get("params"), body.get("args"),
+                                     bool(body.get("queue")), by, at)
             elif op == "parts":
                 return JSONResponse(await checked("", runtime.scan_parts, entry_id or None, body.get("item")))
             elif op == "check":
@@ -4209,11 +4297,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             item["action"] = str(body["action"])
         if isinstance(body.get("params"), dict) and body["params"]:
             item["params"] = body["params"]
-        try:
-            return JSONResponse(await asyncio.to_thread(as_person, runtime.queue_run_now, [json.dumps(item)],
-                                                        bool(body.get("queue")), person(request)))
-        except ValueError as e:
-            return error(400, str(e))
+        return await run_now(runtime.queue_run_now, [json.dumps(item)], bool(body.get("queue")), person(request))
 
     async def labview_scans(request: Request) -> Response:
         """POST {folder, vis: [the VIs' paths], instruments: [{address, name, card}]}: measurement VIs a person chose in
@@ -4338,16 +4422,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             except ValueError:
                 body = {}
             body = body if isinstance(body, dict) else {}
-            out = await asyncio.to_thread(as_person, runtime.run_again, run_id, bool(body.get("restore")),
-                                          str(body.get("version") or "then"), bool(body.get("queue")),
-                                          person(request))
+            return await run_now(runtime.run_again, run_id, bool(body.get("restore")),
+                                 str(body.get("version") or "then"), bool(body.get("queue")), person(request))
         except KeyError as e:
             return error(404, e.args[0] if e.args else "no such run")
         except ValueError as e:
             return error(400, str(e))
         except OSError as e:   # a run.h5 another program holds, or one that can't be read: said, never a bare 500
             return error(500, "Kelvin couldn't read run %s: %s" % (run_id, getattr(e, "strerror", None) or e))
-        return JSONResponse(out)
 
     routes = [
         Route("/", index),
@@ -4479,6 +4561,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/runs/stop", stop_run, methods=["POST"]),
         Route("/api/runs/live", runs_live, methods=["POST"]),
         Route("/api/queue", queue, methods=["GET", "POST"]),
+        Route("/api/later/{job}", later_view),
         Route("/api/home", home_view, methods=["GET", "POST"]),
         Route("/api/home/blocks/{block_id}", home_block, methods=["POST", "DELETE"]),
         Route("/api/library", library, methods=["GET", "POST"]),

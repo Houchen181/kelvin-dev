@@ -88,7 +88,7 @@ def test_a_waiting_request_rings_the_lab_and_each_switch_sits_in_as_its_icon_doe
     from labharness.web.app import STATIC
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     css = (STATIC / "app.css").read_text(encoding="utf-8")
-    start = js.index("async function pollState(")
+    start = js.index("async function readState(")   # one poll of the state (pollState: one at a time)
     poll = js[start:js.index("\n  }\n", start)]
     assert 'if (fresh) Kelvin.paneShow("labpanel");' in poll and "toggleLab(true)" not in poll and "fullShow(" not in poll
     bare = lambda s: re.sub(r"/\*.*?\*/", "", s, flags=re.S)

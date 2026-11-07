@@ -269,8 +269,10 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "still on after %s with nothing happening (left as they are): %s" % (
             e.get("idle"), ", ".join(e.get("still") or []))
     elif kind == "call_cancelled":
-        text = "the client cancelled %s%s%s" % (e.get("tool"), "; its work stopped" if e.get("stopped") else "",
-                                                "; declined what it asked for" if e.get("declined") else "")
+        text = "%s %s%s%s" % ("a person's Stop in a chat ended" if str(e.get("by") or "").startswith("a person")
+                              else "the client cancelled", e.get("tool"),
+                              "; its work stopped" if e.get("stopped") else "",
+                              "; declined what it asked for" if e.get("declined") else "")
     elif kind == "alarm":
         text = "ALARM: %s%s" % (e.get("text"), " -> " + "; ".join(e["actions"]) if e.get("actions") else "")
     elif kind == "alarm_cleared":
@@ -444,6 +446,7 @@ class ClientCall:
         self.thread: Optional[int] = None   # the worker thread doing it, once it has started
         self.waiting = False                # waiting for the lab, which another call or a run has
         self.cancelled = False
+        self.chat: Optional[str] = None     # the portal's chat that made it, if one did (a Stop there cancels it)
 
 
 # whose a piece of work is: the project and chat it is filed under, and the marks that keep it unshared (an
@@ -1865,6 +1868,7 @@ class LabRuntime:
     def client_call(self, call: ClientCall) -> Iterator[None]:
         """This thread works for an MCP client's call (agent/server.py), so a cancel reaches what it does."""
         call.thread = threading.get_ident()
+        call.chat = getattr(_VIEWER.get(), "chat", None)   # the server gives the thread the calling chat's viewer
         self._client.call = call
         try:
             yield
@@ -1874,7 +1878,8 @@ class LabRuntime:
     def cancel_call(self, call: ClientCall) -> None:
         """The client cancelled a call, or went away: Kelvin does nothing more for it. What it asked a person for is
         declined (and anything it would ask), the ramp, run or wait it has the lab for stops as at a person's Stop,
-        and a call still waiting for the lab is never run. Another call's work goes on."""
+        and a call still waiting for the lab is never run. Another call's work goes on. A portal chat's call is
+        cancelled by a person's Stop of that chat (web/agent.py), and the record says so."""
         call.cancelled = True
         decline = getattr(self.approver, "decline_from", None)
         declined = decline(call.thread, ClientCall.CANCELLED) if decline and call.thread is not None else 0
@@ -1882,8 +1887,8 @@ class LabRuntime:
         if working:
             self.gate.request_abort()
         if declined or working:
-            self.gate.log.write("call_cancelled", by="MCP client", tool=call.tool, declined=declined,
-                                stopped=working)
+            self.gate.log.write("call_cancelled", by="a person's Stop in a chat" if call.chat else "MCP client",
+                                tool=call.tool, declined=declined, stopped=working)
 
     def health(self, instruments: Optional[List[str]] = None) -> str:
         """health_check, instrument by instrument, beside whatever else Kelvin does: one that the work changing the

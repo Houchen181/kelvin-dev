@@ -7,9 +7,14 @@
     // the chats answering in this window, by chat id: {reply, from, steers (what the person wrote meanwhile, until
     // Kelvin reads it), title}; answering: every chat the portal says answers now (from any window, or Kelvin's own);
     // unread: answers that came while another chat was open; asking: chats with an approval waiting
-    live: new Map(), answering: new Set(), unread: new Set(), asking: new Set() };
+    // stopping: chats whose Stop was pressed, until they end; steered: what this window wrote to a chat answering
+    // elsewhere (another window, a phone, before a reload), until Kelvin reads it: [{text, el, seen}] by chat
+    live: new Map(), answering: new Set(), unread: new Set(), asking: new Set(), stopping: new Map(), steered: new Map() };
   Object.defineProperty(S, "streaming", { get: () => !!S.chatId && S.live.has(S.chatId) });   // this chat is answering
   const liveHere = () => S.live.get(S.chatId);
+  // the open chat answers now: in this window, or anywhere (another window, a phone, before a reload, Kelvin
+  // continuing it by itself). Its Stop shows either way, and what is written goes to Kelvin's next step
+  const answeringHere = () => !!S.chatId && (S.live.has(S.chatId) || S.answering.has(S.chatId));
   // the focus ring is the keyboard's: a press of the mouse or a finger marks <html> (k-pointer) until the next key, so
   // what it pressed, and what the page gives the focus after it, draws no ring (app.css); a key brings the rings back
   // before the focus moves. Shift, Ctrl, Alt or the Windows key, alone or held (Alt+Tab to another window and back), is
@@ -93,31 +98,66 @@
     try { if (value === undefined) return localStorage.getItem(key); localStorage.setItem(key, value); } catch (e) { return null; }
   }
 
+  // opts.timeout (ms): given up after that long, saying so (a poll or a Stop the server doesn't answer never holds
+  // the next one up). A person's action that waits for a person's answer (the queue's approval card) is answered at
+  // once with 202 {later}, and its own answer is fetched once it has one (answerLater): no request is held open for
+  // a person, as one took one of the browser's six connections to Kelvin for as long, and Stop and Approve queued
   async function api(path, opts = {}) {
-    const res = await fetch(path, {
-      method: opts.method || (opts.body ? "POST" : "GET"),
-      headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
-      signal: opts.signal,   // an AbortController's: a request no longer wanted is dropped
-    });
-    if (!res.ok) {
-      let msg = "HTTP " + res.status, data = null;
-      try { data = await res.json(); msg = data.error || msg; } catch (e) { /* not JSON */ }
-      if (res.status === 401 && data && data.signin) setTimeout(() => location.reload(), 300);   // signed out elsewhere
-      if (res.status === 403 && data && data.pin && opts.body && !opts.noPin) {   // the lab owner's PIN: ask, try again
-        const pin = await askPin(msg);
-        if (pin) return api(path, Object.assign({}, opts, { body: Object.assign({}, opts.body, { pin }) }));
+    let timer = 0, gaveUp = false;
+    if (opts.timeout) {   // its own controller, which the caller's (if any) also aborts
+      const stop = new AbortController();
+      if (opts.signal) opts.signal.addEventListener("abort", () => stop.abort(), { once: true });
+      timer = setTimeout(() => { gaveUp = true; stop.abort(); }, opts.timeout);
+      opts = Object.assign({}, opts, { signal: stop.signal, timeout: 0, given: opts.timeout });
+    }
+    try {
+      const res = await fetch(path, {
+        method: opts.method || (opts.body ? "POST" : "GET"),
+        headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+        signal: opts.signal,   // an AbortController's: a request no longer wanted is dropped
+      });
+      if (res.status === 202) { const first = await res.json(); if (first && first.later) return answerLater(first, opts); return first; }
+      if (!res.ok) {
+        let msg = "HTTP " + res.status, data = null;
+        try { data = await res.json(); msg = data.error || msg; } catch (e) { /* not JSON */ }
+        if (res.status === 401 && data && data.signin) setTimeout(() => location.reload(), 300);   // signed out elsewhere
+        if (res.status === 403 && data && data.pin && opts.body && !opts.noPin) {   // the lab owner's PIN: ask, try again
+          const pin = await askPin(msg);
+          if (pin) return api(path, Object.assign({}, opts, { body: Object.assign({}, opts.body, { pin }) }));
+        }
+        if (res.status === 403 && data && data.approver && opts.body) {   // a trainee's yes: an operator confirms it
+          const given = await askApprover(msg, data.approvers || [], data.pin_set);
+          if (given) return api(path, Object.assign({}, opts, { body: Object.assign({}, opts.body, given) }));
+        }
+        const err = new Error(msg);
+        err.data = data;
+        err.status = res.status;
+        throw err;
       }
-      if (res.status === 403 && data && data.approver && opts.body) {   // a trainee's yes: an operator confirms it
-        const given = await askApprover(msg, data.approvers || [], data.pin_set);
-        if (given) return api(path, Object.assign({}, opts, { body: Object.assign({}, opts.body, given) }));
-      }
-      const err = new Error(msg);
-      err.data = data;
-      err.status = res.status;
+      return await res.json();
+    } catch (e) {
+      if (!gaveUp || e.status) throw e;
+      const err = new Error("Kelvin didn't answer within " + Math.round(opts.given / 1000) + " s");
+      err.timedOut = true;
+      throw err;
+    } finally { clearTimeout(timer); }
+  }
+  async function answerLater(first, opts) {
+    if (opts.onLater) opts.onLater(first.message);
+    for (;;) {
+      await sleep(1500);
+      if (opts.signal && opts.signal.aborted) throw new Error("no longer wanted");
+      let r;
+      try { r = await api("/api/later/" + encodeURIComponent(first.later), { timeout: 15000 }); }
+      catch (e) { if (e.status === 404) throw e; continue; }   // 404: Kelvin restarted; else asked again
+      if (!r.done) continue;
+      if (r.status >= 200 && r.status < 300) return r.body;
+      const err = new Error((r.body && r.body.error) || "HTTP " + r.status);
+      err.data = r.body;
+      err.status = r.status;
       throw err;
     }
-    return res.json();
   }
   // the lab owner's PIN (accounts.py OwnerPin), for what widens Kelvin's reach: limits, the lab config, auto mode,
   // unlocking Hands on the sample. "" when the person cancels.
@@ -1189,7 +1229,7 @@
         const tab = [...RUNS.tabs.values()].find((t) => t.status === "running");
         if (!tab) return;
         let v = null;
-        try { v = (await api("/api/live?since=" + tab.rows.length)).live; } catch (e) { await sleep(2000); continue; }
+        try { v = (await api("/api/live?since=" + tab.rows.length, { timeout: POLL_MS })).live; } catch (e) { await sleep(2000); continue; }
         if (!v || v.run_id !== tab.runId) {  // we missed its end: read the record instead
           setTabStatus(tab, "finishing");
           await loadFinal(tab);
@@ -2635,7 +2675,7 @@
     tick();
     const timer = setInterval(tick, 1000);
     const card = {
-      el, decided: false,
+      el, decided: false, at: Date.now(),   // at: drawn then (a poll sent before may not list it yet: readState)
       close(text, good) {
         clearInterval(timer);
         if (!card.decided) { verdict.textContent = cardSay(text); verdict.className = "verdict " + (good ? "yes" : "no"); }
@@ -2924,6 +2964,7 @@
   }
   function renderChat(chat) {
     thread.replaceChildren();
+    S.shownChat = chat;
     let reply = null, recalled = null, skip = 0;
     const lastUser = chat.messages.map((m) => m.role).lastIndexOf("user");
     S.lastReply = null;
@@ -2969,6 +3010,7 @@
     });
     if (reply) reply.finish();
     offerRecheck(S.lastReply);   // an earlier second opinion on the latest answer: another model can re-check it
+    keepSteered(chat);   // what this window added while it answers elsewhere, until Kelvin reads it
     showEmpty(!chat.messages.length);
     requestAnimationFrame(toBottom);
   }
@@ -3886,16 +3928,60 @@
 
   // ------------------------------------------------------------------ sending
   function refreshComposer() {   // this chat answering: what you write adds to what Kelvin is doing; else it asks
-    $("input").placeholder = S.streaming ? "Add to what Kelvin is doing: it reads this after the step it is on" : askHint();
+    $("input").placeholder = S.chatId && S.stopping.has(S.chatId) ? "Stopping Kelvin…"
+      : answeringHere() ? "Add to what Kelvin is doing: it reads this after the step it is on" : askHint();
     updateSend();
   }
-  function updateSend() {   // while Kelvin works: Stop, or Send once something is typed (Kelvin reads it next step)
+  // while Kelvin works on this chat, here or elsewhere: Stop (Stopping… once pressed), or Send once something is typed
+  // (Kelvin reads it at its next step). After a reload, in a second window or after a lost stream there was no Stop
+  function updateSend() {
     const send = $("send");
     const typed = !!$("input").value.trim();
-    const stop = S.streaming && !typed;
+    const busy = answeringHere(), stop = busy && !typed, stopping = stop && S.stopping.has(S.chatId);
     send.classList.toggle("stop", stop);
-    send.setAttribute("aria-label", stop ? "Stop" : "Send");
-    send.disabled = !!S.sending || (!S.streaming && ((!typed && !ATT.items.length) || !$("model").value));
+    send.classList.toggle("stopping", stopping);
+    send.setAttribute("aria-label", stopping ? "Stopping…" : stop ? "Stop" : "Send");
+    send.title = stopping ? "Stopping…" : "";
+    send.disabled = !!S.sending || stopping || (!busy && ((!typed && !ATT.items.length) || !$("model").value));
+  }
+  // a chat's Stop: "Stopping…" at once; one that didn't reach Kelvin is said, and tried again (it failed in silence)
+  async function stopAnswer(chatId) {
+    if (!chatId || S.stopping.has(chatId)) return;
+    const pressed = Date.now();
+    S.stopping.set(chatId, pressed);
+    setTimeout(() => {   // never "Stopping…" for good
+      if (S.stopping.get(chatId) === pressed) { S.stopping.delete(chatId); refreshComposer(); }
+    }, 30000);
+    refreshComposer();
+    for (let tries = 1; ; tries++) {
+      try { await api("/api/stop", { body: { chat_id: chatId }, timeout: 8000 }); break; }
+      catch (e) {
+        if (tries >= 3) {
+          S.stopping.delete(chatId);
+          refreshComposer();
+          toast("Stop didn't reach Kelvin (" + e.message + "). Press Stop again, or type STOP.");
+          return;
+        }
+        toast("Stop didn't reach Kelvin (" + e.message + "): trying again…");
+        await sleep(1000);
+      }
+    }
+    pollState();   // the chat's end shows as soon as the portal says so
+  }
+  // what the person wrote that Kelvin didn't take: back in the message box, before anything typed since, and never
+  // sent by itself; a toast says why. In a chat not open now, a click on the toast opens it with the text back
+  function putBack(chatId, text, why, files) {
+    if (S.chatId !== chatId) {
+      toast(why + " Click to open “" + titleOf(chatId) + "” with it.", () =>
+        openChat(chatId).then((ok) => { if (ok) putBack(chatId, text, why, files); }));
+      return;
+    }
+    const now = $("input").value;
+    $("input").value = now.trim() ? text + "\n\n" + now : text;
+    if (files && files.length && !ATT.items.length) { ATT.items = files.slice(); renderAttachments(); }
+    autosize();
+    refreshComposer();
+    toast(why);
   }
   // ------------------------------------------------------------------ /name: start a skill or a recipe
   const SLASH = { items: null, shown: [], at: 0, for: null };
@@ -3942,18 +4028,64 @@
     e.preventDefault();
     return true;
   }
-  async function steerMessage(text) {   // written while Kelvin works: it reads it at its next step
+  // written while Kelvin works: it reads it at its next step. While the chat answers elsewhere (another window, a
+  // phone, before a reload) this window has no answer to put it in: it waits at the thread's end until Kelvin reads
+  // it, and one Kelvin's answer ended without reading comes back into the message box (endedElsewhere)
+  async function steerMessage(text) {
     const live = liveHere(), chatId = S.chatId;
-    if (!text || !live) return;
+    if (!text || !chatId) return;
     $("input").value = ""; autosize(); updateSend();
     const el = userBubble(text, []);
     el.classList.add("pending");
     el.title = "Kelvin reads this after the step it is on";
-    live.box.append(el);
+    const waiting = (S.steered.get(chatId) || []).filter((s) => s.text === text).length;   // the same words again
+    const one = { text, el, seen: steersIn(S.shownChat, chatId, text) + waiting };
+    if (live) { live.box.append(el); live.steers.push(one); }
+    else {
+      thread.append(el);
+      S.steered.set(chatId, (S.steered.get(chatId) || []).concat([one]));
+    }
     toBottom();
-    const one = { text, el };
-    live.steers.push(one);
-    try { await api("/api/chats/" + chatId + "/steer", { body: { text } }); } catch (e) { one.late = true; }   // sent after
+    try { await api("/api/chats/" + chatId + "/steer", { body: { text } }); }
+    catch (e) {
+      if (live) { one.late = true; return; }   // sent after its answer ends, as the next message (finishLive)
+      S.steered.set(chatId, (S.steered.get(chatId) || []).filter((s) => s !== one));
+      el.remove();
+      if (e.status === 409) pollState();   // Kelvin had finished: the Stop goes as the portal says so
+      putBack(chatId, text, e.status === 409 ? "Kelvin had finished answering: press Send to send it as a new message."
+        : "Not sent (" + e.message + "): it's back in the message box.");
+    }
+  }
+  // how many times the chat as last drawn holds this text as something the person added while Kelvin worked
+  function steersIn(chat, chatId, text) {
+    return chat && chat.id === chatId ? chat.messages.filter((m) => m.role === "user" && m.steer && m.text === text).length : 0;
+  }
+  // the chat drawn again (it changed while it answered elsewhere): what this window added and Kelvin has read is in
+  // it now; the rest wait at its end again
+  function keepSteered(chat) {
+    const mine = S.steered.get(chat.id);
+    if (!mine || !mine.length) return;
+    const left = mine.filter((s) => {
+      if (steersIn(chat, chat.id, s.text) > s.seen) { s.el.remove(); return false; }   // read: the chat shows it
+      thread.append(s.el);
+      return true;
+    });
+    if (left.length) S.steered.set(chat.id, left); else S.steered.delete(chat.id);
+  }
+  // a chat that answered elsewhere ended: what this window added and Kelvin didn't read comes back into the message
+  // box (the portal dropped it), never sent by itself
+  async function endedElsewhere(chatId) {
+    if (S.stopping.delete(chatId)) refreshComposer();
+    const mine = S.steered.get(chatId);
+    if (!mine || !mine.length) return;
+    S.steered.delete(chatId);
+    let chat = null;
+    try { chat = await api("/api/chats/" + chatId); } catch (e) { /* none read, then */ }
+    const unread = mine.filter((s) => !(chat && steersIn(chat, chatId, s.text) > s.seen));
+    for (const s of mine) s.el.remove();
+    if (chat && S.chatId === chatId && !S.streaming) renderChat(chat);
+    if (unread.length) putBack(chatId, unread.map((s) => s.text).join("\n\n"),
+      "Kelvin's answer ended before it read what you added: it's back in the message box.");
   }
   function steered(live, texts, model) {   // Kelvin read them: they stand in the chat, and its answer goes on below
     live.reply.finish();
@@ -4036,10 +4168,10 @@
 
   // a message that only says stop (web/agent.py typed_stop): Kelvin's answer and the lab's work stop now
   const TYPED_STOP = /^\s*\/?(?:stop|abort|halt)(?:\s+(?:it|now|everything|all|stop|abort))*\s*[.!]*\s*$/i;
-  async function hardStop() {
+  async function hardStop() {   // with no chat open: the Stop for everything ({}), never a chat_id that names none
     $("input").value = ""; autosize(); updateSend();
-    try { const r = await api("/api/stop", { body: { chat_id: S.chatId, lab: true } }); toast(r.message || "Stopped."); }
-    catch (e) { toast(e.message); }
+    try { const r = await api("/api/stop", { body: S.chatId ? { chat_id: S.chatId, lab: true } : {}, timeout: 10000 }); toast(r.message || "Stopped."); }
+    catch (e) { toast("Stop didn't reach Kelvin (" + e.message + "): type STOP again."); }
     pollState();
   }
   // a message on its way: the input empties at once, and S.sending holds off another Enter until its chat is made
@@ -4073,7 +4205,7 @@
   async function sendMessage(text) {
     text = text.trim();
     if (TYPED_STOP.test(text)) return hardStop();
-    if (S.streaming) return steerMessage(text);   // attachments wait for the next message
+    if (answeringHere()) return steerMessage(text);   // here or elsewhere; attachments wait for the next message
     if (S.sending) return;   // the message before is still on its way
     if (!text && ATT.items.length) text = ATT.items.length > 1 ? "Look at the attached files." : "Look at the attached file.";
     if (!text) return;
@@ -4081,20 +4213,24 @@
     if (!model) { openSettings(); return; }
     const extra = compareOn() ? S.compare.filter((k) => k !== model) : [];   // Compare, when Settings has it on
     if (extra.length) return sendCompare(text, [model, ...extra]);
+    const files = ATT.items.slice();   // given back with the text if the message is refused
     const attachments = await startSend(model);
     if (attachments === null) return;
     $("input").placeholder = askHint();
     showEmpty(false);
     for (const el of document.querySelectorAll(".msg-actions")) el.remove();   // the answer before is no longer the latest
-    thread.append(userBubble(text, attachments));
+    const bubble = userBubble(text, attachments);
+    thread.append(bubble);
     const chatId = S.chatId;
-    const live = { reply: new Reply(model), box: h("div", { class: "turn-live" }), from: null, steers: [] };
+    // ended: how its answer ended (turn_end's reason); none when the stream was lost
+    const live = { reply: new Reply(model), box: h("div", { class: "turn-live" }), from: null, steers: [], ended: null };
     live.box.append(live.reply.el);   // this answer's own place: it goes on there while you are in another chat
     thread.append(live.box);
     S.live.set(chatId, live);
     toBottom();
     refreshComposer();
     renderChats();
+    let reader = null, refused = null;
     try {
       const res = await fetch("/api/chats/" + chatId + "/turn", {
         method: "POST",
@@ -4104,10 +4240,10 @@
       if (!res.ok) {
         let msg = "HTTP " + res.status;
         try { msg = (await res.json()).error || msg; } catch (e) { /* not JSON */ }
-        live.reply.error(msg);
+        refused = msg;
         return;
       }
-      const reader = res.body.getReader();
+      reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
       for (;;) {
@@ -4121,20 +4257,34 @@
           if (!line.trim()) continue;
           const ev = JSON.parse(line);
           if (ev.type === "turn_start" && Number.isInteger(ev.from)) live.from = ev.from;
+          if (ev.type === "turn_end") live.ended = ev.reason || "end";
           if (ev.type === "steered") live.reply = steered(live, ev.texts || [], model);
           else handle(live.reply, ev, chatId);
         }
       }
     } catch (e) {
+      if (reader) reader.cancel().catch(() => {});   // the connection is let go of, never left half read
       live.reply.error("Lost the connection to the portal (" + e.message + "). The lab keeps its own log.");
     } finally {
-      live.reply.finish();
-      finishLive(chatId, live);
+      if (refused === null) {
+        live.reply.finish();
+        finishLive(chatId, live);
+      } else {   // not sent (Kelvin answers this chat elsewhere, a model refused): the message back in the box
+        S.live.delete(chatId);
+        bubble.remove();
+        live.box.remove();
+        refreshComposer();
+        renderChats();
+        pollState();   // a chat answering elsewhere shows its Stop as the portal says so
+        putBack(chatId, text, "Not sent: " + refused, files);
+      }
     }
   }
   function finishLive(chatId, live) {   // a chat's answer ended: here, or in a chat you left (then it says so)
     S.live.delete(chatId);
+    S.answering.delete(chatId);   // ended: what follows is a new message, before the next poll says so too
     S.asking.delete(chatId);
+    S.stopping.delete(chatId);
     const here = S.chatId === chatId;
     if (!here) {
       S.unread.add(chatId);
@@ -4143,28 +4293,39 @@
     refreshComposer();
     refreshChats();
     pollState();
-    const left = live.steers.splice(0);   // written too late for this answer: the next message
+    const left = live.steers.splice(0);   // written too late for this answer
     for (const s of left) s.el.remove();
     if (!left.length) return;
-    if (here) sendMessage(left.map((s) => s.text).join("\n\n"));
-    else toast("What you added in “" + titleOf(chatId) + "” came after its answer ended: send it there again.");
+    const text = left.map((s) => s.text).join("\n\n");
+    // stopped by a person, failed, or the page lost the answer: never sent by itself (a Stop then sent it as a new
+    // message, and Kelvin started again, and could drive); otherwise it is the next message
+    const why = live.ended === "stopped" ? "you stopped Kelvin" : live.ended === "error" ? "Kelvin's answer ended in an error"
+      : !live.ended ? "the connection to Kelvin's answer was lost" : "";
+    if (why) putBack(chatId, text, "Not sent: " + why + ". What you added is back in the message box.");
+    else if (here) sendMessage(text);
+    else putBack(chatId, text, "What you added in “" + titleOf(chatId) + "” came after its answer ended.");
   }
 
   // ------------------------------------------------------------------ several models at once
-  async function readEvents(res, onEvent) {
+  async function readEvents(res, onEvent) {   // a stream that fails is let go of, never left half read
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
-        if (line.trim()) onEvent(JSON.parse(line));
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (line.trim()) onEvent(JSON.parse(line));
+        }
       }
+    } catch (e) {
+      reader.cancel().catch(() => {});
+      throw e;
     }
   }
   class CompareView {
@@ -4202,21 +4363,24 @@
     } catch (e) { toast(e.message); }
   }
   async function sendCompare(text, models) {
+    const files = ATT.items.slice();   // given back with the text if the message is refused
     const attachments = await startSend(models[0]);
     if (attachments === null) return;
     $("input").placeholder = askHint();
     showEmpty(false);
     for (const el of document.querySelectorAll(".msg-actions")) el.remove();
-    thread.append(userBubble(text, attachments));
+    const bubble = userBubble(text, attachments);
+    thread.append(bubble);
     const view = new CompareView(models);
     const chatId = S.chatId;
-    const live = { reply: view.lanes[0].reply, box: h("div", { class: "turn-live" }), from: null, steers: [] };
+    const live = { reply: view.lanes[0].reply, box: h("div", { class: "turn-live" }), from: null, steers: [], ended: null };
     live.box.append(view.el);
     thread.append(live.box);
     S.live.set(chatId, live);
     toBottom();
     refreshComposer();
     renderChats();
+    let refused = null;
     try {
       const res = await fetch("/api/chats/" + chatId + "/compare", {
         method: "POST",
@@ -4226,7 +4390,7 @@
       if (!res.ok) {
         let msg = "HTTP " + res.status;
         try { msg = (await res.json()).error || msg; } catch (e) { /* not JSON */ }
-        view.lanes[0].reply.error(msg);
+        refused = msg;
         return;
       }
       await readEvents(res, (ev) => {
@@ -4243,14 +4407,25 @@
         }
         else if (ev.type === "memory") view.el.before(recallBox(ev.notes));
         else if (ev.type === "compare_end") { view.setChosen(ev.chosen, true); if (here) S.lastReply = view.lanes[ev.chosen].reply; }
+        else if (ev.type === "turn_end") live.ended = ev.reason || "end";
         else if (ev.type === "error") view.lanes[0].reply.error(ev.message);
         if (stick) toBottom();
       });
     } catch (e) {
       view.lanes[0].reply.error("Lost the connection to the portal (" + e.message + ").");
     } finally {
-      for (const l of view.lanes) l.reply.finish();
-      finishLive(chatId, live);   // models being compared read nothing meanwhile: what you added is the next message
+      if (refused === null) {
+        for (const l of view.lanes) l.reply.finish();
+        finishLive(chatId, live);   // models being compared read nothing meanwhile: what you added is the next message
+      } else {   // not sent: the message back in the box, as for one model (sendMessage)
+        S.live.delete(chatId);
+        bubble.remove();
+        live.box.remove();
+        refreshComposer();
+        renderChats();
+        pollState();
+        putBack(chatId, text, "Not sent: " + refused, files);
+      }
     }
   }
   // Compare stands under the message box only while Settings → Models has Compare models on (off by default). Off, a
@@ -4664,9 +4839,10 @@
           toast("Kelvin asks for your approval in “" + titleOf(chatId) + "”", () => openChat(chatId));
         }
         break;
-      case "approval_closed": {
+      case "approval_closed": {   // answer: how it ended, wherever it was answered (a phone, a Stop, no answer in time)
         const card = S.approvals.get(ev.id);
-        if (card) card.close(card.choice === undefined ? "Closed" : card.choice ? "Approved" : "Declined", !!card.choice);
+        const yes = ev.answer ? ev.answer === "approved" : !!(card && card.choice);
+        if (card) card.close(ev.answer || card.choice !== undefined ? (yes ? "Approved" : "Declined") : "Closed", yes);
         if (chatId !== undefined && S.asking.delete(chatId)) renderChats();
         break;
       }
@@ -4967,7 +5143,13 @@
   async function wakeState(s) {
     const answering = s.answering || (s.active ? [s.active] : []), woke = s.woke || {};
     const ids = new Set(answering.map((t) => t.chat_id));   // the chats answering now, from any window: marked
-    if (ids.size !== S.answering.size || [...ids].some((id) => !S.answering.has(id))) { S.answering = ids; renderChats(); }
+    if (ids.size !== S.answering.size || [...ids].some((id) => !S.answering.has(id))) {
+      const ended = [...S.answering].filter((id) => !ids.has(id));
+      S.answering = ids;
+      renderChats();
+      refreshComposer();   // the open chat's Stop shows while it answers anywhere
+      for (const id of ended) endedElsewhere(id);
+    }
     const here = !!S.chatId && !S.streaming;
     const running = answering.some((t) => t.wake && t.chat_id === S.chatId);
     const mine = (s.wakes || []).find((w) => w.chat_id === S.chatId);
@@ -4992,12 +5174,26 @@
       renderChat(chat);
     }
   }
-  async function pollState() {
+  // the state, one poll at a time: one asked for while another is under way follows it (and sees what its asker just
+  // changed), and one the server doesn't answer within POLL_MS is given up. Polls piled up behind a slow one, none
+  // ever given up, and with a chat's answer streaming they could take the browser's six connections to Kelvin: a Stop
+  // or an Approve then waited, in silence
+  const POLL = { now: null, next: null };
+  const POLL_MS = 15000;
+  function pollState() {
+    if (!POLL.now) {
+      POLL.now = readState().catch((e) => console.error(e)).finally(() => { POLL.now = null; });
+      return POLL.now;
+    }
+    if (!POLL.next) POLL.next = POLL.now.then(() => { POLL.next = null; return pollState(); });
+    return POLL.next;
+  }
+  async function readState() {
     let s;
     const sent = Date.now();
     const opened = [...FRESH];   // rows just opened: read at once
     FRESH.clear();
-    try { s = opened.length ? await api("/api/state?fresh=" + encodeURIComponent(opened.join(","))) : await api("/api/state"); }
+    try { s = await api("/api/state" + (opened.length ? "?fresh=" + encodeURIComponent(opened.join(",")) : ""), { timeout: POLL_MS }); }
     catch (e) { opened.forEach((n) => FRESH.add(n)); return; }
     $("agent-state").textContent = s.busy ? String(s.busy).charAt(0).toUpperCase() + String(s.busy).slice(1) : "Idle";
     $("agent-state").classList.toggle("busy", !!s.busy);
@@ -5024,6 +5220,15 @@
     // requests no conversation shows (a queue started here, another agent's run): asked in the Lab panel, and kept
     // there until they are answered or closed, not redrawn away on the next poll
     const open = new Set(s.pending.map((p) => p.id));
+    // a card whose request is no longer open (answered on a phone or in another window, declined, timed out) closes
+    // here too, with its answer: a chat's card kept live buttons, and the title "Approval needed", until its call
+    // ended (an hour's run). One drawn after this poll was sent may not be listed yet: the next poll looks again
+    const answered = new Map((s.history || []).filter((x) => x.id).map((x) => [x.id, x]));
+    for (const [id, card] of [...S.approvals]) {
+      if (open.has(id) || card.decided || card.at > sent) continue;
+      const was = answered.get(id);
+      card.close(was ? (was.answer === "approved" ? "Approved" : "Declined") : "Closed", !!was && was.answer === "approved");
+    }
     let fresh = 0;
     for (const p of s.pending) {
       if (PANEL.loose.has(p.id) || S.approvals.has(p.id) || TERM.asked.has(p.id)) continue;
@@ -8135,7 +8340,8 @@
   // Type to Kelvin in text, or switch to an instrument and send it its own commands (SCPI...). They go through the
   // same safety gate as Kelvin's: limits, interlocks and blocked commands apply, and a drive change waits for an
   // approval, answered here with y/n. The server logs them as the person's, never as Kelvin's.
-  const TERM = { open: false, target: null, chatId: null, history: [], hi: 0, busy: false, ask: null, askAt: 0,
+  // busy: what the terminal is doing ("chat": Kelvin's answer; "call": a command to calling, an instrument)
+  const TERM = { open: false, target: null, chatId: null, history: [], hi: 0, busy: false, calling: null, ask: null, askAt: 0,
                  asked: new Set(), reply: null, progress: new Map() };
   const TERM_HELP = [
     "Type to Kelvin, or switch to an instrument and type its own commands (*IDN?, SENS?, :SOUR:VOLT 1 ...).",
@@ -8262,9 +8468,21 @@
     } else if (e.key === "Escape" || (e.ctrlKey && (e.key === "c" || e.key === "C") &&
                input.selectionStart === input.selectionEnd && !window.getSelection().toString())) {
       if (e.key !== "Escape") e.preventDefault();
-      if (TERM.busy && !TERM.ask) { api("/api/stop", { body: { chat_id: TERM.chatId } }).catch(() => {}); termLine("^C stopping Kelvin's answer", "dim"); }
+      if (TERM.busy && !TERM.ask) termInterrupt();
       else if (e.key !== "Escape") { termLine(termPrompt() + " " + input.value + "^C", "cmd"); input.value = ""; }
     }
+  }
+  // Esc or Ctrl+C while the terminal works: its own answer stops. An instrument's command can't be cut off here (it
+  // waits for the instrument, or for the lab): said, with /stop for the lab's work. Never anything else: with no
+  // conversation yet it sent a chat_id of null, which stopped every chat, another chat's run and the queue
+  function termInterrupt() {
+    if (TERM.busy === "chat" && TERM.chatId) {
+      termLine("^C stopping Kelvin's answer", "dim");
+      api("/api/stop", { body: { chat_id: TERM.chatId }, timeout: 8000 })
+        .catch((e) => termLine("the stop didn't reach Kelvin (" + e.message + "): press Esc again, or /stop", "err"));
+    } else if (TERM.busy === "chat") termLine("^C Kelvin's answer hasn't started yet: press Esc again in a moment", "dim");
+    else termLine("^C still waiting for " + (TERM.calling || "the instrument") + ": a command to an instrument can't be " +
+      "cut off here. /stop stops the lab's work (any ramp or run, and the queue)", "dim");
   }
   function termComplete() {
     const input = $("term-input");
@@ -8365,9 +8583,11 @@
         return termCall({ instrument: n, op: "set", arg: p, value: /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(v) ? Number(v) : v });
       }
       case "/new": TERM.chatId = null; termLine("your next message starts a new conversation with Kelvin", "dim"); return;
-      case "/stop":
-        try { const r = await api("/api/stop", { body: { chat_id: TERM.chatId, lab: true } }); termLine(r.message || "stopped", "dim"); }
-        catch (e) { termLine(e.message, "err"); }
+      case "/stop":   // the lab's work, and the terminal's own answer: never a chat_id that names none
+        try {
+          const r = await api("/api/stop", { body: TERM.chatId ? { chat_id: TERM.chatId, lab: true } : { lab: true }, timeout: 10000 });
+          termLine(r.message || "stopped", "dim");
+        } catch (e) { termLine("the stop didn't reach Kelvin (" + e.message + "): /stop again", "err"); }
         return;
       default:
         if (instNames().includes(cmd.slice(1))) return termUse(cmd.slice(1));
@@ -8378,7 +8598,8 @@
   }
 
   async function termCall(body) {
-    TERM.busy = true;
+    TERM.busy = "call";   // what Esc meets (termInterrupt): a command to an instrument
+    TERM.calling = body.instrument;
     const wait = termLine("…", "dim");
     const fast = setInterval(pollState, 700);   // an approval this command needs is asked here at once
     try {
@@ -8391,6 +8612,7 @@
     } finally {
       clearInterval(fast);
       TERM.busy = false;
+      TERM.calling = null;
       termEndAsk();
       pollState();
     }
@@ -8398,7 +8620,7 @@
   async function termChat(text) {
     const model = $("model").value;
     if (!model) { termLine("choose a model first (add a key in Settings)", "warn"); return; }
-    TERM.busy = true;
+    TERM.busy = "chat";   // what Esc meets (termInterrupt): Kelvin's answer
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
         if (!TERM.chatId) TERM.chatId = (await api("/api/chats", { body: { model } })).id;
@@ -9641,8 +9863,16 @@
     $("toggle-analysis").setAttribute("aria-pressed", String(ANA.open));
     $("toggle-analysis").classList.toggle("on", ANA.open);
     fitLayout();
-    if (!ANA.open) return;   // an analysis at work goes on: it shows when the pane is back
+    if (!ANA.open) {   // an analysis at work stops with it: its stream held a connection to Kelvin while nobody looked
+      if (ANA.ctl) {
+        ANA.ctl.abort();
+        ANA.ctl = null;
+        if (ANA.job && ANA.job.working) Object.assign(ANA.job, { working: false, cut: true });
+      }
+      return;
+    }
     if (!ANA.run || ANA.follow) startAnalysis();   // the newest run
+    else if (ANA.job && ANA.job.cut && ANA.job.run === ANA.run) analyzeRun(ANA.run);   // cut short as it closed: anew
     else loadAnalysisRuns();   // runs measured since it was last open
   }
   async function loadAnalysisRuns() {
@@ -10173,7 +10403,7 @@
     for (const id of ["history-subject", "history-who", "history-safety"]) $(id).addEventListener("change", loadHistory);
     $("composer").addEventListener("submit", (e) => {
       e.preventDefault();
-      if (S.streaming && !$("input").value.trim()) api("/api/stop", { body: { chat_id: S.chatId } }).catch(() => {});
+      if (answeringHere() && !$("input").value.trim()) stopAnswer(S.chatId);   // its Stop, wherever it answers
       else sendMessage($("input").value);
     });
     $("input").addEventListener("input", () => { autosize(); updateSend(); slashMenu(); });
@@ -10266,7 +10496,7 @@
       $("wake-bar").hidden = true;
       toast("Kelvin won't continue this chat on its own.");
     });
-    $("wake-stop").addEventListener("click", () => api("/api/stop", { body: { chat_id: S.chatId } }).catch(() => {}));
+    $("wake-stop").addEventListener("click", () => stopAnswer(S.chatId));
     $("attach-btn").addEventListener("click", () => $("attach-input").click());
     $("attach-input").addEventListener("change", (e) => { addFiles([...e.target.files]); e.target.value = ""; });
     $("input").addEventListener("paste", (e) => {   // a screenshot pasted into the message
