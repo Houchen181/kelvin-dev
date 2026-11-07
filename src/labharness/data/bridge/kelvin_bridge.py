@@ -25,6 +25,10 @@ Requests (one JSON object per line):
     {"id": 4, "op": "describe", "path": "...", "module": "atto_device"}   (its classes and functions; nothing called)
     {"id": 5, "op": "quit"}
 Replies: {"id": 1, "ok": true, "value": ...} or {"id": 1, "ok": false, "error": "..."}.
+ping may carry orphan_s, and load close ([[name, args], ...], the card's close calls): when Kelvin's end of the pipe
+closes without a quit (Kelvin crashed, or was ended), the helper makes those calls, so the instrument is let go of,
+and ends; orphan_s seconds after, it ends anyway, so a call into the maker's library that never returns can't keep
+the helper, and the device it holds, running after Kelvin (review of 0.3.45, 4.2).
 A call follows sub-objects only when the maker's package made them (attocube's device.sample), never into Python's
 own modules or objects, and calls only the maker's own functions: its package's, or its DLL's, its assembly's types',
 or its COM object's. Arguments to .NET methods are converted to their parameters' types (a position as a Decimal).
@@ -34,10 +38,14 @@ import importlib
 import importlib.util
 import json
 import os
+import queue
 import re
 import struct
 import sys
+import threading
 import types
+
+ORPHAN_S = 15.0   # Kelvin gone without a quit: the card's close calls, then the helper ends; past this, it ends anyway
 
 DENY_MODULES = {
     "os", "sys", "subprocess", "shutil", "builtins", "importlib", "runpy", "ctypes", "socket", "pathlib", "io",
@@ -562,22 +570,57 @@ def _number(text, kind):
     return int(float(text))
 
 
+def _listen(inp, requests, orphan):
+    """Kelvin's requests as they come, read on a thread of their own, so the pipe's end is seen even while a call into
+    the maker's library hangs: then None, and the helper's last orphan[0] seconds begin."""
+    try:
+        for line in inp:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line.decode("utf-8") if isinstance(line, bytes) else line)
+            except ValueError:
+                continue
+            if isinstance(req, dict):
+                requests.put(req)
+    except (OSError, ValueError):
+        pass
+    requests.put(None)
+    timer = threading.Timer(orphan[0], os._exit, args=(3,))
+    timer.daemon = True
+    timer.start()
+
+
 def serve(inp, out):
     lib = Library()
-    for line in inp:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            req = json.loads(line.decode("utf-8") if isinstance(line, bytes) else line)
-        except ValueError:
-            continue
+    requests = queue.Queue()
+    orphan = [ORPHAN_S]
+    closing = []   # the card's close calls (load's close): made when Kelvin goes away without a quit
+    threading.Thread(target=_listen, args=(inp, requests, orphan), daemon=True).start()
+    def let_go():   # Kelvin is gone: the instrument let go of, as Kelvin's own closing would have
+        for name, args in closing:
+            try:
+                lib.call(name, list(args))
+            except Exception:
+                pass
+
+    while True:
+        req = requests.get()
+        if req is None:
+            let_go()
+            return
         rid, op = req.get("id"), req.get("op")
         try:
             if op == "ping":
+                wait = req.get("orphan_s")
+                if isinstance(wait, (int, float)) and not isinstance(wait, bool) and 0 < wait <= 600:
+                    orphan[0] = float(wait)
                 value = {"python": sys.version.split()[0], "bits": struct.calcsize("P") * 8}
             elif op == "load":
                 value = lib.load(req)
+                closing[:] = [(str(c[0]), list(c[1])) for c in req.get("close") or []
+                              if isinstance(c, list) and len(c) == 2 and isinstance(c[1], list)]
             elif op == "call":
                 value = lib.call(req.get("name"), list(req.get("args") or []))
             elif op == "read":
@@ -599,8 +642,12 @@ def serve(inp, out):
             text = json.dumps(reply)
         except (TypeError, ValueError):
             text = json.dumps({"id": rid, "ok": True, "value": str(reply.get("value"))})
-        out.write((text + "\n").encode("utf-8"))
-        out.flush()
+        try:
+            out.write((text + "\n").encode("utf-8"))
+            out.flush()
+        except (OSError, ValueError):   # Kelvin's end of the pipe is gone
+            let_go()
+            return
 
 
 def main():

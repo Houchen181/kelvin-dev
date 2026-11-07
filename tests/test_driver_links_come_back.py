@@ -432,6 +432,123 @@ def test_a_web_api_that_refuses_or_doesnt_answer_is_lost():
     assert isinstance(e, NoAnswer)
 
 
+# ------------------------------------------------------------------ lib://: a maker's library in Kelvin's helper
+
+FRAGILE = '''
+"""A maker's library that can crash its process or hang in a call, as a DLL can."""
+import os
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+def Connect(port):
+    pass
+
+def Disconnect():
+    with open(os.path.join(HERE, "let-go.txt"), "a") as f:
+        f.write("Disconnect\\n")
+
+def getSampleTemperature():
+    return 4.2
+
+def getCrash():
+    os._exit(1)
+
+def getHang():
+    time.sleep(60)
+    return 0
+'''
+
+FRAGILE_CARD = """
+card: 1
+id: acme/fragile
+model: ACME cryostat (a fragile library)
+vendor: ACME
+kind: cryostat
+status: lab-verified
+connection: { timeout_ms: 1500 }
+library:
+  module: fragile
+  open: ["Connect {address}"]
+  close: ["Disconnect"]
+parameters:
+  T: { label: Temperature, kind: measure, unit: K, get: "GET getSampleTemperature" }
+  crash: { label: Crash, kind: measure, get: "GET getCrash" }
+  hang: { label: Hang, kind: measure, get: "GET getHang" }
+"""
+
+
+@pytest.fixture
+def fragile(tmp_path):
+    folder = tmp_path / "vendor"
+    folder.mkdir()
+    (folder / "fragile.py").write_text(FRAGILE, encoding="utf-8")
+    (tmp_path / "cards").mkdir()
+    (tmp_path / "cards" / "fragile.yaml").write_text(FRAGILE_CARD, encoding="utf-8")
+    return folder
+
+
+def fragile_lab(tmp_path, folder):
+    from labharness.homelab import lab_registry
+    return build_lab("""
+lab: Cryostat
+instruments:
+  cryo: { card: acme/fragile, address: "lib://COM9?path=%s" }
+""" % folder.as_posix(), registry=lab_registry(tmp_path))
+
+
+def test_a_lib_instrument_whose_helper_crashed_gets_a_fresh_one(fragile, tmp_path):
+    lab = fragile_lab(tmp_path, fragile)
+    try:
+        first = lab.instruments["cryo"].backend
+        assert lab.read("cryo", "T") == pytest.approx(4.2)
+        e = raised(lambda: lab.read("cryo", "crash"))                         # the maker's library crashes it
+        assert isinstance(e, InstrumentLost) and lost_kind(e.__cause__) == "gone"
+        assert "helper process has stopped" in first.gone and first.quiet_close
+        assert isinstance(raised(lambda: lab.read("cryo", "T")), InstrumentLost)   # refused at once, still lost
+        lab.switch("cryo", False)                                             # let go of, not set aside to come back
+        assert "cryo" not in lab._parked
+        lab.switch("cryo", True)
+        assert lab.read("cryo", "T") == pytest.approx(4.2)                    # a fresh helper
+        assert lab.instruments["cryo"].backend is not first
+    finally:
+        lab.close()
+
+
+def test_a_lib_call_that_never_returns_ends_its_helper_and_reconnecting_starts_a_fresh_one(fragile, tmp_path):
+    lab = fragile_lab(tmp_path, fragile)
+    try:
+        first = lab.instruments["cryo"].backend
+        e = raised(lambda: lab.read("cryo", "hang"))
+        assert isinstance(e, InstrumentLost) and isinstance(e.__cause__, NoAnswer)
+        assert first.gone and first.bridge.proc.wait(10) is not None          # Kelvin ended its helper
+        assert isinstance(raised(lambda: lab.read("cryo", "T")), InstrumentLost)
+        assert "connected again" in lab.reconnect("cryo")                     # a fresh helper, by reconnecting
+        assert lab.read("cryo", "T") == pytest.approx(4.2)
+    finally:
+        lab.close()
+
+
+def test_a_helper_whose_kelvin_went_away_lets_the_device_go_and_ends(fragile):
+    import time
+    from labharness.library import Bridge, bridge_command
+    b = Bridge("t", bridge_command())
+    b.request("ping", 30, orphan_s=1.0)
+    b.request("load", 60, path=str(fragile), module="fragile", close=[["Disconnect", []]])
+    b.proc.stdin.close()                                                      # Kelvin crashed, or was ended
+    assert b.proc.wait(10) is not None
+    assert (fragile / "let-go.txt").read_text(encoding="utf-8") == "Disconnect\n"   # its close calls, made itself
+    b = Bridge("t", bridge_command())
+    b.request("ping", 30, orphan_s=1.0)
+    b.request("load", 60, path=str(fragile), module="fragile")
+    b.proc.stdin.write(b'{"id": 9, "op": "call", "name": "getHang", "args": []}\n')   # a call that never returns
+    b.proc.stdin.flush()
+    time.sleep(0.5)
+    began = time.monotonic()
+    b.proc.stdin.close()
+    assert b.proc.wait(20) == 3 and time.monotonic() - began < 10             # it ends after orphan_s, not 60 s
+
+
 # ------------------------------------------------------------------ Quantum Design MultiVu (drivers.py)
 
 class MultiVuServer:

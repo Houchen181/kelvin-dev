@@ -52,11 +52,14 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .adapters import AdapterError
+from .adapters import AdapterError, LinkLost, NoAnswer
 from .cards import Card
 from .drivers import DriverBackend
 
 BRIDGE = Path(__file__).parent / "data" / "bridge" / "kelvin_bridge.py"
+# a helper whose Kelvin has gone (crashed, or was ended): the card's close calls, then it ends; past this it ends anyway,
+# so a call that never returns can't keep it, and the device it holds, after Kelvin (kelvin_bridge.ORPHAN_S, as PICam's)
+ORPHAN_S = 15.0
 _CALL = re.compile(r"^\s*(SET|GET)\s+([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*)(.*)$", re.I | re.S)
 
 
@@ -119,10 +122,15 @@ def card_calls(card: Card) -> Tuple[Set[str], Set[str]]:
 
 
 class Bridge:
-    """The helper process: one request at a time, each answered within a timeout."""
+    """The helper process: one request at a time, each answered within a timeout.
+
+    A helper that stopped (the maker's library crashed it) is gone: LinkLost, and connecting the instrument again
+    starts a fresh one. So is one whose call didn't return in time: Kelvin ends it (NoAnswer), as the call may never
+    return and every request after it would wait behind it, and the helper would hold the device for good."""
 
     def __init__(self, name: str, command: List[str]):
         self.name = name
+        self._gone = ""
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
             from .envs import clean_environ   # the maker's code never sees Kelvin's API keys or sign-ins
@@ -136,6 +144,24 @@ class Bridge:
         threading.Thread(target=self._drain, daemon=True).start()
         self.next_id = 0
 
+    @property
+    def gone(self) -> str:
+        """Why this helper can't be used any more ("" while it can): it stopped, or Kelvin ended it."""
+        if self._gone:
+            return self._gone
+        try:
+            stopped = self.proc.poll() is not None
+        except Exception:
+            stopped = False
+        return "its helper process has stopped%s" % self._said() if stopped else ""
+
+    def _end(self, why: str) -> None:
+        self._gone = why
+        try:
+            self.proc.kill()
+        except Exception:
+            pass
+
     def _read(self) -> None:
         for line in self.proc.stdout:
             self.lines.put(line)
@@ -146,22 +172,30 @@ class Bridge:
             self.errors.append(line.decode("utf-8", "replace").rstrip())
 
     def request(self, op: str, timeout: float, **fields: Any) -> Any:
+        if self._gone:
+            raise LinkLost("%s: the library's helper was ended (%s); connecting the instrument again starts a fresh "
+                           "one" % (self.name, self._gone))
         self.next_id += 1
         rid = self.next_id
         try:
             self.proc.stdin.write((json.dumps(dict(fields, id=rid, op=op)) + "\n").encode("utf-8"))
             self.proc.stdin.flush()
-        except OSError:
-            raise AdapterError("%s: the library's helper has stopped%s" % (self.name, self._said()))
+        except OSError as e:
+            self._gone = "its helper process has stopped"
+            raise LinkLost("%s: the library's helper has stopped%s" % (self.name, self._said())) from e
         deadline = time.monotonic() + timeout
         while True:
             try:
                 line = self.lines.get(timeout=max(0.01, deadline - time.monotonic()))
             except queue.Empty:
-                raise AdapterError("%s: the library did not answer %s within %g s%s" % (self.name, fields.get("name", op),
-                                                                                        timeout, self._said()))
+                what = fields.get("name", op)
+                self._end("the library didn't answer %s within %g s" % (what, timeout))
+                raise NoAnswer("%s: the library did not answer %s within %g s%s; Kelvin ended its helper, as the call "
+                               "may never return: connecting the instrument again starts a fresh one"
+                               % (self.name, what, timeout, self._said()))
             if line is None:
-                raise AdapterError("%s: the library's helper stopped%s" % (self.name, self._said()))
+                self._gone = "its helper process has stopped"
+                raise LinkLost("%s: the library's helper stopped%s" % (self.name, self._said()))
             try:
                 reply = json.loads(line.decode("utf-8"))
             except ValueError:
@@ -188,7 +222,12 @@ class Bridge:
 
 
 class LibraryInstrument(DriverBackend):
+    """Its connection has ended (gone) once its helper has (Bridge.gone): every call is refused at once (LinkLost), and
+    connecting it again, or the Lab panel's switch off then on, starts a fresh helper (lab._ended). A dead helper was
+    handed back by the switch as it was, and only a restart of Kelvin helped."""
+
     def __init__(self, name: str, card: Card, address: str, module: Any = None):
+        self._gone = ""
         super().__init__(name, card, address)
         lib = card.library
         if not lib:
@@ -216,12 +255,15 @@ class LibraryInstrument(DriverBackend):
         self.bridge = start(name, bridge_command(python))
         self.python: Any = None
         try:
-            self.python = self.bridge.request("ping", 30)
+            self.python = self.bridge.request("ping", 30, orphan_s=ORPHAN_S)
             load = {k: lib[k] for k in ("module", "object", "create", "create_args", "dll", "prefix", "convention",
                                          "returns", "functions", "assembly", "type", "com", "setup") if k in lib}
             for key in ("create_args", "setup"):   # Device(ip): the address as the examples pass it
                 if load.get(key):
                     load[key] = [a.replace("{address}", self.target) if isinstance(a, str) else a for a in load[key]]
+            # the card's close calls, which the helper makes itself if Kelvin goes away without closing it
+            load["close"] = [list(split_call(step.replace("{address}", self.target))) for step in lib.get("close") or []
+                             if split_call(step)[0] != "wait"]
             self.loaded = self.bridge.request("load", 60, path=q.get("path", ""), **load)
             for step in lib.get("open") or []:
                 self._step(step)
@@ -236,6 +278,14 @@ class LibraryInstrument(DriverBackend):
                         % (q["env"], q["env"], json.dumps(card.requires) if card.requires else "<its pip name>"))
             raise AdapterError(str(e) + hint) from e
 
+    @property
+    def gone(self) -> str:   # its own (a bounded call that didn't return), or its helper's (it stopped, or was ended)
+        return self._gone or str(getattr(getattr(self, "bridge", None), "gone", "") or "")
+
+    @gone.setter
+    def gone(self, why: str) -> None:
+        self._gone = why
+
     def _step(self, text: str) -> Any:
         fn, args = split_call(text.replace("{address}", self.target))
         if fn == "wait":
@@ -244,6 +294,7 @@ class LibraryInstrument(DriverBackend):
         return self.bridge.request("call", self.timeout, name=fn, args=args)
 
     def write(self, command: str) -> None:
+        self.check_gone()
         m = _CALL.match(command or "")
         if not m or m.group(1).upper() != "SET":
             raise AdapterError("%s: %r is not SET <function> [arguments]" % (self.name, command))
@@ -266,6 +317,7 @@ class LibraryInstrument(DriverBackend):
             self.bridge.request("call", self.timeout, name=fn, args=args)
 
     def query(self, command: str) -> str:
+        self.check_gone()
         if command.strip().upper() == "*IDN?" or command.strip() == (self.card.idn_query or "").strip():
             return self.identity()
         m = _CALL.match(command or "")
@@ -280,6 +332,7 @@ class LibraryInstrument(DriverBackend):
             return _text(self.bridge.request("call", self.timeout, name=fn, args=args))
 
     def identity(self) -> str:
+        self.check_gone()
         m = _CALL.match(self.card.idn_query or "")
         if m and m.group(1).upper() == "GET":
             with self.lock:
