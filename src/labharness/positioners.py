@@ -19,9 +19,9 @@ import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import envs
-from .adapters import AdapterError
+from .adapters import AdapterError, LinkLost, NoAnswer
 from .cards import Card
-from .drivers import DriverBackend
+from .drivers import DriverBackend, link_failed
 
 _PATH = re.compile(r"^(\w+?)(\d+)$")   # "offset1": the parameter, then the axis
 MOVE_TIMEOUT_S = 60.0
@@ -101,45 +101,91 @@ class _Controller(DriverBackend):
             pass
 
 
+def _line(raw: bytes) -> str:
+    return re.sub(rb"\xff[\xfb-\xfe].", b"", raw).decode("ascii", "replace").strip()   # telnet options
+
+
 class Link:
     """The ANC300's command line: a serial port (38400 baud, 8N1) or the network (TCP 7230, its password first).
-    Each command is answered by lines that end with OK, or with ERROR."""
+    Each command is answered by lines that end with OK, or with ERROR, in order, with nothing to tell one reply from
+    another.
+
+    So after a reply that didn't come in time (NoAnswer: it may still come), the next command first asks ver and passes
+    over everything before ver's own answer: one late reply made every reply after it the one before's (axis 2's step
+    voltage read as axis 1's offset). A link that broke (a port that went away, a connection reset or closed) is let go
+    of, said as a lost instrument (LinkLost), and opened again at the next command: it was never remade."""
+    port: Any = None
+    sock: Any = None
+    owed = False      # a command's reply didn't come in time and may still come: _resync before the next
+    dropped = False   # let go of after a failure: opened again at the next command
 
     def __init__(self, target: str, pwd: Optional[str] = None, timeout: float = 3.0):
+        self.target, self.pwd, self.timeout = target, pwd, timeout
         self.buf = b""
-        self.timeout = timeout
-        if re.match(r"^(COM\d+|/dev/)", target, re.I):
-            import serial   # pyserial, part of Kelvin's hardware support
-            self.port: Any = serial.Serial(target, 38400, bytesize=8, parity="N", stopbits=1, timeout=0.2)
-            self.sock: Any = None
-        else:
-            host, _, port = target.partition(":")
-            self.sock, self.port = socket.create_connection((host, int(port or 7230)), timeout=timeout), None
-            self.sock.settimeout(0.2)
-            self._send(pwd or "123456")
+        self._open()
+
+    def _open(self) -> None:
+        self.buf, self.owed, self.dropped = b"", False, False
+        try:
+            if re.match(r"^(COM\d+|/dev/)", self.target, re.I):
+                import serial   # pyserial, part of Kelvin's hardware support
+                self.port = serial.Serial(self.target, 38400, bytesize=8, parity="N", stopbits=1, timeout=0.2)
+            else:
+                host, _, port = self.target.partition(":")
+                self.sock = socket.create_connection((host, int(port or 7230)), timeout=self.timeout)
+                self.sock.settimeout(0.2)
+                self._send(self.pwd or "123456")
+                self._until_ok()
+            self._send("echo off")   # the link only: no axis changes
             self._until_ok()
-        self._send("echo off")   # the link only: no axis changes
-        self._until_ok()
+        except (LinkLost, NoAnswer):
+            self._drop()
+            raise
+        except OSError as e:   # pyserial's SerialException too
+            self._drop()
+            raise link_failed("the ANC300 at %s" % self.target, "could not open its link", e) from e
+
+    def _drop(self) -> None:
+        port, sock, self.port, self.sock, self.buf, self.dropped = self.port, self.sock, None, None, b"", True
+        for handle in (port, sock):
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
 
     def _send(self, line: str) -> None:
         data = (line + "\r\n").encode("ascii")
-        if self.port is not None:
-            self.port.write(data)
-        else:
-            self.sock.sendall(data)
+        try:
+            if self.port is not None:
+                self.port.write(data)
+            else:
+                self.sock.sendall(data)
+        except OSError as e:
+            self._drop()
+            raise link_failed("the ANC300 at %s" % self.target, "lost the link", e) from e
 
     def _chunk(self) -> bytes:
         try:
-            return self.port.read(4096) if self.port is not None else self.sock.recv(4096)
+            if self.port is not None:
+                return self.port.read(4096)
+            chunk = self.sock.recv(4096)
         except socket.timeout:
             return b""
+        except OSError as e:   # a serial port that went away, a connection reset
+            self._drop()
+            raise link_failed("the ANC300 at %s" % self.target, "lost the link", e) from e
+        if not chunk:   # the network link's end: closed by the controller
+            self._drop()
+            raise LinkLost("the ANC300 at %s closed the connection" % self.target)
+        return chunk
 
     def _until_ok(self, timeout: Optional[float] = None) -> List[str]:
         end, lines = time.monotonic() + (timeout or self.timeout), []
         while time.monotonic() < end:
             while b"\n" in self.buf:
                 raw, self.buf = self.buf.split(b"\n", 1)
-                line = re.sub(rb"\xff[\xfb-\xfe].", b"", raw).decode("ascii", "replace").strip()   # telnet options
+                line = _line(raw)
                 if line in ("OK", "ERROR"):
                     if line == "ERROR":
                         raise AdapterError(" ".join(lines) or "the ANC300 said ERROR")
@@ -147,18 +193,39 @@ class Link:
                 if line:
                     lines.append(line)
             self.buf += self._chunk()
-        raise AdapterError("the ANC300 did not answer in %g s" % (timeout or self.timeout))
+        self.owed = True
+        raise NoAnswer("the ANC300 did not answer in %g s" % (timeout or self.timeout))
+
+    def _resync(self) -> None:
+        """ver, and everything before its answer passed over (a reply that came late, its OK or ERROR): the controller
+        answers in order, so what follows is in step again. Its answer names the controller (attocube ANC300 controller
+        version ...), as its identity does."""
+        self.buf = b""
+        self._send("ver")
+        end, named = time.monotonic() + self.timeout, False
+        while time.monotonic() < end:
+            while b"\n" in self.buf:
+                raw, self.buf = self.buf.split(b"\n", 1)
+                line = _line(raw)
+                if not named:
+                    named = "ANC300" in line.upper()
+                elif line in ("OK", "ERROR"):
+                    self.owed = False
+                    return
+            self.buf += self._chunk()
+        raise NoAnswer("the ANC300 did not answer in %g s (a reply before may still be on its way)" % self.timeout)
 
     def command(self, line: str, timeout: Optional[float] = None) -> List[str]:
+        if self.dropped:   # let go of after a failure: opened again
+            self._open()
+        if self.owed:
+            self._resync()
         self.buf = b""
         self._send(line)
         return [x for x in self._until_ok(timeout) if x != line]   # an echo, should it still be on
 
     def close(self) -> None:
-        if self.port is not None:
-            self.port.close()
-        else:
-            self.sock.close()
+        self._drop()
 
 
 def _value(lines: List[str]) -> str:
@@ -174,6 +241,7 @@ class ANC300(_Controller):
     output for scanning, V), output (the voltage on the axis now, V), steps (steps made since Kelvin connected;
     setting it steps by the difference and waits for the axis to stop)."""
     KIND = "ANC300"
+    quiet_close = True   # closing its link sends the controller nothing: no axis changes
     GET = {"mode": "getm", "voltage": "getv", "frequency": "getf", "offset": "geta", "output": "geto"}
     SET = {"mode": "setm", "voltage": "setv", "frequency": "setf", "offset": "seta"}
 

@@ -20,9 +20,9 @@ import threading
 import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .adapters import AdapterError
+from .adapters import AdapterError, LinkLost, NoAnswer
 from .cards import Card
-from .drivers import DriverBackend
+from .drivers import DriverBackend, link_failed
 
 TYPES = {"uint16": ("H", 1), "int16": ("h", 1), "uint32": ("I", 2), "int32": ("i", 2), "float32": ("f", 2),
          "float64": ("d", 4)}
@@ -96,6 +96,10 @@ def _value(kind: str, words: List[int], swapped: bool) -> float:
 
 
 class ModbusInstrument(DriverBackend):
+    """A serial port that went away (a USB adapter pulled, then plugged back) is let go of, said as a lost instrument
+    (LinkLost), and opened again at the next exchange: it was never remade. No reply at all is NoAnswer."""
+    quiet_close = True   # closing the port or the connection sends the device nothing
+
     def __init__(self, name: str, card: Card, address: str, module: Any = None):
         super().__init__(name, card, address)
         url = urllib.parse.urlparse(address)
@@ -104,10 +108,11 @@ class ModbusInstrument(DriverBackend):
         self.timeout = float(card.connection.get("timeout_ms", 2000)) / 1000.0
         self.tid = 0
         self.io_lock = threading.Lock()
-        target = (url.netloc + url.path).strip("/")
+        self.target = target = (url.netloc + url.path).strip("/")
         self.serial = None
         self.sock = None
         self.where: Optional[Tuple[str, int]] = None   # a TCP device's host and port, to connect again
+        self.settings: Dict[str, str] = q                # a serial port's baud, parity and stop bits, to open again
         if isinstance(module, dict) and module.get("transport"):
             self.transport = module["transport"]   # tests: a function from a request frame to the reply frame
             self.rtu = bool(module.get("rtu"))
@@ -116,17 +121,47 @@ class ModbusInstrument(DriverBackend):
         self.rtu = target.upper().startswith("COM") or target.startswith("/dev/")
         try:
             if self.rtu:
-                import serial   # pyserial, which Kelvin brings
-                parity = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN, "O": serial.PARITY_ODD}[
-                    q.get("parity", "N").upper()[:1]]
-                self.serial = serial.Serial(target, int(q.get("baud", 9600)), parity=parity,
-                                            stopbits=int(q.get("stop", 1)), timeout=self.timeout)
+                self._open_serial()
             else:
                 host, _, port = target.partition(":")
                 self.where = (host, int(port or 502))
                 self.sock = socket.create_connection(self.where, timeout=self.timeout)
+        except (LinkLost, NoAnswer):
+            raise
         except (OSError, ValueError, KeyError, ImportError) as e:
             raise AdapterError("%s: could not reach %s by Modbus: %s" % (name, target, e)) from e
+
+    def _open_serial(self) -> None:
+        import serial   # pyserial, which Kelvin brings
+        q = self.settings
+        parity = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN, "O": serial.PARITY_ODD}[
+            q.get("parity", "N").upper()[:1]]
+        try:
+            self.serial = serial.Serial(self.target, int(q.get("baud", 9600)), parity=parity,
+                                        stopbits=int(q.get("stop", 1)), timeout=self.timeout)
+        except OSError as e:   # SerialException: the port isn't there (yet), or another program has it
+            raise link_failed(self.name, "could not open %s" % self.target, e) from e
+
+    def _drop_serial(self) -> None:
+        port, self.serial = self.serial, None
+        if port is not None:
+            try:
+                port.close()
+            except Exception:
+                pass
+
+    def _rtu(self, frame: bytes, function: int) -> bytes:
+        """One request over the serial port, and its reply. A port that went away is let go of, and the next request
+        opens it again."""
+        if self.serial is None:
+            self._open_serial()
+        try:
+            self.serial.reset_input_buffer()
+            self.serial.write(frame)
+            return self._read_rtu(function)
+        except OSError as e:   # pyserial's SerialException: the adapter pulled
+            self._drop_serial()
+            raise link_failed(self.name, "lost its serial port %s" % self.target, e) from e
 
     # -------------------------------------------------------------- frames
 
@@ -136,9 +171,7 @@ class ModbusInstrument(DriverBackend):
             if self.transport is not None:
                 reply = self.transport(self._frame(pdu))
             elif self.rtu:
-                self.serial.reset_input_buffer()
-                self.serial.write(self._frame(pdu))
-                reply = self._read_rtu(pdu[0])
+                reply = self._rtu(self._frame(pdu), pdu[0])
             else:
                 reply = self._tcp(self._frame(pdu))
         body = self._unframe(reply)
@@ -158,6 +191,9 @@ class ModbusInstrument(DriverBackend):
         return struct.pack(">HHHB", self.tid, 0, len(pdu) + 1, self.unit) + pdu
 
     def _unframe(self, reply: bytes) -> bytes:
+        if not reply:   # nothing at all: a device that doesn't answer (lost), not one that answered garbled
+            raise NoAnswer("%s: no reply (check the %s)" % (self.name, "unit number, baud rate and wiring" if self.rtu
+                                                            else "address and the unit number"))
         if self.rtu:
             if len(reply) < 5 or crc16(reply[:-2]) != reply[-2:]:
                 raise AdapterError("%s: no valid reply (check the unit number, baud rate and wiring)" % self.name)
@@ -165,7 +201,7 @@ class ModbusInstrument(DriverBackend):
                 raise AdapterError("%s: unit %d answered, not %d" % (self.name, reply[0], self.unit))
             return reply[1:-2]
         if len(reply) < 9:
-            raise AdapterError("%s: no reply (check the address and the unit number)" % self.name)
+            raise AdapterError("%s: a short reply (check the address and the unit number)" % self.name)
         tid, proto, length, unit = struct.unpack(">HHHB", reply[:7])
         if tid != self.tid or proto != 0:
             raise AdapterError("%s: a reply to another request" % self.name)
@@ -214,9 +250,9 @@ class ModbusInstrument(DriverBackend):
                 if len(reply) < 7 or reply[:2] == frame[:2] or self.sock is None:
                     return reply
             return reply
-        except OSError:
+        except OSError as e:
             self._drop()
-            raise
+            raise link_failed(self.name, "lost the connection to %s:%d" % self.where, e) from e
 
     def _drop(self) -> None:
         sock, self.sock = self.sock, None
