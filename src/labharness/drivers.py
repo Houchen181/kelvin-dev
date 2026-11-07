@@ -152,17 +152,20 @@ class DriverBackend:
             raise AdapterError("%s: %r reads, it does not set" % (self.name, command))
         self.check_gone()
         with self.lock:
+            self.check_gone()   # again: it may have ended while this waited behind the call that didn't return
             self.set(path.lower(), _number(value))   # cards write paths in capitals; vendors use lower case
 
     def query(self, command: str) -> str:
         self.check_gone()
         if command.strip().upper() in ("*IDN?", self.card.idn_query.strip().upper()):
             with self.lock:
+                self.check_gone()
                 return self.identity()
         verb, path, _ = parse_command(command)
         if verb != "GET":
             raise AdapterError("%s: %r sets, it does not read" % (self.name, command))
         with self.lock:
+            self.check_gone()
             return _fmt(self.get(path.lower()))
 
     def set(self, path: str, value: Any) -> None:

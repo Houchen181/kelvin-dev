@@ -102,6 +102,8 @@ def test_an_open_that_never_returns_is_set_aside_in_its_time_and_closed_if_it_op
     assert isinstance(lab.instruments["cam"].backend, Unavailable)             # never handed to the lab
     with pytest.raises(KeyError):
         lab.instrument("cam")
+    assert lab.reconnect("cam") == "" and lab.instruments["cam"].enabled        # once its driver opens, as ever
+    assert lab.instruments["cam"].backend is hub.of("cam")[1]
 
 
 def test_how_long_an_open_may_take():

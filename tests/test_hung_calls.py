@@ -30,9 +30,10 @@ class Stuck(DriverBackend):
 
     def __init__(self, name, card, address, release):
         super().__init__(name, card, address)
-        self.release, self.closed = release, False
+        self.release, self.closed, self.calls = release, False, 0
 
     def get(self, path):
+        self.calls += 1
         return self.bounded(0.3, "its maker's read", lambda: self.release.wait(30) and 1.0)
 
     def identity(self):
@@ -72,6 +73,28 @@ def test_a_makers_call_that_never_returns_ends_its_connection_and_connecting_aga
     assert made[1].closed and "cam" not in lab._parked
     lab.switch("cam", True)
     assert lab.instruments["cam"].backend is made[2]
+
+
+def test_a_call_that_waited_behind_the_stuck_one_is_refused_too():
+    release = threading.Event()
+    stuck = Stuck("cam", builtin_registry().get("keithley/2400"), "fake://cam", release)
+    got = []
+
+    def ask():
+        try:
+            got.append(stuck.query("GET reading"))
+        except AdapterError as e:
+            got.append(e)
+    first = threading.Thread(target=ask, daemon=True)
+    first.start()
+    assert wait_for(lambda: stuck.calls == 1)
+    second = threading.Thread(target=ask, daemon=True)   # waits for the driver behind the first call
+    second.start()
+    first.join(3)
+    second.join(3)
+    assert len(got) == 2 and all(isinstance(g, AdapterError) for g in got)
+    assert stuck.calls == 1                                                    # never sent into the stuck driver
+    release.set()
 
 
 def andor_sdk2(calls, wait=None, readout=2.0):
