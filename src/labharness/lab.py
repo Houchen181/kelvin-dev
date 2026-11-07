@@ -161,13 +161,34 @@ def identity_problem(inst: Instrument, idn: str) -> Optional[str]:
     a connection made again by itself sends it anything (review of 0.3.45: 4.1 asks it there, 6.2 adds the serial
     number here)."""
     card = inst.card
-    if not card.idn_pattern or re.search(card.idn_pattern, idn, re.I):
-        return None
-    from .homelab import builtin_ids
-    return ("identity %r does not match card %s (wrong address or instrument? If it is a variant the card doesn't "
-            "know, %s)" % (idn[:80], card.id, ("make this lab's version of the card with its identity: Lab, Cards…, "
-                                                 "Make your version") if card.id in builtin_ids() else
-                           "add its identity to the card: Lab, Cards…, Edit"))
+    if card.idn_pattern and not re.search(card.idn_pattern, idn, re.I):
+        from .homelab import builtin_ids
+        return ("identity %r does not match card %s (wrong address or instrument? If it is a variant the card doesn't "
+                "know, %s)" % (idn[:80], card.id, ("make this lab's version of the card with its identity: Lab, "
+                                                     "Cards…, Make your version") if card.id in builtin_ids() else
+                               "add its identity to the card: Lab, Cards…, Edit"))
+    # the serial number it answered with when it was first set up as this instrument (profiles.hold_serials): two
+    # identical controllers whose USB-serial cables swapped sockets, or two LAN instruments that swapped DHCP addresses,
+    # pass the model check, and Kelvin drove the other cryostat's controller
+    kept = getattr(inst, "kept_serial", None)
+    if kept:
+        from .profiles import parse_idn
+        now = parse_idn(idn).get("serial", "")
+        if now and now.strip().lower() != str(kept).strip().lower():
+            return SWAPPED % (inst.name, now, kept, inst.config.address, inst.name)
+    return None
+
+
+# a serial number other than the one the instrument was set up with (identity_problem): set aside, and a person asked
+SWAPPED = ("%s answers with serial number %s, but it was set up with serial number %s: it may be another instrument of "
+           "the same model (two identical ones swapped at their ports, or their network addresses). Kelvin set it "
+           "aside so nothing reaches the wrong one: check which instrument is at %s; Set up asks you whether to use "
+           "this one as %s")
+
+
+def swapped(problem: Optional[str]) -> bool:
+    """Whether identity_problem's words say another instrument of the same model answers (SWAPPED)."""
+    return bool(problem) and "but it was set up with serial number" in str(problem)
 
 
 def same_card(a: Card, b: Card) -> bool:
@@ -580,6 +601,39 @@ class Lab:
             snap[name] = values
         return snap
 
+    def set_aside(self, name: str, why: str, idn: str = "") -> None:
+        """An instrument that answers as another one (identity_problem: another serial number of the same model) is set
+        aside with why: nothing reaches it until it is connected again, which checks it again. Its connection is let go
+        of as switching it off would: closed where closing sends nothing, else kept unclosed (_not_ours). What it
+        answered stays in `swaps`, for the set-up to ask a person whether it is the one to use."""
+        inst = self.instruments.get(name)
+        if inst is None or not inst.enabled:
+            return
+        self.__dict__.setdefault("swaps", {})[name] = (why, idn)
+        was = inst.backend
+        if self._take(inst, was, Unavailable(name, why)):
+            self._not_ours(name, was)
+
+    def check_identity(self, names: Iterable[str]) -> Dict[str, Tuple[str, str]]:
+        """Each of these asked who it is, and only that (one query each): the ones that answer as another instrument
+        (identity_problem), {name: (why, what it answered)}; another serial number of the same model is set aside. One
+        that doesn't answer is left as it is: the health check and the monitor say that."""
+        out: Dict[str, Tuple[str, str]] = {}
+        for name in names:
+            inst = self.instruments.get(name)
+            if inst is None or not inst.enabled or not inst.card.idn_pattern:
+                continue
+            try:
+                idn = inst.query_raw(inst.card.idn_query).strip()
+            except Exception:
+                continue
+            wrong = identity_problem(inst, idn)
+            if wrong:
+                out[name] = (wrong, idn)
+                if swapped(wrong):
+                    self.set_aside(name, wrong, idn)
+        return out
+
     def health_check(self, names: Optional[List[str]] = None) -> List[HealthResult]:
         """Before an instrument is used: is it the model its card says (a swapped address would send commands to
         the wrong instrument), does its error queue look clean, does every reading work, are the card's sanity
@@ -608,6 +662,8 @@ class Lab:
                     if wrong:
                         problems.append(wrong)
                         out.append(HealthResult(name, False, problems))
+                        if swapped(wrong):   # another one of the same model: nothing more reaches it
+                            self.set_aside(name, wrong, idn)
                         continue  # nothing else is meaningful on the wrong instrument
                     variant = card.variant(idn)
                     if variant is not None:   # another identity the card fits, each written out: said, and confirmed
@@ -630,6 +686,9 @@ class Lab:
                     except NotNow as e:   # that reading only, not the instrument: said, and kept for plans
                         not_now[spec.name] = str(e)
                     except Exception as e:
+                        if isinstance(e, InstrumentLost) or timed_out(e):
+                            raise   # it doesn't answer: each other reading would only wait as long again (an
+                            # SR830 that didn't took 36 s, the lab held, at every start and Save and connect)
                         dead.append("%s (%s)" % (spec.name, str(e).splitlines()[0][:60] if str(e) else type(e).__name__))
                 if dead:
                     problems.append("cannot read " + ", ".join(dead))

@@ -84,6 +84,9 @@ def write_profile(home: Any, name: str, card: Any, address: str, connection: Opt
                     "connection": dict(card.connection, **(connection or {})), "updated": time.time()})
     if idn:
         profile.update({"identity": idn, "parsed": parse_idn(idn), "identified_by": how or "identity reply"})
+        serial = parse_idn(idn).get("serial", "")
+        if serial and not _kept_for(profile, card.id, address):   # the first set-up's, kept (6.2): see kept_serial
+            profile["serial_number"] = {"serial": serial, "card": card.id, "address": address, "since": time.time()}
     if framing:   # the serial settings the instrument answered with
         profile["answered_with"] = framing
     profile.setdefault("found", time.time())
@@ -91,16 +94,66 @@ def write_profile(home: Any, name: str, card: Any, address: str, connection: Opt
     return profile
 
 
+def _kept_for(profile: Dict[str, Any], card: str, address: str) -> str:
+    kept = profile.get("serial_number")
+    if isinstance(kept, dict) and kept.get("serial") and kept.get("card") == card and kept.get("address") == address:
+        return str(kept["serial"])
+    return ""
+
+
+def kept_serial(home: Any, name: str, card: str, address: str) -> str:
+    """The serial number the instrument answered with when it was first set up as `name`, while its lab config entry
+    is of this card and address ('' when none is kept: an identity without one, or an entry changed since). Every
+    set-up after the first writes its identity again, never this: two identical instruments that swapped ports pass
+    the model check, and only this tells them apart (review of 0.3.45, 6.2)."""
+    try:
+        return _kept_for(_read_json(folder(home, name) / "instrument.json"), card, address)
+    except KeyError:
+        return ""
+
+
+def hold_serials(home: Any, lab: Any) -> None:
+    """Each real instrument of the lab holds its kept serial number (inst.kept_serial), which identity_problem
+    compares with what it answers: at the health check, the set-up's identity check and a connection made again."""
+    for name, inst in list(lab.instruments.items()):
+        if not inst.simulated:
+            inst.kept_serial = kept_serial(home, name, inst.card.id, inst.config.address) or None
+
+
+def accept_serial(home: Any, name: str, serial: str, card: str, address: str) -> None:
+    """A person said the instrument that answers now is the one to use as `name` (a replacement, a repaired one):
+    its serial number is kept from now on."""
+    path = folder(home, name) / "instrument.json"
+    profile = _read_json(path)
+    profile["serial_number"] = {"serial": serial, "card": card, "address": address, "since": time.time(),
+                                "accepted": True}
+    _write_json(path, profile)
+
+
 def read_values(inst: Any) -> Dict[str, Any]:
-    """Every readable setting and reading of one instrument (traces skipped). Reading never changes anything."""
+    """Every readable setting and reading of one instrument. Reading never changes anything. Traces, frames and
+    acquisitions are skipped: they run only when a plan or a person asks (the set-up's read once took 4 camera
+    exposures, a spectrometer's peak and a g2 at every start). One it doesn't answer at all ends the reading of it,
+    as for Lab.snapshot: each other would only wait as long again (a 2400 answering only *IDN? took 26 timeouts, 78 s,
+    with the lab held, at every start and after each Save and connect)."""
+    from .adapters import timed_out
+    from .instrument import InstrumentLost
     values: Dict[str, Any] = {}
+    silent = ""
     for spec in inst.card.params.values():
-        if spec.type == "trace" or (spec.get_cmd is None and spec.name not in getattr(inst, "_last", {})):
+        if spec.type in ("trace", "image") or getattr(spec, "acquires", False) or \
+                (spec.get_cmd is None and spec.name not in getattr(inst, "_last", {})):
             continue   # (a listen-only instrument's settings are what Kelvin last sent it)
+        if silent:
+            values[spec.name] = "ERROR: not read: %s did not answer (%s)" % (inst.name, silent)
+            continue
         try:
             values[spec.name] = inst.read(spec.name)
         except Exception as e:
-            values[spec.name] = "ERROR: %s" % (str(e).splitlines()[0] if str(e) else type(e).__name__)
+            said = str(e).splitlines()[0] if str(e) else type(e).__name__
+            values[spec.name] = "ERROR: %s" % said
+            if timed_out(e) or isinstance(e, InstrumentLost):
+                silent = said[:120]
     return values
 
 
@@ -323,12 +376,47 @@ def _first_line(e: BaseException) -> str:
     return str(e).splitlines()[0][:200] if str(e) else type(e).__name__
 
 
+class _Later(Exception):
+    """An instrument prepare reads another time (other work held it)."""
+
+
+PREPARE_WAIT_S = 30.0   # how long the set-up waits for an instrument that other work holds, before it reads it later
+
+
+def unprepared(home: Any, lab: Any) -> List[str]:
+    """The lab's real instruments with no folder yet, or whose folder is of another card or address: what a set-up
+    after a change of the lab reads (each instrument read again at every Save and connect cost a minute of timeouts
+    on a lab with one silent instrument)."""
+    out = []
+    for name, inst in list(lab.instruments.items()):
+        if inst.simulated:
+            continue
+        profile = _read_json(folder(home, name) / "instrument.json")
+        if not profile or profile.get("card") != inst.card.id or profile.get("address") != inst.config.address:
+            out.append(name)
+    return out
+
+
+def _take(lock: Any, name: str, wait: float) -> bool:
+    """The lab's lock for reading one instrument (LabLock: holding only it, so the others stay readable), within
+    `wait` seconds: work that has the lab (a run) is never waited out for this."""
+    try:
+        return bool(lock.acquire(timeout=wait, names=[name]))
+    except TypeError:   # a plain lock (tests, older callers)
+        return bool(lock.acquire(timeout=wait))
+
+
 def prepare(home: Any, lab: Any, lock: Any, found: Optional[Dict[str, Dict[str, Any]]] = None,
-            manuals: bool = True, fetch: Fetch = http_get, names: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+            manuals: bool = True, fetch: Fetch = http_get, names: Optional[Iterable[str]] = None,
+            busy: Optional[Callable[[Optional[str]], None]] = None) -> Dict[str, Any]:
     """Give every real instrument of the lab its folder: profile, current settings, and (if allowed) its manual.
     `found` is what a scan learnt, by address; without it the instrument is asked who it is. `lock` keeps these reads
-    from overlapping with anything else Kelvin does with the instruments."""
+    from overlapping with anything else Kelvin does with the instruments: held for one instrument at a time, and only
+    that one, PREPARE_WAIT_S at most (work that holds it meanwhile, a run, is never waited out: its settings are read
+    another time). names: only these. busy(text): what is read now, for Kelvin's busy line (None once done)."""
     report: Dict[str, Any] = {}
+    names = None if names is None else set(names)
+    wait = PREPARE_WAIT_S
     for name, inst in list(lab.instruments.items()):   # a copy: the agent may add an instrument meanwhile
         if inst.simulated or not inst.enabled or (names is not None and name not in names):
             continue   # switched off in the Lab panel: nothing is sent to it, not even who-are-you
@@ -336,7 +424,13 @@ def prepare(home: Any, lab: Any, lock: Any, found: Optional[Dict[str, Dict[str, 
         seen = (found or {}).get(address) or {}
         entry: Dict[str, Any] = {}
         try:
-            with lock:
+            if not _take(lock, name, wait):
+                wait = 0.5   # the work that has it goes on: the others aren't waited for as long again
+                entry["settings"] = "not read now: other work has it (read at the next set-up, or in the Lab panel)"
+                raise _Later()
+            try:
+                if busy is not None:
+                    busy("reading the settings of %s" % name)
                 idn, how = seen.get("idn") or "", seen.get("how") or ""
                 if not idn and card.idn_pattern:
                     try:
@@ -344,11 +438,17 @@ def prepare(home: Any, lab: Any, lock: Any, found: Optional[Dict[str, Dict[str, 
                     except Exception:
                         idn = ""
                 values = read_values(inst)
+            finally:
+                if busy is not None:
+                    busy(None)
+                lock.release()
             write_profile(home, name, card, address, getattr(inst.config, "connection", None), idn, how,
                           seen.get("settings") or "")
             write_settings(home, name, card, values)
             bad = [k for k, v in values.items() if isinstance(v, str) and v.startswith("ERROR")]
             entry["settings"] = "%d read" % (len(values) - len(bad)) + (", %d did not answer" % len(bad) if bad else "")
+        except _Later:
+            pass
         except Exception as e:
             entry["error"] = _first_line(e)
         if manuals:

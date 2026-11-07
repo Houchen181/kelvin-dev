@@ -898,8 +898,8 @@ def test_an_arduino_is_opened_once_and_an_echoing_command_line_still_answers():
     found = identify("ASRL4::INSTR", reg, arduino, usb={"ASRL4::INSTR": "2341:0043"})
     assert arduino.opened == 1 and found.idn == "HEATER-ARDUINO v2"
     plain = Board(lambda cmd: None)
-    identify("ASRL5::INSTR", reg, plain, usb={"ASRL5::INSTR": "0403:6001"})   # an FTDI cable: every framing, as before
-    assert plain.opened > 5
+    identify("ASRL5::INSTR", reg, plain, usb={"ASRL5::INSTR": "0403:6001"})   # an FTDI cable: every framing, on one
+    assert plain.opened == 1   # open (review of 0.3.45, 5.3: each framing opened the port again, 13 times)
     anc = Board(lambda cmd: "attocube ANC300 controller version 1.1.0-1304 2013-10-17 08:16" if cmd == "ver" else None,
                 echo=True, framing=(38400, 8, "none", 1.0))
     card = reg.get("attocube/anc300")

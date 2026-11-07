@@ -52,6 +52,32 @@ def draft_found(found: List[Dict[str, Any]], registry: Any, lab_name: str = "My 
     return draft_from(items, registry, lab_name)
 
 
+def _write_new(path: Path, text: str) -> bool:
+    """Write a new file whole, never over one that is there (a person's own lab config, saved while the set-up
+    scanned): False when one is. Written beside it, then linked into place, so a reader never sees half of it."""
+    import os
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        try:
+            os.link(str(tmp), str(path))   # fails if the file is there, on every system
+        except FileExistsError:
+            return False
+        except OSError:   # no links on this drive (FAT, some network folders): made only if it isn't there
+            try:
+                with open(str(path), "x", encoding="utf-8") as f:
+                    f.write(text)
+            except FileExistsError:
+                return False
+        return True
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def reviewed(text: str) -> str:
     """The lab config with Kelvin's marks taken out, every added_by: kelvin (and an older observe_only line): a
     person does this after reviewing the limits."""
@@ -79,17 +105,41 @@ class AutoSetup:
         self.racks: Dict[str, Any] = {}   # their Special Measure rack, by address: (its instrument, the rack in words)
         self._drafted = False      # the first lab config is written: the scripts come too late to shape it
         self._scripts_lock = threading.Lock()
+        self._running = False      # a set-up runs (start): another start waits for it (lab changed: runs after it)
+        self._again = False
+        self._missing: Dict[str, str] = {}
 
     @property
     def lab_file(self) -> Path:
         return self.home / "lab.yaml"
 
     def start(self, reason: str = "start") -> bool:
-        if self._thread is not None and self._thread.is_alive():
-            return False
-        self._thread = threading.Thread(target=self.run, args=(reason,), name="kelvin-autosetup", daemon=True)
-        self._thread.start()
+        """The set-up, in the background. One asked for after a change of the lab while one runs (Save and connect
+        during the start's set-up) runs once that one ends: its instruments once got no folder, settings or manual
+        until the next start."""
+        with self._scripts_lock:
+            if self._running:
+                if reason == "lab changed":
+                    self._again = True
+                return False
+            self._running, self._again = True, False
+            self._thread = threading.Thread(target=self._runs, args=(reason,), name="kelvin-autosetup", daemon=True)
+            self._thread.start()
         return True
+
+    def _runs(self, reason: str) -> None:
+        try:
+            self.run(reason)
+            while True:   # a change of the lab while it ran: what is new set up too
+                with self._scripts_lock:
+                    if not self._again:
+                        self._running = False   # with the lock: a start from now on starts anew
+                        return
+                    self._again = False
+                self.run("lab changed")
+        finally:
+            with self._scripts_lock:
+                self._running = False
 
     def join(self, timeout: Optional[float] = None) -> None:
         if self._thread is not None:
@@ -188,6 +238,18 @@ class AutoSetup:
             taken.add(f.get("suggested"))
         return out
 
+    def _scan(self) -> List[Dict[str, Any]]:
+        """The scan, saying as it goes which port or address it asks now (a port that takes long shows which)."""
+        import inspect
+
+        def asking(what: str) -> None:
+            self._set("scanning", message="Looking for connected instruments: %s" % what)
+        try:
+            takes = "progress" in inspect.signature(self.scan).parameters
+        except (TypeError, ValueError):
+            takes = False
+        return self.scan(progress=asking) if takes else self.scan()
+
     def _done(self, message: str, **more: Any) -> Dict[str, Any]:
         """Finish, saying why (the Lab panel shows it while the lab has no instruments), and log it."""
         looked = self.runtime.last_survey if more.get("lines") is not None else None
@@ -202,6 +264,8 @@ class AutoSetup:
         rt = self.runtime
         manuals = self.settings.get("manuals") != "off"
         found_by_address: Dict[str, Dict[str, Any]] = {}
+        self._missing: Dict[str, str] = {}   # what didn't connect, and why: said with the set-up's last words
+        started = rt.lab   # a person's own lab coming in meanwhile is never replaced by the set-up's draft
         try:
             if rt.lab.connecting:   # Kelvin opened before connecting the person's lab, which can take minutes
                 self._connect_pending()
@@ -215,36 +279,55 @@ class AutoSetup:
                 self._set("scanning", message="Looking for connected instruments (asking each who it is)")
                 log.info("Instrument scan (%s): looking for connected instruments", reason)
                 try:
-                    found = self.scan()
+                    found = self._scan()
                 except Exception as e:   # no VISA library: nothing to set up
                     return self._done("Kelvin could not look for instruments: %s" % profiles._first_line(e), found=0)
                 looked = rt.last_survey or {}
                 found_by_address = {f["address"]: f for f in found}
                 matched = [f for f in found if f.get("card_id") and not f.get("in_lab")]
                 unknown = [f for f in found if f.get("idn") and not f.get("card_id") and not f.get("in_lab")]
-                written, card_problems = self._write_cards(unknown, matched)
-                matched = self._with_scripts(matched + written, found)
-                unknown = [f for f in unknown if f["address"] not in {w["address"] for w in matched}]
-                for f in found:
-                    log.info("  %s: %s", f["address"], f.get("idn") or f.get("how") or "no answer")
-                if not matched and card_problems:
-                    return self._done(" ".join(card_problems), found=0, unknown=len(unknown),
-                                      lines=looked.get("lines") or [])
-                if not matched:
-                    named = [f["model"] for f in unknown if f.get("collection") and f.get("model")]
-                    return self._done(looked.get("reason") or (
-                        "%d instrument%s answered but Kelvin has no card for %s yet%s; make one in Lab setup"
-                        % (len(unknown), "" if len(unknown) == 1 else "s", "it" if len(unknown) == 1 else "them",
-                           " (%s)" % ", ".join(named) if named else "")
-                        if unknown else "No instruments found on this computer"),
-                        found=0, unknown=len(unknown), lines=looked.get("lines") or [])
-                if not self._connect(matched):
-                    return self.status
-                user_lab = True
+                if matched and unknown and self.make_card is not None and self.settings.get("auto_cards") != "off":
+                    # the ones Kelvin knows connect first: writing the others' cards takes minutes of model calls
+                    # (5.7), and each comes in as it is written (add_instrument), the ones connected meanwhile untouched
+                    first = self._with_scripts(matched, found)
+                    for f in found:
+                        log.info("  %s: %s", f["address"], f.get("idn") or f.get("how") or "no answer")
+                    if not self._connect(first, started):
+                        return self.status
+                    user_lab = True
+                    taken = {w["address"] for w in first}
+                    written, _ = self._write_cards([f for f in unknown if f["address"] not in taken], first)
+                    self._add_written(written)
+                    matched, unknown = [], []
+                else:
+                    written, card_problems = self._write_cards(unknown, matched)
+                    matched = self._with_scripts(matched + written, found)
+                    unknown = [f for f in unknown if f["address"] not in {w["address"] for w in matched}]
+                    for f in found:
+                        log.info("  %s: %s", f["address"], f.get("idn") or f.get("how") or "no answer")
+                    if not matched and card_problems:
+                        return self._done(" ".join(card_problems), found=0, unknown=len(unknown),
+                                          lines=looked.get("lines") or [])
+                    if not matched:
+                        named = [f["model"] for f in unknown if f.get("collection") and f.get("model")]
+                        return self._done(looked.get("reason") or (
+                            "%d instrument%s answered but Kelvin has no card for %s yet%s; make one in Lab setup"
+                            % (len(unknown), "" if len(unknown) == 1 else "s", "it" if len(unknown) == 1 else "them",
+                               " (%s)" % ", ".join(named) if named else "")
+                            if unknown else "No instruments found on this computer"),
+                            found=0, unknown=len(unknown), lines=looked.get("lines") or [])
+                    if not self._connect(matched, started):
+                        return self.status
+                    user_lab = True
             if not user_lab:
                 return self._done(rt.lab_info.get("error") or "No instruments set up yet")
+            swaps = self._check_identities()   # another instrument of the same model at an instrument's address (6.2)
             names = sorted(n for n, i in rt.lab.instruments.items() if not i.simulated and i.enabled)
-            self._set("reading", message="Reading the settings of %s" % ", ".join(names),
+            # after a change of the lab (Save and connect, an instrument added), only what is new: the rest have their
+            # folders, and each one read again cost a minute of timeouts on a lab with one silent instrument
+            reading = names if reason != "lab changed" else [n for n in profiles.unprepared(self.home, rt.lab)
+                                                              if n in names]
+            self._set("reading", message="Reading the settings of %s" % (", ".join(reading) or "nothing new"),
                       instruments=names, unreviewed=rt.lab.config.unreviewed())
             for name, ic in list(rt.lab.config.instruments.items()):   # manuals found while writing cards: no second download
                 m = self._manuals.pop(ic.address, None)
@@ -253,15 +336,27 @@ class AutoSetup:
                         profiles.store_manual(self.home, name, rt.lab.instruments[name].card, m["data"], m["url"])
                     except Exception as e:
                         log.info("  could not keep the %s manual: %s", name, profiles._first_line(e))
-            report = profiles.prepare(self.home, rt.lab, rt.lock, found_by_address,
-                                      manuals=manuals, fetch=self.fetch)
+            def busy(text: Optional[str]) -> None:   # the Lab panel's busy line says which instrument is read now
+                try:
+                    rt.busy = text
+                except Exception:
+                    pass
+            report = profiles.prepare(self.home, rt.lab, rt.lock, found_by_address, manuals=manuals,
+                                      fetch=self.fetch, names=reading, busy=busy)
+            profiles.hold_serials(self.home, rt.lab)   # the serial numbers kept now (the first set-up's, just written)
+            kept_aside = self._ask_swapped(swaps)
             fetched = [n for n, r in report.items() if "pages" in str(r.get("manual", ""))]
             missing = [n for n, r in report.items() if str(r.get("manual", "")).startswith("not fetched")]
             log.info("Instrument setup: %s; %s", ", ".join(names), report)
+            away = rt.lab.unavailable   # still not connected, with why: said, not left out
+            unconnected = {n: away[n] for n in self._missing if n in away}
             self._set("done", instruments=names, report=report, unreviewed=rt.lab.config.unreviewed(),
-                      written=list(self._written),
-                      message="%d instrument%s set up%s%s%s%s" % (
+                      written=list(self._written), not_connected=sorted(unconnected),
+                      message="%d instrument%s set up%s%s%s%s%s" % (
                           len(names), "" if len(names) == 1 else "s",
+                          "; not connected: " + "; ".join("%s (%s)" % (n, profiles._first_line(why))
+                                                          for n, why in sorted(unconnected.items()))
+                          if unconnected else "",
                           "; " + " ".join(self._card_problems).rstrip(".") if self._card_problems else "",
                           "; Kelvin wrote draft cards for %s: review them in Lab setup" % ", ".join(self._written)
                           if self._written else "",
@@ -272,6 +367,79 @@ class AutoSetup:
             log.exception("Instrument setup failed")
             self._set("failed", message="Setting up instruments failed: %s" % profiles._first_line(e))
             return self.status
+
+    def _add_written(self, written: List[Dict[str, Any]]) -> None:
+        """Instruments whose cards were written after the known ones connected: each added to the lab as it comes
+        (add_instrument: its entry, then it alone connected; the others stay as they are). One that can't be added is
+        said with the set-up's last words."""
+        rt = self.runtime
+        for w in written:
+            self._set("connecting", message="Adding %s (%s), whose card Kelvin wrote" % (w.get("suggested"),
+                                                                                        w.get("model")))
+            try:
+                said = rt.add_instrument(w["address"], card=w["card_id"], name=w.get("suggested") or "", by="setup")
+            except Exception as e:
+                said = "not added: %s" % profiles._first_line(e)
+            log.info("  %s: %s", w["address"], said.splitlines()[0] if said else "")
+            if not said.startswith("added"):
+                self._card_problems.append("%s: %s." % (w.get("suggested") or w["address"], said.rstrip(".")))
+
+    def _check_identities(self) -> Dict[str, Any]:
+        """Each instrument with a kept serial number asked who it is (one query, the instrument held for it, never
+        waiting out a run): one that answers with another serial number of the same model is set aside (Lab.
+        check_identity). Swapped USB-serial cables or DHCP addresses once had Kelvin drive the other cryostat's
+        controller. {name: (why, what it answered)}."""
+        rt = self.runtime
+        profiles.hold_serials(self.home, rt.lab)
+        out: Dict[str, Any] = {}
+        for name, inst in list(rt.lab.instruments.items()):
+            if inst.simulated or not inst.enabled or not getattr(inst, "kept_serial", None):
+                continue
+            if not profiles._take(rt.lock, name, 10.0):   # other work has it: asked at the next set-up
+                continue
+            try:
+                rt.lab.check_identity([name])
+            finally:
+                rt.lock.release()
+        away = rt.lab.unavailable   # the swapped ones, set aside: now, or by a health check before (at start, a run)
+        return {n: v for n, v in dict(getattr(rt.lab, "swaps", {})).items() if n in away}
+
+    def _ask_swapped(self, swaps: Dict[str, Any]) -> List[str]:
+        """A person says, for each instrument set aside as another one of the same model, whether the one that answers
+        now is the one to use (a replacement, one back from repair): yes keeps its serial number and connects it again;
+        no, or no answer, leaves it set aside. Never auto mode's to answer. The ones left aside."""
+        from .gate import ApprovalRequest
+        from .profiles import parse_idn
+        rt = self.runtime
+        aside = []
+        for name, (why, idn) in swaps.items():
+            inst = rt.lab.instruments.get(name)
+            if inst is None:
+                continue
+            serial = parse_idn(idn).get("serial", "")
+            rt.notifier("setup", "%s set aside: another instrument of its model answers there" % name, why)
+            self._set("asking", message="Is the instrument at %s your %s? It answers with serial number %s"
+                      % (inst.config.address, name, serial))
+            request = ApprovalRequest("Use the instrument at %s as %s?" % (inst.config.address, name), [
+                why, "Yes, if it is the one to use as %s now (a replacement, or back from repair): Kelvin keeps serial "
+                     "number %s for it and connects it again. No: it stays set aside." % (name, serial)])
+            try:
+                yes = bool(rt.approver.approve(request))
+            except Exception:
+                yes = False
+            if not yes:
+                aside.append(name)
+                self._missing[name] = why
+                continue
+            profiles.accept_serial(self.home, name, serial, inst.card.id, inst.config.address)
+            profiles.hold_serials(self.home, rt.lab)
+            getattr(rt.lab, "swaps", {}).pop(name, None)
+            try:
+                rt.lab.reconnect(name)
+            except Exception as e:   # set aside again with why: said
+                self._missing[name] = profiles._first_line(e)
+                aside.append(name)
+        return aside
 
     def _connect_pending(self) -> None:
         """Connect the person's lab, one instrument after another, saying which (the portal shows it)."""
@@ -285,6 +453,7 @@ class AutoSetup:
                 step=i + 1, steps=n)
         result = rt.connect_pending(progress)
         missing = result["not_connected"]
+        self._missing = dict(getattr(self, "_missing", {}), **missing)   # said again with the set-up's last words
         message = ("Connected %s" % ", ".join(result["connected"]) if result["connected"] else "No instrument connected")
         if missing:
             message += "; not connected: " + "; ".join("%s (%s)" % (n, profiles._first_line(why))
@@ -365,18 +534,33 @@ class AutoSetup:
                                       if r.get("notes") else ""))
         return written, problems
 
-    def _connect(self, matched: List[Dict[str, Any]]) -> bool:
-        """Write the observed lab and connect to it. False (and a status saying why) if that is not possible now."""
+    def _theirs_meanwhile(self, started: Any) -> bool:
+        """Whether a person set up their own lab while this set-up scanned and wrote cards (Save and connect, a lab
+        config of their own): then the set-up's draft never takes its place."""
+        rt = self.runtime
+        return rt.lab is not started or rt.lab_info.get("kind") == "file" or self.lab_file.exists()
+
+    def _connect(self, matched: List[Dict[str, Any]], started: Any = None) -> bool:
+        """Write the observed lab and connect to it. False (and a status saying why) if that is not possible now.
+
+        The lab config is written only as a new file, never over one a person saved meanwhile (their ±0.5 V limit once
+        became the maker's ±210 V, and the next start opened Kelvin's draft), and the lab is switched only while it is
+        still the one the set-up started from (`started`). The lab opens before it connects, then connects instrument
+        by instrument (connect_pending), as at every other start: one that can't connect (a COM port another program
+        holds) is set aside with why, and the rest are used. All or nothing once left the whole found lab out."""
         from .homelab import build_lab, lab_registry
         rt = self.runtime
+        started = rt.lab if started is None else started
         registry = lab_registry(self.home, rt.collection)
         text = draft_found(matched, registry)
         names = ", ".join("%s (%s)" % (f.get("suggested"), f.get("model")) for f in matched)
         self._set("connecting", message="Found %s; connecting" % names, found=len(matched))
-        tmp = self.lab_file.with_suffix(".tmp")
-        tmp.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(self.lab_file)
+        kept = ("Found %s; you saved your own lab config meanwhile, so Kelvin left it as it is (Set up's Scan finds "
+                "these again)" % names)
+        if self._theirs_meanwhile(started) or not _write_new(self.lab_file, text):
+            log.info("Instrument setup: %s", kept)
+            self._set("done", found=len(matched), message=kept)
+            return False
         proposed = self._keep_proposed(text, registry)
         changed = getattr(rt, "config_changed", None)   # kept in the lab's config history (configversions.py)
         if changed is not None:
@@ -384,22 +568,36 @@ class AutoSetup:
         if not self.can_switch():   # Kelvin is answering: the switch waits for the answer to end (switch_lab idle)
             self._set("connecting", message="Found %s; Kelvin switches to them when it is next idle" % names,
                       found=len(matched))
-        try:
-            lab = build_lab(self.lab_file, None, 0, registry, getattr(self.settings, "switched_off", None))
-        except Exception as e:
-            self._set("done", found=len(matched), message="Found %s but could not connect: %s"
+        try:   # opened before it connects: nothing reaches an instrument here, so nothing here can fail on one
+            lab = build_lab(self.lab_file, None, 0, registry, getattr(self.settings, "switched_off", None), later=True)
+        except Exception as e:   # the config itself (a card that can't be read): no lab to switch to
+            self._set("done", found=len(matched), message="Found %s but could not open them as a lab: %s"
                       % (names, profiles._first_line(e)))
             return False
         info = {"kind": "file", "path": str(self.lab_file), "error": None, "has_file": True, "auto": True}
+        if rt.lab is not started or rt.lab_info.get("kind") == "file":   # a person's own lab came in meanwhile
+            lab.close()
+            self._set("done", found=len(matched), message=kept)
+            return False
         try:   # never under an answer in progress: it once ran a whole turn on the lab it left meanwhile
             rt.switch_lab(lab, None, info, "Kelvin auto-setup", idle=self.can_switch)
         except RuntimeError as e:
             lab.close()
             self._set("done", found=len(matched), message="Found %s; %s" % (names, e))
             return False
+        # switch_lab connected them, one by one, setting aside with why one that couldn't be (or didn't open in time)
+        away = {n: why for n, why in rt.lab.unavailable.items() if n in rt.lab.config.instruments}
+        self._missing = dict(getattr(self, "_missing", {}), **away)
+        connected = sorted(n for n, i in rt.lab.instruments.items() if i.enabled)
+        self._set("connected", message="Connected %s%s" % (", ".join(connected) or "nothing", (
+            "; not connected: " + "; ".join("%s (%s)" % (n, profiles._first_line(why)) for n, why in sorted(away.items()))
+            ) if away else ""), connected=connected, not_connected=sorted(away), found=len(matched))
+        missing = sorted(away)
         rt.notifier("setup", "Kelvin set up %d instrument%s" % (len(matched), "" if len(matched) == 1 else "s"),
                     names + ". Readings and settings work now; Kelvin asks you before each output change until you "
-                    "review their limits in Lab setup.%s" % (
+                    "review their limits in Lab setup.%s%s" % (
+                        " Not connected: %s (the Lab panel says why; connect it again from there once that is fixed)."
+                        % ", ".join(missing) if missing else "",
                         " Your Special Measure rack's limits for %s are there for you to accept (Limits… on %s row)."
                         % (", ".join(proposed), "its" if len(proposed) == 1 else "each") if proposed else ""))
         return True

@@ -5934,24 +5934,30 @@ class LabRuntime:
         self.last_found = [f.address for f in found]
         self.found_info = {resource_name(f.address): dict(vars(f)) for f in found}
 
-    def scan_found(self) -> List[Dict[str, Any]]:
+    def scan_found(self, progress: Optional[Callable[[str], None]] = None) -> List[Dict[str, Any]]:
         """Connected instruments as data, each with a suggested name. Raises AdapterError without VISA.
         What the scan looked through, and why it found what it did, goes to last_survey. Not while a plan or the queue
         runs (a scan asks every instrument on their buses who it is), said at once; behind other work it waits
-        BUSY_WAIT_S at most (LabBusy)."""
+        BUSY_WAIT_S at most (LabBusy). As it goes, what it asks now is Kelvin's busy line, and progress(what)'s."""
         from ..discovery import scan_survey
         in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()
                   if not ic.address.startswith("sim://")}
         if self.running_now():
             raise LabBusy("Kelvin is busy with %s; scan when it has finished, or stop it first." % self.held_by())
+
+        def asking(what: str) -> None:   # one port that takes long (a port another program holds) shows which
+            self.busy = "scanning for instruments: " + what
+            if progress is not None:
+                progress(what)
         with self._person_work("scanning for instruments"):
             found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network,
-                                        catalog=self.collection)
+                                        catalog=self.collection, progress=asking)
+        self._moved(found)
         self._remember_scan(found, looked)
         taken = [n for n in self.lab.config.instruments if not self.lab.config.instruments[n].address.startswith("sim://")]
         out = []
-        for f in found:
-            name = f.suggest_name(taken) if f.card_id and not f.in_lab else None
+        for f in found:   # one of the lab's that moved is no new instrument: no name offered for it
+            name = f.suggest_name(taken) if f.card_id and not f.in_lab and not getattr(f, "moved_from", None) else None
             if name:
                 taken.append(name)
             out.append(dict(vars(f), suggested=name))
@@ -8863,10 +8869,16 @@ class LabRuntime:
                         and not self.gate.ask(request):
                     note = " (%s)" % request.note if request.note else ""
                     return "declined: the person did not want %s added%s" % (new, note)
-            try:   # on the person's lab: connect just this one; from no lab yet: their lab, with it
-                lab = self.lab if on_file else build_lab(new_text, None, 0, registry, self.switched_off_for)
+            try:   # on the person's lab: connect just this one; from no lab yet: their lab, with it, where one of the
+                # others that can't connect (a port another program holds) is set aside with why, never the whole lab
+                lab = self.lab if on_file else build_lab(new_text, None, 0, registry, self.switched_off_for,
+                                                         partial=True)
                 if on_file:
                     lab.add(ic, the_card)
+                elif new in lab.unavailable:   # the one asked for didn't connect: nothing is added
+                    why = lab.unavailable[new]
+                    lab.close()
+                    return "not added: Kelvin could not connect %s: %s" % (address, why)
             except (AdapterError, OSError, ValueError, RuntimeError) as e:
                 why = str(e).splitlines()[0] if str(e) else type(e).__name__
                 return "not added: Kelvin could not connect %s: %s" % (address if on_file else "your lab with it", why)
@@ -10555,6 +10567,31 @@ class LabRuntime:
             self.lock.release()
         return results
 
+    def _moved(self, found: List[Any]) -> None:
+        """A found instrument with the model and the kept serial number of one of the lab's at another address: that
+        one, moved (a USB-serial port renumbered after a replug, a new DHCP address). Said as such, with how to use it
+        there (change its address), and never offered as a new instrument: a scan once offered tc2 for tc at COM5."""
+        from ..adapters import resource_name
+        from ..profiles import kept_serial, parse_idn
+        if self.home is None:
+            return
+        for f in found:
+            if f.in_lab or not f.card_id or not f.idn:
+                continue
+            serial = parse_idn(f.idn).get("serial", "").strip().lower()
+            if not serial:
+                continue
+            for name, inst in list(self.lab.instruments.items()):
+                ic = inst.config
+                if inst.simulated or inst.card.id != f.card_id or resource_name(ic.address) == resource_name(f.address):
+                    continue
+                if kept_serial(self.home, name, inst.card.id, ic.address).strip().lower() == serial:
+                    f.moved_from = name
+                    f.how = ("%s of this lab (serial number %s), now at %s instead of %s: change its address to use it "
+                             "here (Lab, Set up…, its row; or change_instrument %s with address %s)"
+                             % (name, serial, f.address, ic.address, name, f.address))
+                    break
+
     def scan(self) -> str:
         """Which instruments are connected, matched to cards. Read-only: it only asks who they are."""
         def run() -> str:
@@ -10568,6 +10605,7 @@ class LabRuntime:
                                             catalog=self.collection)
             except AdapterError as e:
                 return str(e)
+            self._moved(found)
             self._remember_scan(found, looked)
             if not found:
                 return "\n".join([reason(found, looked)] + looked.lines())
