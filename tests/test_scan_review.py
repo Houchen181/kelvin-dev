@@ -358,10 +358,10 @@ def test_what_couldnt_be_read_now_is_said(tmp_path, monkeypatch):
     tc = rt.lab.instruments["tc"]
     real = tc.read
 
-    def broken(param):
+    def broken(param, *rest):   # (a look at the instrument passes its own replies too)
         if param == "setpoint":
             raise OSError("no answer")
-        return real(param)
+        return real(param, *rest)
     monkeypatch.setattr(tc, "read", broken)
     view = rt.run_again_view(run_id)
     (setpoint,) = [c for c in view["conditions"] if c["key"] == "tc.setpoint"]
