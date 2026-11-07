@@ -106,7 +106,8 @@ def test_the_l09_night(night):
     # 1. the 2182A unplugged in the middle of a scan
     new = fault_in_a_scan(bench, rt, ("unplug", "nvm"))
     [alarm] = new
-    words = "nvm (Keithley 2182 / 2182A nanovoltmeter) doesn't answer on GPIB (address 7): cable or power?"
+    words = ("nvm (Keithley 2182 / 2182A nanovoltmeter) doesn't answer on GPIB (address 7): nothing listens there: "
+             "switched off, unplugged, or set to another address?")
     assert alarm.kind == "silent" and alarm.text.startswith(words) and not alarm.cleared
     assert words in rt.queue.reason                                         # the pause says why, in the same words
     lines = rt.queue.last["lines"]

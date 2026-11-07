@@ -170,8 +170,8 @@ def test_an_instrument_nothing_reads_is_checked_while_work_runs_and_alarms_once(
         monitor.tick()
         [alarm] = monitor.alarms
         assert alarm.kind == "silent" and alarm.text == (
-            "lockin (Virtual Lock-in Amplifier) doesn't answer on GPIB (address 7): cable or power? "
-            "[VI_ERROR_NLISTENERS]")
+            "lockin (Virtual Lock-in Amplifier) doesn't answer on GPIB (address 7): nothing listens there: switched "
+            "off, unplugged, or set to another address? [VI_ERROR_NLISTENERS]")
         for _ in range(3):
             lab.clock.sleep(21)
             monitor.tick()
