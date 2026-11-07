@@ -283,13 +283,13 @@ class Waker:
     async def _wake(self, w: Wake, why: str) -> None:
         from .agent import Busy
         agent = self.agent
-        try:
-            chat = agent.store.load(w.chat_id)
+        try:   # off the server's loop: a read Windows holds up for up to 2 s held Stop and every poll
+            chat = await asyncio.to_thread(agent.store.load, w.chat_id)
         except KeyError:
             return   # the chat is gone
         model = str(chat.get("model") or "")
         try:
-            provider = agent.claim(w.chat_id, model)
+            provider = agent.claim(w.chat_id, model, chat)
         except Busy:
             self.pending.setdefault(w.chat_id, w)   # try again on the next tick
             self._keep()

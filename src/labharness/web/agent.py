@@ -32,7 +32,7 @@ from ..folderfiles import MAX_PDF_PAGES
 from ..gate import ApprovalRequest
 from ..protection import summary as protection_summary
 from .hubmodels import through_hub
-from .providers.base import SESSION, Emit, ModelInfo, Provider, sees_images, text_of
+from .providers.base import SESSION, Emit, ModelInfo, Provider, TurnResult, sees_images, text_of
 from . import analyst, brevity, compaction, memory, review, rules as rulebook
 from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, READ_SKILL_FILE, SAVE_RECIPE, SAVE_SKILL, USE_SKILL, Know
 from .wakeups import WAKE_ME, Waker
@@ -167,6 +167,10 @@ DATA_KINDS = ("CSV, TSV, text and Excel tables, NumPy arrays, MATLAB .mat files 
               "images, BioLogic, Gamry, Arbin and LabVIEW (.lvm, .tdms) files")
 WAIT_S = 120   # the longest wait inside a turn: a wait holds the lab, so longer waits use wake_me
 STOP_POLL_S = 0.2   # how often a tool call that is still running looks at the stop button
+SILENT_S = 120.0     # no word from the model this long: the chat says so, and Kelvin keeps waiting (_answer)
+SILENT_LOOK_S = 5.0   # how often that is looked at
+SILENT = ("No word from the model for %d min: its service may be slow or stuck. Kelvin keeps waiting for it; press "
+          "Stop to end this answer.")
 STOPPED_CALL = ("stopped: the person pressed stop while this was still running. Kelvin ends it as soon as the lab "
                 "lets it: a plan stops at once, an instrument still taking a reading is told to stop.")
 # the tools that make runs, and how their answers name them: run_id='…', or "run <id>" (a recipe's stages)
@@ -220,6 +224,26 @@ def _stopped_turn() -> Optional[str]:
     with their context (the in-process MCP server runs a chat's call in the chat's own task)."""
     turn = _TURN.get()
     return "stop button" if turn is not None and turn.stop else None
+
+
+async def _answer(task: "asyncio.Future[TurnResult]", heard: List[float], say: Emit) -> TurnResult:
+    """The model's answer, as awaiting `task` gives it. While no word comes from the model for SILENT_S (a service that
+    stalled: an SDK reads for up to 10 minutes, then tries again, and the chat said "answering" all along), the chat
+    says so, once each time it falls silent, and Kelvin keeps waiting: Stop ends it as ever (the task is cancelled).
+    heard[0]: when the model was last heard from (time.monotonic(), set by the events it sends)."""
+    told = 0.0
+    while True:
+        try:
+            done, _ = await asyncio.wait({task}, timeout=SILENT_LOOK_S)
+        except asyncio.CancelledError:   # the turn itself ended: the model's answer with it
+            task.cancel()
+            raise
+        if done:
+            return task.result()
+        quiet = time.monotonic() - heard[0]
+        if quiet >= SILENT_S and told < heard[0]:   # once for each silence
+            told = time.monotonic()
+            await say({"type": "note", "text": SILENT % max(1, round(quiet / 60))})
 
 
 class _Cards:
@@ -615,6 +639,7 @@ class ChatAgent:
         self.providers = providers
         self.tools: List[Dict[str, Any]] = []
         self.turns: Dict[str, _Turn] = {}   # the chats answering now, by chat id (each its own turn, side by side)
+        self._choosing: Set[str] = set()   # chats whose comparison's answer is being changed (choose_off_loop)
         self._lab: Optional[asyncio.Lock] = None   # one chat's lab call at a time, filed under that chat
         self.lab_holder: Optional[str] = None   # the chat whose call works the lab now
         self._exit = AsyncExitStack()
@@ -683,6 +708,8 @@ class ChatAgent:
     def _may_start(self, chat_id: str) -> None:
         if chat_id in self.turns:
             raise Busy("This conversation is still answering.")
+        if chat_id in self._choosing:   # another model's answer is being put in its place (choose_off_loop)
+            raise Busy("This conversation is changing to another model's answer; send it again in a moment.")
         if len(self.turns) >= MAX_TURNS:
             raise Busy("Kelvin is answering in %d conversations; wait for one of them to finish." % MAX_TURNS)
 
@@ -1309,11 +1336,14 @@ class ChatAgent:
         provider = self.providers.get(self.model_key(model_key).partition(":")[0])
         return describe_error(provider, e) if provider is not None else describe("The model", "", e)
 
-    def claim(self, chat_id: str, model_key: str) -> Provider:
+    def claim(self, chat_id: str, model_key: str, chat: Optional[Dict[str, Any]] = None) -> Provider:
+        """chat: the chat as read already, off the server's loop (the portal and the wakeups read it so: a read that
+        Windows holds up for up to 2 s once held Stop and every poll); else it is read here."""
         self._may_start(chat_id)
         model_key = self.model_key(model_key)   # the caller passes the same key to run_turn: model_key() it first
         provider, _ = self.provider_for(model_key)
-        self.check_model(self.store.load(chat_id), model_key, "Pick one of the allowed models.")   # KeyError: no chat
+        self.check_model(chat if chat is not None else self.store.load(chat_id), model_key,
+                         "Pick one of the allowed models.")   # KeyError: no chat
         self.turns[chat_id] = _Turn({"chat_id": chat_id, "model": model_key})
         return provider
 
@@ -1503,8 +1533,10 @@ class ChatAgent:
         """One model response plus its tool calls. Returns True if the turn continues."""
         await self._take_steer(chat, emit)
         partial: List[str] = []
+        heard = [time.monotonic()]   # when the model was last heard from (_answer)
 
         async def relay(event: Dict[str, Any]) -> None:
+            heard[0] = time.monotonic()
             if event["type"] == "text":
                 partial.append(event["delta"])
             elif event["type"] == "reset":
@@ -1543,7 +1575,7 @@ class ChatAgent:
                             self._pictures(chat, brevity.with_reminder(history, self._budget()), provider, model_id),
                             context["tools"], relay))
         try:
-            result = await self._stream_task
+            result = await _answer(self._stream_task, heard, emit)
         except asyncio.CancelledError:
             if not self._stop:
                 raise
@@ -2012,13 +2044,16 @@ class ChatAgent:
 
     # ------------------------------------------------------------------ several models at once
 
-    def claim_compare(self, chat_id: str, model_keys: List[str]) -> List[Tuple[str, Provider, str]]:
+    def claim_compare(self, chat_id: str, model_keys: List[str],
+                      chat: Optional[Dict[str, Any]] = None) -> List[Tuple[str, Provider, str]]:
+        """chat: as claim's."""
         self._may_start(chat_id)
         keys = list(dict.fromkeys(self.model_key(str(k)) for k in model_keys if k))
         if not 2 <= len(keys) <= MAX_LANES:
             raise ValueError("Pick two or three different models to compare.")
         lanes = [(k,) + self.provider_for(k) for k in keys]
-        chat = self.store.load(chat_id)  # raises KeyError for an unknown chat
+        if chat is None:
+            chat = self.store.load(chat_id)  # raises KeyError for an unknown chat
         for k in keys:
             self.check_model(chat, k)
         self.turns[chat_id] = _Turn({"chat_id": chat_id, "model": keys[0], "compare": keys})
@@ -2095,15 +2130,20 @@ class ChatAgent:
         records (the chat's project, under its rules). incognito: the chat uses no memory, so its tools' answers
         come without the lab's notes, as in its ordinary turns."""
         out: List[Dict[str, Any]] = []
+        heard = [time.monotonic()]   # when this lane's model was last heard from (_answer)
 
         async def lane_emit(event: Dict[str, Any]) -> None:
+            heard[0] = time.monotonic()
+            await emit(dict(event, lane=i))
+
+        async def lane_note(event: Dict[str, Any]) -> None:   # Kelvin's own word in the lane: not the model's
             await emit(dict(event, lane=i))
 
         try:
             for _ in range(COMPARE_STEPS):
-                result = await provider.stream(model_id, system, self._pictures(
+                result = await _answer(asyncio.ensure_future(provider.stream(model_id, system, self._pictures(
                     {"id": chat_id}, brevity.with_reminder(base + out, self._budget()), provider, model_id), tools,
-                    lane_emit)
+                    lane_emit)), heard, lane_note)
                 out.append({"role": "assistant", "provider": provider.name, "model": result.model or model_id,
                             "blocks": result.blocks, "raw": result.raw})
                 if result.stop_reason != "tool_calls":
@@ -2150,11 +2190,31 @@ class ChatAgent:
                         "blocks": [{"type": "text", "text": "(no answer: %s)" % reason}]})
             return {"model": key, "messages": out, "error": reason}
 
+    async def choose_off_loop(self, chat_id: str, index: int) -> Dict[str, Any]:
+        """choose, its chat read and written off the server's loop. The chat is held meanwhile, so no turn starts on it
+        between the read and the write (_may_start), as none could while choose ran on the loop."""
+        if chat_id in self.turns or chat_id in self._choosing:
+            raise Busy("Wait until the answers are finished.")
+        self._choosing.add(chat_id)
+        try:
+            chat = await self._load(chat_id)
+            out = self._chosen(chat, index)
+            await self._save(chat)
+            return out
+        finally:
+            self._choosing.discard(chat_id)
+
     def choose(self, chat_id: str, index: int) -> Dict[str, Any]:
         """Continue the chat with another model's answer from the last comparison."""
-        if chat_id in self.turns:
+        if chat_id in self.turns or chat_id in self._choosing:
             raise Busy("Wait until the answers are finished.")
         chat = self.store.load(chat_id)
+        out = self._chosen(chat, index)
+        self.store.save(chat)
+        return out
+
+    def _chosen(self, chat: Dict[str, Any], index: int) -> Dict[str, Any]:
+        """The chat changed to that answer of its last comparison (not saved). ValueError says why not."""
         at = max((i for i, m in enumerate(chat["messages"]) if m.get("role") == "user"), default=-1)
         comp = chat["messages"][at].get("compare") if at >= 0 else None
         if not comp or not comp.get("lanes"):
@@ -2167,7 +2227,6 @@ class ChatAgent:
         chat["messages"] = chat["messages"][:at + 1] + copy.deepcopy(lanes[index]["messages"])
         comp["chosen"] = index
         chat["model"] = comp["models"][index]
-        self.store.save(chat)
         return {"chosen": index, "model": chat["model"]}
 
     async def _tool(self, name: str, args: Any, viewer: Optional[Viewer]) -> Any:
