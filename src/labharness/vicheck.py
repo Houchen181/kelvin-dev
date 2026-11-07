@@ -12,9 +12,10 @@ model, and only ever a warning).
    order.
 4. A second model's review.
 
-What blocks keeping a translation is only a safety failure (Finding.blocks): a path around the gate, a forbidden
+What blocks keeping a translation is a safety failure (Finding.blocks): a path around the gate, a forbidden
 import or call, a drive the VI never touched, an input default changed, a rehearsal that breaks a limit, reaches
-past the simulated lab or never ends. The rest are warnings a person accepts by keeping it.
+past the simulated lab or never ends; and a check a person stopped (their Stop during a rehearsal), which isn't
+passed until it runs again. The rest are warnings a person accepts by keeping it.
 """
 from __future__ import annotations
 
@@ -347,15 +348,27 @@ def _default_prepare(lab: Any) -> Callable[[Path, str], Any]:
     return lambda path, action: scriptrun.prepare(lab, str(path), [path.parent], action=action)
 
 
+STOPPED = "stopped by a person"   # scriptrun.Rehearsal.ended for a rehearsal a person's Stop ended
+
+
+def stopped(report: Report) -> bool:
+    """A person's Stop ended the check's rehearsals: it isn't passed, and nothing in the code is to be repaired for it
+    (vitranslate stops there)."""
+    return any(r.get("ended") == STOPPED for r in report.rehearsals.values())
+
+
 def rehearse_actions(lab: Any, path: Path, source: str, twin_of: Callable[[], Any],
                      prepare: Optional[Callable[[Path, str], Any]] = None,
-                     real: Any = None) -> Tuple[Dict[str, Any], List[Finding]]:
+                     real: Any = None, since: Optional[int] = None) -> Tuple[Dict[str, Any], List[Finding]]:
     """Each action (the whole file when it has none) rehearsed in file order on one simulated copy of the lab, made by
     twin_of, as a person runs them one after another (initialize, then scan): what each did, and what blocks or
-    warns."""
+    warns. A person's Stop on the lab (real, the lab's gate; since: its stops when the check began) ends the
+    rehearsals: the translation isn't checked then, which blocks keeping it until it is checked again."""
     prepare = prepare or _default_prepare(lab)
     out: Dict[str, Any] = {}
     found: List[Finding] = []
+    if real is not None and since is None:
+        since = real.stop_generation
     try:
         twin = twin_of()
     except Exception as e:   # the lab couldn't be copied now: nothing is rehearsed, and it says so
@@ -370,7 +383,7 @@ def rehearse_actions(lab: Any, path: Path, source: str, twin_of: Callable[[], An
             found.append(Finding("rehearsal", "%s isn't rehearsed: %s" % (name, e), False))
             continue
         try:
-            r = scriptrun.rehearse(lab, prep, seconds=REHEARSE_S, twin=twin, real=real)
+            r = scriptrun.rehearse(lab, prep, seconds=REHEARSE_S, twin=twin, real=real, since=since)
         except scriptrun.ScriptError as e:
             out[action] = {"ok": False, "ended": "not rehearsed", "message": str(e), "problems": [str(e)],
                            "columns": {}}
@@ -378,6 +391,12 @@ def rehearse_actions(lab: Any, path: Path, source: str, twin_of: Callable[[], An
             continue
         out[action] = {"ok": r.ok, "ended": r.ended, "message": r.message, "problems": list(r.problems),
                        "columns": r.columns, "asked": list(r.asked)}
+        if r.ended == STOPPED:   # never a passed check: the rest isn't rehearsed, and keeping it waits for a check
+            found.append(Finding("rehearsal", "a person pressed Stop during %s's rehearsal, so it isn't checked: "
+                                              "check it again" % name, True))
+            found += [Finding("rehearsal", "%s, in its rehearsal: %s" % (name, p), True)
+                      for p in r.problems if _is_safety(p)]
+            break
         if r.ended == "not on Stop":
             found.append(Finding("rehearsal", "%s never ends, not even on Stop" % name, True))
         for p in r.problems:
@@ -505,12 +524,16 @@ def check(source: str, desc: Dict[str, Any], lab: Any, mappings: Dict[str, Mappi
           path: Path, twin_of: Callable[[], Any], plan_text: str = "", review_ask: Optional[Ask] = None,
           real: Any = None, prepare: Optional[Callable[[Path, str], Any]] = None, desc_text: str = "") -> Report:
     """Every check on a translation saved at path. The rehearsals, columns, trace and review run only when the static
-    rules found nothing that blocks (a file that reaches past the gate never runs, even on the simulated lab)."""
+    rules found nothing that blocks (a file that reaches past the gate never runs, even on the simulated lab). A
+    person's Stop on the lab (real) during the rehearsals ends the check there: it is not passed."""
+    since = real.stop_generation if real is not None else None
     report = Report(static(source, desc, mappings, lab, notes))
     if report.blocking:
         return report
-    report.rehearsals, found = rehearse_actions(lab, Path(path), source, twin_of, prepare, real)
+    report.rehearsals, found = rehearse_actions(lab, Path(path), source, twin_of, prepare, real, since)
     report.findings += found
+    if stopped(report):
+        return report   # no trace, columns or second opinion from a check a person cut short
     have: Set[str] = set()
     for r in report.rehearsals.values():
         cols = r.get("columns") or {}

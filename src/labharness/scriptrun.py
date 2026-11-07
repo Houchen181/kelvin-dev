@@ -1048,10 +1048,16 @@ class ScriptRun:
     def __init__(self, gate: SafetyGate, prep: Prepared, store: RunStore, grants: Dict[str, Allowed],
                  allowed: Set[str], meta: Optional[Dict[str, Any]] = None, folder: Any = None,
                  busy: Optional[Callable[[str], None]] = None,
-                 progress: Optional[Callable[[Dict[str, Any]], None]] = None, rehearsal: bool = False):
+                 progress: Optional[Callable[[Dict[str, Any]], None]] = None, rehearsal: bool = False,
+                 since: Optional[int] = None):
         self.gate, self.lab, self.prep = gate, gate.lab, prep
         # a rehearsal on the simulated lab (rehearse): nothing outside it, in a folder of its own, its waits skipped
         self.rehearsal = rehearsal
+        # the gate's stops as they were when the run was asked for (the tool's call, the queue picking it): a Stop
+        # since then, while it was approved or while it was starting, stops it, or it never starts. None: as execute()
+        # begins
+        self.since = since
+        self.gen: Optional[int] = None   # the stops this run began with (execute)
         self.killed = False   # it did not end after its stop, so Kelvin ended it
         self.store, self.grants, self.meta, self.folder = store, grants, dict(meta or {}), folder
         # unknown addresses a person allowed, as VISA resources however they are spelled (the approval's serial://COM5
@@ -1256,6 +1262,10 @@ class ScriptRun:
             yield
         finally:
             del inst.instrument_error
+
+    def _stop_pressed(self) -> bool:
+        """A Stop since the run began."""
+        return self.gen is not None and self.gate.stop_generation != self.gen
 
     @contextmanager
     def _patience(self, inst: Any, timeout_ms: Optional[float]) -> Iterator[None]:
@@ -1728,6 +1738,10 @@ class ScriptRun:
 
     def execute(self) -> ScriptReport:
         gate, lab, prep = self.gate, self.lab, self.prep
+        # the stops as they were when the run was asked for (else now, before anything): a person's Stop while it was
+        # approved or while it is starting (the snapshot reads every instrument, the folder walk can take seconds) is
+        # never lost
+        self.gen = gate.stop_generation if self.since is None else self.since
         plan = {"plan": prep.name, "script": str(prep.path), "sha256": prep.sha256, "python": prep.python.text,
                 "changes": prep.changes or None, "params": prep.params or None, "args": prep.args or None,
                 "version": prep.version, "action": prep.action or None}
@@ -1756,7 +1770,6 @@ class ScriptRun:
         self.t0 = time.monotonic()
         self.last_activity = self.t0
         self.stop_at = 0.0
-        gen = gate.stop_generation
         killed = False
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("127.0.0.1", 0))
@@ -1770,15 +1783,19 @@ class ScriptRun:
         approved = gate.preapproved(self.grants)   # what the person approved holds for the whole run
         approved.__enter__()
         try:
-            try:
-                proc = subprocess.Popen(self._command_line(run_dir, source_file), cwd=str(run_dir if self.rehearsal else prep.path.parent),
-                                        env=self._environ(server.getsockname()[1], run_dir),
-                                        stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                                        start_new_session=os.name != "nt")
-            except OSError as e:
-                self.failed = "the script's Python did not start (%s)" % (e.strerror or e)
-                proc = None
+            proc = None
+            if self._stop_pressed():   # stopped while it was approved or starting: its Python never starts
+                self._begin_stop("stop requested", conns)
+            else:
+                try:
+                    proc = subprocess.Popen(self._command_line(run_dir, source_file),
+                                            cwd=str(run_dir if self.rehearsal else prep.path.parent),
+                                            env=self._environ(server.getsockname()[1], run_dir),
+                                            stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                                            start_new_session=os.name != "nt")
+                except OSError as e:
+                    self.failed = "the script's Python did not start (%s)" % (e.strerror or e)
             if proc is not None:
                 job = _Job(proc)
                 self.busy("script %s: starting" % prep.name)
@@ -1808,7 +1825,7 @@ class ScriptRun:
                         sel.unregister(conn.sock)
                         conns.pop(conn.sock, None)
                         conn.sock.close()
-                if gate.stop_generation != gen and not self.stopping:
+                if not self.stopping and self._stop_pressed():
                     self._begin_stop("stop requested", conns)
                 if proc.poll() is not None:
                     break
@@ -1838,7 +1855,7 @@ class ScriptRun:
         if self.failed:
             status, reason = "aborted", self.failed
         elif stopped_by_person:
-            status, reason = "aborted", "stop requested"
+            status, reason = "aborted", "stop requested" if proc is not None else "stop requested before it started"
         elif code not in (0, None):
             status = "aborted"
             reason = self.bye.get("error") or "it ended with exit code %s" % code
@@ -1942,8 +1959,10 @@ class ScriptRun:
 
 @dataclass
 class Rehearsal:
-    ok: bool                 # it ended (by itself, or on Stop) and nothing was refused
-    ended: str               # "by itself" | "on Stop" | "failed" | "not on Stop"
+    ok: bool                 # it ended (by itself, or on Kelvin's own Stop) and nothing was refused
+    # "by itself" | "on Stop" (Kelvin's, when its time ran out) | "failed" | "not on Stop" | "stopped by a person"
+    # (never a clean rehearsal: what it would have done next is not known, and the person wanted it stopped)
+    ended: str
     message: str
     lab_seconds: float       # the simulated lab's time it took
     problems: List[str] = field(default_factory=list)
@@ -1954,7 +1973,7 @@ class Rehearsal:
 
 
 ENDED = {"by itself": "it ended by itself", "on Stop": "it ended on Stop", "failed": "it failed",
-         "not on Stop": "it did not end on Stop"}
+         "not on Stop": "it did not end on Stop", "stopped by a person": "a person stopped it"}
 
 
 def _reaches_past(source: str) -> Optional[str]:
@@ -2014,7 +2033,8 @@ def rehearsal_problem(prep: Prepared) -> Optional[str]:
 
 
 def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: Any = None,
-             twin: Any = None, real: Any = None, wire: Optional[List[Any]] = None) -> Rehearsal:
+             twin: Any = None, real: Any = None, wire: Optional[List[Any]] = None,
+             since: Optional[int] = None) -> Rehearsal:
     """An experiment run on a simulated copy of the lab (lab.make_twin), as it would run on the lab: every command
     through the twin's gate, which says yes to whatever a person would be asked (and lists it), its waits skipped on the
     simulated clock, nothing outside the simulated lab, and nothing written beside the script. Kelvin presses Stop on
@@ -2024,8 +2044,11 @@ def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: An
     Nothing it runs reaches past the simulated lab: its process refuses programs, native libraries, COM, the network
     and writing outside its own folder (kelvin_shim._fence). (No job object stops it starting a process, as run_python's
     has: a venv's python.exe on Windows starts the real Python as a second process.) real: the lab's own gate, whose
-    Stop (a person's, or the agent's stop_run) stops the rehearsal too. wire: a list that gets each (instrument,
-    command) the simulated instruments are sent, in order (vicheck compares it with a plan's)."""
+    Stop (a person's, or the agent's stop_run) stops the rehearsal too; then it is never a clean one (ended "stopped
+    by a person", not ok), so nothing that waits on it (auto mode, the queue's approval) goes on to the real run.
+    since: the lab gate's stops when the run was asked for (else as this begins): a Stop since then counts. wire: a
+    list that gets each (instrument, command) the simulated instruments are sent, in order (vicheck compares it with a
+    plan's)."""
     if not prep.found.experiment:
         raise ScriptError("%s doesn't use kelvin.lab, so Kelvin can't rehearse it: it may reach what the simulated lab "
                           "can't stand in for" % prep.name)
@@ -2034,6 +2057,10 @@ def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: An
         raise ScriptError("%s can't be rehearsed: %s" % (prep.name, why))
     from .eventlog import EventLog
     from .gate import SimulationApprover
+    stops = None if real is None else real.stop_generation if since is None else since
+
+    def person_stopped() -> bool:
+        return stops is not None and real.stop_generation != stops
     twin = twin if twin is not None else lab.make_twin()
     if wire is not None:
         for name, inst in twin.instruments.items():
@@ -2046,18 +2073,21 @@ def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: An
     if problems:
         return Rehearsal(False, "failed", "rehearsal on the simulated lab: %s before it started" % ENDED["failed"],
                          0.0, problems)
-    job = ScriptRun(gate, prep, RunStore(None), grants, set(), rehearsal=True)
+    if person_stopped():   # a Stop while the lab was copied: nothing runs, not even on the simulated lab
+        return Rehearsal(False, "stopped by a person", "rehearsal on the simulated lab: %s before it started"
+                         % ENDED["stopped by a person"], 0.0)
+    # its own stops from here on: Kelvin's when its time runs out, a person's on the lab
+    job = ScriptRun(gate, prep, RunStore(None), grants, set(), rehearsal=True, since=gate.stop_generation)
     t0 = twin.clock.now()
     timer = threading.Timer(seconds, gate.request_abort, args=("the rehearsal's time ran out",))
     timer.daemon = True
     timer.start()
     watching = threading.Event()
     if real is not None:   # a person's Stop on the lab stops its rehearsal too
-        stops = real.stop_generation
 
         def watch() -> None:
             while not watching.wait(0.1):
-                if real.stop_generation != stops:
+                if person_stopped():
                     gate.request_abort("a person pressed Stop")
                     return
         threading.Thread(target=watch, name="kelvin-rehearsal-stop", daemon=True).start()
@@ -2086,6 +2116,8 @@ def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: An
         ended = "on Stop"
     else:
         ended, problems = "failed", [job.bye.get("error") or report.message]
+    if person_stopped():   # whatever else it did: what it would have done next is not known, and the person wanted it
+        ended = "stopped by a person"   # stopped, so it never counts as a clean rehearsal (auto mode, the queue)
     for refused in job.bye.get("refused") or []:   # what its process refused, also when the experiment carried on
         line = "its process refused: %s" % refused
         if line not in problems:
