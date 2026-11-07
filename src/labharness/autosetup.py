@@ -214,6 +214,18 @@ class AutoSetup:
             taken.add(f.get("suggested"))
         return out
 
+    def _scan(self) -> List[Dict[str, Any]]:
+        """The scan, saying as it goes which port or address it asks now (a port that takes long shows which)."""
+        import inspect
+
+        def asking(what: str) -> None:
+            self._set("scanning", message="Looking for connected instruments: %s" % what)
+        try:
+            takes = "progress" in inspect.signature(self.scan).parameters
+        except (TypeError, ValueError):
+            takes = False
+        return self.scan(progress=asking) if takes else self.scan()
+
     def _done(self, message: str, **more: Any) -> Dict[str, Any]:
         """Finish, saying why (the Lab panel shows it while the lab has no instruments), and log it."""
         looked = self.runtime.last_survey if more.get("lines") is not None else None
@@ -243,7 +255,7 @@ class AutoSetup:
                 self._set("scanning", message="Looking for connected instruments (asking each who it is)")
                 log.info("Instrument scan (%s): looking for connected instruments", reason)
                 try:
-                    found = self.scan()
+                    found = self._scan()
                 except Exception as e:   # no VISA library: nothing to set up
                     return self._done("Kelvin could not look for instruments: %s" % profiles._first_line(e), found=0)
                 looked = rt.last_survey or {}

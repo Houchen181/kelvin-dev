@@ -20,7 +20,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .adapters import AdapterError, apply_serial_settings, is_serial, resource_manager, resource_name, timed_out
+from .adapters import (AdapterError, apply_serial_settings, is_serial, lost_kind, resource_manager, resource_name,
+                       timed_out)
 from .cards import Card, CardRegistry
 
 SHORT_NAMES = {"source-meter": "smu", "lock-in": "lockin", "temperature-controller": "tc", "magnet-supply": "magnet",
@@ -279,52 +280,129 @@ def _ask(rm: Any, name: str, query: str, timeout_ms: int, settings: Optional[Dic
     READY) goes into `said`, and the query is sent after it, as sent earlier it is lost in the bootloader."""
     res = rm.open_resource(name)
     try:
-        res.timeout = timeout_ms
-        res.read_termination = (settings or {}).get("read_termination", "\n")
-        res.write_termination = (settings or {}).get("write_termination", "\n")
-        if settings:
-            apply_serial_settings(res, settings)
-        if booting:
-            res.timeout = int(booting * 1000)
-            try:
-                said = said if said is not None else []
-                said.append(str(res.read()).strip())   # the first line once it has started, or nothing
-                res.timeout = 300
-                for _ in range(3):
-                    said.append(str(res.read()).strip())
-            except Exception:
-                pass
-            res.timeout = timeout_ms
-        if name.upper().endswith("::SOCKET"):   # what it says by itself as a connection opens (an AMI 430 greets)
-            res.timeout = min(timeout_ms, 300)
-            for _ in range(3):
-                try:
-                    res.read()
-                except Exception:
-                    break
-            res.timeout = timeout_ms
-        if (settings or {}).get("enq"):   # acknowledged (passing over readings it was sending), then asked with ENQ
-            res.write(query)
-            for _ in range(20):
-                ack = str(res.read()).strip()
-                if ack in ("\x06", "\x15"):
-                    break
-            if ack != "\x06":
-                return ""
-            res.write_raw(b"\x05")
-            reply = str(res.read()).strip()
-        else:
-            reply = str(res.query(query)).strip()
-            if reply == query.strip():   # it echoes each command (an ANC300's command line): its answer comes next
-                reply = str(res.read()).strip()
-        if re.fullmatch(r"[\d\s.,;:+\-Ee]*", reply) or REFUSAL.match(reply) or reply in (said or []):
-            return ""   # not who it is: its readings, a refusal of the query, or the banner it printed again
-        return reply if all(ch.isprintable() for ch in reply) else ""
+        return _ask_open(res, name, query, timeout_ms, settings, booting, said)
     finally:
         try:
             res.close()
         except Exception:
             pass
+
+
+def _ask_open(res: Any, name: str, query: str, timeout_ms: int, settings: Optional[Dict[str, Any]] = None,
+              booting: float = 0.0, said: Optional[List[str]] = None) -> str:
+    """_ask on a session already open: a serial port is opened once and asked at each framing in turn."""
+    res.timeout = timeout_ms
+    res.read_termination = (settings or {}).get("read_termination", "\n")
+    res.write_termination = (settings or {}).get("write_termination", "\n")
+    if settings:
+        apply_serial_settings(res, settings)
+    if booting:
+        res.timeout = int(booting * 1000)
+        try:
+            said = said if said is not None else []
+            said.append(str(res.read()).strip())   # the first line once it has started, or nothing
+            res.timeout = 300
+            for _ in range(3):
+                said.append(str(res.read()).strip())
+        except Exception:
+            pass
+        res.timeout = timeout_ms
+    if name.upper().endswith("::SOCKET"):   # what it says by itself as a connection opens (an AMI 430 greets)
+        res.timeout = min(timeout_ms, 300)
+        for _ in range(3):
+            try:
+                res.read()
+            except Exception:
+                break
+        res.timeout = timeout_ms
+    if (settings or {}).get("enq"):   # acknowledged (passing over readings it was sending), then asked with ENQ
+        res.write(query)
+        for _ in range(20):
+            ack = str(res.read()).strip()
+            if ack in ("\x06", "\x15"):
+                break
+        if ack != "\x06":
+            return ""
+        res.write_raw(b"\x05")
+        reply = str(res.read()).strip()
+    else:
+        reply = str(res.query(query)).strip()
+        if reply == query.strip():   # it echoes each command (an ANC300's command line): its answer comes next
+            reply = str(res.read()).strip()
+    if re.fullmatch(r"[\d\s.,;:+\-Ee]*", reply) or REFUSAL.match(reply) or reply in (said or []):
+        return ""   # not who it is: its readings, a refusal of the query, or the banner it printed again
+    return reply if all(ch.isprintable() for ch in reply) else ""
+
+
+def _discard_input(res: Any) -> None:
+    """What a serial port holds unread (a reply at another framing, as garbage; an ACK; readings a gauge controller
+    sends by itself): dropped before the next framing's question, so it is never taken for that answer. The port's
+    own discard where it has one; else what is there is read off, briefly."""
+    try:
+        from pyvisa import constants
+        res.flush(constants.BufferOperation.discard_read_buffer | constants.BufferOperation.discard_receive_buffer)
+        return
+    except Exception:   # a port that can't, or a fake bus in tests
+        pass
+    timeout = getattr(res, "timeout", None)
+    try:
+        res.timeout = 50
+        for _ in range(20):   # a controller streaming its readings never stops sending: a few, then on
+            res.read()
+    except Exception:
+        pass
+    finally:
+        try:
+            res.timeout = timeout
+        except Exception:
+            pass
+
+
+def _unopened(address: str, e: BaseException) -> str:
+    """A port the scan couldn't open, in words: most often another program has it (LabVIEW holding a GPIB-USB)."""
+    from .others import holders_text
+    why = str(e).splitlines()[0][:160] if str(e).strip() else type(e).__name__
+    return ("Kelvin could not open it (%s): another program may have it open%s; close that program, or unplug it "
+            "and plug it in again, then scan again" % (why, holders_text()))
+
+
+BLUETOOTH = ("a Bluetooth serial port: not asked, as opening one can wait a long while for a paired device (an "
+             "instrument is never on one)")
+
+
+def _bluetooth_ports() -> set:
+    """The serial ports Windows makes for paired Bluetooth devices (hwid BTHENUM), as resources (ASRL7::INSTR)."""
+    try:
+        from serial.tools import list_ports
+        ports = list_ports.comports()
+    except Exception:
+        return set()
+    out = set()
+    for port in ports:
+        if "BTHENUM" in str(getattr(port, "hwid", "") or "").upper():
+            num = re.match(r"^COM(\d+)$", str(port.device), re.I)
+            out.add("ASRL%s::INSTR" % (num.group(1) if num else port.device))
+    return out
+
+
+def _shown(resource: str) -> str:
+    """A resource as people know it: ASRL3::INSTR is COM3; the rest as they are."""
+    m = re.match(r"^ASRL(\d+)::INSTR$", resource, re.I)
+    return "COM%s" % m.group(1) if m else resource
+
+
+def _answered(found: Found, reply: str, settings: Optional[Dict[str, Any]], registry: CardRegistry,
+              catalog: Any) -> Found:
+    """An identity reply, at these settings (a serial port's framing): what it says of the instrument."""
+    found.idn = reply
+    found.settings = _framing(settings) if settings else ""
+    found.serial = {k: v for k, v in (settings or {}).items() if k != "query"}
+    card = match_card(reply, registry)
+    if card:
+        found.card_id, found.model, found.kind, found.how = card.id, card.model, card.kind, "identity reply"
+        return found
+    found.how = "no card matches the reply"
+    return look_up(found, catalog)
 
 
 def _usb_ids() -> Dict[str, str]:
@@ -356,26 +434,39 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
     if resets_on_open(vid_pid):
         return _ask_board(found, rm, registry, vid_pid, timeout_ms, catalog)
     if is_serial(address):
-        tries = [(s["query"], s) for s in _serial_settings(registry)]
+        # opened once, and asked at each framing on the open port: opened again for each of 13 framings, a port whose
+        # opening blocks (a Bluetooth one) cost 13 times as long, and an FTDI board reset 13 times. A port that can't
+        # be opened is said as such (another program may hold it), not as an instrument that didn't answer
+        try:
+            res = rm.open_resource(address)
+        except Exception as e:
+            found.how = _unopened(address, e)
+            return found
+        try:
+            for settings in _serial_settings(registry):
+                _discard_input(res)
+                try:
+                    reply = _ask_open(res, address, settings["query"], timeout_ms, settings)
+                except Exception as e:
+                    if lost_kind(e) == "gone":   # the port went away meanwhile: nothing more to ask
+                        break
+                    continue
+                if reply:
+                    return _answered(found, reply, settings, registry, catalog)
+        finally:
+            try:
+                res.close()
+            except Exception:
+                pass
     else:
         queries = queries or ["*IDN?"] + sorted({c.idn_query for c in registry if c.idn_query != "*IDN?"})
-        tries = [(q, None) for q in queries]
-    for query, settings in tries:
-        try:
-            reply = _ask(rm, address, query, timeout_ms, settings)
-        except Exception:
-            continue
-        if not reply:
-            continue
-        found.idn = reply
-        found.settings = _framing(settings) if settings else ""
-        found.serial = {k: v for k, v in (settings or {}).items() if k != "query"}
-        card = match_card(reply, registry)
-        if card:
-            found.card_id, found.model, found.kind, found.how = card.id, card.model, card.kind, "identity reply"
-            return found
-        found.how = "no card matches the reply"
-        return look_up(found, catalog)
+        for query in queries:
+            try:
+                reply = _ask(rm, address, query, timeout_ms)
+            except Exception:
+                continue
+            if reply:
+                return _answered(found, reply, None, registry, catalog)
     vid_pid = vid_pid or (usb if usb is not None else _usb_ids()).get(address)
     if vid_pid:
         cards = [c for c in registry if vid_pid in c.usb_ids]
@@ -427,16 +518,32 @@ def _ask_board(found: Found, rm: Any, registry: CardRegistry, vid_pid: str, time
 
 NLISTENERS = -1073807265   # VISA: nothing listens at that GPIB address (the bus says so before anything is sent)
 SWEEP_MS = 300             # how long an instrument that listens may take to answer *IDN? in a GPIB board's sweep
+HUNG_IN_A_ROW = 3          # addresses in a row that time out in a board's sweep: the bus is hung, not instruments
+HUNG_UNANSWERED = 5        # or this many, with nothing answering and nothing saying that nobody is there
 
 
-def gpib_listeners(rm: Any, board: str, skip: Iterable[str] = (), timeout_ms: int = SWEEP_MS) -> List[Tuple[str, str]]:
+def hung_bus_text(board: str) -> str:
+    """A GPIB board the scan found hung, and what to do, in words for the Lab panel."""
+    return ("%s seems hung: its addresses time out instead of saying that nothing is there, as when an instrument holds "
+            "the bus, so Kelvin stopped asking on it. Switch off the instrument that holds it (or reset the board: NI "
+            "MAX, Reset), then scan again; Kelvin can clear the bus too (ask it to)" % board)
+
+
+def gpib_listeners(rm: Any, board: str, skip: Iterable[str] = (), timeout_ms: int = SWEEP_MS,
+                   hung: Optional[List[str]] = None) -> List[Tuple[str, str]]:
     """The instruments on a GPIB board ("GPIB0"), found as NI MAX's Scan for Instruments finds them: each address from
     1 to 30 asked *IDN? in turn. NI-VISA lists only those MAX's scan found, so a lab whose MAX never scanned saw none
     (field test). Where nothing listens the bus says so at once and nothing is sent; one that listens but doesn't
     answer in time is device-cleared (its query isn't left pending). skip: resources not to ask (the lab's own, which
-    may be busy, and those VISA listed, asked as usual). [(resource, its reply, "" for none)]."""
+    may be busy, and those VISA listed, asked as usual). [(resource, its reply, "" for none)].
+
+    A hung bus (an instrument holding its handshake) times out at every address: HUNG_IN_A_ROW in a row, or
+    HUNG_UNANSWERED with nothing answering and nothing saying that nobody is there, end the sweep. The board goes into
+    `hung`, and the addresses that timed out are left out: they were the bus, not instruments (a first start once
+    reported 30 instruments that "did not answer", after 3.5 minutes of timeouts)."""
     skip = {str(s).upper() for s in skip}
     out: List[Tuple[str, str]] = []
+    row = timeouts = answered = nobody = 0
     for pad in range(1, 31):
         name = "%s::%d::INSTR" % (board, pad)
         if name.upper() in skip:
@@ -451,14 +558,23 @@ def gpib_listeners(rm: Any, board: str, skip: Iterable[str] = (), timeout_ms: in
                 reply = str(res.query("*IDN?")).strip()
             except Exception as e:
                 if getattr(e, "error_code", None) == NLISTENERS or "NLISTENERS" in str(e):
+                    nobody, row = nobody + 1, 0
                     continue   # nobody there
                 if not timed_out(e):
+                    row = 0
                     continue
+                timeouts, row = timeouts + 1, row + 1
+                if row >= HUNG_IN_A_ROW or (timeouts >= HUNG_UNANSWERED and not answered and not nobody):
+                    if hung is not None:
+                        hung.append(board)
+                    return [(n, r) for n, r in out if r]   # what answered; the silent ones were the hung bus
                 reply = ""   # it listens, and says nothing (an older instrument): its query dropped
                 try:
                     res.clear()
                 except Exception:
                     pass
+            else:
+                answered, row = answered + 1, 0
             out.append((name, reply))
         finally:
             try:
@@ -568,11 +684,15 @@ def _look_behind(adapter: str, registry: CardRegistry, in_lab: Dict[str, str], c
 def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]] = None,
                 timeout_ms: int = 800, network: bool = True, catalog: Any = None,
                 prologix_ports: Optional[Iterable[str]] = None, gpib_sweep: Optional[bool] = None,
+                progress: Optional[Callable[[str], None]] = None,
                 **survey_options: Any) -> Tuple[List[Found], Any]:
     """The scan, and what it looked through (survey.py): VISA, the local network, USB, serial ports and GPIB, each
     GPIB board asked address by address too (gpib_listeners), also behind Prologix adapters. prologix_ports: the
     serial ports that may be a GPIB-USB (prologix.usb_ports, when the VISA is a real one; tests give theirs).
-    gpib_sweep: ask the GPIB boards address by address (by default with a real VISA)."""
+    gpib_sweep: ask the GPIB boards address by address (by default with a real VISA). progress(what): as the scan
+    goes on, what it asks now, in words ("asking COM3 who it is, 4 of 9"): one port that takes long shows which.
+    A GPIB board found hung is said in what was looked through (its problems), and its addresses that timed out are
+    no instruments; Bluetooth serial ports are not asked."""
     from . import prologix
     from .adapters import resource_name
     from .survey import _is_pyvisa, survey
@@ -590,12 +710,19 @@ def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[st
         for board in looked.gpib_boards:
             if BUSES.text(board):
                 continue   # a hung bus: nothing more is sent on it
-            for name, reply in gpib_listeners(rm, board, set(resources) | set(in_lab)):
+            if progress is not None:
+                progress("asking each address on %s who is there" % board)
+            stuck: List[str] = []
+            for name, reply in gpib_listeners(rm, board, set(resources) | set(in_lab), hung=stuck):
                 swept[name] = reply
                 looked.add(name, GPIB_SWEPT)
                 resources.append(name)
+            if stuck:   # said, with what to do; the monitor's own alarm and Clear the bus are for the lab's instruments
+                looked.problems.append(hung_bus_text(board))
     usb = _usb_ids()
+    bluetooth = _bluetooth_ports()
     out = []
+    asking = [n for n in sorted(set(resources)) if n not in in_lab and not swept.get(n) and n.upper() not in bluetooth]
     for name in sorted(set(resources)):
         if name in in_lab:
             out.append(Found(name, how="already in this lab", in_lab=in_lab[name]))
@@ -603,6 +730,11 @@ def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[st
         if swept.get(name):   # asked already, on the sweep: not again
             out.append(_from_reply(name, swept[name], registry, catalog))
             continue
+        if name.upper() in bluetooth:
+            out.append(Found(name, how=BLUETOOTH))
+            continue
+        if progress is not None:
+            progress("asking %s who it is, %d of %d" % (_shown(name), asking.index(name) + 1, len(asking)))
         out.append(identify(name, registry, rm, timeout_ms, usb, catalog=catalog))
     for adapter in adapters:
         out += _look_behind(adapter, registry, in_lab, catalog, looked)

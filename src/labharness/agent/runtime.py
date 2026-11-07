@@ -5931,19 +5931,24 @@ class LabRuntime:
         self.last_found = [f.address for f in found]
         self.found_info = {resource_name(f.address): dict(vars(f)) for f in found}
 
-    def scan_found(self) -> List[Dict[str, Any]]:
+    def scan_found(self, progress: Optional[Callable[[str], None]] = None) -> List[Dict[str, Any]]:
         """Connected instruments as data, each with a suggested name. Raises AdapterError without VISA.
         What the scan looked through, and why it found what it did, goes to last_survey. Not while a plan or the queue
         runs (a scan asks every instrument on their buses who it is), said at once; behind other work it waits
-        BUSY_WAIT_S at most (LabBusy)."""
+        BUSY_WAIT_S at most (LabBusy). As it goes, what it asks now is Kelvin's busy line, and progress(what)'s."""
         from ..discovery import scan_survey
         in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()
                   if not ic.address.startswith("sim://")}
         if self.running_now():
             raise LabBusy("Kelvin is busy with %s; scan when it has finished, or stop it first." % self.held_by())
+
+        def asking(what: str) -> None:   # one port that takes long (a port another program holds) shows which
+            self.busy = "scanning for instruments: " + what
+            if progress is not None:
+                progress(what)
         with self._person_work("scanning for instruments"):
             found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network,
-                                        catalog=self.collection)
+                                        catalog=self.collection, progress=asking)
         self._remember_scan(found, looked)
         taken = [n for n in self.lab.config.instruments if not self.lab.config.instruments[n].address.startswith("sim://")]
         out = []

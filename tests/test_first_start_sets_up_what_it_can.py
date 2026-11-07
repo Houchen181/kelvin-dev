@@ -134,6 +134,129 @@ def test_a_lab_config_the_person_saved_meanwhile_is_never_replaced_nor_switched_
         set_resource_manager(None)
 
 
+# ---------------------------------------------------------------------- 5.3: a serial port is opened once
+
+class Counting(Bus):
+    """A bus that counts each address's opens; `refuse`: addresses whose open fails (another program has the port)."""
+
+    def __init__(self, devices, refuse=()):
+        super().__init__(devices)
+        self.opens, self.refuse = {}, set(refuse)
+
+    def open_resource(self, name):
+        self.opens[name] = self.opens.get(name, 0) + 1
+        if name in self.refuse:
+            raise OSError("VI_ERROR_RSRC_BUSY: Access is denied")
+        return super().open_resource(name)
+
+
+def survey_of(rm, **more):
+    from labharness.discovery import scan_survey
+    return scan_survey(builtin_registry(), rm, network=False, usb=False, gpib_sweep=False, prologix_ports=[], **more)
+
+
+def test_a_serial_port_is_opened_once_and_asked_at_each_framing_on_it(monkeypatch):
+    from labharness import discovery
+    monkeypatch.setattr(discovery, "_usb_ids", lambda: {})
+    rm = Counting({"ASRL3::INSTR": Device("lakeshore/336", serial={"baud_rate": 57600, "data_bits": 7,
+                                                                    "parity": "odd"}, name="ls"),
+                   "ASRL4::INSTR": Device(silent=True)})
+    found, _ = survey_of(rm)
+    by = {f.address: f for f in found}
+    assert by["ASRL3::INSTR"].card_id == "lakeshore/336" and by["ASRL3::INSTR"].settings.startswith("57600 7O")
+    assert rm.opens == {"ASRL3::INSTR": 1, "ASRL4::INSTR": 1}                # 13 framings, one open each (13 before)
+
+
+def test_a_port_another_program_holds_is_said_as_such_and_opened_once(monkeypatch):
+    from labharness import discovery, others
+    monkeypatch.setattr(discovery, "_usb_ids", lambda: {})
+    monkeypatch.setattr(others, "holders", lambda: ["LabVIEW"])
+    rm = Counting({"ASRL5::INSTR": Device(silent=True)}, refuse={"ASRL5::INSTR"})
+    found, _ = survey_of(rm)
+    assert rm.opens == {"ASRL5::INSTR": 1}
+    how = found[0].how
+    assert "could not open it" in how and "another program may have it open; running now: LabVIEW" in how, how
+    assert "switched off" not in how
+
+
+def test_a_bluetooth_port_is_not_asked_and_the_scan_says_what_it_asks(monkeypatch):
+    from labharness import discovery
+    monkeypatch.setattr(discovery, "_usb_ids", lambda: {})
+    monkeypatch.setattr(discovery, "_bluetooth_ports", lambda: {"ASRL7::INSTR"})
+    rm = Counting({"ASRL7::INSTR": Device(silent=True), "GPIB0::8::INSTR": Device("srs/sr830", name="sr830")})
+    said = []
+    found, _ = survey_of(rm, progress=said.append)
+    assert "ASRL7::INSTR" not in rm.opens and [f.how for f in found if f.address == "ASRL7::INSTR"] == [discovery.BLUETOOTH]
+    assert said == ["asking GPIB0::8::INSTR who it is, 1 of 1"]
+
+
+def test_the_set_up_says_which_port_it_asks_now(tmp_path):
+    rt = first_runtime(tmp_path)
+    seen = []
+
+    def scanning(progress=None):
+        progress("asking COM4 who it is, 2 of 9")
+        seen.append(setup.status["message"])
+        return []
+    setup = AutoSetup(rt, {}, tmp_path, fetch=lambda u: b"", scan=scanning)
+    setup.run()
+    assert seen == ["Looking for connected instruments: asking COM4 who it is, 2 of 9"]
+
+
+# ---------------------------------------------------------------------- 5.4: a GPIB bus hung at start
+
+class HungBoard:
+    """A GPIB board an instrument hangs: every address times out instead of saying nothing listens."""
+    __module__ = "pyvisa.highlevel"
+
+    def __init__(self, answers=None, nobody=()):
+        self.asked, self.answers, self.nobody = [], dict(answers or {}), set(nobody)
+
+    def list_resources(self, query="?*::INSTR"):
+        return ("GPIB0::INTFC",) if "INTFC" in query else ()
+
+    def open_resource(self, name):
+        board = self
+
+        class Res:
+            timeout = 2000
+
+            def query(self, cmd, delay=None):
+                board.asked.append(name)
+                if name in board.answers:
+                    return board.answers[name]
+                if name in board.nobody:
+                    raise OSError("VI_ERROR_NLISTENERS: no listeners")
+                raise TimeoutError("VI_ERROR_TMO")
+
+            def clear(self):
+                raise TimeoutError("VI_ERROR_TMO")
+
+            def close(self):
+                pass
+        return Res()
+
+
+def test_a_hung_gpib_bus_stops_the_sweep_and_says_to_clear_it():
+    from labharness.discovery import scan_survey
+    from labharness.survey import reason
+    rm = HungBoard()
+    found, looked = scan_survey(builtin_registry(), rm, network=False, usb=False, gpib_sweep=True, prologix_ports=[],
+                                ports=lambda: [])
+    assert found == [] and len(rm.asked) == 3                                   # 3 timeouts, not 30 and 8 queries each
+    assert "GPIB0 seems hung" in looked.problems[0] and "seems hung" in reason(found, looked)
+
+
+def test_a_bus_with_an_old_silent_instrument_is_not_taken_for_a_hung_one():
+    from labharness.discovery import gpib_listeners
+    nobody = {"GPIB0::%d::INSTR" % p for p in range(1, 31)} - {"GPIB0::5::INSTR", "GPIB0::24::INSTR"}
+    rm = HungBoard(answers={"GPIB0::24::INSTR": "KEITHLEY INSTRUMENTS INC.,MODEL 2400,1,C30"}, nobody=nobody)
+    hung = []
+    out = gpib_listeners(rm, "GPIB0", hung=hung)
+    assert hung == [] and out == [("GPIB0::5::INSTR", ""), ("GPIB0::24::INSTR",
+                                                            "KEITHLEY INSTRUMENTS INC.,MODEL 2400,1,C30")]
+
+
 def test_the_draft_is_written_only_as_a_new_file(tmp_path):
     from labharness.autosetup import _write_new
     path = tmp_path / "lab.yaml"
