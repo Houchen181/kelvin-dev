@@ -7,6 +7,7 @@ import math
 import os
 import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
@@ -42,6 +43,8 @@ def plan_text(plan: Dict[str, Any]) -> str:
 
 _SHARED = threading.Lock()
 _SHARED_SEQ: Dict[str, int] = {}   # the lab's instrument log numbers its own lines: by file, counted once
+RETRY_S = 30.0          # while the record can't be written, how often (seconds) Kelvin tries again
+KEEP_BACK = 50000       # lines kept back meanwhile, at most (the oldest go first)
 
 
 def _lines(path: Path) -> int:
@@ -58,7 +61,12 @@ class EventLog:
     shared: the lab's instrument log (~/Kelvin/instrument-log.jsonl), where every event of everyone who uses these
     instruments is also written, with user: the signed-in person (None: nobody, such as setting up on start).
     whose: the marks of unshared work the writing thread does (LabRuntime._whose_now), kept with each event it writes,
-    so that other chats and phones through the Kelvin hub never see it."""
+    so that other chats and phones through the Kelvin hub never see it.
+
+    A write never fails for the file: while it can't be written (its folder's drive or network share went away, a full
+    disk), the lines are kept back and written first once it can be (tried again every RETRY_S); trouble says why
+    meanwhile (the monitor's alarm). A record that raised made every change fail with it, a person's Stop answered
+    with an error, and a stopped run's clean-up ended at its first drive."""
 
     def __init__(self, path: Any = None, clock: Any = None, shared: Any = None, user: Optional[str] = None,
                  whose: Optional[Callable[[], Optional[Dict[str, Any]]]] = None):
@@ -70,6 +78,10 @@ class EventLog:
         self._memory: List[Dict[str, Any]] = []
         self._seq = 0
         self._lock = threading.Lock()  # agent, plans and people write from different threads; keep every line
+        self.trouble: Optional[str] = None   # why the file can't be written, while it can't
+        self._back: List[str] = []           # the lines kept back meanwhile
+        self._dropped = 0                    # and those that didn't fit (KEEP_BACK)
+        self._retry_at = 0.0                 # when (monotonic) to try the file again
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.path.exists():
@@ -92,8 +104,7 @@ class EventLog:
             if whose and "whose" not in event:
                 event["whose"] = _jsonable(whose)
             if self.path:
-                with open(self.path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                self._append(json.dumps(event, ensure_ascii=False) + "\n")
             else:
                 self._memory.append(event)
         if self.shared:
@@ -114,13 +125,47 @@ class EventLog:
                 pass
         return event
 
+    def _append(self, line: str) -> None:
+        """A line onto the file, after those kept back (the caller holds the lock). While the file can't be written,
+        it is kept back with them; the file is tried again once RETRY_S has passed, never at every line (a network
+        share that is away can take seconds to say so)."""
+        if line:
+            self._back.append(line)
+            if len(self._back) > KEEP_BACK:
+                self._dropped += len(self._back) - KEEP_BACK
+                del self._back[:-KEEP_BACK]
+        if not self._back or (self.trouble is not None and time.monotonic() < self._retry_at):
+            return
+        try:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write("".join(self._back))
+        except OSError as e:
+            self._retry_at = time.monotonic() + RETRY_S
+            self.trouble = "%s could not be written (%s)%s" % (
+                self.path, e.strerror or e, "; %d older events could not be kept" % self._dropped if self._dropped
+                else "")
+            return
+        self._back.clear()
+        self.trouble, self._dropped = None, 0
+
+    def flush(self) -> None:
+        """The lines kept back, written now if the file can be (no more often than RETRY_S apart)."""
+        if self.path:
+            with self._lock:
+                self._append("")
+
     def events(self) -> List[Dict[str, Any]]:
         if not self.path:
             return list(self._memory)
-        if not self.path.exists():
-            return []
-        with open(self.path, encoding="utf-8") as f:
-            return [json.loads(line) for line in f if line.strip()]
+        with self._lock:
+            back = [json.loads(line) for line in self._back]
+        try:
+            if not self.path.exists():
+                return back
+            with open(self.path, encoding="utf-8") as f:
+                return [json.loads(line) for line in f if line.strip()] + back
+        except OSError:   # the file can't be read now: what is kept back, at least
+            return back
 
 
 class RunRecord:
@@ -170,6 +215,14 @@ class RunRecord:
     def set_analysis(self, analysis: Dict[str, Any]) -> None:
         self._write("analysis", {"analysis": analysis})
 
+    def abandon(self) -> None:
+        """Let go of a run that never started (its record couldn't be written): its folder's lock goes."""
+        if self._record is not None:
+            try:
+                self._record.release()
+            except OSError:
+                pass
+
     def finish(self, **meta: Any) -> None:
         """The run ended (done, stopped or failed): its record is closed and kept as run.h5. If that can't be
         written now (no h5py, a full disk), the record stays, and Kelvin finishes it at its next start."""
@@ -177,14 +230,18 @@ class RunRecord:
         self.meta["finished"] = _now()
         if self._record is None:
             return
-        self._write("finish", {"meta": dict(self.meta)}, sync=True)
-        self._record.close()
-        try:
-            rundata.finish(self.path)
-        except Exception as e:   # the record keeps every point; it becomes run.h5 at the next start
-            self.meta.setdefault("warnings", []).append("run.h5 not written yet: %s" % e)
+        try:   # a record that can't be written (its drive went away) raises, and the run is let go of all the same
+            self._write("finish", {"meta": dict(self.meta)}, sync=True)
+            self._record.close()
+            try:
+                rundata.finish(self.path)
+            except Exception as e:   # the record keeps every point; it becomes run.h5 at the next start
+                self.meta.setdefault("warnings", []).append("run.h5 not written yet: %s" % e)
         finally:
-            self._record.release()
+            try:
+                self._record.release()
+            except OSError:
+                pass
 
 
 RUN_NAME = re.compile(r"^\d{8}-\d{6}-[\w.-]*$")   # a run's folder is its id, as RunStore names it

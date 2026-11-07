@@ -28,9 +28,22 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .instrument import Garbled, InstrumentLost, SensorError
+from .instrument import Busy, Garbled, InstrumentLost, SensorError, patience
 
 FAILS_BEFORE_ALARM = 3       # failed exchanges in a row before "doesn't answer" (one that can't reach it at all: one)
+WAIT_S = 1.0                 # the longest the monitor waits for an instrument whose connection other work has (an
+                             # acquisition, a wait for *OPC?): then it is busy, not read this round. A network
+                             # analyzer's 20-minute sweep held the monitor, and every watch, interlock and alarm with it
+FRESH_S = 15.0               # seconds: another's latest reading of a busy instrument (the running work's own) stands in
+                             # for the monitor's own when at most this old (three interlock checks)
+UNREAD_S = 300.0             # lab seconds a watched reading may go unread, its instrument busy, before people hear of it
+INTERLOCK_UNREAD_S = 60.0    # lab seconds an interlock may go unchecked, its reading's instrument busy, before it fails
+                             # as one that can't be read does: twelve checks, and the minute the heartbeat allows
+LATE_S = 30.0                # seconds one look at the lab may take before "Kelvin's watching is held up" goes up
+LATE_EVERY = 2.0             # how often (seconds) the watchdog thread looks whether a look is taking too long
+SAFE_WAIT_S = 2.0            # seconds the monitor waits for a to-safe it started before it says the alarm: one that
+                             # takes longer (a ramp) goes on on its own thread, and says how it ended in the alarm
+SAFE_STOP_S = 10.0           # seconds stopping the monitor (quitting, a lab switch) waits for to-safes under way
 ERROR_CHECK_EVERY = 60.0     # lab seconds between error-queue checks on real instruments
 BUS_PROBE_S = 30.0           # how often one instrument on a hung GPIB bus is asked whether it answers again
 ALIVE_EVERY = 20.0           # lab seconds between checks that each real instrument answers, while a run or queue goes
@@ -150,6 +163,8 @@ class Watch:
     last_read: Optional[float] = None
     alarm: Optional[str] = None                # the active alarm's id
     recent: List[float] = field(default_factory=list)   # its latest readings: their noise sets the band
+    unread_since: Optional[float] = None       # lab time since when it goes unread, its instrument busy
+    unread_alarm: Optional[str] = None         # the alarm that says it has gone unread too long
 
     def rule(self, unit: str = "") -> str:
         u = " " + unit if unit else ""
@@ -248,16 +263,51 @@ class Alarm:
         return "; ".join(bits)
 
 
-class Monitor:
-    """Polls watches on a background thread (start/stop), or one pass at a time (tick) in tests."""
+class _Safing:
+    """A drive the monitor sends to safe on a thread of its own (a watch's action, an interlock's): what the gate said,
+    as (ok, words), once it is done."""
 
-    def __init__(self, lab: Any, gate: Any, notify: Callable[[str, str, str], None], poll_s: float = 1.0):
+    def __init__(self, key: str, alarm: Alarm):
+        self.key, self.alarm = key, alarm
+        self.going = "%s going to safe" % key   # its alarm's words until it is done
+        self.said: List[Tuple[bool, str]] = []
+        self.finished = False   # the gate is done with it (said is in)
+        self.late = False       # its alarm went out before that: it says how it ended there itself
+        self.done = threading.Event()   # finished, and said so where it had to
+
+
+class Monitor:
+    """Polls watches on a background thread (start/stop), or one pass at a time (tick) in tests.
+
+    Nothing an instrument does holds it up. Its exchanges wait a moment at most for a connection other work has (an
+    acquisition, a wait for *OPC?): such an instrument is busy, not read this round, and its latest reading by that
+    work stands in while fresh (WAIT_S, FRESH_S). A watch unread for long says so (UNREAD_S); an interlock unchecked
+    for long fails as one that can't be read (INTERLOCK_UNREAD_S). A drive it sends to safe goes there on a thread of
+    its own (SAFE_WAIT_S). A watchdog thread says when one look at the lab takes too long (LATE_S), naming what holds
+    it up, while it still does. in_use(name): whether the work under way uses that instrument (the runtime's lab
+    lock), for a maker's driver whose connection has no lock to wait on."""
+
+    def __init__(self, lab: Any, gate: Any, notify: Callable[[str, str, str], None], poll_s: float = 1.0,
+                 in_use: Optional[Callable[[str], bool]] = None):
         self.lab = lab
         self.gate = gate
         self.notify = notify
         self.poll_s = poll_s
+        self.in_use = in_use
         self.watches: Dict[str, Watch] = {}
-        self.last_tick: Optional[float] = None   # wall time of the latest pass: the heartbeat's sign of life
+        # wall time of the latest sign of life: a pass began, or a check in one (the heartbeat pings only while there
+        # is one within the last minute: watching)
+        self.last_tick: Optional[float] = None
+        self._pass_began: Optional[float] = None   # wall time the look at the lab under way began
+        self._doing: Optional[str] = None          # what it is doing now, in words, and since when (wall time)
+        self._doing_since: Optional[float] = None
+        self._slowest: Tuple[str, float] = ("", 0.0)   # the slowest check of this look, and how long it took
+        self._late: Optional[Alarm] = None         # "Kelvin's watching is held up", while it is
+        self._record: Optional[Alarm] = None       # "the lab's record can't be written", while it can't
+        self._unchecked: Dict[int, float] = {}     # interlocks not checked lately, their reading busy: since (lab time)
+        self._safing: Dict[str, _Safing] = {}      # the latest to-safe of each drive (instr.param)
+        self._safe_last: Dict[str, _Safing] = {}   # and of each instrument: its next waits for it
+        self._watchdog: Optional[threading.Thread] = None
         self.alarms: List[Alarm] = []        # newest first, active and cleared
         self._fails: Dict[str, int] = {}
         self._unreadable: Dict[str, Alarm] = {}   # a watch's reading that fails though its instrument answers
@@ -325,6 +375,7 @@ class Monitor:
         if w.alarm:
             self._clear(w.alarm, "%s is no longer watched (%s)" % (w.key, why or "the watch was removed"))
             w.alarm = None
+        self._read_again(w, "%s is no longer watched (%s)" % (w.key, why or "the watch was removed"))
         if unread is not None:
             self._clear(unread.id, "%s is no longer read: no watch is on it (%s)" % (instr, why or
                                                                                    "its watch was removed"))
@@ -395,13 +446,29 @@ class Monitor:
         if self._thread is None:
             self._thread = threading.Thread(target=self._run, name="kelvin-monitor", daemon=True)
             self._thread.start()
+        if self._watchdog is None:
+            self._watchdog = threading.Thread(target=self._watch_the_watcher, name="kelvin-monitor-watchdog",
+                                              daemon=True)
+            self._watchdog.start()
         return self
 
     def stop(self) -> None:
+        """No more looks at the lab. The drives on their way to safe get there first (quitting, or a lab switch,
+        closes their connections next), SAFE_STOP_S at most; one still going then is said in the record."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=5)
             self._thread = None
+        if self._watchdog is not None:
+            self._watchdog.join(timeout=5)
+            self._watchdog = None
+        end = time.monotonic() + SAFE_STOP_S
+        with self._lock:
+            going = [h for h in self._safing.values() if not h.done.is_set()]
+        for h in going:
+            if not h.done.wait(max(0.0, end - time.monotonic())):
+                self.gate.log.write("alarm_actions", by="monitor", alarm=h.alarm.id, target=h.key, ok=False,
+                                    actions=["%s was still on its way to safe as Kelvin stopped watching" % h.key])
 
     def _run(self) -> None:
         while not self._stop.wait(self.poll_s):
@@ -411,12 +478,110 @@ class Monitor:
                 pass
 
     def watching(self) -> bool:
-        """Is the monitor going: it ticked lately (the heartbeat pings only then)."""
+        """Is the monitor going: a look at the lab, or a check in one, began lately (the heartbeat pings only then). A
+        check held up for over a minute stops it: then nothing is watched."""
         return self.last_tick is not None and time.time() - self.last_tick < max(60.0, 20 * self.poll_s)
 
     def tick(self) -> None:
-        self.last_tick = time.time()
+        """One look at the lab: the watches, the set points, the interlocks, the error queues, whether each instrument
+        answers, the buses, the instruments' health and the lab's record, each on its own: one that fails never keeps
+        the others from their turn (its error is raised once they have had it)."""
+        began = self.last_tick = self._pass_began = time.time()
+        self._doing, self._doing_since, self._slowest = None, None, ("", 0.0)
         now = self.lab.clock.now()
+        failed: List[BaseException] = []
+        try:
+            with patience(WAIT_S, self.in_use):   # an instrument that other work has is busy, not waited for
+                for doing, check, args in (("reading the watches", self._check_watches, (now,)),
+                                           ("following the set points", self._check_setpoints, (now,)),
+                                           ("checking the interlocks", self._check_interlocks, (now,)),
+                                           ("reading the error queues", self._check_errors, (now,)),
+                                           ("checking that the instruments answer", self._check_alive, (now,)),
+                                           # first: a hung bus is one alarm, and its instruments' own don't go up
+                                           ("checking the GPIB buses", self._check_buses, ()),
+                                           ("checking the instruments' health", self._check_health, (now,)),
+                                           ("checking the lab's record", self._check_record, ())):
+                    self._at(doing)
+                    try:
+                        check(*args)
+                    except Exception as e:   # the next check has its turn all the same
+                        failed.append(e)
+            self._at(None)
+        finally:
+            self._pass_began = None
+        self._in_time(time.time() - began)
+        if failed:
+            raise failed[0]
+
+    def _at(self, doing: Optional[str]) -> None:
+        """What this look at the lab is doing now (None: done): a sign of life for the heartbeat, and what the watchdog
+        names if it takes too long. Keeps the slowest so far."""
+        now = time.time()
+        if self._doing is not None and self._doing_since is not None and now - self._doing_since > self._slowest[1]:
+            self._slowest = (self._doing, now - self._doing_since)
+        self._doing, self._doing_since = doing, now
+        self.last_tick = now
+
+    def _watch_the_watcher(self) -> None:
+        while not self._stop.wait(LATE_EVERY):
+            try:
+                self._check_late()
+            except Exception:   # the watchdog outlives anything too
+                pass
+
+    def _check_late(self, now: Optional[float] = None) -> None:
+        """The watchdog's look, on a thread of its own: a look at the lab under way for LATE_S or more raises "Kelvin's
+        watching is held up", naming what holds it up, while it still does (the look can't say it itself: it is what
+        is held up)."""
+        began, doing, since = self._pass_began, self._doing, self._doing_since
+        now = time.time() if now is None else now
+        if began is None or now - began < LATE_S or self._late is not None:
+            return
+        self._late_up("Kelvin's watching is held up: %s has taken %s so far" % (
+            doing or "one look at the lab", _dur(now - (since or began))),
+            "Until it is done, no watch is read, no interlock is checked and no other alarm goes up.")
+
+    def _in_time(self, took: float) -> None:
+        """A look at the lab that took LATE_S or more is said (if the watchdog hasn't already); the next one that
+        doesn't clears it."""
+        if took >= LATE_S:
+            if self._late is None:
+                what, slow = self._slowest
+                self._late_up("Kelvin's watching fell behind: one look at the lab took %s%s" % (
+                    _dur(took), " (%s took %s)" % (what, _dur(slow)) if what else ""),
+                    "Watches and interlocks were checked late meanwhile.")
+            return
+        with self._lock:
+            late, self._late = self._late, None
+        if late is not None:
+            self._clear(late.id, "Kelvin's watching is on time again (one look at the lab took %s)" % _dur(took))
+
+    def _late_up(self, text: str, detail: str) -> None:
+        with self._lock:
+            if self._late is not None:
+                return
+            a = self._late = self._new("delay", "watching", text, source="monitor")
+        self._tell(a, detail)
+
+    def _fresh(self, inst: Any, param: str, ask: Callable[[], Any]) -> Any:
+        """ask() now; while its instrument is busy with other work (Busy), that work's own latest reading of it, if at
+        most FRESH_S old. Busy when there is none."""
+        try:
+            return ask()
+        except Busy:
+            got = inst.seen(param, FRESH_S)
+            if got is None:
+                raise
+            return got[0]
+
+    def _read(self, instr: str, param: str) -> Any:
+        """A reading for the monitor (_fresh): asked now, or the running work's own while fresh. Busy otherwise."""
+        inst = self.lab.instruments.get(instr)
+        if inst is None:
+            return self.lab.read(instr, param)   # says which instruments there are
+        return self._fresh(inst, param, lambda: self.lab.read(instr, param))
+
+    def _check_watches(self, now: float) -> None:
         with self._lock:
             watches = list(self.watches.values())
         for w in watches:
@@ -426,13 +591,19 @@ class Monitor:
             instr = w.key.split(".")[0]
             if instr in self.lab.instruments and not self.lab.instruments[instr].enabled:
                 w.value = None   # switched off: nothing is sent to it, so nothing to watch (and no alarm)
+                self._read_again(w, "%s is not watched while %s is disconnected" % (w.key, instr))
                 continue
             if instr in self.lab.instruments and self._on_hung_bus(self.lab.instruments[instr]):
                 w.value = None   # its bus is hung: the bus's alarm says it, not one of the watch's own
                 continue
+            self._at("reading %s" % w.key)
             try:
-                value = self.lab.read(*w.key.split(".", 1))
+                value = self._read(*w.key.split(".", 1))
+            except Busy as e:   # other work has its instrument, and nothing it read of it is fresh: not read now
+                self._unread(w, now, str(e))
+                continue
             except SensorError as e:   # it answers, but says its sensor is faulty: the reading is unknown, so alarm
+                self._read_again(w)
                 self._answered(instr)
                 w.value = None
                 if w.alarm is None:
@@ -441,6 +612,7 @@ class Monitor:
             except Exception as e:
                 self._failed(instr, e)
                 continue
+            self._read_again(w)
             self._answered(instr)
             w.value = value
             if not isinstance(value, (int, float)) or isinstance(value, bool):
@@ -461,12 +633,27 @@ class Monitor:
                 w.since = now
             if now - w.since >= w.for_s:
                 self._raise_reading(w, value)
-        self._check_setpoints(now)
-        self._check_interlocks(now)
-        self._check_errors(now)
-        self._check_alive(now)
-        self._check_buses()   # first: a hung bus is one alarm, and its instruments' own don't go up meanwhile
-        self._check_health(now)
+
+    def _unread(self, w: Watch, now: float, why: str) -> None:
+        """A watch not read this round: other work has its instrument, and nothing it read of it is fresh. One that
+        goes unread for UNREAD_S is said, once (a watch that can't read can't alarm either); read again, it clears."""
+        if w.unread_since is None:
+            w.unread_since = now
+        if w.unread_alarm is not None or now - w.unread_since < UNREAD_S:
+            return
+        a = self._new("silent", w.key, "%s has not been read for %s: %s" % (w.key, _dur(now - w.unread_since), why),
+                      source="unread " + w.id)
+        w.unread_alarm = a.id
+        self._tell(a, "Its watch can't alarm while it isn't read. Kelvin reads it again as soon as the work that has "
+                      "the instrument lets it.", watch=w.id)
+
+    def _read_again(self, w: Watch, text: str = "") -> None:
+        """The watch is read again (or no longer needs to be): its alarm for going unread clears."""
+        since, alarm = w.unread_since, w.unread_alarm
+        w.unread_since = w.unread_alarm = None
+        if alarm is not None:
+            self._clear(alarm, text or "%s is read again (it wasn't for %s)" % (
+                w.key, _dur(self.lab.clock.now() - since) if since is not None else "a while"))
 
     # ------------------------------------------------------------------ alarms
 
@@ -544,14 +731,112 @@ class Monitor:
         if w.stop_run:   # the run says what stopped it, not "stop requested", as if a person had
             self.gate.request_abort("a watch (%s)" % text)
             actions.append("stopped the running plan")
-        for instr, param, safe in w.then:   # only ever toward safe: lab-config watches name safe values
-            try:   # its switch goes off too (gate.cut): V = 0 does nothing on a source in current mode
-                actions += [r.message if r.ok else "could not set %s.%s: %s" % (instr, param, r.message)
-                            for r in self.gate.cut(instr, param, "monitor")]
-            except Exception as e:
-                actions.append("could not set %s.%s: %s" % (instr, param, e))
-        a.actions = actions if a.count == 1 or actions else a.actions
+        # only ever toward safe (lab-config watches name safe values), each on a thread of its own (_to_safe)
+        started = [self._to_safe(a, "%s.%s" % (instr, param), lambda i=instr, p=param: self._cut(i, p))
+                   for instr, param, safe in w.then]
+        self._actions(a, actions, started, keep=a.count > 1)
         self._tell(a, "; ".join(a.actions) or (w.note or "Kelvin is watching it."), watch=w.id)
+
+    def _cut(self, instr: str, param: str) -> List[Tuple[bool, str]]:
+        """A watch's action: the drive to safe, and its switch off too (gate.cut): V = 0 does nothing on a source in
+        current mode."""
+        try:
+            return [(r.ok, r.message if r.ok else "could not set %s.%s: %s" % (instr, param, r.message))
+                    for r in self.gate.cut(instr, param, "monitor")]
+        except Exception as e:
+            return [(False, "could not set %s.%s: %s" % (instr, param, e))]
+
+    def _abort_to_safe(self, drive: str) -> List[Tuple[bool, str]]:
+        """An interlock's action: its drive to safe, even where the lab config says hold."""
+        try:
+            return [(r.ok, r.message) for r in self.gate.abort_to_safe([drive], "monitor", hold=False)]
+        except Exception as e:
+            return [(False, "could not bring %s to safe: %s" % (drive, e))]
+
+    def _to_safe(self, alarm: Alarm, key: str, job: Callable[[], List[Tuple[bool, str]]]) \
+            -> Tuple[str, Optional[_Safing]]:
+        """Send a drive to safe on a thread of its own (job: the gate's to-safe, what it said), so a ramp of minutes
+        never holds the monitor up: an 8 V gate at 0.5 V/s took every other check for 17 s, and an output that waits for
+        a magnet to ramp down took them for tens of minutes. One instrument's go one after another (two ramps of one
+        drive would interleave their steps); one already on its way isn't sent again (None). (key, its handle)."""
+        instr = key.split(".")[0]
+        with self._lock:
+            going = self._safing.get(key)
+            if going is not None and not going.done.is_set():
+                return key, None
+            h = _Safing(key, alarm)
+            before = self._safe_last.get(instr)
+            self._safing[key] = self._safe_last[instr] = h
+        threading.Thread(target=self._safe_run, args=(h, job, before), name="kelvin-to-safe", daemon=True).start()
+        return key, h
+
+    def _safe_run(self, h: _Safing, job: Callable[[], List[Tuple[bool, str]]], before: Optional[_Safing]) -> None:
+        if before is not None:
+            before.done.wait()   # its instrument's to-safe before this one first
+        try:
+            said = list(job())
+        except Exception as e:   # (job says what failed itself; this is for what it didn't foresee)
+            said = [(False, "could not bring %s to safe: %s" % (h.key, e))]
+        with self._lock:
+            h.said, h.finished = said, True
+            late = h.late
+        try:
+            if late:
+                self._safe_ended(h)
+        finally:
+            h.done.set()
+
+    def _actions(self, a: Alarm, first: List[str], started: List[Tuple[str, Optional[_Safing]]],
+                 keep: bool = False, add: bool = False) -> None:
+        """The alarm's actions: `first`, then what each to-safe just started said, all of them waited for SAFE_WAIT_S
+        at most; one still going says so, and says how it ended in the alarm itself (_safe_ended). keep: a repeat keeps
+        the actions it had when there are none now. add: they go after its earlier ones, each once."""
+        end = time.monotonic() + SAFE_WAIT_S
+        for key, h in started:
+            if h is not None:
+                self._at("sending %s to safe" % key)
+                h.done.wait(max(0.0, end - time.monotonic()))
+        with self._lock:
+            words = list(first)
+            for key, h in started:
+                if h is None:
+                    words.append("%s already on its way to safe" % key)
+                elif h.finished:
+                    words += [w for _, w in h.said]
+                else:
+                    h.late = True
+                    words.append(h.going)
+            if add:
+                a.actions += [w for w in words if w not in a.actions]
+            elif words or not keep:
+                a.actions = words
+
+    def _safe_ended(self, h: _Safing) -> None:
+        """A to-safe that outlasted SAFE_WAIT_S is done: its alarm says how in place of "going to safe", and so does
+        the record; people hear of it when it didn't get there (they were told it was on its way)."""
+        a, words = h.alarm, [w for _, w in h.said]
+        with self._lock:
+            if h.going in a.actions:
+                k = a.actions.index(h.going)
+                a.actions[k:k + 1] = words
+            else:
+                a.actions += [w for w in words if w not in a.actions]
+        ok = all(flag for flag, _ in h.said)
+        self.gate.log.write("alarm_actions", by="monitor", alarm=a.id, target=h.key, actions=words, ok=ok)
+        if ok:
+            self.on_change()
+        else:
+            self.notify("alarm", "Alarm: %s did not go to safe" % h.key, "; ".join(words) + " (after: %s)" % a.text)
+
+    def safe_done(self, timeout: Optional[float] = None) -> bool:
+        """Wait until every to-safe the monitor started is done (timeout seconds at most); whether they are."""
+        end = None if timeout is None else time.monotonic() + timeout
+        with self._lock:
+            going = list(self._safing.values())
+        for h in going:
+            if not h.done.wait(None if end is None else max(0.0, end - time.monotonic())):
+                return False
+        return True
 
     def _check_interlocks(self, now: float) -> None:
         """The interlocks are enforced, not only checked when their drive moves: every INTERLOCK_EVERY lab seconds,
@@ -561,26 +846,47 @@ class Monitor:
         counts as at safe once its reading is (a field ramping down is still up: its alarm once cleared on the set
         point while the field was 1.5 T). The alarm clears once the drive is at safe, or the condition has held again
         for INTERLOCK_CLEAR_S (a sample at its interlock's 10 K raised and cleared it six times in 15 s). While it is
-        up, a drive set away from safe again goes back to safe."""
+        up, a drive set away from safe again goes back to safe.
+
+        An instrument other work has (an acquisition, a wait for *OPC?) isn't waited for: the work's own reading stands
+        in while fresh. A condition with none is not checked this round, and after INTERLOCK_UNREAD_S unchecked it
+        fails as one that can't be read. A drive whose place is unknown so is taken as away from safe: its condition
+        is checked."""
         if now - self._last_interlock_check < INTERLOCK_EVERY:
             return
         self._last_interlock_check = now
         from .gate import _unreachable, interlock_problem, reading_away
         for i, lock in enumerate(self.lab.config.interlocks):
+            self._at("checking the interlock on %s" % lock.drive)
             try:
                 inst, spec = self.lab.resolve(lock.drive)
                 if not inst.enabled:
+                    self._unchecked.pop(i, None)
                     continue   # switched off: Kelvin sends it nothing, and nothing reaches the sample from it
-                at = self.gate._current(inst, spec)
+                at = self._fresh(inst, spec.name, lambda: self.gate._current(inst, spec))
+                unknown = False
+            except Busy:   # where it is set is unknown now: it may be away from safe
+                at, unknown = None, True
             except Exception:
                 continue   # its drive can't be read: silence is the read failures' job
             try:   # where it is, not only where it is set to
-                there = inst.read(spec.readback) if spec.readback and spec.ramp == "instrument" else at
+                there = self._read(inst.name, spec.readback) if spec.readback and spec.ramp == "instrument" else at
+            except Busy:
+                there, unknown = None, True   # not known to be at safe: a field ramping down is up
             except Exception:
                 there = at   # its reading can't be read: by its set point, as before
             set_safe = at is not None and spec.distance(at) == 0
-            safe = set_safe and not reading_away(spec, there)   # set to safe, and there: a field ramping down is up
-            broken = None if safe else interlock_problem(self.lab, lock)
+            # set to safe, and there: a field ramping down is up
+            safe = set_safe and not reading_away(spec, there) and not unknown
+            try:
+                broken = None if safe else interlock_problem(self.lab, lock, read=self._read)
+            except Busy as e:   # its reading's instrument is busy, and nothing fresh of it: not checked this round
+                since = self._unchecked.setdefault(i, now)
+                if now - since < INTERLOCK_UNREAD_S:
+                    continue
+                broken = ", but %s could not be read for %s (%s)" % (lock.require.key, _dur(now - since), e)
+            else:
+                self._unchecked.pop(i, None)
             if broken is None:
                 if i in self._broken and (safe or now - self._holding.setdefault(i, now) >= INTERLOCK_CLEAR_S):
                     self._holding.pop(i, None)
@@ -589,19 +895,20 @@ class Monitor:
                 continue
             self._holding.pop(i, None)
             if i in self._broken:
-                if not set_safe and not _unreachable(spec):   # set away again while it is broken: back to safe
-                    a = self._broken[i]
-                    a.actions += [m for m in (r.message for r in self.gate.abort_to_safe([lock.drive], "monitor",
-                                                                                         hold=False))
-                                  if m not in a.actions]
+                # set away again while it is broken: back to safe (not one merely unknown now, already sent there)
+                if not set_safe and not (unknown and at is None) and not _unreachable(spec):
+                    started = self._to_safe(self._broken[i], lock.drive, lambda d=lock.drive: self._abort_to_safe(d))
+                    if started[1] is not None:
+                        self._actions(self._broken[i], [], [started], add=True)
                 continue
             moving = spec.readback and _number(at) and _number(there) and abs(at - there) > spec.tol
-            shown = spec.show(there if _number(there) else at) + (" (set to %s)" % spec.show(at) if moving else "")
+            shown = ("a value not known now (%s is busy)" % inst.name if unknown and at is None and not _number(there)
+                     else spec.show(there if _number(there) else at) + (" (set to %s)" % spec.show(at) if moving else ""))
             text = "Interlock: %s is at %s, which needs %s%s" % (lock.drive, shown, lock.require.text, broken)
             a = self._broken[i] = self._new("interlock", lock.drive, text, source="interlock %d" % i)
             self.gate.request_abort("the interlock on %s (it needs %s%s)" % (lock.drive, lock.require.text, broken))
-            a.actions = ["stopped the running plan"] + [r.message for r in self.gate.abort_to_safe([lock.drive], "monitor",
-                                                                                                hold=False)]
+            started = self._to_safe(a, lock.drive, lambda d=lock.drive: self._abort_to_safe(d))
+            self._actions(a, ["stopped the running plan"], [started])
             self._tell(a, "; ".join(a.actions), interlock=lock.drive)
 
     def _check_setpoints(self, now: float) -> None:
@@ -622,6 +929,8 @@ class Monitor:
                 if spec.is_drive and spec.ramp == "instrument" and spec.readback and spec.numeric:
                     try:
                         self._follow(name, inst, spec, now, seen)
+                    except Busy:   # other work has it: followed on, looked at again next time
+                        seen.add("%s.%s" % (name, spec.name))
                     except Exception:   # one odd instrument must not stop the monitor's other checks
                         continue
         for key in [k for k in self._moves if k not in seen]:   # switched off, or no longer set by Kelvin
@@ -646,9 +955,9 @@ class Monitor:
         if move.arrived:
             return   # it got there; a reading that drifts off later is for a watch
         try:
-            value = inst.read(spec.readback)
+            value = self._fresh(inst, spec.readback, lambda: inst.read(spec.readback))
         except Exception:
-            return   # silence is the read failures' job
+            return   # silence is the read failures' job (and a busy instrument is looked at next time)
         stuck = move.update(value, now)
         reading = "%s.%s" % (name, spec.readback)
         if move.there(value):
@@ -715,6 +1024,8 @@ class Monitor:
             return True
         try:
             return switch.distance(inst.read(switch.name)) > 0
+        except Busy:
+            raise   # not known now: the set point is followed on (_check_setpoints)
         except Exception:
             return False
 
@@ -908,11 +1219,14 @@ class Monitor:
             if now - self._last_alive_check.get(name, -1e18) >= ALIVE_EVERY:
                 self._last_alive_check[name] = now
                 probe = self._probe(inst)
+                self._at("asking %s whether it answers" % name)
                 try:
                     if probe is not None:
                         probe()
                 except Exception:
-                    continue   # its health says it, if it didn't answer
+                    # its health says it, if it didn't answer; a busy one (Busy) answers the work that has it, which
+                    # shows soon enough whether it is there
+                    continue
                 finally:   # after the question: its own answer is not "answered since"
                     self._alive_asked[name] = time.time()
             if now - self._last_reset_check.get(name, -1e18) >= RESET_EVERY:
@@ -1002,3 +1316,28 @@ class Monitor:
                 self._tell(a, "", instrument=name)
             elif not err and name in self._errors:
                 self._clear(self._errors.pop(name).id, "%s reports no more errors" % name)
+
+    # ------------------------------------------------------------------ the lab's record
+
+    def _check_record(self) -> None:
+        """The lab's record (events.jsonl), while it can't be written (its folder's drive or network share went away,
+        a full disk): one alarm says so. Kelvin keeps what happens meanwhile, and writes it there as soon as it can
+        (EventLog: tried again every so often, also from here); then the alarm clears."""
+        log = getattr(self.gate, "log", None)
+        flush = getattr(log, "flush", None)
+        if getattr(log, "trouble", None) and flush is not None:
+            flush()   # it may be back (no more often than the log's own retries)
+        trouble = getattr(log, "trouble", None)
+        with self._lock:
+            on = self._record
+            if trouble and on is None:
+                a = self._record = self._new("record", "the lab's record", "The lab's record can't be written: %s"
+                                             % trouble, source="record")
+            elif not trouble and on is not None:
+                self._record = None
+        if trouble and on is None:
+            self._tell(a, "Kelvin keeps what happens meanwhile and writes it there as soon as it can. Runs can't keep "
+                          "their data there either: check that the data folder's drive or network share is there, "
+                          "with room.")
+        elif not trouble and on is not None:
+            self._clear(on.id, "the lab's record is written again")

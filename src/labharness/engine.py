@@ -16,7 +16,7 @@ from ._version import __version__
 from .analysis import analyze_run
 from .chain import derived_readings
 from .conditions import typed
-from .eventlog import EventLog, RunStore
+from .eventlog import EventLog, RunFolderError, RunStore
 from .forecast import Forecast, action_of, floats, runs
 from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur, applied_by, feeds_of, paces
 from .instrument import InstrumentOff, SensorError, Stopped
@@ -843,11 +843,16 @@ class RunEngine:
         rec = self.store.create(plan.name, plan.source, gate.operator, folder, meta=dict(
             {"lab": lab.config.name, "simulated": all(i.simulated for i in lab.instruments.values())}, **(meta or {})))
         start = lab.snapshot()
-        rec.snapshot("start", start)
-        gate.log.write("run_start", by=gate.operator, run=rec.run_id, plan=plan.name, points=plan.points)
-        cols = self.columns(plan)
-        rec.set_columns(cols)
-        rec.note(units=self.units(start), planned_points=plan.points)
+        try:   # its record's first lines: a folder that can't be written (its drive went away, a full disk) starts none
+            rec.snapshot("start", start)
+            gate.log.write("run_start", by=gate.operator, run=rec.run_id, plan=plan.name, points=plan.points)
+            cols = self.columns(plan)
+            rec.set_columns(cols)
+            rec.note(units=self.units(start), planned_points=plan.points)
+        except OSError as e:
+            rec.abandon()
+            raise RunFolderError("Kelvin could not write the run's record in %s (%s), so the run did not start and "
+                                 "nothing was set" % (rec.path, e.strerror or e)) from e
         self._emit(event="start", run_id=rec.run_id, plan=plan.name, total=plan.points, **cols)
         t0, wall0 = clock.now(), time.time()
         status, reason, n = "done", None, 0
@@ -1004,7 +1009,10 @@ class RunEngine:
                 row["gap_s"] = lost   # the time lost to a fault just before this point (0: none)
             if logs_waits:
                 row["stabilizing"] = 1 if waiting else 0
-            rec.add(row)
+            try:
+                rec.add(row)
+            except OSError as e:   # its folder's drive went away, a full disk: it stops, and people hear of it
+                raise _Abort(self._unwritten(rec, e))
             n += 1
             state["last"] = row
             self._emit(event="point", run_id=rec.run_id, done=n, total=max(plan.points, n), row=row,
@@ -1302,40 +1310,52 @@ class RunEngine:
                                             _dur(sum(g["lost_s"] for g in gaps)),
                                             "those points" if len(gaps) > 1 else "that point", gaps[0]["error"]))
         cleanup: List[str] = []
-        if status == "aborted":
-            self._emit(event="phase", run_id=rec.run_id, phase="stopping", eta_s=None)
-            cleanup = self._on_abort(plan)
-        duration = clock.now() - t0
-        try:
-            rec.snapshot("end", lab.snapshot())
-        except Exception:
-            pass
-        meta = dict(status=status, reason=reason, points=n, planned_points=plan.points,
-                    duration_s=round(duration, 3), cleanup=cleanup, warnings=warnings, labharness=__version__)
-        # how it went, where a plan asked for more than a fixed grid: a ramp's legs, each stabilize, the readings
-        # taken again, and the loops its until: or while: ended early
-        meta.update({k: v for k, v in (("legs", legs), ("stabilized", settled), ("gaps", gaps), ("ended", ended)) if v})
-        analysis = None
-        points = [r for r in rec.rows if not r.get("stabilizing")]   # not the ones logged while it waited
-        if self.analyze and points:
-            try:   # with how it measured (protocol, guards) and the device's measurement chain (readings in ohms)
-                known = {k: rec.meta[k] for k in ("protocol", "guards") if k in rec.meta}
-                derive = derived_readings(rec.meta.get("chain"), rec.meta.get("setup"), start, cols["measures"])
-                analysis = analyze_run(points, cols["axes"], cols["measures"], dict(meta, **known), derive=derive)
-                rec.set_analysis(analysis)
-            except Exception as e:  # analysis is a convenience; the data are already safe on disk
-                warnings.append("automatic analysis failed: %s" % e)
-        if took.reads or took.steps:   # what its readings, steps and points took: the estimates after it count them
-            meta["timing"] = took.summary()
-            if timing is not None and n:
-                try:
-                    timing.learn(rec.run_id, took, self._ran_with(plan, start, {k.split(".")[0] for k in took.reads}))
-                except Exception:   # an estimate is a convenience; the run is kept whatever happens here
-                    pass
-        rec.finish(**meta)
-        gate.log.write("run_end", by=gate.operator, run=rec.run_id, status=status, reason=reason, points=n,
-                       duration_s=round(duration, 3))
-        self._emit(event="end", run_id=rec.run_id, status=status, done=n, total=max(plan.points, n))
+        saved, told = True, False
+        try:   # whatever happens on its way out, its end goes out (a record that couldn't be finished left it running)
+            if status == "aborted":
+                self._emit(event="phase", run_id=rec.run_id, phase="stopping", eta_s=None)
+                cleanup = self._on_abort(plan)
+            duration = clock.now() - t0
+            try:
+                rec.snapshot("end", lab.snapshot())
+            except Exception:
+                pass
+            meta = dict(status=status, reason=reason, points=n, planned_points=plan.points,
+                        duration_s=round(duration, 3), cleanup=cleanup, warnings=warnings, labharness=__version__)
+            # how it went, where a plan asked for more than a fixed grid: a ramp's legs, each stabilize, the readings
+            # taken again, and the loops its until: or while: ended early
+            meta.update({k: v for k, v in (("legs", legs), ("stabilized", settled), ("gaps", gaps), ("ended", ended))
+                         if v})
+            analysis = None
+            points = [r for r in rec.rows if not r.get("stabilizing")]   # not the ones logged while it waited
+            if self.analyze and points:
+                try:   # with how it measured (protocol, guards) and the device's measurement chain (readings in ohms)
+                    known = {k: rec.meta[k] for k in ("protocol", "guards") if k in rec.meta}
+                    derive = derived_readings(rec.meta.get("chain"), rec.meta.get("setup"), start, cols["measures"])
+                    analysis = analyze_run(points, cols["axes"], cols["measures"], dict(meta, **known), derive=derive)
+                    rec.set_analysis(analysis)
+                except Exception as e:  # analysis is a convenience; the data are already safe on disk
+                    warnings.append("automatic analysis failed: %s" % e)
+            if took.reads or took.steps:   # what its readings, steps and points took: the estimates after it count them
+                meta["timing"] = took.summary()
+                if timing is not None and n:
+                    try:
+                        timing.learn(rec.run_id, took, self._ran_with(plan, start,
+                                                                      {k.split(".")[0] for k in took.reads}))
+                    except Exception:   # an estimate is a convenience; the run is kept whatever happens here
+                        pass
+            try:
+                rec.finish(**meta)
+            except Exception as e:   # its folder's drive went away, a full disk: said, and people hear of it
+                saved = False
+                warnings.append(self._unwritten(rec, e, ended=True))
+            gate.log.write("run_end", by=gate.operator, run=rec.run_id, status=status, reason=reason, points=n,
+                           duration_s=round(duration, 3))
+            self._emit(event="end", run_id=rec.run_id, status=status, done=n, total=max(plan.points, n))
+            told = True
+        finally:
+            if not told:
+                self._emit(event="end", run_id=rec.run_id, status="aborted", done=n, total=max(plan.points, n))
         if status == "done":
             msg = "run %s done: %d points, %s" % (rec.run_id, n, _dur(duration))
             if ended:
@@ -1345,7 +1365,21 @@ class RunEngine:
             if cleanup:
                 msg += "; then " + "; ".join(cleanup)
         return RunReport(status, plan.name, msg, rec.run_id, n, duration, rec.rows,
-                         str(rec.path) if rec.path else None, analysis=analysis, warnings=warnings)
+                         str(rec.path) if rec.path and saved else None, analysis=analysis, warnings=warnings)
+
+    def _unwritten(self, rec: Any, e: BaseException, ended: bool = False) -> str:
+        """A run's data that can't be written (its folder's drive or network share went away, a full disk), in words;
+        and once a run, an alarm that stays until a person says Got it (gate.alarm: the monitor's). ended: the run had
+        ended, and only its record couldn't be finished."""
+        why = getattr(e, "strerror", None) or str(e) or type(e).__name__
+        text = "its data could not be written to %s (%s)%s" % (rec.path, why, (
+            ": what was written before stays there, and Kelvin keeps it as the run's data at its next start"
+            if ended else ""))
+        if not getattr(rec, "alarmed", False):
+            rec.alarmed = True
+            self.gate._raise_alarm("record", str(rec.path), "Run %s: %s. Is that drive or network folder there, with "
+                                   "room?" % (rec.run_id, text))
+        return text
 
     def _ran_with(self, plan: Plan, start: Dict[str, Any], names: Iterable[str]) -> Dict[str, Dict[str, Any]]:
         """These instruments' settings while the plan ran (as at its start, with its setup), kept with its readings'
@@ -1418,7 +1452,11 @@ class RunEngine:
                 out.append("%s stays held: the lab config holds it on a stop (on_abort asked for %s)"
                            % (step.key, self.lab.resolve(step.key)[1].show(step.value)))
                 continue
-            r = self.gate._set(step.instr, step.param, step.value, False, by, record_undo=False)
+            try:   # the clean-up goes on whatever this step meets
+                r = self.gate._set(step.instr, step.param, step.value, False, by, record_undo=False)
+            except Exception as e:
+                out.append("%s: %s" % (step.key, str(e).splitlines()[0][:160] if str(e) else type(e).__name__))
+                continue
             if r.action != "no-change":
                 out.append(r.message)
         return out
