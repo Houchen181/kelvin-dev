@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tupl
 from . import protection, pulses
 from .cards import ParamSpec, num
 from .eventlog import EventLog
-from .instrument import Instrument
+from .instrument import Busy, Instrument
 from .labconfig import Allowed, Envelope, Guard
 from .scpi import Template, is_query, split_compound
 
@@ -177,12 +177,15 @@ def _number_in(cmd: str) -> Optional[float]:
         return None
 
 
-def interlock_problem(lab: Any, lock: Any) -> Optional[str]:
+def interlock_problem(lab: Any, lock: Any, read: Optional[Callable[[str, str], Any]] = None) -> Optional[str]:
     """Why an interlock's condition doesn't hold now, in words (" (now 25 K)"), or None when it holds. A condition that
     can't be read, or reads what it can't be (an open sensor), fails: an interlock never passes on a reading Kelvin
-    can't vouch for."""
+    can't vouch for. read: how its reading is had (the monitor's: Busy, raised, when its instrument is busy with other
+    work and nothing fresh of it is known; the monitor decides)."""
     try:
-        ok, actual = lock.require.check(lab.read)
+        ok, actual = lock.require.check(read or lab.read)
+    except Busy:
+        raise
     except Exception as e:
         return ", but %s can't be read (%s)" % (lock.require.key, str(e).splitlines()[0][:160] if str(e) else
                                                  type(e).__name__)

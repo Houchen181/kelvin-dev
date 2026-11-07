@@ -9406,7 +9406,9 @@ class LabRuntime:
     # ------------------------------------------------------------------ watching instruments
 
     def _new_monitor(self) -> Monitor:
-        monitor = Monitor(self.lab, self.gate, self._monitor_said)   # it hears the gate's trips too (gate.alarm)
+        # it hears the gate's trips too (gate.alarm); an instrument the work under way holds, whose connection has no
+        # lock to wait on (a maker's driver), it leaves to that work (in_use)
+        monitor = Monitor(self.lab, self.gate, self._monitor_said, in_use=self.lock.holds)
         monitor.on_change = self._save_alarms   # a repeat folded into an alarm, a Got it: kept with the history
         for w in self.lab.config.watches:
             monitor.add(Watch(w["read"], w["above"], w["below"], w["for"], w["every"], list(w["then"]),

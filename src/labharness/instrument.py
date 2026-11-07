@@ -5,11 +5,12 @@ and the run engine call them; the agent never gets an Instrument.
 """
 from __future__ import annotations
 
+import contextlib
 import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from .adapters import lost_kind, short_code, short_model, where_and_cause
 from .cards import BINARY_REPLY, Card, ParamSpec
@@ -66,6 +67,30 @@ class Garbled(RuntimeError):
     be, an error-queue reply that isn't one. A loose cable, a bad adapter or electrical noise; nothing in it can be
     trusted, so it is neither a value nor an instrument error (field test: a garbled "0,No error" was alarmed as an
     instrument error and cleared again 42 times in a night)."""
+
+
+class Busy(RuntimeError):
+    """Other work had the instrument's connection for longer than this thread waits for it (patience: the monitor's),
+    as an acquisition or a wait for *OPC? has it for minutes: nothing was sent, and its health is as it was. Not a
+    failure: the instrument is answering that work."""
+
+
+_patience = threading.local()
+
+
+@contextlib.contextmanager
+def patience(seconds: float, in_use: Optional[Callable[[str], bool]] = None) -> Iterator[None]:
+    """On this thread (the monitor's), an exchange waits at most `seconds` for an instrument's connection that other
+    work has, then raises Busy instead of waiting behind it: a network analyzer's 20-minute sweep held the monitor, and
+    every watch, interlock and alarm with it, for the whole sweep. An instrument found busy is not waited for again in
+    the same with. A connection whose lock can't be taken again inside an exchange (a maker's driver) is only looked
+    at; one with none at all is passed over (Busy) while in_use(name) says the work under way uses its instrument."""
+    before = getattr(_patience, "now", None)
+    _patience.now = (max(0.0, float(seconds)), in_use, {})
+    try:
+        yield
+    finally:
+        _patience.now = before
 
 
 @dataclass
@@ -172,6 +197,56 @@ class Instrument:
         self._checked: Dict[Tuple[int, int], Tuple[float, bool, str]] = {}
         self._cache_lock = threading.Lock()
         self.changed_at = 0.0   # when a command last went to it that may change it: the Lab panel looks at once
+        # each reading's latest value and when (wall time), whoever read it: the monitor takes the running work's own
+        # while that work has the connection (seen)
+        self._seen: Dict[str, Tuple[Any, float]] = {}
+
+    def seen(self, param: str, within: float) -> Optional[Tuple[Any, float]]:
+        """The latest value anyone read of this reading (a run, the Lab panel, the monitor), and when (wall time), if
+        it is at most `within` seconds old; None otherwise."""
+        got = self._seen.get(param)
+        return got if got is not None and time.time() - got[1] <= within else None
+
+    def _saw(self, param: str, value: Any) -> Any:
+        if value is not None and not isinstance(value, (list, tuple, dict)):
+            self._seen[param] = (value, time.time())
+        return value
+
+    @contextlib.contextmanager
+    def _turn(self) -> Iterator[None]:
+        """This thread's turn on the connection, for one exchange or an acquisition's whole sequence. Under patience
+        (the monitor's): Busy instead of a wait behind other work that has it. Elsewhere nothing changes: the
+        backend's own lock makes others wait, as it always did."""
+        now = getattr(_patience, "now", None)
+        if now is None:
+            yield
+            return
+        wait, in_use, busy = now
+        if self.name in busy:   # found busy already: not waited for twice
+            raise Busy(busy[self.name])
+        lock = getattr(self.backend, "lock", None)
+        take = getattr(lock, "acquire", None)
+        if take is None:   # no lock to wait on: only whether the work under way uses it (a twin never waits)
+            if in_use is not None and not self.simulated and in_use(self.name):
+                busy[self.name] = self.busy_text()
+                raise Busy(busy[self.name])
+            yield
+            return
+        if not (take(timeout=wait) if wait > 0 else take(False)):
+            busy[self.name] = self.busy_text()
+            raise Busy(busy[self.name])
+        if not hasattr(lock, "_is_owned"):   # a plain lock, taken again inside the exchange: only looked at
+            lock.release()
+            yield
+            return
+        try:
+            yield
+        finally:
+            lock.release()
+
+    def busy_text(self) -> str:
+        return ("%s is busy: other work has its connection (an acquisition, or a wait for it to finish something)"
+                % self.name)
 
     def _forget(self) -> None:
         """A command that can change what its checks look at went to it (an action, a raw command, a setting of what
@@ -205,29 +280,31 @@ class Instrument:
         """One exchange with the instrument, kept in its health. No answer, or no connection, is raised in plain words
         (InstrumentLost: which instrument, on which bus, what to check), wherever it happens; any other error (a
         command it refused, a card's mistake) passes as it is. alive=False: an answer that doesn't show it is there
-        (a maker's driver says its identity by itself)."""
-        started = time.time()
-        try:
-            out = fn(*args)
-        except (InstrumentOff, Stopped, InstrumentLost):
-            raise
-        except Exception as e:
-            kind = lost_kind(e)
-            if kind is None:
+        (a maker's driver says its identity by itself). Under patience (the monitor's), Busy, with nothing sent, while
+        other work has the connection."""
+        with self._turn():
+            started = time.time()
+            try:
+                out = fn(*args)
+            except (InstrumentOff, Stopped, InstrumentLost):
                 raise
-            self._forget()
-            why = self._said_instead(fn, args) if kind == "silent" else None
-            if why:   # it answers its error queue: not lost; it couldn't do this one, and says why
+            except Exception as e:
+                kind = lost_kind(e)
+                if kind is None:
+                    raise
+                self._forget()
+                why = self._said_instead(fn, args) if kind == "silent" else None
+                if why:   # it answers its error queue: not lost; it couldn't do this one, and says why
+                    self.health.answered()
+                    raise InstrumentFault(why) from e
+                command = str(args[0]).strip() if args and isinstance(args[0], str) else ""
+                self.health.failed(kind == "gone", self.loss_text(e, command), command, started)
+                raise InstrumentLost(self.health.lost_text) from e
+            if alive:
                 self.health.answered()
-                raise InstrumentFault(why) from e
-            command = str(args[0]).strip() if args and isinstance(args[0], str) else ""
-            self.health.failed(kind == "gone", self.loss_text(e, command), command, started)
-            raise InstrumentLost(self.health.lost_text) from e
-        if alive:
-            self.health.answered()
-            if args and isinstance(args[0], str):
-                self.health.last_ok = args[0].strip()
-        return out
+                if args and isinstance(args[0], str):
+                    self.health.last_ok = args[0].strip()
+            return out
 
     def _said_instead(self, fn: Callable[..., Any], args: Tuple[Any, ...]) -> Optional[str]:
         """After a query it didn't answer in time: what its error queue says, asked at once (once it is back in step,
@@ -348,7 +425,8 @@ class Instrument:
             raise ValueError("%s.%s cannot be read" % (self.name, param))
         self._guard(spec)
         if spec.get_before:
-            return self._acquire(spec)
+            with self._turn():   # the whole sequence, or (the monitor) Busy before any of it
+                return self._saw(param, self._acquire(spec))
         if spec.type == "trace":
             return self._trace(spec)
         command = spec.get_cmd.render()
@@ -361,7 +439,7 @@ class Instrument:
         value = self._parse(spec, command, reply)
         if spec.status_cmd is not None or spec.plausible is not None:
             self._vouch(spec, value)
-        return value
+        return self._saw(param, value)
 
     def _guard(self, spec: ParamSpec) -> None:
         """The checks its card makes before this reading (health: before), each asked again after GUARD_S or once
