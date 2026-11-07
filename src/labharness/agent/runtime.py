@@ -3671,10 +3671,13 @@ class LabRuntime:
                 out += self.engine.interlock_problems(None, state, who, sets=load_step(item.text).sets)
         return out
 
-    def _rehearse(self, items: List[Item]) -> Tuple[float, List[str]]:
-        """The whole queue, in order, on a simulated copy of the lab: (lab seconds it takes, what went wrong)."""
+    def _rehearse(self, items: List[Item], since: Optional[int] = None) -> Tuple[float, List[str]]:
+        """The whole queue, in order, on a simulated copy of the lab: (lab seconds it takes, what went wrong). A
+        person's Stop on the lab since `since` (the gate's stops when the queue was asked to start; else now) ends it:
+        what is left isn't rehearsed, and it is never a clean rehearsal."""
         from .. import scriptrun
         from ..gate import SimulationApprover
+        since = self.gate.stop_generation if since is None else since
         twin = self.lab.make_twin()
         gate = SafetyGate(twin, SimulationApprover(), EventLog(None, twin.clock), envelope=self.gate.envelope,
                           operator="dry-run")
@@ -3682,6 +3685,10 @@ class LabRuntime:
         engine.analyze = False
         t0, problems, warnings = twin.clock.now(), [], []
         for n, item in enumerate(items, 1):
+            if self.gate.stop_generation != since:
+                problems.append("a person pressed Stop, so the rehearsal ended before %s"
+                                % self._item_line(n, item))
+                break
             if item.kind == "plan":
                 r = engine.run(self._plan(item.text), dry_run=False)
                 if r.status != "done":
@@ -3692,7 +3699,7 @@ class LabRuntime:
                 if covered is not None:
                     try:
                         r = scriptrun.rehearse(self.lab, covered[0], envelope=self.gate.envelope, twin=twin,
-                                               real=self.gate)
+                                               real=self.gate, since=since)
                         if not r.ok:
                             problems.append(self._item_line(n, item, "; ".join(r.problems) or r.message))
                     except scriptrun.ScriptError as e:
@@ -3743,7 +3750,9 @@ class LabRuntime:
         items alone (_queue_loop's only): never one waiting after them, or added since. It runs exactly the items
         approved, as they were when it looked (copies: the card is built from these, and an edit while it waits is
         another text): an item changed since, or added since to a start of the whole queue, is asked about before it
-        runs, if it drives anything."""
+        runs, if it drives anything. A person's Stop from the moment this is called (while it waits for the lab, is
+        rehearsed or approved) means the queue doesn't start."""
+        since = self.gate.stop_generation
         with self.queue.lock:
             if self.queue.state in ("running", "pausing"):
                 return "the queue is already running\n" + self._queue_text()
@@ -3758,7 +3767,9 @@ class LabRuntime:
             problems = check()
             if problems:
                 return REHEARSAL % "queue_start" + "\nnot rehearsed:\n" + "\n".join(problems[:8])
-            duration, failed = self._rehearse(items)
+            duration, failed = self._rehearse(items, since)
+            if self.gate.stop_generation != since:   # cut short: no forecast from part of it
+                return REHEARSAL % "queue_start" + "\nnot finished: a person pressed Stop while it was rehearsed"
             _, _, refusals = self.gate.plan_approval(self._queue_drives(items), whole_path=True,
                                                      later=self._queue_later(items))
             refusals += self._queue_interlocks(items)
@@ -3776,12 +3787,15 @@ class LabRuntime:
             with self.queue.lock:   # it may have started meanwhile, from another chat or the Runs panel
                 if self.queue.state in ("running", "pausing"):
                     return "the queue is already running\n" + self._queue_text()
-            got = self._queue_approve(items, by, "the queue did not start")
+            got = self._queue_approve(items, by, "the queue did not start", since=since)
             if not got["ok"]:
                 return got["said"]
             with self.queue.lock:   # checked again as it starts, under the lock: never two loops at once
                 if self.queue.state in ("running", "pausing"):
                     return "the queue is already running\n" + self._queue_text()
+                if self.gate.stop_generation != since:   # a Stop since its approval: it never starts
+                    return ("the queue did not start: a person pressed Stop before it started. Ask them before "
+                            "starting it again.")
                 self.gate.queue_actions = got["actions"]   # its scans do these, not asking again
                 self.queue_started_by = getattr(self.viewer, "chat", None) if by != "human" else None
                 self.queue.state, self.queue.reason = "running", ""
@@ -3799,11 +3813,21 @@ class LabRuntime:
         return self._do("starting the queue", prepare, stoppable=True,
                         uses=self._uses("\n".join(item.text for item in items)))   # the rest stay readable
 
-    def _queue_approve(self, items: List[Item], by: str, said: str, again: bool = False) -> Dict[str, Any]:
+    def _queue_approve(self, items: List[Item], by: str, said: str, again: bool = False,
+                       since: Optional[int] = None) -> Dict[str, Any]:
         """The queue's one approval for these items (waiting, in order, up to a pause): each checked, the whole path
         walked, then a person asked once, or auto mode's yes. {ok, grants, actions, title, duration}, or {ok: False,
         said}: why not, after said ("the queue did not start"). again: these came after the queue was approved (added
-        or changed meanwhile), and its card says so. The caller holds the lab."""
+        or changed meanwhile), and its card says so. since: the gate's stops when it was asked for (else now): a
+        person's Stop since then, while it is rehearsed or its card waits, is never an approval. The caller holds the
+        lab."""
+        since = self.gate.stop_generation if since is None else since
+
+        def stopped(when: str) -> Optional[Dict[str, Any]]:
+            if self.gate.stop_generation == since:
+                return None
+            return {"ok": False, "said": "%s: a person pressed Stop %s. Ask them before starting it again."
+                    % (said, when)}
         problems = self._queue_checked(items)
         if problems:
             return {"ok": False, "said": "%s:\n%s" % (said, "\n".join(problems[:8]))}
@@ -3842,7 +3866,10 @@ class LabRuntime:
                     " up to there" if pause else "")])
             covered = False
             if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk
-                duration, failed = self._rehearse(items)
+                duration, failed = self._rehearse(items, since)
+                cut = stopped("while it was rehearsed on the simulated lab")   # never auto-approved, nor asked
+                if cut:
+                    return cut
                 rehearsal = type("Rehearsal", (), {"ok": not failed})()
                 covered, why = self.gate.auto_plan(grants, rehearsal)
                 if starting:   # an action that drives the sample is a person's to start, as with do_action
@@ -3859,6 +3886,9 @@ class LabRuntime:
                 note = " (%s)" % request.note if request.note else ""
                 self.gate.log.write("queue_declined", by=by)
                 return {"ok": False, "said": "declined: %s%s" % (said, note)}
+        cut = stopped("before they ran" if again else "before it started")   # while its card waited (a phone's yes)
+        if cut:
+            return cut
         for item in items:   # the experiments' versions this approval covered: those run without asking again
             c = self._covered_item(item)
             if c is not None:
@@ -4205,7 +4235,7 @@ class LabRuntime:
         kept = self._kept_version(prep.path)
         queued = kept is not None and kept.approved and self._queue_covered.get(item.id) == kept.number
         text, report = self._script_run(prep, lambda t: t, {"queue": {
-            "item": item.id, "position": position, "note": item.note}}, told=False, queued=queued)
+            "item": item.id, "position": position, "note": item.note}}, told=False, queued=queued, since=gen)
         stopped = self.gate.stop_generation != gen
         if report is None:   # refused, declined or not ready: it never started
             q.mark(item, "stopped" if stopped else "failed", text[:300])
@@ -6563,11 +6593,13 @@ class LabRuntime:
                 lines.append("  … (experiments shows the whole change)")
         return lines
 
-    def _auto_experiment(self, prep: Any, grants: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    def _auto_experiment(self, prep: Any, grants: Dict[str, Any],
+                         since: Optional[int] = None) -> Tuple[bool, List[str]]:
         """Does auto mode cover a run of an approved version of one of the lab's experiments? As a plan: it is
         rehearsed on a simulated copy of the lab first (the caller holds the lab), and every drive it sets is low-risk
         (gate.auto_plan). Never when it loads a maker's library, opens what isn't in the lab, or runs a card's action
-        that drives the sample. (covered, why)."""
+        that drives the sample, nor after a person's Stop since the run was asked for (since: the gate's stops then),
+        which ends its rehearsal and is never a clean one. (covered, why)."""
         from .. import scriptrun
         found = prep.found
         why = (["it loads %s, a maker's library" % ", ".join(found.libraries)] if found.libraries else []) + \
@@ -6577,9 +6609,11 @@ class LabRuntime:
             return False, why
         try:
             r = scriptrun.rehearse(self.lab, prep, envelope=self.gate.envelope, twin=self.lab.make_twin(),
-                                   real=self.gate)
+                                   real=self.gate, since=since)
         except scriptrun.ScriptError as e:
             return False, ["it can't be rehearsed: %s" % e]
+        if r.ended == "stopped by a person":
+            return False, [r.message]
         ok, reasons = self.gate.auto_plan(grants, r)
         if not ok:
             return False, reasons + ["its rehearsal: %s" % p for p in r.problems[:2]]
@@ -7256,8 +7290,10 @@ class LabRuntime:
         back to safe. mark: how the script's own output is marked for the model (text from outside the lab).
         action: an experiment's action (its main one when none is named). dry_run: only a rehearsal of an experiment
         on the simulated lab, never followed by the real run. background: through the queue (queue_run_now), so this
-        returns at once and set_live reaches the run while it goes on."""
+        returns at once and set_live reaches the run while it goes on. A person's Stop from the moment this is called
+        (while it is read, waits for the lab, is rehearsed, approved or starting) means it doesn't run."""
         from .. import scriptrun
+        since = self.gate.stop_generation
         try:
             prep = self._prepare_script(path, params, args, drives, action=action)
         except scriptrun.ScriptError as e:
@@ -7283,7 +7319,7 @@ class LabRuntime:
             if prep.live:
                 said += "\nWhile it runs, set_live changes its live inputs: %s" % ", ".join(prep.live)
             return said
-        return self._do("running script %s" % prep.name, lambda: self._run_script(prep, mark), stoppable=True)
+        return self._do("running script %s" % prep.name, lambda: self._run_script(prep, mark, since), stoppable=True)
 
     def rehearse_script(self, prep: Any) -> str:
         """A prepared experiment rehearsed on a simulated copy of the lab (scriptrun.rehearse), in words: how it
@@ -7326,8 +7362,8 @@ class LabRuntime:
             return False, "not changed: %s" % (e.args[0] if e.args else e)
         return True, "%s is now %r in run %s (it was %r)" % (name, after, job.rec_id, before)
 
-    def _run_script(self, prep: Any, mark: Callable[[str], str]) -> str:
-        return self._script_run(prep, mark)[0]
+    def _run_script(self, prep: Any, mark: Callable[[str], str], since: Optional[int] = None) -> str:
+        return self._script_run(prep, mark, since=since)[0]
 
     def _changed_since(self, prep: Any) -> List[str]:
         """Lines for a script's card on what changed since its last run (the library keeps, of each run, the sha256 of
@@ -7354,14 +7390,22 @@ class LabRuntime:
         return lines
 
     def _script_run(self, prep: Any, mark: Callable[[str], str], extra: Optional[Dict[str, Any]] = None,
-                    told: bool = True, queued: bool = False) -> Tuple[str, Any]:
+                    told: bool = True, queued: bool = False, since: Optional[int] = None) -> Tuple[str, Any]:
         """A prepared script, run after its one approval: (the answer, its ScriptReport; None when it never started:
-        refused, declined, or an instrument it opens not ready). extra: more for its run's record (its place in the
-        queue). told: a notice when it ends (a queue's account says it at the end instead). queued: an approved
+        refused, declined, stopped, or an instrument it opens not ready). extra: more for its run's record (its place
+        in the queue). told: a notice when it ends (a queue's account says it at the end instead). queued: an approved
         version of one of the lab's experiments the queue's approval covered, which runs without asking again. In
-        auto mode an approved version is rehearsed first and covered as a plan is (_auto_experiment)."""
+        auto mode an approved version is rehearsed first and covered as a plan is (_auto_experiment). since: the
+        gate's stops when the run was asked for (the tool's call, the queue picking it; else now): a person's Stop
+        since then, while it was rehearsed, approved or starting, means it doesn't run, never that it runs anyway."""
         from .. import scriptrun
         gate, lab = self.gate, self.lab
+        since = gate.stop_generation if since is None else since
+
+        def stopped(when: str) -> Optional[str]:
+            if gate.stop_generation == since:
+                return None
+            return "script not run: a person pressed Stop %s. Ask them before trying it again." % when
         names = list(prep.found.instruments)
         for name in names:
             away = lab.away(name)
@@ -7386,7 +7430,10 @@ class LabRuntime:
         if queued and kept is not None and kept.approved:
             covered = ["the queue's approval covers it: an approved version of the lab's experiment %s" % kept.name]
         elif gate.auto and kept is not None and kept.approved:
-            ok, why = self._auto_experiment(prep, grants)
+            ok, why = self._auto_experiment(prep, grants, since)
+            said = stopped("while it was rehearsed on the simulated lab")   # never auto-approved, nor asked about
+            if said:
+                return said, None
             if ok:
                 covered = why
             else:
@@ -7402,6 +7449,9 @@ class LabRuntime:
         elif not gate.ask(request):
             gate.log.write("run_declined", by=gate.operator, plan=prep.name)
             return "declined: script %s not run%s" % (prep.name, " (%s)" % request.note if request.note else ""), None
+        said = stopped("before it started")   # while its card waited (a yes from a phone after it), or the preflight
+        if said:
+            return said, None
         if kept is not None and not kept.approved:   # the person's yes to its run approves the version
             try:
                 kept = self.experiments.approve(kept.name, kept.number, self._person())
@@ -7419,7 +7469,7 @@ class LabRuntime:
         with self._device_protection(meta) as held:
             job = scriptrun.ScriptRun(gate, prep, self.engine.store, grants,
                                       set(prep.found.unknown) | set(prep.found.libraries), meta,
-                                      self.attribution.get("folder"), busy, self.engine.progress)
+                                      self.attribution.get("folder"), busy, self.engine.progress, since=since)
             self._live_run = job   # set_live reaches it while it runs
             try:
                 report = job.execute()

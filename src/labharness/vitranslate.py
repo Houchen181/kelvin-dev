@@ -143,11 +143,12 @@ def translate(desc: Dict[str, Any], lab: Any, ask: Ask, table: vimap.Table, fold
         path.write_text(source, encoding="utf-8")
         report = vicheck.check(source, desc, lab, mappings, notes, path, twin_of, plan_text, real=real,
                                prepare=prepare, desc_text=desc_text)
-        if not _needs_repair(report):
+        if not _needs_repair(report) or vicheck.stopped(report):   # a person's Stop ends it here, not checked
             break
         problems = [f.text for f in report.findings if f.blocks or f.kind in ("untranslated", "rehearsal")]
         text = _repair(first, source, problems)
-    if review_ask is not None and source and not any(f.kind in ("syntax", "api") for f in report.blocking):
+    if review_ask is not None and source and not vicheck.stopped(report) and \
+            not any(f.kind in ("syntax", "api") for f in report.blocking):
         report.findings += vicheck.review(review_ask, desc_text, source)
     vi = {k: desc.get(k) for k in ("path", "name", "sha256", "labview")}
     return Translation(source, notes, report, rounds, model, vi, {k: asdict(m) for k, m in mappings.items()})

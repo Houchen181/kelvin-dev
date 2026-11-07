@@ -355,7 +355,7 @@ def test_a_persons_stop_ends_a_rehearsal(rt_keysight):
     threading.Timer(1.0, rt.gate.request_abort).start()
     started = time.monotonic()
     said = rt.rehearse_script(prep)
-    assert "on Stop" in said and time.monotonic() - started < 20, said
+    assert "a person stopped it" in said and time.monotonic() - started < 20, said   # never a clean one
 
 
 # ------------------------------------------------------------------ the final review's findings (fix pass)

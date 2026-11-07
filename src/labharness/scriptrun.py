@@ -46,7 +46,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set,
 
 from . import experiment, prologix
 from . import scripts as lab_scripts
-from .adapters import resource_name
+from .adapters import resource_name, timed_out
 from .eventlog import RunStore
 from .gate import ApprovalRequest, Approver, SafetyGate, _dur
 from .labconfig import Allowed
@@ -63,8 +63,14 @@ OPAQUE = ("zhinst", "nidaqmx", "PyDAQmx", "MultiPyVu", "pylablib", "seabreeze", 
           "pymmcore", "spcm", "pyspcm", "TimeTagger", "pulsestreamer", "spinapi", "harvesters", "pyueye", "pyvcam",
           "pyftdi", "ftd2xx", "usb", "hid", "pymodbus", "minimalmodbus", "pylibftdi")
 STOPS = ("refused", "declined", "tripped", "stopped", "timeout")   # gate results that end a script's run
-GRACE_S = 10.0       # after a stop, how long the script may stay quiet before Kelvin ends it
+GRACE_S = 10.0       # after a stop, how long the script may go without a change (or, its main script ended, take to
+                     # end its process) before Kelvin ends it
 MAX_GRACE_S = 120.0  # and how long its own clean-up may take at most
+END_WAIT_S = 30.0    # how long its process may take to go once Kelvin ended it, before Kelvin cleans up without it
+# a query the instrument answers in a character once it has finished (*OPC?): a script that waits longer for it than
+# Kelvin's connection would is answered through adapters' query_waiting, a second at a time, so a person's Stop ends
+# the wait at once. Only this one: a longer reply, read a second at a time, could be cut where a second ends
+LONG_WAIT = re.compile(r"^\s*\*OPC\?\s*$", re.I)
 PROBE_S = 30.0
 PROBE_KEEP_S = 600.0
 OUTPUT_TAIL = 12     # lines of the script's output in the answer
@@ -1019,8 +1025,11 @@ class _Job:
             self._k32.TerminateJobObject(self.handle, 1)
         elif os.name == "nt":
             if self.proc.poll() is None:
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True, timeout=15,
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                try:
+                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True,
+                                   timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                except (subprocess.TimeoutExpired, OSError):
+                    pass   # taskkill itself hung or is missing: the run says the process may still be there
         else:
             import signal
             try:
@@ -1048,11 +1057,21 @@ class ScriptRun:
     def __init__(self, gate: SafetyGate, prep: Prepared, store: RunStore, grants: Dict[str, Allowed],
                  allowed: Set[str], meta: Optional[Dict[str, Any]] = None, folder: Any = None,
                  busy: Optional[Callable[[str], None]] = None,
-                 progress: Optional[Callable[[Dict[str, Any]], None]] = None, rehearsal: bool = False):
+                 progress: Optional[Callable[[Dict[str, Any]], None]] = None, rehearsal: bool = False,
+                 since: Optional[int] = None):
         self.gate, self.lab, self.prep = gate, gate.lab, prep
         # a rehearsal on the simulated lab (rehearse): nothing outside it, in a folder of its own, its waits skipped
         self.rehearsal = rehearsal
+        # the gate's stops as they were when the run was asked for (the tool's call, the queue picking it): a Stop
+        # since then, while it was approved or while it was starting, stops it, or it never starts. None: as execute()
+        # begins
+        self.since = since
+        self.gen: Optional[int] = None   # the stops this run began with (execute)
         self.killed = False   # it did not end after its stop, so Kelvin ended it
+        self.kill_why = ""    # why, in words, with the real time it took
+        self.outlived = False  # and its process was still there END_WAIT_S later (a call stuck in a maker's driver)
+        self.pid: Optional[int] = None
+        self.bye_at = 0.0     # when its main script said it ended (bye): its process should end soon after
         self.store, self.grants, self.meta, self.folder = store, grants, dict(meta or {}), folder
         # unknown addresses a person allowed, as VISA resources however they are spelled (the approval's serial://COM5
         # is the script's COM5 or ASRL5::INSTR), and makers' libraries, by name
@@ -1181,8 +1200,8 @@ class ScriptRun:
         now = time.monotonic()
         if now - self._shown > 0.5:
             self._shown = now
-            self.busy("script %s: %d commands%s" % (self.prep.name, self.n_commands,
-                                                   ", " + self._last if self._last else ""))
+            self.busy("script %s: %s%d commands%s" % (self.prep.name, "stopping, " if self.stopping else "",
+                                                     self.n_commands, ", " + self._last if self._last else ""))
 
     def _write(self, entry: Dict[str, Any]) -> None:
         with self._log_lock:
@@ -1257,9 +1276,19 @@ class ScriptRun:
         finally:
             del inst.instrument_error
 
+    def _stop_pressed(self) -> bool:
+        """Whether a wait the script is in ends now: a Stop since the run began. Once it is stopping, its own
+        clean-up's waits go on, until MAX_GRACE_S after the stop (when Kelvin ends it anyway)."""
+        if self.stopping:
+            return time.monotonic() - self.stop_at > MAX_GRACE_S
+        return self.gen is not None and self.gate.stop_generation != self.gen
+
     @contextmanager
-    def _patience(self, inst: Any, timeout_ms: Optional[float]) -> Iterator[None]:
-        """A reading the script waits longer for than Kelvin's connection would (its own timeout)."""
+    def _patience(self, inst: Any, timeout_ms: Optional[float], command: Optional[str] = None) -> Iterator[None]:
+        """A reading the script waits longer for than Kelvin's connection would (its own timeout). command: the query
+        it sent through the gate; *OPC? (LONG_WAIT), then awaited a moment at a time (the connection's
+        query_waiting), so a person's Stop ends the wait within a second instead of when the script's timeout would
+        have (a VNA's sweep: ten minutes), the instrument cleared so its late answer is never taken for another's."""
         backend = inst.backend
         res = getattr(backend, "res", None)
         lock = getattr(backend, "lock", None)
@@ -1268,19 +1297,74 @@ class ScriptRun:
             return
         with lock:
             before = getattr(res, "timeout", None)
+            longer = False
             try:
                 if before is not None and float(timeout_ms) > before:
                     res.timeout = float(timeout_ms)
+                    longer = True
             except (TypeError, ValueError):
                 before = None
+            waiting = getattr(backend, "query_waiting", None)
+            sliced = longer and waiting is not None and command is not None and \
+                LONG_WAIT.match(command) is not None and hasattr(backend, "__dict__")
+            own = backend.__dict__.get("query") if sliced else None   # one put there already stays (a test's)
+            if sliced:
+                plain, me, seconds, inside = backend.query, threading.get_ident(), float(timeout_ms) / 1000.0, []
+
+                def query(cmd: str, *args: Any, **kwargs: Any) -> Any:
+                    # this query, on this thread; anything else (query_waiting's own plain query) as ever
+                    if inside or threading.get_ident() != me or str(cmd).strip() != str(command).strip():
+                        return plain(cmd, *args, **kwargs)
+                    inside.append(cmd)
+                    try:
+                        return waiting(cmd, seconds, self._stop_pressed)
+                    finally:
+                        inside.pop()
+                backend.query = query
             try:
                 yield
             finally:
+                if sliced:
+                    if own is None:
+                        backend.__dict__.pop("query", None)
+                    else:
+                        backend.query = own
                 if before is not None:
                     try:
                         res.timeout = before
                     except Exception:
                         pass
+
+    @staticmethod
+    def _bus_free(inst: Any) -> None:
+        """A direct exchange with an instrument whose bus is hung (adapters.BUSES) fails at once, as Kelvin's own
+        exchanges on it do, instead of waiting it out."""
+        check = getattr(inst.backend, "_bus_ok", None)
+        if check is not None:
+            try:
+                check()
+            except Exception as e:
+                raise _Refuse(str(e), stop=False) from None
+
+    @staticmethod
+    def _missed(backend: Any, e: BaseException) -> None:
+        """After a direct exchange that ran out of time: the reply the instrument may still send is dropped before the
+        next command (the connection's _timed_out), never taken for a later command's."""
+        mark = getattr(backend, "_timed_out", None)
+        if mark is not None and timed_out(e):
+            try:
+                mark()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _in_step(inst: Any) -> None:
+        """Before a direct exchange that sends a command (a binary block's query or write), with the connection's lock
+        held: what the instrument still owes from an exchange that ran out of time is dropped first (the connection's
+        _settle), as before Kelvin's own commands; raises while it isn't back in step."""
+        settle = getattr(inst.backend, "_settle", None)
+        if settle is not None:
+            settle()
 
     def _instrument(self, msg: Dict[str, Any]) -> Any:
         name = str(msg.get("instrument") or "")
@@ -1305,7 +1389,8 @@ class ScriptRun:
                           message="an error the instrument reported earlier, kept for the script")
                 continue
             caught: List[str] = []
-            with self._quiet(), self._patience(inst, msg.get("timeout") if is_query(part, enq) else None), \
+            asks = is_query(part, enq)
+            with self._quiet(), self._patience(inst, msg.get("timeout") if asks else None, part if asks else None), \
                     self._keeping_errors(inst, caught):
                 r = self.gate.raw(inst.name, part)
             self._log(instrument=inst.name, command=part, action=r.action, ok=r.ok, message=r.message,
@@ -1344,7 +1429,9 @@ class ScriptRun:
             if raw:
                 raise _Refuse("%s has no reply waiting" % inst.name, stop=False)
             return ""
+        self._bus_free(inst)
         with self._patience(inst, msg.get("timeout")), backend.lock:
+            res = backend.res
             try:
                 if count:
                     data = res.read_bytes(count, break_on_termchar=bool(msg.get("break_on_termchar")))
@@ -1353,6 +1440,7 @@ class ScriptRun:
                 else:
                     data = res.read()
             except Exception as e:
+                self._missed(backend, e)
                 raise _Refuse("%s: %s" % (inst.name, e), stop=False) from None
         self._log(instrument=inst.name, command="(read)", action="read", ok=True, message="")
         if raw or count:
@@ -1536,14 +1624,17 @@ class ScriptRun:
             res = getattr(inst.backend, "res", None)
             if res is None:
                 raise _Refuse("%s is simulated: it has no binary readings" % inst.name, stop=False)
+            self._bus_free(inst)
             with self._patience(inst, msg.get("timeout")), inst.backend.lock:
                 try:
-                    values = res.query_binary_values(command, datatype=msg.get("datatype") or "f",
-                                                     is_big_endian=bool(msg.get("is_big_endian")),
-                                                     header_fmt=msg.get("header_fmt") or "ieee",
-                                                     expect_termination=msg.get("expect_termination", True),
-                                                     data_points=int(msg.get("data_points") or 0), container=list)
+                    self._in_step(inst)
+                    values = inst.backend.res.query_binary_values(
+                        command, datatype=msg.get("datatype") or "f", is_big_endian=bool(msg.get("is_big_endian")),
+                        header_fmt=msg.get("header_fmt") or "ieee",
+                        expect_termination=msg.get("expect_termination", True),
+                        data_points=int(msg.get("data_points") or 0), container=list)
                 except Exception as e:
+                    self._missed(inst.backend, e)
                     raise _Refuse("%s: %s" % (inst.name, e), stop=False) from None
             self._log(instrument=inst.name, command=command, action="read", ok=True, message="%d values" % len(values))
             return {"values": [float(v) for v in values]}
@@ -1555,12 +1646,15 @@ class ScriptRun:
                 raise _Refuse("refused: " + why)
             res = getattr(inst.backend, "res", None)
             if res is not None:
+                self._bus_free(inst)
                 with inst.backend.lock:
                     try:
-                        res.write_binary_values(command, list(msg.get("values") or []),
-                                                datatype=msg.get("datatype") or "f",
-                                                is_big_endian=bool(msg.get("is_big_endian")))
+                        self._in_step(inst)
+                        inst.backend.res.write_binary_values(command, list(msg.get("values") or []),
+                                                             datatype=msg.get("datatype") or "f",
+                                                             is_big_endian=bool(msg.get("is_big_endian")))
                     except Exception as e:
+                        self._missed(inst.backend, e)
                         raise _Refuse("%s: %s" % (inst.name, e), stop=False) from None
             self._log(instrument=inst.name, command=command, action="sent", ok=True,
                       message="a block of %d values" % len(msg.get("values") or []))
@@ -1585,8 +1679,8 @@ class ScriptRun:
             return {"value": int(float(r.value)) if r.ok and r.value else 0}
         if op == "library":
             return self._library(str(msg.get("module") or ""))
-        if op == "bye":
-            self.bye = msg
+        if op == "bye":   # its main script ended: its process ends next, unless a thread of its own keeps it going
+            self.bye, self.bye_at = msg, time.monotonic()
             return {}
         raise _Refuse("Kelvin's stand-in asked for %r, which Kelvin does not know" % op, stop=False)
 
@@ -1640,13 +1734,45 @@ class ScriptRun:
     # ---------------------------------------------------------------- the loop
 
     def _begin_stop(self, why: str, conns: Dict[socket.socket, _Conn]) -> None:
+        """The run stops: the script is told (its main thread gets KeyboardInterrupt, once, so its own finally: runs),
+        the live views and the lab's busy line say it is stopping, and from now on only its changes count as its
+        clean-up (_serve)."""
         if self.stopping:
             return
         self.stopping = why
         self.stop_at = time.monotonic()
+        self.busy("script %s: stopping (%s)" % (self.prep.name, why if len(why) <= 100 else why[:97] + "..."))
+        if self.rec_id is not None:
+            self._emit(event="phase", run_id=self.rec_id, phase="stopping", eta_s=None)
         for c in conns.values():
             if c.ok:
                 self._send(c, {"op": "stop", "why": why})
+
+    @staticmethod
+    def _changes(msg: Dict[str, Any]) -> bool:
+        """A request that changes something on an instrument: a setting, an action, a command that isn't a query, a
+        binary block or a device clear. After a stop only these are the script's clean-up: a thread of its own that
+        goes on reading (a live plot) never keeps its run from ending."""
+        op = msg.get("op")
+        if op in ("set", "act", "write_binary", "clear"):
+            return True
+        if op in ("command", "raw"):
+            text = str(msg.get("command") or "").strip()
+            return bool(text) and not all(is_query(p, False) for p in split_compound(text) or [text])
+        return False
+
+    def _overdue(self, now: float) -> Optional[str]:
+        """Why Kelvin ends the script now that it is stopping, in words with the real time since the stop; None while
+        it may still end by itself."""
+        after = _dur(now - self.stop_at)
+        if self.bye_at and now - max(self.bye_at, self.stop_at) > GRACE_S:
+            return ("its main script ended, but its process was still running %s after the stop (a thread it started "
+                    "kept it going), so Kelvin ended it" % after)
+        if now - max(self.last_activity, self.stop_at) > GRACE_S:
+            return "it did not end within %s of the stop, so Kelvin ended it" % after
+        if now - self.stop_at > MAX_GRACE_S:
+            return "its clean-up was still going %s after the stop, so Kelvin ended it" % after
+        return None
 
     @staticmethod
     def _send(conn: _Conn, msg: Dict[str, Any]) -> None:
@@ -1682,9 +1808,13 @@ class ScriptRun:
                 return True
         except Exception as e:   # a command that failed on the way: the script gets the error, the run goes on
             answer = {"id": rid, "ok": False, "error": "%s: %s" % (type(e).__name__, e), "stop": False}
+        if not self.stopping and self._stop_pressed():   # a Stop while this was answered (a wait it cut short): said
+            self._begin_stop("stop requested", conns)      # first, so the script's request ends in its stop
         self._send(conn, answer)
-        if msg.get("op") not in ("sleep", "live"):   # waiting, or reading an input, is no clean-up after a stop:
-            self.last_activity = time.monotonic()      # a script that only does that is ended once GRACE_S passes
+        # after a stop, only its changes are clean-up: waiting, reading an input or an instrument (a thread of its
+        # own polling for a live plot) is not, so a script that only does that is ended once GRACE_S passes
+        if msg.get("op") not in ("sleep", "live", "bye") and (not self.stopping or self._changes(msg)):
+            self.last_activity = time.monotonic()
         return True
 
     def _command_line(self, run_dir: Path, source_file: Optional[Path]) -> List[str]:
@@ -1728,6 +1858,10 @@ class ScriptRun:
 
     def execute(self) -> ScriptReport:
         gate, lab, prep = self.gate, self.lab, self.prep
+        # the stops as they were when the run was asked for (else now, before anything): a person's Stop while it was
+        # approved or while it is starting (the snapshot reads every instrument, the folder walk can take seconds) is
+        # never lost
+        self.gen = gate.stop_generation if self.since is None else self.since
         plan = {"plan": prep.name, "script": str(prep.path), "sha256": prep.sha256, "python": prep.python.text,
                 "changes": prep.changes or None, "params": prep.params or None, "args": prep.args or None,
                 "version": prep.version, "action": prep.action or None}
@@ -1756,7 +1890,6 @@ class ScriptRun:
         self.t0 = time.monotonic()
         self.last_activity = self.t0
         self.stop_at = 0.0
-        gen = gate.stop_generation
         killed = False
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("127.0.0.1", 0))
@@ -1770,17 +1903,22 @@ class ScriptRun:
         approved = gate.preapproved(self.grants)   # what the person approved holds for the whole run
         approved.__enter__()
         try:
-            try:
-                proc = subprocess.Popen(self._command_line(run_dir, source_file), cwd=str(run_dir if self.rehearsal else prep.path.parent),
-                                        env=self._environ(server.getsockname()[1], run_dir),
-                                        stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                                        start_new_session=os.name != "nt")
-            except OSError as e:
-                self.failed = "the script's Python did not start (%s)" % (e.strerror or e)
-                proc = None
+            proc = None
+            if self._stop_pressed():   # stopped while it was approved or starting: its Python never starts
+                self._begin_stop("stop requested", conns)
+            else:
+                try:
+                    proc = subprocess.Popen(self._command_line(run_dir, source_file),
+                                            cwd=str(run_dir if self.rehearsal else prep.path.parent),
+                                            env=self._environ(server.getsockname()[1], run_dir),
+                                            stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                                            start_new_session=os.name != "nt")
+                except OSError as e:
+                    self.failed = "the script's Python did not start (%s)" % (e.strerror or e)
             if proc is not None:
                 job = _Job(proc)
+                self.pid = proc.pid
                 self.busy("script %s: starting" % prep.name)
             while proc is not None:
                 for key, _ in sel.select(timeout=0.2):
@@ -1808,16 +1946,19 @@ class ScriptRun:
                         sel.unregister(conn.sock)
                         conns.pop(conn.sock, None)
                         conn.sock.close()
-                if gate.stop_generation != gen and not self.stopping:
+                if not self.stopping and self._stop_pressed():
                     self._begin_stop("stop requested", conns)
                 if proc.poll() is not None:
                     break
                 if self.stopping:
-                    now = time.monotonic()
-                    if now - max(self.last_activity, self.stop_at) > GRACE_S or now - self.stop_at > MAX_GRACE_S:
-                        killed = True
+                    why = self._overdue(time.monotonic())
+                    if why:
+                        killed, self.kill_why = True, why
                         job.end()
-                        proc.wait(timeout=30)
+                        try:
+                            proc.wait(timeout=END_WAIT_S)
+                        except subprocess.TimeoutExpired:   # a call stuck in a maker's driver can keep it there:
+                            self.outlived = True             # the clean-up goes on without it, and says so
                         break
         finally:
             approved.__exit__(None, None, None)
@@ -1838,7 +1979,7 @@ class ScriptRun:
         if self.failed:
             status, reason = "aborted", self.failed
         elif stopped_by_person:
-            status, reason = "aborted", "stop requested"
+            status, reason = "aborted", "stop requested" if proc is not None else "stop requested before it started"
         elif code not in (0, None):
             status = "aborted"
             reason = self.bye.get("error") or "it ended with exit code %s" % code
@@ -1846,10 +1987,11 @@ class ScriptRun:
             status, reason = "done", None
         self.killed = killed
         if killed:
-            reason = "%s; it did not end within %s of the stop, so Kelvin ended it" % (reason, _dur(GRACE_S))
+            reason = "%s; %s" % (reason, self.kill_why)
         cleanup: List[str] = []
         if status != "done":
-            self._emit(event="phase", run_id=self.rec.run_id, phase="stopping", eta_s=None)
+            if not self.stopping:   # one that stopped said so as it began to (_begin_stop)
+                self._emit(event="phase", run_id=self.rec.run_id, phase="stopping", eta_s=None)
             cleanup = self._back_to_safe()
         left = self._left_on() if status == "done" else []
         try:
@@ -1871,6 +2013,11 @@ class ScriptRun:
         if self.reported:
             report.warnings.append("the instruments refused %d of its commands, as they would have without Kelvin "
                                    "(commands.jsonl says which and why)" % self.reported)
+        if self.outlived:
+            report.warnings.append(
+                "its process (pid %s) was still there %s after Kelvin ended it: a call stuck in a maker's driver can "
+                "keep it, and it may still hold an instrument. If it stays, end it in the Task Manager"
+                % (self.pid, _dur(END_WAIT_S)))
         self.rec.set_columns(report.columns)
         meta = dict(status=status, reason=reason, points=len(self.rows), duration_s=round(duration, 3),
                     cleanup=cleanup, warnings=report.warnings, exit_code=code, commands=self.n_commands,
@@ -1942,8 +2089,10 @@ class ScriptRun:
 
 @dataclass
 class Rehearsal:
-    ok: bool                 # it ended (by itself, or on Stop) and nothing was refused
-    ended: str               # "by itself" | "on Stop" | "failed" | "not on Stop"
+    ok: bool                 # it ended (by itself, or on Kelvin's own Stop) and nothing was refused
+    # "by itself" | "on Stop" (Kelvin's, when its time ran out) | "failed" | "not on Stop" | "stopped by a person"
+    # (never a clean rehearsal: what it would have done next is not known, and the person wanted it stopped)
+    ended: str
     message: str
     lab_seconds: float       # the simulated lab's time it took
     problems: List[str] = field(default_factory=list)
@@ -1954,7 +2103,7 @@ class Rehearsal:
 
 
 ENDED = {"by itself": "it ended by itself", "on Stop": "it ended on Stop", "failed": "it failed",
-         "not on Stop": "it did not end on Stop"}
+         "not on Stop": "it did not end on Stop", "stopped by a person": "a person stopped it"}
 
 
 def _reaches_past(source: str) -> Optional[str]:
@@ -2014,7 +2163,8 @@ def rehearsal_problem(prep: Prepared) -> Optional[str]:
 
 
 def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: Any = None,
-             twin: Any = None, real: Any = None, wire: Optional[List[Any]] = None) -> Rehearsal:
+             twin: Any = None, real: Any = None, wire: Optional[List[Any]] = None,
+             since: Optional[int] = None) -> Rehearsal:
     """An experiment run on a simulated copy of the lab (lab.make_twin), as it would run on the lab: every command
     through the twin's gate, which says yes to whatever a person would be asked (and lists it), its waits skipped on the
     simulated clock, nothing outside the simulated lab, and nothing written beside the script. Kelvin presses Stop on
@@ -2024,8 +2174,11 @@ def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: An
     Nothing it runs reaches past the simulated lab: its process refuses programs, native libraries, COM, the network
     and writing outside its own folder (kelvin_shim._fence). (No job object stops it starting a process, as run_python's
     has: a venv's python.exe on Windows starts the real Python as a second process.) real: the lab's own gate, whose
-    Stop (a person's, or the agent's stop_run) stops the rehearsal too. wire: a list that gets each (instrument,
-    command) the simulated instruments are sent, in order (vicheck compares it with a plan's)."""
+    Stop (a person's, or the agent's stop_run) stops the rehearsal too; then it is never a clean one (ended "stopped
+    by a person", not ok), so nothing that waits on it (auto mode, the queue's approval) goes on to the real run.
+    since: the lab gate's stops when the run was asked for (else as this begins): a Stop since then counts. wire: a
+    list that gets each (instrument, command) the simulated instruments are sent, in order (vicheck compares it with a
+    plan's)."""
     if not prep.found.experiment:
         raise ScriptError("%s doesn't use kelvin.lab, so Kelvin can't rehearse it: it may reach what the simulated lab "
                           "can't stand in for" % prep.name)
@@ -2034,6 +2187,10 @@ def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: An
         raise ScriptError("%s can't be rehearsed: %s" % (prep.name, why))
     from .eventlog import EventLog
     from .gate import SimulationApprover
+    stops = None if real is None else real.stop_generation if since is None else since
+
+    def person_stopped() -> bool:
+        return stops is not None and real.stop_generation != stops
     twin = twin if twin is not None else lab.make_twin()
     if wire is not None:
         for name, inst in twin.instruments.items():
@@ -2046,18 +2203,21 @@ def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: An
     if problems:
         return Rehearsal(False, "failed", "rehearsal on the simulated lab: %s before it started" % ENDED["failed"],
                          0.0, problems)
-    job = ScriptRun(gate, prep, RunStore(None), grants, set(), rehearsal=True)
+    if person_stopped():   # a Stop while the lab was copied: nothing runs, not even on the simulated lab
+        return Rehearsal(False, "stopped by a person", "rehearsal on the simulated lab: %s before it started"
+                         % ENDED["stopped by a person"], 0.0)
+    # its own stops from here on: Kelvin's when its time runs out, a person's on the lab
+    job = ScriptRun(gate, prep, RunStore(None), grants, set(), rehearsal=True, since=gate.stop_generation)
     t0 = twin.clock.now()
     timer = threading.Timer(seconds, gate.request_abort, args=("the rehearsal's time ran out",))
     timer.daemon = True
     timer.start()
     watching = threading.Event()
     if real is not None:   # a person's Stop on the lab stops its rehearsal too
-        stops = real.stop_generation
 
         def watch() -> None:
             while not watching.wait(0.1):
-                if real.stop_generation != stops:
+                if person_stopped():
                     gate.request_abort("a person pressed Stop")
                     return
         threading.Thread(target=watch, name="kelvin-rehearsal-stop", daemon=True).start()
@@ -2081,11 +2241,13 @@ def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: An
     elif job.failed:
         ended, problems = "failed", [job.failed]
     elif job.killed:
-        ended, problems = "not on Stop", ["it did not end within %s of Stop" % _dur(GRACE_S)]
+        ended, problems = "not on Stop", [job.kill_why or "it did not end on Stop"]
     elif job.stopping == "stop requested":
         ended = "on Stop"
     else:
         ended, problems = "failed", [job.bye.get("error") or report.message]
+    if person_stopped():   # whatever else it did: what it would have done next is not known, and the person wanted it
+        ended = "stopped by a person"   # stopped, so it never counts as a clean rehearsal (auto mode, the queue)
     for refused in job.bye.get("refused") or []:   # what its process refused, also when the experiment carried on
         line = "its process refused: %s" % refused
         if line not in problems:
