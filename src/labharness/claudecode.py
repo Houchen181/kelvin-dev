@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -58,30 +59,83 @@ def _flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0
 
 
+def _started() -> Dict[str, Any]:
+    """How the program is started: without a window on Windows; elsewhere in a process group of its own, so what it
+    starts ends with it (kill_tree)."""
+    if sys.platform.startswith("win"):
+        return {"creationflags": _flags()}
+    return {"start_new_session": True}
+
+
+def kill_tree(proc: Any) -> None:
+    """The program ended, and every process it started. An npm install's `claude` is a launcher (claude.CMD) running
+    node: Stop and the time limit killed the launcher alone, and node finished its answer, or went on working the
+    screen. Windows: taskkill /T over the tree, while the launcher (which waits for node) still runs; elsewhere the
+    process group it was started in."""
+    if sys.platform.startswith("win"):
+        if proc.poll() is None:
+            try:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+                               creationflags=_flags())
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (OSError, AttributeError):
+            pass
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def status(cmd: List[str], timeout: float = 20) -> Dict[str, Any]:
-    """Is Claude Code signed in? (`claude auth status`; says how, never with what)."""
+    """Is Claude Code signed in? (`claude auth status`; says how, never with what). Waits for the program, within
+    `timeout`, and never for its output's pipe: on Windows a child of the launcher kept that open, and waiting for it
+    held the Settings page's look for as long as the child lived (subprocess.run's timeout waits for it again)."""
     try:
-        p = subprocess.run(cmd + ["auth", "status"], capture_output=True, encoding="utf-8", errors="replace",
-                           timeout=timeout, env=child_env(), creationflags=_flags())   # UTF-8 whatever the locale
-    except (OSError, subprocess.TimeoutExpired) as e:
+        proc = subprocess.Popen(cmd + ["auth", "status"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=child_env(), **_started())
+    except OSError as e:
         return {"signed_in": False, "error": str(e)}
+    chunks: List[bytes] = []
+
+    def read() -> None:   # what it says, as it says it: a child left holding the pipe doesn't keep it back
+        try:
+            for chunk in iter(lambda: proc.stdout.read1(65536), b""):
+                chunks.append(chunk)
+        except (OSError, ValueError):
+            pass
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
     try:
-        data = json.loads(p.stdout or "{}")
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_tree(proc)
+        return {"signed_in": False, "error": "`claude auth status` didn't answer within %d s" % round(timeout)}
+    reader.join(2.0)   # the rest of its output; then whatever it said is what counts
+    try:
+        data = json.loads(b"".join(chunks).decode("utf-8", "replace") or "{}")   # UTF-8 whatever the locale
     except ValueError:
         data = {}
     method = data.get("authMethod") if isinstance(data, dict) else None
-    return {"signed_in": p.returncode == 0 and method not in (None, "none"), "method": method}
+    return {"signed_in": code == 0 and method not in (None, "none"), "method": method}
 
 
 async def stream(cmd: List[str], args: List[str], stdin_text: str, cwd: Path,
                  should_stop: Callable[[], bool] = lambda: False, timeout: float = 600) -> AsyncIterator[Dict[str, Any]]:
-    """Run `claude <args>` and yield its stream-json events. Stops (and kills it) on should_stop(), the timeout, or
-    when the consumer is cancelled. Uses threads, not asyncio subprocesses, so it works on any event loop."""
+    """Run `claude <args>` and yield its stream-json events. Stops (and ends it, with everything it started:
+    kill_tree) on should_stop(), the timeout, or when the consumer is cancelled. Uses threads, not asyncio
+    subprocesses, so it works on any event loop."""
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
     proc = subprocess.Popen(cmd + args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            cwd=str(cwd), env=child_env(), creationflags=_flags())
+                            cwd=str(cwd), env=child_env(), **_started())
     err: List[bytes] = []
+    finished = False
 
     def feed() -> None:
         try:
@@ -91,9 +145,12 @@ async def stream(cmd: List[str], args: List[str], stdin_text: str, cwd: Path,
             pass
 
     def read() -> None:
-        for line in proc.stdout:
-            loop.call_soon_threadsafe(queue.put_nowait, line)
-        loop.call_soon_threadsafe(queue.put_nowait, None)
+        try:
+            for line in proc.stdout:
+                loop.call_soon_threadsafe(queue.put_nowait, line)
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+        except RuntimeError:   # the loop closed meanwhile (the consumer stopped and went): nobody is left to tell
+            pass
 
     for target in (feed, read, lambda: err.append(proc.stderr.read())):
         threading.Thread(target=target, daemon=True).start()
@@ -117,12 +174,13 @@ async def stream(cmd: List[str], args: List[str], stdin_text: str, cwd: Path,
             if isinstance(event, dict):
                 yield event
         code = await asyncio.to_thread(proc.wait)
+        finished = True
         if code not in (0, None):
             text = b"".join(err).decode("utf-8", "replace").strip()
             yield {"type": "exit", "code": code, "stderr": text[-500:]}
     finally:
-        if proc.poll() is None:
-            proc.kill()
+        if not finished or proc.poll() is None:   # stopped, out of time or cancelled: nothing it started goes on
+            kill_tree(proc)
 
 
 class StopRequested(Exception):
