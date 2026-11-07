@@ -82,16 +82,35 @@ def _free_port() -> int:
 
 
 def _running_copy(lock: Path, wait: float = 1.0) -> Optional[int]:
-    """The port of a Kelvin that is already running, if any; not one that is quitting (it says so in app.json)."""
+    """The port of a Kelvin that is already running, if any; not one that is quitting (it says so in app.json).
+
+    app.json may be left by a Kelvin that crashed, or cut short. Nothing in it but a running Kelvin's own portal counts,
+    and nothing in it ever stops this Kelvin from starting. A stale app.json naming a port that another program now
+    answered in its own protocol (http.client's BadStatusLine is no OSError), or holding null, ended every start at
+    once, with no window, until someone deleted the file (review of 0.3.45)."""
     try:
         state = json.loads(lock.read_text(encoding="utf-8"))
-        if state.get("closing"):
+        if not isinstance(state, dict) or state.get("closing"):
             return None
         port = int(state["port"])
+        if not 0 < port < 65536:
+            return None
+        pid = state.get("pid")
+        if isinstance(pid, int) and not _alive(pid):
+            return None   # the Kelvin that wrote it has gone: whatever answers on its port now is another program
         with urllib.request.urlopen("http://127.0.0.1:%d/" % port, timeout=wait) as r:
-            return port if b"<title>Kelvin</title>" in r.read() else None
-    except (OSError, ValueError, KeyError):
+            return port if b"<title>Kelvin</title>" in r.read(65536) else None   # the title is in the page's head
+    except Exception:
         return None
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process with this id runs now (True when this computer can't say: the portal's answer decides)."""
+    try:
+        import psutil
+        return bool(psutil.pid_exists(pid))
+    except Exception:
+        return True
 
 
 def _run_file_ok() -> bool:
@@ -549,7 +568,7 @@ def _run(args: argparse.Namespace, home: Path) -> int:
         try:
             if json.loads(lock.read_text(encoding="utf-8")).get("pid") == os.getpid():
                 lock.unlink()
-        except (OSError, ValueError):
+        except Exception:   # gone, or not this Kelvin's (another program's file, cut short): left as it is
             pass
 
 
