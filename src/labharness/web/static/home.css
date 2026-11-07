@@ -103,6 +103,10 @@ html.fit-compact .home-spark { height: 36px; }
 .home-blocks { flex: 1 1 0%; min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   align-content: start; gap: var(--sp-4, 16px); margin: -4px; padding: 4px; }   /* 4 px of room for a card's ring and shadow */
 .home-blocks[hidden] { display: none; }
+/* over the blocks while a load of them fails: they may be out of date (home.js blocksNote) */
+.home-note { flex: none; margin: 0; padding: 8px 12px; border: 1px solid var(--warn-line); border-radius: 10px;
+  background: var(--warn-bg); color: var(--warn); font-size: 14px; }
+.home-note[hidden] { display: none; }
 .kcard.home-block { display: flex; flex-direction: column; gap: var(--sp-2, 8px); min-width: 0; padding: var(--pad-card, 18px 20px);
   border-radius: 14px; border-left-width: 3px; box-shadow: var(--home-shadow); transition: box-shadow .4s ease; }
 .kcard.home-block.fresh { box-shadow: 0 0 0 2px var(--accent), var(--home-shadow); transition: none; }   /* it just arrived */
