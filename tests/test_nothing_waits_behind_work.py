@@ -514,6 +514,39 @@ def test_a_stop_in_one_chat_ends_that_chats_reading_and_nothing_else(tmp_path):
         tb.join(5)
 
 
+def test_the_stop_button_in_a_chat_ends_its_reading_also_after_its_turn(tmp_path):
+    """The portal's Stop in a chat (ChatAgent.stop) reaches that chat's reading, which no cancel of its call reaches
+    (a reading is no call a cancel ends), also one that outlived its turn; the other chat's reading goes on."""
+    pytest.importorskip("mcp")
+    from labharness.agent.server import build_server
+    from labharness.web.agent import ChatAgent
+    from labharness.web.store import ChatStore
+    lab = build_virtual_lab(clock=RealClock(), seed=1)
+    a, b = add_slow_vna(lab, "vna2"), add_slow_vna(lab, "vna3")
+    rt = runtime(tmp_path, lab=lab)
+    agent = ChatAgent(rt, ChatStore(tmp_path / "chats"), build_server(rt), {})
+    got = {}
+
+    def read(chat, name):
+        with rt.viewing(Viewer(chat=chat)):
+            got[chat] = rt.get(name, "s21")
+    ta = threading.Thread(target=read, args=("A", "vna2"), daemon=True)
+    tb = threading.Thread(target=read, args=("B", "vna3"), daemon=True)
+    ta.start()
+    tb.start()
+    wait_until(lambda: a.sweeping and b.sweeping, "the sweeps never started")
+    gen = rt.gate.stop_generation
+    try:
+        assert "A" not in agent.turns and agent.stop("A") is True               # no turn: its reading alone
+        ta.join(3)
+        assert not ta.is_alive() and "stopped" in got["A"], got.get("A")
+        assert tb.is_alive() and b.sweeping and rt.gate.stop_generation == gen  # chat B's goes on; nothing else
+        assert agent.stop("nobody") is False
+    finally:
+        rt.gate.request_abort()
+        tb.join(5)
+
+
 def test_a_reading_behind_an_acquisition_says_so_rather_than_blame_the_instrument(tmp_path, monkeypatch):
     monkeypatch.setattr(rtmod, "READ_WAIT_S", 1.0)
     lab = build_virtual_lab(clock=RealClock(), seed=1)

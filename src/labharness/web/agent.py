@@ -1325,10 +1325,14 @@ class ChatAgent:
         is making ends as a client's cancelled call does (_call; LabRuntime.cancel_call): the ramp, run or wait that
         call has the lab for stops, and one still waiting for the lab is never run. Work it only waits behind is
         someone else's (another client's scan, the queue) and goes on: a Stop in a chat that waited for the lab once
-        aborted whoever had it. Every chat (None): every open card is declined and the lab's work stops."""
+        aborted whoever had it. The chat's own readings under way end too (an acquisition, a sweep it waits for:
+        LabRuntime.stop_readings), also one that outlived its turn; the other chats' go on. Every chat (None): every
+        open card is declined and the lab's work stops, every reading with it."""
+        stop_readings = getattr(self.runtime, "stop_readings", None) if chat_id else None
+        ended = stop_readings(chat_id) if stop_readings is not None else 0   # readings are no call a cancel reaches
         turns = [self.turns[chat_id]] if chat_id in self.turns else [] if chat_id else list(self.turns.values())
         if not turns:
-            return False
+            return bool(ended)
         for turn in turns:
             turn.stop = True
             if turn.stream_task is not None:
