@@ -8842,10 +8842,16 @@ class LabRuntime:
                         and not self.gate.ask(request):
                     note = " (%s)" % request.note if request.note else ""
                     return "declined: the person did not want %s added%s" % (new, note)
-            try:   # on the person's lab: connect just this one; from no lab yet: their lab, with it
-                lab = self.lab if on_file else build_lab(new_text, None, 0, registry, self.switched_off_for)
+            try:   # on the person's lab: connect just this one; from no lab yet: their lab, with it, where one of the
+                # others that can't connect (a port another program holds) is set aside with why, never the whole lab
+                lab = self.lab if on_file else build_lab(new_text, None, 0, registry, self.switched_off_for,
+                                                         partial=True)
                 if on_file:
                     lab.add(ic, the_card)
+                elif new in lab.unavailable:   # the one asked for didn't connect: nothing is added
+                    why = lab.unavailable[new]
+                    lab.close()
+                    return "not added: Kelvin could not connect %s: %s" % (address, why)
             except (AdapterError, OSError, ValueError, RuntimeError) as e:
                 why = str(e).splitlines()[0] if str(e) else type(e).__name__
                 return "not added: Kelvin could not connect %s: %s" % (address if on_file else "your lab with it", why)
