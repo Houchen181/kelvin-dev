@@ -588,7 +588,8 @@ def test_reconnecting_an_instrument_uses_its_card_as_it_is_now(tmp_path, plate):
     assert "card student/hotplate as it is now" in said and "connected again" in said, said
     assert lab.read("hotplate", "T") == pytest.approx(22.4)
     assert lab.instruments["hotplate"].card.connection == {"set_reply": "^OK$"}
-    assert rt.reconnect_instrument("hotplate") == "hotplate is connected, with its card as it is now"   # no change
+    again = rt.reconnect_instrument("hotplate")                                 # no change: asked all the same
+    assert again.startswith("hotplate is connected, with its card as it is now") and "answers" in again, again
     broken = fixed.replace("  setpoint:", "  target:")                         # the lab config limits setpoint
     (tmp_path / "cards" / "student_hotplate.yaml").write_text(broken, encoding="utf-8")
     said = rt.reconnect_instrument("hotplate")

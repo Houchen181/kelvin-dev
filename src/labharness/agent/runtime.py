@@ -8546,7 +8546,11 @@ class LabRuntime:
     def reconnect_instrument(self, name: str, by: str = "agent") -> str:
         """Connect an instrument of the lab that could not be connected, once what stopped it is fixed (a package
         installed, the instrument switched on or plugged in), with its card as it is on disk now: a card fixed since
-        it connected is used from now on (lab.Lab.reconnect). Connecting changes nothing on it."""
+        it connected is used from now on (lab.Lab.reconnect). Connecting changes nothing on it. One that counts as
+        connected is asked all the same, never answered "connected" unchecked: a connection that ended by itself (a
+        camera's helper), a session that died (a power cycle, a replug) or one out of step is made anew, and it is
+        asked who it is (review of 0.3.45, 4.3: it said "connected" of a dead session, and of a camera whose helper
+        had ended)."""
         from ..homelab import card_now
         inst = self.lab.instruments.get(name)
         if inst is None:
@@ -8559,23 +8563,37 @@ class LabRuntime:
             news = self.lab.reconnect(name, card)
             return "%s is disconnected from Kelvin in the Lab panel: ask_to_switch_on asks the person%s" % (
                 name, " (it will use %s)" % news if news else "")
-        if inst.enabled and card is None:
-            return "%s is connected, with its card as it is now" % name
 
         def run() -> str:   # one change to the lab, as any other: behind a run it says so rather than wait it out
+            was = inst.enabled and inst.unavailable is None   # it counted as connected already
             try:
                 news = self.lab.reconnect(name, card)
             except Exception as e:
-                self.gate.log.write("reconnect_failed", by=by, instrument=name, error=inst.unavailable)
-                return "%s is still not connected: %s" % (name, inst.unavailable or e)
-            self.gate.log.write("instrument_connected", by=by, instrument=name, card=inst.card.id,
-                                reloaded=bool(news))
+                why = inst.unavailable or (inst.lost_words(getattr(inst.backend, "broken", ""))
+                                           if inst.health.fails else str(e).splitlines()[0][:300])
+                self.gate.log.write("reconnect_failed", by=by, instrument=name, error=why)
+                return "%s is still not connected: %s" % (name, why)
+            if news or not was:   # connected anew (one that was, with nothing changed, is only asked)
+                self.gate.log.write("instrument_connected", by=by, instrument=name, card=inst.card.id,
+                                    reloaded=bool(news))
             self._caps_if_waiting()
-            self._refresh(CLOSING_WAIT_S, only=[name])
             health = self.lab.health_check([name])[0]
-            return "%s is connected now%s%s" % (name, ", with " + news if news else "",
-                                                ": " + "; ".join(health.problems) if health.problems else
-                                                " and answers as its card expects")
+            if getattr(inst.backend, "broken", "") and getattr(inst.backend, "reopen", None) is not None:
+                try:   # its session had died with nothing asking it since: found by the check, made anew now
+                    more = self.lab.reconnect(name)
+                    news = news + ("; " if news and more else "") + more
+                    if more:
+                        self.gate.log.write("instrument_connected", by=by, instrument=name, card=inst.card.id,
+                                            reloaded=False)
+                    health = self.lab.health_check([name])[0]
+                except Exception:
+                    pass   # not back: said below
+            self._refresh(CLOSING_WAIT_S, only=[name])
+            if inst.health.fails:   # it doesn't answer: not connected, whatever its connection says
+                return "%s doesn't answer: %s" % (name, inst.health.lost_text or "; ".join(health.problems))
+            head = ("%s is connected, with its card as it is now" % name if was and not news else
+                    "%s is connected now%s" % (name, ", with " + news if news else ""))
+            return head + (": " + "; ".join(health.problems) if health.problems else " and answers as its card expects")
         return self._do("connecting %s" % name, run, uses=[name])
 
     def _fetch_files(self, env: str, source: str) -> str:

@@ -18,13 +18,14 @@ PyVISA uses the installed VISA (NI-VISA, Keysight IO Libraries) when there is on
 """
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
 import sys
 import threading
 import warnings
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from .cards import Card, parity_name, serial_settings
 
@@ -38,6 +39,7 @@ _rm_lock = threading.Lock()
 warnings.filterwarnings("ignore", message="read string doesn't end with termination characters")
 WAIT_SLICE_MS = 1000   # a long wait on an instrument is read a second at a time, so a stop ends it within one
 SYNC_MS = 2000         # after a timeout: how long its identity, asked to check it is back in step, may take
+REOPEN_MS = 5000       # how long making a session that died anew may wait for the instrument (pyvisa's open_timeout)
 AFTER_MS = 1000        # and its error queue, asked right after a query it didn't answer
 
 
@@ -72,23 +74,83 @@ GONE = {-1073807265: "VI_ERROR_NLISTENERS",    # GPIB: nothing listens at the ad
         -1073807346: "VI_ERROR_INV_OBJECT"}    # the session went away
 _SLOW = re.compile(r"timed? ?out|time-out|did not answer|didn't answer|no response", re.I)
 _GONE = re.compile(r"not connected|isn't connected|connection (was )?(lost|refused|reset|closed|aborted)|unreachable"
-                   r"|no listeners|device (was )?(removed|not found|disconnected)|broken pipe", re.I)
+                   r"|no listeners|device (was )?(removed|not found|disconnected)|broken pipe|no such device"
+                   r"|actively refused|forcibly closed|closed the connection|input/output error", re.I)
+# a VISA session these end is dead for good (a power cycle, a replug: the instrument comes back as a new device), and
+# a new one is opened; never NLISTENERS, after which a GPIB session still works once the instrument is on again
+DEAD = {-1073807194: "VI_ERROR_CONN_LOST", -1073807346: "VI_ERROR_INV_OBJECT",
+        -1073807343: "VI_ERROR_RSRC_NFOUND", -1073807298: "VI_ERROR_IO"}
+# what the OS says of a device that went away under a connection: no such device, an I/O error, a pipe broken
+LOST_ERRNO = {errno.ENODEV, errno.EIO, errno.EPIPE}
+# pyserial's and pyusb's errors (an adapter or a USB device pulled), and pyvisa's for a session that went away; their
+# timeouts (SerialTimeoutException, USBTimeoutError) are an instrument slow to answer, not gone
+LOST_TYPES = ("SerialException", "USBError", "InvalidSession")
+_DEAD = re.compile(r"no such device|device (was )?(removed|disconnected|not configured)|invalid session"
+                   r"|connection (was )?(lost|reset|aborted)|forcibly closed|broken pipe|input/output error", re.I)
+
+
+def _errors(e: BaseException) -> Iterator[BaseException]:
+    """An error and the ones it came from (raise ... from, or raised while handling), each once: a driver's words
+    over the bus's error, a lost USB device under pyvisa-py's ValueError."""
+    seen = set()
+    while e is not None and id(e) not in seen and len(seen) < 8:
+        seen.add(id(e))
+        yield e
+        e = e.__cause__ if e.__cause__ is not None else None if e.__suppress_context__ else e.__context__
+
+
+def _lost_type(e: BaseException) -> Optional[str]:
+    """What an error's own kind says: "gone", "silent" (a timeout of pyserial's or pyusb's), or None."""
+    names = [k.__name__ for k in type(e).__mro__]
+    if any("Timeout" in n for n in names[:-3]):
+        return "silent"
+    if getattr(e, "error_code", None) in GONE or isinstance(e, ConnectionError) or \
+            getattr(e, "errno", None) in LOST_ERRNO or any(n in LOST_TYPES for n in names):
+        return "gone"
+    return None
 
 
 def lost_kind(e: BaseException) -> Optional[str]:
     """Whether an error says the instrument isn't answering: "gone" when it can't be reached at all (nothing listens
-    on GPIB, a pulled USB cable, a dropped connection), "silent" when it didn't answer in time; None for any other
-    error (a command it refused, a card's mistake), which is not a lost instrument."""
-    if getattr(e, "error_code", None) in GONE or isinstance(e, (ConnectionError, BrokenPipeError)):
-        return "gone"
-    if timed_out(e):
+    on GPIB, a pulled USB cable or USB-serial adapter, a dropped connection, a server that refuses it), "silent" when
+    it didn't answer in time; None for any other error (a command it refused, a card's mistake), which is not a lost
+    instrument. The errors it came from count too: a maker's driver and pyvisa-py say a lost device in their own
+    words over the system's (review of 0.3.45, 4.4: eleven such went by as no loss at all)."""
+    chain = list(_errors(e))
+    for err in chain:
+        kind = _lost_type(err)
+        if kind == "gone":
+            return kind
+    if timed_out(e) or any(_lost_type(err) == "silent" for err in chain):
         return "silent"
-    text = str(e)
-    if _GONE.search(text):
-        return "gone"
-    if _SLOW.search(text):
-        return "silent"
+    for err in chain:
+        text = str(err)
+        if _GONE.search(text):
+            return "gone"
+        if _SLOW.search(text):
+            return "silent"
     return None
+
+
+def session_dead(e: BaseException) -> str:
+    """Whether an exchange's error says its VISA session is dead (the instrument was power-cycled or replugged, its
+    LAN connection dropped, its USB-serial adapter pulled): what said so, in a few words; "" for any other error,
+    a timeout, or GPIB's NLISTENERS (its session still works once the instrument is back)."""
+    for err in _errors(e):
+        code = getattr(err, "error_code", None)
+        if code in DEAD:
+            return DEAD[code]
+        if code is not None or _lost_type(err) == "silent":
+            continue
+        if _lost_type(err) == "gone" or _DEAD.search(str(err)):
+            return (str(err).strip().splitlines() or [type(err).__name__])[0][:120] or type(err).__name__
+    return ""
+
+
+def names_device(resource: str) -> bool:
+    """Whether a VISA address names the device itself, not only a place another could be: USB-TMC with its serial
+    number (USB0::0x05E6::0x2400::04412345::INSTR). A LAN address or a serial port is wherever a device is put."""
+    return bool(re.match(r"^USB\d*::(0x)?[0-9a-f]+::(0x)?[0-9a-f]+::[^:]+::", resource, re.I))
 
 
 # a maker's software an instrument is reached through, by its address's scheme: (where, what to check)
@@ -421,15 +483,46 @@ class VisaBackend:
         # is until it answers as itself, before the next command (_settle): a field test's *IDN? got the reading of a
         # query from before a bus hang, and every answer after it would have been one behind
         self.owed = False
+        # its session died (a power cycle, a replug): what said so. Nothing is sent on it until it is made anew and the
+        # instrument has answered as itself (reopen; the monitor's reconnector, or a person's reconnect)
+        self.broken = ""
+        self.sessions = 1   # sessions opened for it: one more each time it is made anew
         self._sync = (card.idn_query, card.idn_pattern) if card.idn_pattern else None
         self.bus = bus_of(address)
         self._open()
 
     def _open(self) -> None:
+        """Its session opened and set up, then its start-up commands sent (on_connect). One that fails half way lets go
+        of what it opened: a Prologix adapter's connection stayed held when a start-up command failed (review of
+        0.3.45, 4.6)."""
+        self._connect()
+        try:
+            self._start()
+        except BaseException:
+            self._close_res()
+            raise
+
+    def _start(self) -> None:
+        for command in self._on_connect:   # configuration only; parse_card refuses drive commands here
+            self.write(command)
+
+    def _close_res(self) -> None:
+        try:
+            self.res.close()
+        except Exception:
+            pass   # closing: nothing more to do with it
+
+    def _connect(self, open_timeout: Optional[int] = None) -> None:
+        """Its session opened and set up (timeout, line ends, serial framing; the lines it greets a connection with,
+        read and dropped). Nothing is sent to the instrument. open_timeout (ms): how long a real resource manager may
+        wait for it (pyvisa-py's connection to a LAN instrument)."""
         rm = self._rm
         try:
             rm = rm or resource_manager()
-            self.res = rm.open_resource(self.resource)
+            if open_timeout and hasattr(rm, "visalib"):
+                self.res = rm.open_resource(self.resource, open_timeout=open_timeout)
+            else:
+                self.res = rm.open_resource(self.resource)
         except AdapterError:
             raise
         except Exception as e:
@@ -458,19 +551,20 @@ class VisaBackend:
             from .others import holders_text   # who may hold it: another Kelvin still closing, MATLAB, NI MAX...
             raise AdapterError("%s: cannot open %s (%s). Check the cable, the address and that no other program "
                                "holds the instrument%s." % (self.name, self.resource, e, holders_text())) from e
-        self.res.timeout = int(self._conn.get("timeout_ms", 3000))
-        self.res.read_termination = self._conn.get("read_termination", "\n")
-        self.res.write_termination = self._conn.get("write_termination", "\n")
-        if is_serial(self.resource):
-            try:
-                apply_serial_settings(self.res, self._conn)
-            except AdapterError as e:
-                self.close()
-                raise AdapterError("%s: %s" % (self.name, e)) from None
-        if self._conn.get("greeting_lines"):
-            self._drop_greeting(int(self._conn["greeting_lines"]))
-        for command in self._on_connect:   # configuration only; parse_card refuses drive commands here
-            self.write(command)
+        try:
+            self.res.timeout = int(self._conn.get("timeout_ms", 3000))
+            self.res.read_termination = self._conn.get("read_termination", "\n")
+            self.res.write_termination = self._conn.get("write_termination", "\n")
+            if is_serial(self.resource):
+                try:
+                    apply_serial_settings(self.res, self._conn)
+                except AdapterError as e:
+                    raise AdapterError("%s: %s" % (self.name, e)) from None
+            if self._conn.get("greeting_lines"):
+                self._drop_greeting(int(self._conn["greeting_lines"]))
+        except BaseException:
+            self._close_res()
+            raise
 
     def _drop_greeting(self, lines: int) -> None:
         """The lines an instrument sends by itself as a connection opens (the AMI 430 greets each LAN connection with
@@ -562,8 +656,7 @@ class VisaBackend:
                     if not self.set_reply.search(reply):
                         raise AdapterError("%s refused %r: %s" % (self.name, command, reply))
             except Exception as e:
-                if timed_out(e):
-                    self._timed_out()
+                self._failed(e)
                 raise
 
     def query(self, command: str) -> str:
@@ -579,9 +672,71 @@ class VisaBackend:
                 from .cards import BINARY_REPLY
                 raise AdapterError("%s (%s): %s" % (self.name, command, BINARY_REPLY)) from e
             except Exception as e:
-                if timed_out(e):
-                    self._timed_out()
+                self._failed(e)
                 raise
+
+    def _failed(self, e: BaseException) -> None:
+        """An exchange failed. One that ran out of time may still owe its reply (_timed_out). One whose session died
+        (session_dead: a power cycle, a replug, a dropped LAN connection) marks it broken: it gave
+        VI_ERROR_CONN_LOST to every exchange after, and nothing but switching it off and on brought it back (review
+        of 0.3.45, 4.1). It is made anew between exchanges, checked first (reopen)."""
+        if timed_out(e):
+            self._timed_out()
+            return
+        dead = session_dead(e)
+        if dead:
+            self.broken = dead
+
+    def reopens_by_itself(self) -> bool:
+        """Whether Kelvin may make its session anew without a person (the monitor's reconnector): when it can check that
+        the instrument is the same one, by the identity its card asks, or its address names the device itself (USB
+        with its serial number). Otherwise a person reconnects it (Lab panel, or reconnect_instrument)."""
+        return (self._sync is not None and not self.write_only) or names_device(self.resource)
+
+    def reopen(self, check: Optional[Callable[[str], Optional[str]]] = None, person: bool = False) -> str:
+        """Its session made anew: when it died (broken) or is out of step (owed), between exchanges (under its lock:
+        none goes meanwhile), never in the middle of one's sequence. The old one is closed, a new one opened, which
+        sends the instrument nothing; what it may still owe is dropped (a device clear, or a serial line read until
+        quiet); then it is asked who it is, and used only if it answers as itself, by its card's identity and
+        check(identity) (the lab's identity_problem). Only then do its start-up commands go again (on_connect).
+        person: a person asked for it, so a card with no identity reconnects wherever it is (reopens_by_itself).
+        Returns the identity it answered ("" for a card without one). Raises while it can't, and stays broken: not
+        there yet, or "answers as X now" when another instrument answers there."""
+        with self.lock:
+            if not person and not self.reopens_by_itself():
+                raise AdapterError("%s: its card has no identity to check it by, and %s could be another instrument: "
+                                   "once it is back, switch it off and on in the Lab panel, or reconnect it"
+                                   % (self.name, self.resource))
+            why = self.broken or ("out of step" if self.owed else "connected again")
+            self.broken = why   # meanwhile nothing goes on it (an exchange is refused at once, not kept waiting)
+            self._close_res()
+            self._connect(open_timeout=REOPEN_MS)
+            idn = ""
+            try:
+                if marks_message_end(self.resource):
+                    clear = getattr(self.res, "clear", None)
+                    if clear is not None:
+                        clear()   # a device clear: what it may still owe is dropped; nothing is sent to it
+                elif is_serial(self.resource):
+                    self._quiet()
+                if self._sync is not None and not self.write_only:
+                    idn = self._ask_identity()[-1].strip()
+                    problem = (None if re.search(self._sync[1], idn, re.I) else
+                               "it answers as %r, not as its card's model" % idn[:60])
+                    if problem is None and check is not None:
+                        problem = check(idn)
+                    if problem:
+                        self.broken = "answers as %r now" % idn[:60]
+                        raise AdapterError("%s answers again, but not as itself: %s. Kelvin sends it nothing until the "
+                                           "instrument there is the one in the lab config" % (self.name, problem))
+                self.broken, self.owed = "", False
+                self._start()
+            except BaseException:
+                self.broken = self.broken or why
+                self._close_res()
+                raise
+            self.sessions += 1
+            return idn
 
     def _timed_out(self) -> None:
         """An exchange ran out of time, so the instrument may still send its reply. A device clear drops it now, where
@@ -598,14 +753,20 @@ class VisaBackend:
         """Before a command that follows one that timed out: what the instrument may still owe is dropped (a device
         clear; a serial line read until it is quiet; a plain socket connected again), then it is asked who it is
         until it answers as itself, twice at most, so one stale reply is read off. Raises while it isn't back in step,
-        and the command isn't sent."""
+        and the command isn't sent. Nothing goes on a session that died (broken) until it is made anew (reopen)."""
+        if self.broken:
+            raise LinkLost("%s: its connection ended (%s); Kelvin connects to it again once it is back"
+                           % (self.name, self.broken))
         if not self.owed:
             return
         self.owed = False   # owed again below while it isn't back in step; meanwhile its own commands go (_open's)
         try:
             self._back_in_step()
-        except BaseException:
+        except BaseException as e:
             self.owed = True
+            dead = session_dead(e) if isinstance(e, Exception) else ""
+            if dead:
+                self.broken = dead
             raise
 
     def _back_in_step(self) -> None:
@@ -616,39 +777,43 @@ class VisaBackend:
         elif is_serial(self.resource):
             self._quiet()
         else:   # a plain socket, connected again; its start-up commands go as on any connection (never a loop back)
-            try:
-                self.res.close()
-            except Exception:
-                pass
+            self._close_res()
             self._open()
         if self._sync is not None and not self.write_only:
             query, pattern = self._sync
-            res, before = self.res, self.res.timeout
-            replies: List[str] = []
-            try:
-                res.timeout = min(int(before or SYNC_MS), SYNC_MS)
-                if self.enq or self.echo or self.ack or self.query_delay:
-                    replies.append(str(self._query(query)))
-                else:   # asked once, its replies read until its own: one stale reply in front of it is read off
-                    replies.append(str(res.query(query)))
-                    while not re.search(pattern, replies[-1], re.I) and len(replies) < 3:
-                        try:
-                            replies.append(str(res.read()))
-                        except Exception as e:
-                            if timed_out(e):
-                                break   # it answered, and nothing more comes: not as itself (said below)
-                            raise
-            except Exception as e:
-                if timed_out(e):
-                    self._timed_out()
-                raise
-            finally:
-                if self.res is res:
-                    res.timeout = before
+            replies = self._ask_identity()
             if not re.search(pattern, replies[-1], re.I):
                 raise AdapterError("%s is out of step: after a reply it didn't send in time, it answered %s to %s, "
                                    "not who it is. Kelvin cleared it; check it, then reconnect it"
                                    % (self.name, ", ".join(repr(r.strip()[:40]) for r in replies), query))
+
+    def _ask_identity(self) -> List[str]:
+        """Who it is, asked once within SYNC_MS, its replies read until its own: one stale reply in front of it is read
+        off. The replies, its answer last."""
+        query, pattern = self._sync
+        res, before = self.res, self.res.timeout
+        replies: List[str] = []
+        try:
+            res.timeout = min(int(before or SYNC_MS), SYNC_MS)
+            if self.enq or self.echo or self.ack or self.query_delay:
+                replies.append(str(self._query(query)))
+            else:   # asked once, its replies read until its own: one stale reply in front of it is read off
+                replies.append(str(res.query(query)))
+                while not re.search(pattern, replies[-1], re.I) and len(replies) < 3:
+                    try:
+                        replies.append(str(res.read()))
+                    except Exception as e:
+                        if timed_out(e):
+                            break   # it answered, and nothing more comes: not as itself (said by the caller)
+                        raise
+        except Exception as e:
+            if timed_out(e):
+                self._timed_out()
+            raise
+        finally:
+            if self.res is res:
+                res.timeout = before
+        return replies
 
     def _quiet(self) -> None:
         """A serial line read until nothing more comes (0.3 s), at most 2 s: a late reply's bytes, dropped."""
@@ -678,6 +843,8 @@ class VisaBackend:
             except Exception as e:
                 if timed_out(e):
                     self.owed = True   # cleared before the next command
+                elif not self.broken and session_dead(e):
+                    self.broken = session_dead(e)
                 return None
             finally:
                 if self.res is res:
@@ -710,14 +877,19 @@ class VisaBackend:
             self._settle()
             res = self.res
             before, end = res.timeout, time.monotonic() + seconds
-            res.write(command)
             try:
+                try:   # its write too: one that times out or finds the session dead is handled as any exchange's
+                    res.write(command)
+                except Exception as e:
+                    self._failed(e)
+                    raise
                 res.timeout = WAIT_SLICE_MS
                 while True:
                     try:
                         return str(res.read())
                     except Exception as e:
                         if not timed_out(e):
+                            self._failed(e)
                             raise
                     if stopped():
                         self._abandon()
@@ -732,24 +904,40 @@ class VisaBackend:
     def _abandon(self) -> None:
         """After a stop cut a wait short, the answer the instrument still owes must never be taken for a later
         command's: a bus that marks message ends gets a device clear (which also ends the wait on the instrument);
-        a plain socket is connected again, which drops it; a serial line can only be emptied."""
+        a plain socket is connected again, which drops it; a serial line can only be emptied of what came so far,
+        and the instrument answers when its sweep ends: either way it is put back in step before the next command,
+        its late reply read off (owed, _settle). A serial *OPC? cut by a Stop answered "1" to the next query
+        (review of 0.3.45, 4.6)."""
         if marks_message_end(self.resource) or is_serial(self.resource):
             self.drain()
+            self.owed = True
             return
-        try:
-            self.res.close()
-        except Exception:
-            pass
+        self._close_res()
         try:
             self._open()
-        except Exception:
-            pass   # the next command says the instrument can't be reached
+        except Exception as e:
+            self.owed = True   # the next command connects it again, or says the instrument can't be reached
+            dead = session_dead(e)
+            if dead:
+                self.broken = dead
 
     def drain(self) -> None:
         """Drop the rest of a reply Kelvin could not read (a binary block cut at a line-end byte), so the next reply
-        is the next command's: a device clear, or on a plain socket, reading until nothing more comes."""
+        is the next command's: a device clear, or on a serial line, reading until nothing more comes. A plain socket
+        is connected again instead, which drops it: pyvisa-py's clear() of a socket whose instrument had closed it read
+        for ever (review of 0.3.45, 4.6)."""
         import time
         with self.lock:
+            if not marks_message_end(self.resource) and not is_serial(self.resource):
+                self._close_res()
+                try:
+                    self._open()
+                except Exception as e:
+                    self.owed = True   # the next command connects it again first
+                    dead = session_dead(e)
+                    if dead:
+                        self.broken = dead
+                return
             try:
                 self.res.clear()
                 return
@@ -802,8 +990,7 @@ class VisaBackend:
                 raise AdapterError("%s: %r did not answer with a block of %s numbers (%s)" % (self.name, command,
                                                                                             number, e)) from e
             except Exception as e:
-                if timed_out(e):
-                    self._timed_out()
+                self._failed(e)
                 raise
         return [float(v) for v in values]
 

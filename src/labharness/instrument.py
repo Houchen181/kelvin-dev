@@ -123,6 +123,8 @@ class Health:
     garbles: int = 0                     # replies that arrived garbled since Kelvin connected it
     garbled_text: str = ""               # the latest, in plain words
     garbled_at: Optional[float] = None
+    reopened_at: Optional[float] = None  # when Kelvin last made its connection anew, its session having died
+    reopened_as: str = ""                # the identity it answered then, as itself
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
@@ -295,7 +297,12 @@ class Instrument:
         (InstrumentLost: which instrument, on which bus, what to check), wherever it happens; any other error (a
         command it refused, a card's mistake) passes as it is. alive=False: an answer that doesn't show it is there
         (a maker's driver says its identity by itself). Under patience (the monitor's), Busy, with nothing sent, while
-        other work has the connection."""
+        other work has the connection. A connection whose session died (backend.broken) is refused at once, with
+        nothing sent and nothing waited for, until it is made anew (reopen): its health keeps the failure that found
+        it, so the reconnector's schedule (Health.resting) runs from there."""
+        broken = getattr(self.backend, "broken", "")
+        if broken:
+            raise InstrumentLost(self.lost_words(broken))
         with self._turn():
             started = time.time()
             try:
@@ -319,6 +326,43 @@ class Instrument:
                 if args and isinstance(args[0], str):
                     self.health.last_ok = args[0].strip()
             return out
+
+    def lost_words(self, broken: str = "") -> str:
+        """An instrument whose connection ended (its session died), in words: what found it, and what happens next."""
+        said = self.health.lost_text or "%s's connection ended (%s)" % (self.name, broken or "lost")
+        by_itself = getattr(self.backend, "reopens_by_itself", None)
+        if by_itself is not None and not by_itself():
+            return said + ("; once it is back, switch it off and on in the Lab panel, or reconnect it: its card has "
+                           "no identity Kelvin could check it by before sending it anything")
+        return said + "; Kelvin connects to it again by itself once it is back, checking it is the same instrument"
+
+    def reopen(self, person: bool = False) -> str:
+        """Its connection made anew, its session having died (a power cycle, a replug) or being out of step: the backend
+        opens a new session (which sends nothing), asks who it is and goes on only if the lab says it is itself
+        (lab.identity_problem: its card's model, its serial number), then sends its start-up commands. What Kelvin
+        set on it is forgotten (_last), and what its checks found (_checked) and the latest values: it may have
+        restarted with its outputs at their power-on values. person: a person asked (reconnect), so a card with no
+        identity reconnects wherever it is. Returns the identity it answered. Raises InstrumentLost while it isn't
+        back, or answers as another instrument; its health says so (the monitor's alarm stays up)."""
+        backend = self.backend
+        reopen = getattr(backend, "reopen", None)
+        if reopen is None:
+            raise InstrumentLost("%s: its connection can't be made anew here" % self.name)
+        from .lab import identity_problem
+        started = time.time()
+        try:
+            idn = reopen(lambda said: identity_problem(self, said), person=person)
+        except Exception as e:
+            kind = lost_kind(e)
+            text = self.loss_text(e, "(connecting again)") if kind is not None else str(e).splitlines()[0][:300]
+            self.health.failed(True, text, "(connecting again)", started)
+            raise InstrumentLost(self.lost_words(getattr(backend, "broken", ""))) from e
+        self._last.clear()
+        self._seen.clear()
+        self._forget()
+        self.health.answered()
+        self.health.reopened_at, self.health.reopened_as = time.time(), idn
+        return idn
 
     def _said_instead(self, fn: Callable[..., Any], args: Tuple[Any, ...]) -> Optional[str]:
         """After a query it didn't answer in time: what its error queue says, asked at once (once it is back in step,
