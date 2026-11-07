@@ -606,3 +606,30 @@ def test_with_no_visa_installed_gpib_says_what_to_install(monkeypatch):
     monkeypatch.setattr(survey, "ni4882", lambda: "")
     s = survey.survey(rm, network=False, usb_list=lambda: [dict(d) for d in adapter], ports=lambda: [])
     assert "install NI-488.2 with NI-VISA" in s.problems[0]
+
+
+# ------------------------------------------------------------------ what the field test's kelvin.log still showed
+
+def test_the_scan_knows_both_spectrapros_by_their_model_answers():
+    """ASRL11 answered MODEL with "SP-2-150i  ok", which the SpectraPro card missed: Kelvin tried to write a card for it
+    and the SP-2150i was never set up (the SP-308 on ASRL4 was)."""
+    from labharness.discovery import match_card
+    registry = builtin_registry()
+    for reply in ("SP-2-150i  ok", "SP-308  ok", "MODEL SP-2558  ok", "SP-2-300i ok", "SP-2750i ok"):
+        card = match_card(reply, registry)
+        assert card is not None and card.id == "princeton/spectrapro", reply
+
+
+def test_a_usb_instrument_the_installed_visa_doesnt_list_is_never_told_to_install_it(monkeypatch):
+    """A Thorlabs USB instrument on its maker's driver, which NI-VISA doesn't list, was told to install NI-VISA."""
+    from labharness import survey
+    monkeypatch.setattr(sys, "platform", "win32")
+    meter = {"vid": 0x1313, "pid": 0x8078, "maker": "Thorlabs", "usbtmc": True, "visible": False}
+    monkeypatch.setattr(survey, "_windows_driver", lambda vid, pid: ("TLPM", 0))
+    said = survey._usb_advice(meter, builtin=False)
+    assert "this computer's VISA doesn't list it" in said and "the driver TLPM" in said
+    assert "Power Meter Driver Switcher" in said and "install" not in said.lower()
+    monkeypatch.setattr(survey, "_windows_driver", lambda vid, pid: ("", 28))
+    said = survey._usb_advice(meter, builtin=False)
+    assert "Windows has no driver for it" in said and "install" not in said.lower()
+    assert "install the maker's IO software" in survey._usb_advice(meter, builtin=True)   # no VISA here: that brings one

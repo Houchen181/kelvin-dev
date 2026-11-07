@@ -215,6 +215,21 @@ def usb_devices() -> List[Dict[str, Any]]:
     return out
 
 
+def _windows_driver(vid: int, pid: int) -> Tuple[str, int]:
+    """The driver Windows runs a USB device with (its services, by name) and its problem code (28: none installed), from
+    Windows' device list; ("", 0) where that isn't known."""
+    if not sys.platform.startswith("win"):
+        return "", 0
+    try:
+        from .probe import usb_devices as plugged
+        for d in plugged():
+            if d.get("vid") == vid and d.get("pid") == pid:
+                return ", ".join((d.get("drivers") or [])[:2]), int(d.get("problem") or 0)
+    except Exception:
+        pass
+    return "", 0
+
+
 def _serial_ids() -> set:
     """(VID, PID) of each USB-serial port: such a device is reached as a COM port, not through VISA's USB."""
     try:
@@ -291,6 +306,17 @@ def _usb_advice(u: Dict[str, Any], builtin: bool = False) -> str:
                            "with its 64-bit support. A DAQ device is NI-DAQmx's")
         return what + "install NI-488.2; a DAQ device is NI-DAQmx's"
     if sys.platform.startswith("win"):
+        if not builtin:   # this computer's VISA is the one in use, and doesn't list it: never "install NI-VISA"
+            driver, problem = _windows_driver(u["vid"], u["pid"])
+            switch = ("for a Thorlabs power meter, Thorlabs' Power Meter Driver Switcher; else Device Manager"
+                      if u["vid"] == 0x1313 else "its maker's software, or Device Manager")
+            if driver and problem != 28:
+                return ("%s is plugged in, but this computer's VISA doesn't list it. Windows runs it with the driver %s: "
+                        "VISA lists a USB instrument only with a VISA USB driver, so switch it to one (%s), then scan "
+                        "again" % (who, driver, switch))
+            return ("%s is plugged in, but Windows has no driver for it, so this computer's VISA can't list it: its "
+                    "maker's IO software (Keysight IO Libraries Suite) or NI-VISA's USB support brings one, then scan "
+                    "again" % who)
         return ("%s is plugged in, but Windows has no driver that lets Kelvin open it: install the maker's IO software "
                 "(Keysight IO Libraries Suite or NI-VISA), which brings the USB driver, then scan again" % who)
     if sys.platform.startswith("linux"):
