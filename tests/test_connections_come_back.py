@@ -365,3 +365,159 @@ def test_reconnect_reaches_a_camera_whose_helper_kelvin_ended(monkeypatch, runti
     said = runtime_of(lab).reconnect_instrument("cam")
     assert made == ["cam"] and not isinstance(lab.instruments["cam"].backend, EndedCamera), said
     assert said.startswith("cam is connected now"), said
+
+
+# ---------------------------------------------------------------------- 4.4: a lost device in its own words
+
+
+class SerialException(OSError):   # pyserial's, known by its name
+    pass
+
+
+class SerialTimeoutException(SerialException):
+    pass
+
+
+class USBError(OSError):   # pyusb's
+    pass
+
+
+def raised(error, cause):
+    try:
+        try:
+            raise cause
+        except Exception as e:
+            raise error from e
+    except Exception as e:
+        return e
+
+
+@pytest.mark.parametrize("error, kind", [
+    (ValueError("No such device (it may have been disconnected)"), "gone"),        # pyvisa-py's USB write, unplugged
+    (USBError(errno.EIO, "Input/output error"), "gone"),                           # pyvisa-py's USB read, unplugged
+    (SerialException("ClearCommError failed (PermissionError(13, 'Access is denied.', None, 5))"), "gone"),
+    (SerialTimeoutException("Write timeout"), "silent"),                           # slow, not gone
+    (urllib.error.URLError(ConnectionRefusedError(10061, "No connection could be made because the target machine "
+                                                         "actively refused it")), "gone"),   # its web server off
+    (raised(AdapterError("cam: the camera stopped"), OSError(errno.ENODEV, "No such device")), "gone"),
+    (OSError(errno.EPIPE, "Broken pipe"), "gone"),
+    (raised(AdapterError("comp: nothing came back"), TimeoutError("timed out")), "silent"),
+    (LinkLost("dl: the controller closed its connection"), "gone"),
+    (NoAnswer("comp didn't answer READ 30008"), "silent"),
+    (RuntimeError("toptica: the controller closed the connection"), "gone"),
+    (VisaIOError(NLISTENERS, "No listeners"), "gone"),
+    (ValueError("could not convert string to float: 'abc'"), None),               # a card's mistake: no loss
+])
+def test_a_lost_device_is_recognised_in_its_own_words(error, kind):
+    assert lost_kind(error) == kind
+
+
+def test_which_errors_say_a_session_died():
+    assert session_dead(VisaIOError(CONN_LOST)) == "VI_ERROR_CONN_LOST"
+    assert session_dead(VisaIOError(RSRC_NFOUND)) == "VI_ERROR_RSRC_NFOUND"
+    assert session_dead(VisaIOError(NLISTENERS)) == ""                            # GPIB's session outlives it
+    assert session_dead(TimeoutError("VI_ERROR_TMO")) == "" and session_dead(SerialTimeoutException("x")) == ""
+    assert session_dead(ConnectionResetError(10054, "An existing connection was forcibly closed"))
+    assert session_dead(raised(AdapterError("smu: write failed"), ValueError("No such device")))
+    assert session_dead(ValueError("bad reply")) == ""
+
+
+# ---------------------------------------------------------------------- 4.6: smaller transport fixes
+
+
+class SerialLine:
+    """An RS-232 instrument whose sweep answers *OPC? when it ends, whatever was asked since."""
+
+    def __init__(self):
+        self.timeout, self.read_termination, self.write_termination = 3000, "\n", "\n"
+        self.out, self.pending_opc, self.sent, self.baud_rate = [], False, [], 9600
+
+    def write(self, cmd):
+        if self.pending_opc:                # the sweep ended meanwhile: its "1" comes now, before this reply
+            self.out.append("1")
+            self.pending_opc = False
+        self.sent.append(cmd)
+        if cmd == "*OPC?":
+            self.pending_opc = True
+        elif cmd.endswith("?"):
+            self.out.append({"*IDN?": IDN, ":SOUR:VOLT?": "2.500000E+00"}.get(cmd, "0"))
+
+    def read(self):
+        if not self.out:
+            raise TimeoutError("VI_ERROR_TMO")
+        return self.out.pop(0)
+
+    def read_raw(self):
+        return (self.read() + "\n").encode()
+
+    def query(self, cmd, delay=None):
+        self.write(cmd)
+        return self.read()
+
+    def clear(self):                        # a serial port's clear: its buffers emptied, nothing sent
+        self.out = []
+
+    def close(self):
+        pass
+
+
+class One:
+    def __init__(self, *made):
+        self.made, self.opened = list(made), 0
+
+    def open_resource(self, name):
+        self.opened += 1
+        return self.made.pop(0) if len(self.made) > 1 else self.made[0]
+
+
+def test_a_serial_opc_cut_by_a_stop_never_answers_the_next_query():
+    res = SerialLine()
+    smu = VisaBackend("smu", builtin_registry().get("keithley/2400"), "serial://COM3", rm=One(res))
+    asked = []
+    with pytest.raises(Stopped):
+        smu.query_waiting("*OPC?", 600, lambda: asked.append(1) or len(asked) > 1)
+    assert smu.owed                                                           # it still owes its "1"
+    assert smu.query(":SOUR:VOLT?") == "2.500000E+00" and smu.query("*IDN?") == IDN and smu.query(":OUTP?") == "0"
+
+
+def test_a_socket_whose_instrument_closed_it_is_connected_again_not_read_for_ever():
+    called = []
+
+    class Closed(Res):
+        def clear(self):                                                       # pyvisa-py's: reads for ever
+            called.append("clear")
+            raise AssertionError("clear() of a socket whose peer closed never returns")
+
+    device = Device()
+    first, second = Closed(device), Res(device)
+    rm = One(first, second)
+    smu = VisaBackend("smu", builtin_registry().get("keithley/2400"), "TCPIP0::10.0.0.5::5025::SOCKET", rm=rm)
+    smu.drain()
+    assert called == [] and rm.opened == 2 and first.closed and smu.res is second
+
+
+def test_query_waitings_write_is_handled_as_any_exchanges():
+    for error, check in ((TimeoutError("VI_ERROR_TMO"), lambda b: b.owed and not b.broken),
+                         (VisaIOError(CONN_LOST), lambda b: b.broken == "VI_ERROR_CONN_LOST")):
+        res = Res(Device())
+        smu = VisaBackend("smu", builtin_registry().get("keithley/2400"), USB, rm=One(res))
+        res.write = lambda cmd, error=error: (_ for _ in ()).throw(error)
+        with pytest.raises(Exception):
+            smu.query_waiting("*OPC?", 5, lambda: False)
+        assert check(smu), error
+
+
+def test_a_start_up_that_fails_lets_go_of_what_it_opened():
+    """A Prologix adapter's connection stayed held when a start-up command failed: the Resource was never closed."""
+    card = parse_card({"card": 1, "id": "test/remote", "model": "Remote source", "vendor": "test", "kind": "source",
+                       "on_connect": ["SYST:REM"],
+                       "parameters": {"V": {"label": "V", "kind": "measure", "unit": "V", "get": "VOLT?"}}})
+
+    class Refusing(Res):
+        def write(self, cmd):
+            raise AdapterError("remote mode refused")
+
+    res = Refusing(Device())
+    with pytest.raises(AdapterError):
+        VisaBackend("src", card, "prologix://10.0.0.50/12", rm=One(res))
+    assert res.closed
