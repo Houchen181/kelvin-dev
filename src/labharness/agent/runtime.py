@@ -70,6 +70,7 @@ LAB_STATUS_S = 10.0  # lab_status (the agent's look) reads again what was read l
 RETRY_MS = 1000     # a retry of an instrument that stopped answering waits this long at most: the bus is everyone's
 PANEL_WAIT_S = 0.2   # the same, for the Lab panel's look every few seconds: it shows the latest values meanwhile
 AFTER_STOP_S = 900.0   # how long the card after a Stop waits, in the background, for the stopped work to end
+SWITCH_CLOSE_S = 15.0   # how long the old lab's connections may take to close as the lab changes (each on its own thread)
 MAX_CONFIG_CHARS = 30000   # of the lab config shown at once; an instrument's own entry is always shown whole
 SETUP_STEPS = ("connecting", "scanning", "drafting", "reading")   # the instrument setup at work (autosetup.py)
 # a rehearsal is never a run (field tests: run_plan with dry_run: true went on to run for real)
@@ -5621,7 +5622,17 @@ class LabRuntime:
     def switch_instrument(self, name: str, on: bool, by: str) -> None:
         """A person switches an instrument on or off for this lab (Lab panel). Off: Kelvin sends it nothing at all
         (lab.py Lab.switch). Not while a plan or the queue runs. Raises KeyError, RuntimeError, or AdapterError when
-        switching on cannot connect."""
+        switching on cannot connect. Off for one that isn't connected (still connecting, or set aside with why) waits
+        for nothing, not even the lab: nothing of it is in use (an open that hung in a maker's driver held the lab,
+        and this switch behind it, for good)."""
+        lab = self.lab
+        inst = lab.instruments.get(name)
+        if not on and inst is not None and not inst.enabled:
+            was = inst.unavailable
+            if lab.set_off(name):
+                if was is not None:   # (one off already: nothing to do, nor to log)
+                    self.gate.log.write("instrument_switched", by=by, instrument=name, on=False, was=was)
+                return
         with self.lock:
             if name not in self.lab.instruments:
                 raise KeyError("no instrument %r in %s" % (name, self.lab.config.name))
@@ -8170,7 +8181,9 @@ class LabRuntime:
     def connect_pending(self, progress: Optional[Callable[[str, int, int], None]] = None) -> Dict[str, Any]:
         """Connect the instruments of a lab Kelvin opened before connecting them (open_home_lab connect=False), one
         at a time, holding the lab for each only: a request for one already connected doesn't wait for the rest. One
-        that can't be connected is set aside with why, as at any start. progress(name, i, n) before each."""
+        that can't be connected is set aside with why, as at any start; so is one whose driver doesn't finish opening
+        in time (lab.open_deadline), and the rest are connected all the same. A person may switch one off while it
+        connects (switch_instrument waits for nothing then). progress(name, i, n) before each."""
         lab = self.lab
         names = lab.connecting
         done: List[str] = []
@@ -8182,6 +8195,10 @@ class LabRuntime:
             if progress is not None:
                 progress(name, i, len(names))
             with self.lock:
+                if self.lab is not lab:   # checked again with the lab: a switch of labs may have just taken it
+                    break
+                if name not in lab.connecting:
+                    continue
                 self.busy = "connecting %s" % name
                 try:
                     lab.reconnect(name)
@@ -10113,9 +10130,14 @@ class LabRuntime:
                 raise RuntimeError("a plan is running; wait for it to finish or stop it first")
             old = self.lab
             kept = self._carry_over(old, lab, renamed) if old is not lab else []
-            if old is not lab:
-                old.close()   # the old lab's own connections, before the new lab opens its own
-            for name in lab.connecting:   # one that can't be connected is set aside, with why
+            # the old lab's own connections closed before the new lab opens its own, each on a thread of its own and
+            # all within SWITCH_CLOSE_S, as when Kelvin quits: a camera library whose closing never returned held the
+            # lab, and the switch, for good. One still closing is said in the record; the new lab's connection to the
+            # same instrument, if it can't be made meanwhile, is set aside with why
+            still = old.close(within=SWITCH_CLOSE_S) if old is not lab else []
+            if still:
+                logging.getLogger("kelvin").warning("still closing as the lab changed: %s", ", ".join(still))
+            for name in lab.connecting:   # one that can't be connected (or open in time) is set aside, with why
                 try:
                     lab.reconnect(name)
                 except Exception:
@@ -10143,7 +10165,8 @@ class LabRuntime:
                 self._readings = {}   # the old lab's: an instrument of the same name may be another one
             self._refresh()
             self.gate.log.write("lab_changed", by=by, lab=lab.config.name, instruments=sorted(lab.instruments),
-                                kind=info.get("kind"), kept=kept or None, set_aside=info.get("set_aside") or None)
+                                kind=info.get("kind"), kept=kept or None, set_aside=info.get("set_aside") or None,
+                                still_closing=still or None)
             results = [str(r) for r in self.engine.preflight()]
         return results
 

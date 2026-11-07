@@ -33,6 +33,11 @@ from .cards import Card
 log = logging.getLogger("kelvin")
 STEP_S = 0.2
 MOVE_TIMEOUT_S = 120.0                # a grating turn, or a long move of the spectrograph
+# a capture is waited for each frame's exposure and FRAME_S more (a PyLoN reads a 2048 x 2048 chip in 42 s at its
+# slowest), and CAPTURE_S on top: LightField's Capture has no time limit of its own, and one that never returned
+# held the camera, and the lab, for good
+FRAME_S = 60.0
+CAPTURE_S = 120.0
 GRATING = re.compile(r"^\[([^,\]]*),\s*(\d+)\]")   # LightField's "[550nm,900][1][0]": blaze, grooves per mm
 STATUS = {"locked": "locked", "unlocked": "unlocked", "faulted": "faulted"}
 
@@ -294,7 +299,14 @@ class LightFieldCamera(Camera):
         import numpy as np   # in the app
         count = self._frames()
         try:
-            data = self.experiment.Capture(count)
+            exposure = max(0.0, float(self.get_setting("exposure")))
+        except Exception:
+            exposure = 0.0
+        try:   # past its time the connection ends (DriverBackend.bounded): connecting again starts LightField afresh
+            data = self.bounded(CAPTURE_S + count * (exposure + FRAME_S), "LightField's capture",
+                                self.experiment.Capture, count)
+        except AdapterError:
+            raise
         except Exception as e:
             raise AdapterError("%s: LightField's capture failed (%s)" % (self.name, _first(e)))
         if data is None:

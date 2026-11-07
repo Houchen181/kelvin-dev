@@ -163,10 +163,15 @@ def discover_pylon(module: Any = None) -> List[Tuple[str, str]]:
 # ------------------------------------------------------------------ Andor (Andor's own SDK wrappers)
 
 DRV_SUCCESS = 20002
+DRV_NO_NEW_DATA = 20024   # WaitForAcquisitionTimeOut: no frame came within its time
 DRV_NOT_INITIALIZED = 20075
 TEMP_STATUS = {20034: "cooler off", 20035: "not stabilized", 20036: "stabilized", 20037: "not reached",
                20040: "drifted"}
 READ_FVB, READ_IMAGE, SINGLE_SCAN = 0, 4, 1
+# an SDK2 acquisition is waited for its exposure and readout (as Andor's SDK gives them) and this much more: a camera
+# that waits for a trigger that never comes, or doesn't deliver, can't hold the lab for good (WaitForAcquisition, with
+# no time limit, did); without the readout time this much more again (a slow-scan CCD reads a full frame in 80 s)
+ACQUIRE_MARGIN_S = 60.0
 
 
 class AndorCamera(Camera):
@@ -353,8 +358,9 @@ class AndorCamera(Camera):
         self._ok(s.SetReadMode(read_mode), "SetReadMode")
         if read_mode == READ_IMAGE:
             self._ok(s.SetImage(1, 1, 1, self.width, 1, self.height), "SetImage")
+        limit = self._acquisition_s()
         self._ok(s.StartAcquisition(), "StartAcquisition")
-        self._ok(s.WaitForAcquisition(), "WaitForAcquisition")
+        self._wait(limit)
         size = self.width * (self.height if read_mode == READ_IMAGE else 1)
         ret, data = s.GetAcquiredData(size)
         self._ok(ret, "GetAcquiredData")
@@ -364,6 +370,49 @@ class AndorCamera(Camera):
         if hasattr(data, "reshape"):
             return data.reshape(self.height, self.width)
         return [data[r * self.width:(r + 1) * self.width] for r in range(self.height)]
+
+    def _acquisition_s(self) -> float:
+        """How long the SDK2 acquisition just set up may take: its exposure (the longest of Andor's acquisition
+        timings) and readout, as the SDK gives them, and ACQUIRE_MARGIN_S more (twice that when it can't say its
+        readout time)."""
+        s = self.sdk
+        longest, readout = 0.0, None
+        try:
+            got = s.GetAcquisitionTimings()
+            if isinstance(got, tuple) and got[0] == DRV_SUCCESS:
+                longest = max(float(v) for v in got[1:4])
+        except Exception:
+            pass
+        try:
+            got = s.GetReadOutTime()
+            if isinstance(got, tuple) and got[0] == DRV_SUCCESS:
+                readout = float(got[1])
+        except Exception:
+            pass
+        return longest + (ACQUIRE_MARGIN_S if readout is None else readout) + ACQUIRE_MARGIN_S
+
+    def _wait(self, limit: float) -> None:
+        """Wait for the SDK2 acquisition just started, `limit` seconds at most: WaitForAcquisitionTimeOut, and
+        AbortAcquisition when no frame came in that time (the camera answers; it may be waiting for a trigger). An SDK
+        without it is waited for on a thread of its own (bounded): past the limit its connection ends."""
+        s = self.sdk
+        wait = getattr(s, "WaitForAcquisitionTimeOut", None)
+        if wait is None:
+            self._ok(self.bounded(limit, "Andor's WaitForAcquisition", s.WaitForAcquisition), "WaitForAcquisition")
+            return
+        ret = wait(int(limit * 1000))
+        code = ret[0] if isinstance(ret, tuple) else ret
+        if code == DRV_SUCCESS:
+            return
+        try:
+            s.AbortAcquisition()
+        except Exception:
+            pass   # aborting what didn't come: the camera is left idle either way
+        if code == DRV_NO_NEW_DATA:
+            raise AdapterError("%s: no frame came within %d s, so Kelvin aborted the acquisition: is the camera set to "
+                               "wait for an external trigger, or to a longer exposure than Kelvin knows?"
+                               % (self.name, round(limit)))
+        self._ok(code, "WaitForAcquisitionTimeOut")
 
     def snap(self) -> Any:
         if self.sdk_version == "3":
