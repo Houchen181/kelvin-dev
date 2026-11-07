@@ -144,8 +144,8 @@ lab: Real bench
 instruments:
   smu: { card: keithley/2400, address: "GPIB0::24::INSTR", limits: { V: [-5, 5] }, rates: { V: 5 } }
   lockin: { card: srs/sr830, address: "GPIB0::8::INSTR" }
-  sim_tc: { card: virtual/temperature-controller }
-""")
+  sim_tc: { card: virtual/temperature-controller, address: "sim://sim_tc" }
+""")   # beside real instruments a simulated one says so (sim://): an address left out there is a mistake (6.1)
     assert not lab.instrument("smu").simulated and lab.instrument("sim_tc").simulated
     assert type(lab.clock).__name__ == "RealClock"      # real hardware runs on real time
     k = bus.devices["GPIB0::24::INSTR"]
