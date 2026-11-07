@@ -3403,8 +3403,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             attached = agent.check_attachments(chat_id, body.get("attachments"))
         except KeyError:
             return error(400, "An attached file is no longer there: attach it again.")
-        try:
-            provider = agent.claim(chat_id, model)
+        try:   # the chat read off the server's loop (a file Windows holds up), then claimed on it
+            provider = agent.claim(chat_id, model, await asyncio.to_thread(store.load, chat_id))
         except Busy as e:
             return error(409, str(e))
         except (KeyError, ValueError) as e:
@@ -3564,8 +3564,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             attached = agent.check_attachments(chat_id, body.get("attachments"))
         except KeyError:
             return error(400, "An attached file is no longer there: attach it again.")
-        try:
-            lanes = agent.claim_compare(chat_id, models)
+        try:   # the chat read off the server's loop, as for one model
+            lanes = agent.claim_compare(chat_id, models, await asyncio.to_thread(store.load, chat_id))
         except Busy as e:
             return error(409, str(e))
         except (KeyError, ValueError) as e:
@@ -3575,7 +3575,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     async def choose(request: Request) -> Response:
         body = await request.json()
         try:
-            return JSONResponse(agent.choose(request.path_params["chat_id"], int(body.get("index", -1))))
+            return JSONResponse(await agent.choose_off_loop(request.path_params["chat_id"], int(body.get("index", -1))))
         except Busy as e:
             return error(409, str(e))
         except KeyError as e:

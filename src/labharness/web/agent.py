@@ -639,6 +639,7 @@ class ChatAgent:
         self.providers = providers
         self.tools: List[Dict[str, Any]] = []
         self.turns: Dict[str, _Turn] = {}   # the chats answering now, by chat id (each its own turn, side by side)
+        self._choosing: Set[str] = set()   # chats whose comparison's answer is being changed (choose_off_loop)
         self._lab: Optional[asyncio.Lock] = None   # one chat's lab call at a time, filed under that chat
         self.lab_holder: Optional[str] = None   # the chat whose call works the lab now
         self._exit = AsyncExitStack()
@@ -707,6 +708,8 @@ class ChatAgent:
     def _may_start(self, chat_id: str) -> None:
         if chat_id in self.turns:
             raise Busy("This conversation is still answering.")
+        if chat_id in self._choosing:   # another model's answer is being put in its place (choose_off_loop)
+            raise Busy("This conversation is changing to another model's answer; send it again in a moment.")
         if len(self.turns) >= MAX_TURNS:
             raise Busy("Kelvin is answering in %d conversations; wait for one of them to finish." % MAX_TURNS)
 
@@ -1333,11 +1336,14 @@ class ChatAgent:
         provider = self.providers.get(self.model_key(model_key).partition(":")[0])
         return describe_error(provider, e) if provider is not None else describe("The model", "", e)
 
-    def claim(self, chat_id: str, model_key: str) -> Provider:
+    def claim(self, chat_id: str, model_key: str, chat: Optional[Dict[str, Any]] = None) -> Provider:
+        """chat: the chat as read already, off the server's loop (the portal and the wakeups read it so: a read that
+        Windows holds up for up to 2 s once held Stop and every poll); else it is read here."""
         self._may_start(chat_id)
         model_key = self.model_key(model_key)   # the caller passes the same key to run_turn: model_key() it first
         provider, _ = self.provider_for(model_key)
-        self.check_model(self.store.load(chat_id), model_key, "Pick one of the allowed models.")   # KeyError: no chat
+        self.check_model(chat if chat is not None else self.store.load(chat_id), model_key,
+                         "Pick one of the allowed models.")   # KeyError: no chat
         self.turns[chat_id] = _Turn({"chat_id": chat_id, "model": model_key})
         return provider
 
@@ -2038,13 +2044,16 @@ class ChatAgent:
 
     # ------------------------------------------------------------------ several models at once
 
-    def claim_compare(self, chat_id: str, model_keys: List[str]) -> List[Tuple[str, Provider, str]]:
+    def claim_compare(self, chat_id: str, model_keys: List[str],
+                      chat: Optional[Dict[str, Any]] = None) -> List[Tuple[str, Provider, str]]:
+        """chat: as claim's."""
         self._may_start(chat_id)
         keys = list(dict.fromkeys(self.model_key(str(k)) for k in model_keys if k))
         if not 2 <= len(keys) <= MAX_LANES:
             raise ValueError("Pick two or three different models to compare.")
         lanes = [(k,) + self.provider_for(k) for k in keys]
-        chat = self.store.load(chat_id)  # raises KeyError for an unknown chat
+        if chat is None:
+            chat = self.store.load(chat_id)  # raises KeyError for an unknown chat
         for k in keys:
             self.check_model(chat, k)
         self.turns[chat_id] = _Turn({"chat_id": chat_id, "model": keys[0], "compare": keys})
@@ -2181,11 +2190,31 @@ class ChatAgent:
                         "blocks": [{"type": "text", "text": "(no answer: %s)" % reason}]})
             return {"model": key, "messages": out, "error": reason}
 
+    async def choose_off_loop(self, chat_id: str, index: int) -> Dict[str, Any]:
+        """choose, its chat read and written off the server's loop. The chat is held meanwhile, so no turn starts on it
+        between the read and the write (_may_start), as none could while choose ran on the loop."""
+        if chat_id in self.turns or chat_id in self._choosing:
+            raise Busy("Wait until the answers are finished.")
+        self._choosing.add(chat_id)
+        try:
+            chat = await self._load(chat_id)
+            out = self._chosen(chat, index)
+            await self._save(chat)
+            return out
+        finally:
+            self._choosing.discard(chat_id)
+
     def choose(self, chat_id: str, index: int) -> Dict[str, Any]:
         """Continue the chat with another model's answer from the last comparison."""
-        if chat_id in self.turns:
+        if chat_id in self.turns or chat_id in self._choosing:
             raise Busy("Wait until the answers are finished.")
         chat = self.store.load(chat_id)
+        out = self._chosen(chat, index)
+        self.store.save(chat)
+        return out
+
+    def _chosen(self, chat: Dict[str, Any], index: int) -> Dict[str, Any]:
+        """The chat changed to that answer of its last comparison (not saved). ValueError says why not."""
         at = max((i for i, m in enumerate(chat["messages"]) if m.get("role") == "user"), default=-1)
         comp = chat["messages"][at].get("compare") if at >= 0 else None
         if not comp or not comp.get("lanes"):
@@ -2198,7 +2227,6 @@ class ChatAgent:
         chat["messages"] = chat["messages"][:at + 1] + copy.deepcopy(lanes[index]["messages"])
         comp["chosen"] = index
         chat["model"] = comp["models"][index]
-        self.store.save(chat)
         return {"chosen": index, "model": chat["model"]}
 
     async def _tool(self, name: str, args: Any, viewer: Optional[Viewer]) -> Any:
