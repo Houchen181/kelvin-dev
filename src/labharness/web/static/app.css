@@ -610,6 +610,8 @@ body:not(.incognito) #empty-sub { display: none; }
 .send.stop { background: var(--text); color: var(--bg); }
 .send.stop .i-send { display: none; }
 .send.stop .i-stop { display: block; }
+/* pressed: Stopping… until the answer ends (the message box says so too) */
+.send.stop.stopping:disabled { background: var(--text); color: var(--bg); opacity: .5; cursor: progress; }
 
 /* ---------- lab panel ---------- */
 /* a pane's header, every pane alike (.pane-head below): --head-h tall, the title 15px 600, on --panel over a --line */

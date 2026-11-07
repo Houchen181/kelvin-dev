@@ -302,7 +302,7 @@ def test_a_chat_made_elsewhere_changes_the_states_stamp_and_the_sidebar_reloads(
     store.save(chat)
     assert client.get("/api/state", headers=h).json()["chats"] != after
     assert [c["title"] for c in store.list() if c["id"] == made["id"]] == ["Cool to 5 K while measuring"]
-    poll = _js("pollState")
+    poll = _js("readState")   # one poll of the state (pollState: one at a time)
     assert "s.chats !== S.chatsStamp" in poll and "refreshChats()" in poll.split("s.chats !== S.chatsStamp")[1][:80]
 
 

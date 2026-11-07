@@ -179,7 +179,7 @@ def test_nothing_a_person_must_answer_is_out_of_sight_in_full_screen():
     handle = _js("handle")
     case = handle[handle.index('case "approval":'):]
     assert "if (here && !ev.auto) exitFull();" in case[:case.index("break;")]
-    assert re.search(r'(fullShow|paneShow)\("labpanel"\);', _js("pollState"))
+    assert re.search(r'(fullShow|paneShow)\("labpanel"\);', _js("readState"))
     assert 'if (!TERM.open) toggleTerm(true);\n    fullShow("termpane");' in _js("termAsk")
     for name in ("openChat", "newChat", "toggleIncognito"):
         assert "exitFull();" in _js(name), name

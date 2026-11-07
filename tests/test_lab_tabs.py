@@ -117,13 +117,13 @@ def test_the_strip_is_a_tab_list_that_says_what_is_new():
     assert "const on = (alarms || []).filter((a) => a && !a.cleared).length" in render
     assert 'labTabMark("watches", on);' in render and '$("watch-summary").classList.toggle("bad", on > 0);' in render
     assert "const alarmsOn = (s) => ((s && s.alarms) || []).filter((a) => a && !a.cleared);" in _read("home.js")
-    assert "renderWatches(s.watches || [], s.status, s.alarms);" in _function(js, "pollState")
+    assert "renderWatches(s.watches || [], s.status, s.alarms);" in _function(js, "readState")
     # the head says only what there is: "1 alarm · 2 watched", "2 watched", never "0 alarm"
     assert '[on ? on + (on === 1 ? " alarm" : " alarms") : "",' in render and '.filter(Boolean).join(" · ")' in render
     # Activity's lines are seen only while its part is on the screen, not merely while the Lab is open
     seen = _function(js, "labTabSeen")
     assert 'paneVisible("labpanel") && (LAB_TABS.chosen === "activity" || LAB_TABS.wide)' in seen
-    poll = _function(js, "pollState")
+    poll = _function(js, "readState")
     assert "LAB_TABS.top = lines.length ? String(lines[0].text) : \"\";" in poll and "labTabSeen();" in poll
 
 
@@ -229,8 +229,8 @@ def test_a_poll_keeps_a_press_the_focus_and_what_was_switched():
                  "if (PANEL.later) { PANEL.later = false; renderInstruments(); }"):
         assert text in hold, text
     # a poll sent before a switch was answered does not turn the switch back: that instrument keeps what the page had
-    poll = _function(js, "pollState")
-    assert poll.index("const sent = Date.now();") < poll.index('api("/api/state")')
+    poll = _function(js, "readState")
+    assert poll.index("const sent = Date.now();") < poll.index('api("/api/state"')
     assert "freshInstruments(s.instruments, sent)" in poll
     assert "PANEL.switchedAt.set(name, Date.now());" in _function(js, "switchInstrument")
     fresh = _function(js, "freshInstruments")

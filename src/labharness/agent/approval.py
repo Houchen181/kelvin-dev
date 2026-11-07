@@ -19,7 +19,7 @@ import time
 from collections import OrderedDict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set
 
 from ..gate import ApprovalRequest, Approver
 
@@ -59,6 +59,9 @@ class WebApprover(Approver):
         self._pending: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._history: Deque[Dict[str, Any]] = deque(maxlen=20)
         self._seq = 0
+        # each process's own requests: ids r1, r2… began again with each start, so a card a page kept across a
+        # restart (a phone's, another window's) could answer another request that had its number
+        self._run = secrets.token_hex(3)
         self._listeners: List[Callable[[Dict[str, Any]], None]] = []
         # who declines a request before anyone sees it (asked from the requesting thread): the client that cancelled
         # the call asking it (LabRuntime.cancel_call). None: it is shown as usual
@@ -109,7 +112,7 @@ class WebApprover(Approver):
         with self._cv:
             self._seq += 1
             now = time.time()
-            entry = {"id": "r%d" % self._seq, "title": request.title, "items": list(request.items),
+            entry = {"id": "r%d-%s" % (self._seq, self._run), "title": request.title, "items": list(request.items),
                      "created": now, "expires": now + self.timeout, "answer": None, "by": None,
                      "thread": threading.get_ident(), "where": where, "lessons": lessons,
                      "figures": list(getattr(request, "figures", None) or []),   # a generator's timing, drawn
@@ -182,8 +185,8 @@ class WebApprover(Approver):
         with self._cv:
             self._seq += 1
             now = time.time()
-            entry = {"id": "a%d" % self._seq, "title": request.title, "items": list(request.items), "created": now,
-                     "decided": now, "answer": True, "by": "auto mode", "reasons": list(reasons),
+            entry = {"id": "a%d-%s" % (self._seq, self._run), "title": request.title, "items": list(request.items),
+                     "created": now, "decided": now, "answer": True, "by": "auto mode", "reasons": list(reasons),
                      "unshared": unshared}
             self._history.appendleft(entry)
         public = {"id": entry["id"], "title": entry["title"], "items": entry["items"], "auto": True,
@@ -221,6 +224,35 @@ class WebApprover(Approver):
     def decline_all(self, by: str = "stop button") -> int:
         return self.decline_from(None, by)
 
+    def decline_ids(self, ids: Iterable[str], by: str) -> int:
+        """Decline these open requests (a chat's own cards, at that chat's Stop: nobody is left to act on a yes). How
+        many were declined."""
+        wanted = set(ids)
+        with self._cv:
+            n = 0
+            for entry in self._pending.values():
+                if entry["answer"] is None and entry["id"] in wanted:
+                    entry["answer"], entry["by"] = False, by
+                    n += 1
+            self._cv.notify_all()
+            return n
+
+    def open_ids(self) -> Set[str]:
+        """The requests that still wait for an answer, by id."""
+        with self._cv:
+            return {e["id"] for e in self._pending.values() if e["answer"] is None}
+
+    def outcome(self, request_id: str) -> Optional[str]:
+        """How a request ended: "approved" or "declined" (a person, the Stop, no answer in time); None while it is
+        open, or when it is no longer remembered."""
+        with self._cv:
+            entry = self._pending.get(request_id)
+            if entry is None:
+                entry = next((e for e in self._history if e["id"] == request_id), None)
+            if entry is None or entry["answer"] is None:
+                return None
+            return "approved" if entry["answer"] else "declined"
+
     def decline_from(self, thread: Optional[int], by: str) -> int:
         """Decline the open requests asked from that thread (None: every open request). How many were declined."""
         with self._cv:
@@ -255,8 +287,10 @@ class WebApprover(Approver):
                     for e in self._pending.values() if e["answer"] is None]
 
     def history_list(self) -> List[Dict[str, Any]]:
+        """The latest answered requests, newest first: by id, so a page closes the card it still shows of one answered
+        elsewhere (a phone, another window) with its answer."""
         with self._cv:
-            return [dict({"title": e["title"], "items": e["items"],
+            return [dict({"id": e["id"], "title": e["title"], "items": e["items"],
                           "answer": "approved" if e["answer"] else "declined",
                           "by": who_text(e["who"]) if e.get("who") else e["by"], "where": e.get("where"),
                           "at": time.strftime("%H:%M:%S", time.localtime(e["decided"]))},

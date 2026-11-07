@@ -21,7 +21,7 @@ import sys
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from mcp import Client
 
@@ -208,9 +208,58 @@ class _Turn:
         self.stop = False
         self.stream_task: Optional[asyncio.Future] = None
         self.lanes: List[asyncio.Future] = []
+        self.cards: Set[str] = set()   # the approval requests its chat shows now, still open (_Cards)
 
 
 _TURN: "contextvars.ContextVar[Optional[_Turn]]" = contextvars.ContextVar("kelvin_turn", default=None)   # this task's
+
+
+def _stopped_turn() -> Optional[str]:
+    """The approver's veto (WebApprover.vetoes): a card asked from a chat's turn after a person stopped it is
+    declined before anyone sees it, as nobody is left to act on a yes. The threads a turn's calls run in take its turn
+    with their context (the in-process MCP server runs a chat's call in the chat's own task)."""
+    turn = _TURN.get()
+    return "stop button" if turn is not None and turn.stop else None
+
+
+class _Cards:
+    """The approval cards one call shows in its chat. Each closes there (approval_closed, with how it ended) as soon
+    as its request is no longer open, answered anywhere (a phone, another window), declined or timed out, while the
+    call goes on; and every one when the call ends, however it ends, a Stop included. A card answered on a phone kept
+    live buttons in the chat, and the page's title said "Approval needed", until the whole call ended: an hour's run.
+    The turn keeps the open ones, which a Stop of the chat declines (ChatAgent.stop)."""
+
+    def __init__(self, agent: "ChatAgent", call_id: str, emit: Emit):
+        self.agent, self.call_id, self.emit = agent, call_id, emit
+        self.turn = _TURN.get()
+        self.open: List[str] = []
+
+    async def show(self, request: Dict[str, Any]) -> None:
+        if not request.get("auto"):   # auto mode's yes: shown as done, nothing to close
+            self.open.append(request["id"])
+            if self.turn is not None:
+                self.turn.cards.add(request["id"])
+        await self.emit(dict(request, type="approval", call_id=self.call_id))
+
+    async def close_answered(self) -> None:
+        if not self.open:
+            return
+        still = self.agent._open_requests()
+        if still is not None:
+            for request_id in [r for r in self.open if r not in still]:
+                await self._close(request_id)
+
+    async def close_all(self) -> None:
+        for request_id in list(self.open):
+            await self._close(request_id)
+
+    async def _close(self, request_id: str) -> None:
+        self.open.remove(request_id)
+        if self.turn is not None:
+            self.turn.cards.discard(request_id)
+        outcome = getattr(self.agent.runtime.approver, "outcome", None)
+        answer = outcome(request_id) if outcome is not None else None
+        await self.emit(dict({"type": "approval_closed", "id": request_id}, **({"answer": answer} if answer else {})))
 
 
 def plan_name(args: Any) -> str:
@@ -582,6 +631,9 @@ class ChatAgent:
         self._analysts: Dict[str, Any] = {}   # the Analysis pane's subagent at work: a task by chat ("": none yet)
         # its complete analyses, by (run, model, chat): (the run as it was then, what the pane was told), latest last
         self._analyzed: Dict[Tuple[str, str, str], Tuple[Any, List[Dict[str, Any]]]] = {}
+        vetoes = getattr(runtime.approver, "vetoes", None)
+        if isinstance(vetoes, list) and _stopped_turn not in vetoes:   # a stopped chat asks nobody
+            vetoes.append(_stopped_turn)
 
     # ------------------------------------------------------------------ the chats answering now
     # Each chat's turn runs in its own task; _TURN holds that chat's turn there (and in the tasks it starts), so the
@@ -930,7 +982,7 @@ class ChatAgent:
         # the person wrote: what the chat read before no longer pauses auto mode (its next lab call sets the gate's
         # mark from the chat; the gate's mark now may be another chat's, working the lab meanwhile)
         chat.pop("outside", None)
-        self.store.save(chat)
+        await self._save(chat)
         await emit({"type": "steered", "texts": waiting})
 
     def context(self, chat: Dict[str, Any]) -> Dict[str, Any]:
@@ -1266,8 +1318,14 @@ class ChatAgent:
         return provider
 
     def stop(self, chat_id: Optional[str] = None) -> bool:
-        """Stop this chat's answer (None: every chat's). The lab's ramp or plan stops too when it is that chat's
-        call working the lab, and always when every chat is stopped."""
+        """Stop this chat's answer (None: every chat's).
+
+        A chat's own Stop: the approval cards it shows are declined at once, as nobody is left to act on a yes (a card
+        for keeping a skill or a file stayed open, and an open card holds the lab for everyone: busy_for). The call it
+        is making ends as a client's cancelled call does (_call; LabRuntime.cancel_call): the ramp, run or wait that
+        call has the lab for stops, and one still waiting for the lab is never run. Work it only waits behind is
+        someone else's (another client's scan, the queue) and goes on: a Stop in a chat that waited for the lab once
+        aborted whoever had it. Every chat (None): every open card is declined and the lab's work stops."""
         turns = [self.turns[chat_id]] if chat_id in self.turns else [] if chat_id else list(self.turns.values())
         if not turns:
             return False
@@ -1277,12 +1335,35 @@ class ChatAgent:
                 turn.stream_task.cancel()
             for lane in turn.lanes:
                 lane.cancel()
-        if chat_id is None or self.lab_holder == chat_id:
+        if chat_id is None:
             decline_all = getattr(self.runtime.approver, "decline_all", None)
             if decline_all:
                 decline_all("stop button")
             self.runtime.gate.request_abort()
+            return True
+        decline = getattr(self.runtime.approver, "decline_ids", None)
+        if decline is not None and turns[0].cards:
+            decline(list(turns[0].cards), "stop button")
         return True
+
+    def _open_requests(self) -> Optional[Set[str]]:
+        """The approval requests that still wait for a person, by id (None: an approver that keeps no list)."""
+        approver = self.runtime.approver
+        ids = getattr(approver, "open_ids", None)
+        if ids is not None:
+            return set(ids())
+        listed = getattr(approver, "pending_list", None)
+        return {p["id"] for p in listed()} if listed is not None else None
+
+    async def _save(self, chat: Dict[str, Any]) -> None:
+        """A chat written to its file off the server's loop: a save is tried again for up to 2 s while Windows says
+        the file is in use (ChatStore._again), and the portal's Stop, polls and every other chat waited meanwhile.
+        Nothing else changes this chat's dict while it is written: each turn has its own, read from its file."""
+        await asyncio.to_thread(self.store.save, chat)
+
+    async def _load(self, chat_id: str) -> Dict[str, Any]:
+        """A chat read from its file off the server's loop, as _save writes it. KeyError: no such chat."""
+        return await asyncio.to_thread(self.store.load, chat_id)
 
     async def run_turn(self, chat_id: str, text: str, model_key: str, provider: Provider, emit: Emit,
                        wake: str = "", attachments: Optional[List[Dict[str, Any]]] = None) -> None:
@@ -1294,7 +1375,7 @@ class ChatAgent:
         held = _TURN.set(turn)   # this task's turn, and the tasks it starts
         session = SESSION.set(chat_id)   # the conversation its model requests belong to
         try:
-            chat = self.store.load(chat_id)
+            chat = await self._load(chat_id)
             message: Dict[str, Any] = {"role": "user", "text": text}
             if wake:
                 message["wake"] = wake
@@ -1313,7 +1394,7 @@ class ChatAgent:
                 first = text.strip().splitlines()[0]
                 chat["title"] = first[:48] + ("…" if len(first) > 48 else "")
             chat["model"] = model_key
-            self.store.save(chat)
+            await self._save(chat)
             context = self.context(chat)  # fixed for the whole turn, so every step reuses the cached prefix
             context["model"] = model_id   # what its tools show the model: pictures, PDF pages (read_file)
             await emit({"type": "turn_start", "model": model_key, "title": chat["title"], "chat_id": chat_id,
@@ -1321,7 +1402,7 @@ class ChatAgent:
             if message.get("memory"):
                 await emit({"type": "memory", "notes": message["memory"]})
             if attachments and await self._draw_attached(chat, message, provider, model_id, emit):
-                self.store.save(chat)
+                await self._save(chat)
             for _ in range(MAX_STEPS):
                 if not await self._step(chat, provider, model_id, context, emit):
                     return
@@ -1431,7 +1512,7 @@ class ChatAgent:
             said = "".join(partial).strip()
             chat["messages"].append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
                                      "blocks": [{"type": "text", "text": (said + " …" if said else "") + "(stopped)"}]})
-            self.store.save(chat)
+            await self._save(chat)
             await emit({"type": "turn_end", "reason": "stopped"})
             return False
 
@@ -1448,7 +1529,7 @@ class ChatAgent:
             finally:
                 self._stream_task = None
             if folded:
-                self.store.save(chat)
+                await self._save(chat)
                 history = compaction.view(chat)
                 await emit({"type": "note", "text": "Kelvin summarised the earlier part of this conversation for the "
                                                     "model, to stay within what it can read at once. The whole chat "
@@ -1468,7 +1549,7 @@ class ChatAgent:
 
         chat["messages"].append({"role": "assistant", "provider": provider.name, "model": result.model or model_id,
                                  "blocks": result.blocks, "raw": result.raw})
-        self.store.save(chat)
+        await self._save(chat)
         if result.note:
             await emit({"type": "note", "text": result.note})
         if result.stop_reason == "pause":
@@ -1487,7 +1568,7 @@ class ChatAgent:
                                               for call in calls[i:i + n]))
             i += n
         chat["messages"].append({"role": "tool", "results": results})
-        self.store.save(chat)
+        await self._save(chat)
         if self._stop:
             await emit({"type": "turn_end", "reason": "stopped"})
             return False
@@ -1783,7 +1864,7 @@ class ChatAgent:
             raise Busy("Wait until Kelvin has finished answering.")
         model_key = self.model_key(model_key)
         provider, model_id = self.provider_for(model_key)
-        chat = self.store.load(chat_id)
+        chat = await self._load(chat_id)
         self.check_model(chat, model_key)
         prompt = review.answer_context(chat["messages"])   # ValueError when there is nothing to review
         text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.ANSWER_CHECK, prompt,
@@ -1791,11 +1872,11 @@ class ChatAgent:
                                                                  bool(chat.get("incognito"))), REVIEW_S)
         opinion = dict(review.findings_of(text, "answer"), kind="answer", model=model_key, label=self.label(model_key),
                        lookups=lookups, at=time.time())
-        chat = self.store.load(chat_id)   # it may have been saved meanwhile
+        chat = await self._load(chat_id)   # it may have been saved meanwhile
         target = _answered(chat)
         if target is not None:
             target["review"] = opinion
-            self.store.save(chat)
+            await self._save(chat)
         return opinion
 
     async def recheck_review(self, chat_id: str, model_key: str) -> Dict[str, Any]:
@@ -1803,7 +1884,7 @@ class ChatAgent:
         records: the ones it confirms become sure, the ones it refutes are dropped. Kept with the answer."""
         model_key = self.model_key(model_key)
         provider, model_id = self.provider_for(model_key)
-        chat = self.store.load(chat_id)
+        chat = await self._load(chat_id)
         self.check_model(chat, model_key)
         target = _answered(chat)
         opinion = (target or {}).get("review")
@@ -1817,11 +1898,11 @@ class ChatAgent:
                                                                  bool(chat.get("incognito"))), REVIEW_S)
         checked = review.apply_recheck(copy.deepcopy(opinion), text, "answer", self.label(model_key))
         checked.update(given=False, recheck_lookups=lookups)   # the main model sees it with the next message
-        chat = self.store.load(chat_id)
+        chat = await self._load(chat_id)
         target = _answered(chat)
         if target is not None and target.get("review", {}).get("at") == opinion.get("at"):
             target["review"] = checked
-            self.store.save(chat)
+            await self._save(chat)
         return checked
 
     async def _review_loop(self, provider: Provider, model_id: str, system: str, prompt: str,
@@ -1888,33 +1969,41 @@ class ChatAgent:
         return listen
 
     async def _ask_human(self, call_id: str, emit: Emit, request: ApprovalRequest) -> bool:
-        """Ask the user through the approver (inline in the chat), outside any tool call."""
+        """Ask the user through the approver (inline in the chat), outside any tool call. Stopped meanwhile (a
+        person's Stop of the chat), what it asked is declined: its card closes, and holds up nothing."""
         loop = asyncio.get_running_loop()
         requests: asyncio.Queue = asyncio.Queue()
         subscribe = getattr(self.runtime.approver, "subscribe", None)
         unsubscribe = subscribe(self._own_requests(loop, requests)) if subscribe else None
         task = asyncio.ensure_future(asyncio.to_thread(self.runtime.approver.approve, request))
-        shown: List[str] = []
+        cards = _Cards(self, call_id, emit)
+        getter: Optional[asyncio.Future] = None
         try:
             while not task.done():
                 getter = asyncio.ensure_future(requests.get())
                 done, _ = await asyncio.wait({task, getter}, timeout=0.4, return_when=asyncio.FIRST_COMPLETED)
                 if getter in done:
-                    r = getter.result()
-                    shown.append(r["id"])
-                    await emit(dict(r, type="approval", call_id=call_id))
+                    await cards.show(getter.result())
                 else:
                     getter.cancel()
+                await cards.close_answered()
             await asyncio.sleep(0)
             while not requests.empty():
-                r = requests.get_nowait()
-                shown.append(r["id"])
-                await emit(dict(r, type="approval", call_id=call_id))
+                await cards.show(requests.get_nowait())
+        except asyncio.CancelledError:
+            asked = list(cards.open)
+            while not requests.empty():   # asked, not shown yet
+                asked.append(requests.get_nowait()["id"])
+            decline = getattr(self.runtime.approver, "decline_ids", None)
+            if decline is not None and asked:
+                decline(asked, "stop button" if self._stop else "the chat, which ended")
+            raise
         finally:
+            if getter is not None and not getter.done():
+                getter.cancel()
             if unsubscribe:
                 unsubscribe()
-        for request_id in shown:
-            await emit({"type": "approval_closed", "id": request_id})
+            await cards.close_all()
         return bool(task.result())
 
     # ------------------------------------------------------------------ several models at once
@@ -1940,7 +2029,7 @@ class ChatAgent:
         held = _TURN.set(turn)
         session = SESSION.set(chat_id)
         try:
-            chat = self.store.load(chat_id)
+            chat = await self._load(chat_id)
             message: Dict[str, Any] = {"role": "user", "text": text,
                                        "compare": {"models": keys, "lanes": [], "chosen": 0}}
             if attachments:
@@ -1954,7 +2043,7 @@ class ChatAgent:
             if chat.get("title", "New chat") == "New chat":
                 first = text.strip().splitlines()[0]
                 chat["title"] = first[:48] + ("…" if len(first) > 48 else "")
-            self.store.save(chat)
+            await self._save(chat)
             context = self.context(chat)
             tools = [t for t in context["tools"] if t["name"] in self.read_only]   # already without web tools if barred
             system = context["system"] + "\n\n" + COMPARE
@@ -1977,12 +2066,12 @@ class ChatAgent:
                                "blocks": [{"type": "text", "text": "(stopped)"}]}
                     results.append({"model": keys[i], "messages": [stopped], "error": "stopped"})
             chosen = next((i for i, r in enumerate(results) if not r.get("error")), 0)
-            chat = self.store.load(chat_id)
+            chat = await self._load(chat_id)
             last = chat["messages"][-1]
             last["compare"] = {"models": keys, "lanes": results, "chosen": chosen}
             chat["messages"] += copy.deepcopy(results[chosen]["messages"])
             chat["model"] = keys[chosen]
-            self.store.save(chat)
+            await self._save(chat)
             await emit({"type": "compare_end", "chosen": chosen})
             await emit({"type": "turn_end", "reason": "stopped" if self._stop else "end"})
         except Exception as e:
@@ -2098,12 +2187,8 @@ class ChatAgent:
         # something up meanwhile; and only the call's own, never what another chat asks a person beside it
         subscribe = getattr(self.runtime.approver, "subscribe", None) if call["name"] not in OFF_LAB else None
         unsubscribe = subscribe(self._own_requests(loop, requests)) if subscribe else None
-        shown: List[str] = []
-
-        async def show(request: Dict[str, Any]) -> None:
-            shown.append(request["id"])
-            await emit(dict(request, type="approval", call_id=call["id"]))
-
+        cards = _Cards(self, call["id"], emit)
+        getter: Optional[asyncio.Future] = None
         before = self.runtime.live_view(10 ** 9)
         old_run = before["run_id"] if before else None
         sent: Dict[str, Any] = {}
@@ -2126,22 +2211,30 @@ class ChatAgent:
                 getter = asyncio.ensure_future(requests.get())
                 done, _ = await asyncio.wait({task, getter}, timeout=0.4, return_when=asyncio.FIRST_COMPLETED)
                 if getter in done:
-                    await show(getter.result())
+                    await cards.show(getter.result())
                 else:
                     getter.cancel()
+                await cards.close_answered()
                 await progress()
             await asyncio.sleep(0)  # let a last notification from the worker thread land
             while not requests.empty():
-                await show(requests.get_nowait())
+                await cards.show(requests.get_nowait())
             await progress()
-        except asyncio.CancelledError:   # stopped: the tool may still finish in its thread, unwatched
+        except asyncio.CancelledError:
+            # a person's Stop of this chat: the call ends as a client's cancelled call does (LabRuntime.cancel_call,
+            # through the in-process server, which runs it in this task): the ramp, run or wait it has the lab for
+            # stops, one still waiting for the lab never runs, and what it asks a person is declined. Work it only
+            # waits behind is someone else's and goes on. Otherwise (the server quitting) it finishes unwatched
+            if self._stop:
+                task.cancel()
             task.add_done_callback(lambda t: t.cancelled() or t.exception())
             raise
         finally:
+            if getter is not None and not getter.done():
+                getter.cancel()
             if unsubscribe:
                 unsubscribe()
-        for request_id in shown:
-            await emit({"type": "approval_closed", "id": request_id})
+            await cards.close_all()
         try:
             result = task.result()
         except Exception as e:  # a tool must never leave the history without its result
