@@ -7,9 +7,10 @@ hub's terms: the hub refuses a sync until then, and the portal says so (brief())
 
 While it is on, Kelvin sends what changed (docs/hub.md), and what was removed since:
 - their normal projects and unfiled chats, with whole conversations (collect() in hub/client.py), and
-- the records of the finished runs in their data folder that they made, in those projects or in none: each run's
-  meta.json (its plan, settings, results and assessment). Runs from before Kelvin noted who made them and whether an
-  incognito chat did go only if the person says so ("Also share older runs").
+- the records of the finished runs in their data folder that they made, in those projects or in none: each run's meta
+  with its card (its plan, what it swept and measured, its results and assessment: with_card()). Runs from before
+  Kelvin noted who made them and whether an incognito chat did go only if the person says so ("Also share older
+  runs").
 Never: a run's data files (run.h5, plots, reports stay on this computer), unpublished, confidential or model-limited
 projects with their chats and runs, incognito chats and the runs they started, anyone else's runs, API keys, or ChatGPT
 and Claude Code sign-ins.
@@ -125,9 +126,29 @@ def run_items(runs: Any, shared: Set[str], person: Optional[str] = None,
             if not old_runs:
                 held += 1
                 continue
-        out.append({"id": d.name, "project": project, "device": str(meta.get("device_name") or ""), "meta": meta,
-                    "created": started(meta, d)})
+        out.append(with_card({"id": d.name, "project": project, "device": str(meta.get("device_name") or ""),
+                              "meta": meta, "created": started(meta, d)}, d))
     return out, held
+
+
+def with_card(item: Dict[str, Any], folder: Path) -> Dict[str, Any]:
+    """A run's record with its card in its meta (rundata.card: its plan, what it swept, measured and held, its results,
+    assessment and issues), while that stays within what the hub keeps of a run (MAX_META). A card that doesn't fit,
+    or can't be read, is left out, never the run. A card that changes (a fit or a re-analysis after the run ended)
+    changes the record, so it goes again."""
+    try:
+        card = rundata.card(folder)
+    except Exception:   # an unreadable card never keeps the run's record from going
+        log.debug("no card for %s", folder.name, exc_info=True)
+        return item
+    if not isinstance(card, dict) or not card:
+        return item
+    fuller = dict(item, meta=dict(item["meta"], card=card))
+    try:
+        size = len(json.dumps(fuller, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return item
+    return fuller if size <= MAX_META else item
 
 
 def batches(todo: List[Tuple[Dict[str, Any], str, int]]) -> Iterator[List[Tuple[Dict[str, Any], str, int]]]:

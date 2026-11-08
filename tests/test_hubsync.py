@@ -249,6 +249,57 @@ def test_switching_sharing_off_takes_back_what_was_shared(tmp_path, monkeypatch)
     assert sorted(c["title"] for c in hub.shared_with(1)["chats"]) == ["Gate sweep", "Unfiled", "Written while it is off"]
 
 
+def test_a_run_goes_with_its_card_and_again_when_the_card_changes(tmp_path, monkeypatch):
+    from labharness import rundata
+    from labharness.eventlog import RunRecord
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    k = portal(tmp_path, monkeypatch, browser)
+    sign_in(k)
+    name = "20261108-100000-gate_sweep"
+    rec = RunRecord(name, k.runtime.runs.home / name, {"plan": "gate_sweep"}, k.runtime.user)
+    rec.set_columns({"axes": [{"key": "smu.V", "unit": "V", "kind": "instrument"}],
+                     "measures": [{"key": "lockin.X", "unit": "V", "kind": "scalar"}]})
+    for i in range(5):
+        rec.add({"i": i, "t": float(i), "smu.V": 0.5 * i, "lockin.X": 0.01 * i})
+    rec.finish(status="done", points=5, user=k.runtime.user)
+    folder = k.runtime.runs.home / name
+    rundata.set_analysis(folder, {"assessment": "A clean linear rise.",
+                                  "series": [{"y": "lockin.X", "results": [{"name": "slope", "value": "0.02 V/V"}]}]})
+    s = k.link.sync_once()
+    assert s["ok"] and s["sent"]["runs"] == 1
+
+    def on_hub():
+        with hub.connect() as con:
+            return json.loads(con.execute("SELECT meta FROM runs WHERE local_id = ?", (name,)).fetchone()["meta"])
+    card = on_hub()["card"]
+    assert card["assessment"] == "A clean linear rise." and card["results"] == ["lockin.X: slope 0.02 V/V"]
+    assert card["plan"] == "gate_sweep" and card["swept"][0]["key"] == "smu.V" and card["measured"][0]["key"] == "lockin.X"
+    assert hub_files(tmp_path) == []                                    # the record, never run.h5
+
+    assert k.link.sync_once()["sent"]["runs"] == 0                     # unchanged: not again
+    rundata.set_analysis(folder, {"assessment": "Linear, with a kink at 1 V.",   # a fit or re-analysis afterwards
+                                  "series": [{"y": "lockin.X", "results": [{"name": "kink", "value": "1.0 V"}]}]})
+    s = k.link.sync_once()
+    assert s["ok"] and s["sent"]["runs"] == 1                          # the card changed: the record goes again
+    assert on_hub()["card"]["results"] == ["lockin.X: kink 1.0 V"]
+
+    items, _ = hubsync.run_items(k.runtime.runs, set(), k.runtime.user)
+    bare = dict(items[0], meta={key: v for key, v in items[0]["meta"].items() if key != "card"})
+    monkeypatch.setattr(hubsync, "MAX_META", len(json.dumps(bare, sort_keys=True, ensure_ascii=False).encode()) + 10)
+    items, _ = hubsync.run_items(k.runtime.runs, set(), k.runtime.user)
+    assert [i["id"] for i in items] == [name] and "card" not in items[0]["meta"]   # too big: the card stays out, not the run
+    s = k.link.sync_once()
+    assert s["ok"] and s["sent"]["runs"] == 1 and "card" not in on_hub()
+
+
+def test_the_hub_says_new_terms_either_way():
+    from labharness.hub.client import HubClientError
+    assert hubsync.wants_terms(HubClientError("x", 403, {"error": "Agree first", "consent_url": HUB + "/consent"}))
+    assert hubsync.wants_terms(HubClientError("x", 403, {"error": "The hub's terms changed", "needs_consent": True}))
+    assert not hubsync.wants_terms(HubClientError("x", 403, {"error": "Confirm your email address before sharing."}))
+    assert not hubsync.wants_terms(HubClientError("x", 401, {"error": "not connected", "needs_consent": True}))
+
+
 def test_a_new_sign_in_is_used_at_once_and_a_sync_with_the_old_token_stops(tmp_path, monkeypatch):
     hub, browser = the_hub(tmp_path, monkeypatch)
     k = portal(tmp_path, monkeypatch, browser)
