@@ -124,6 +124,12 @@
     <div id="notices" class="notices">
       <!-- no poll answered for 10 s: Kelvin quit, crashed, or its computer sleeps or is busy (app.js reach) -->
       <div id="unreachable" class="update-bar warn" role="alert" hidden><span id="unreachable-text"></span></div>
+      <!-- the Kelvin hub's new terms: Kelvin shares nothing until the person agrees there, or switches sharing off (hubsync.py) -->
+      <div id="hub-terms-bar" class="update-bar" role="status" hidden>
+        <span>The Kelvin hub's terms changed: Kelvin now shares your chats and run records with the Kelvin team, unless you switch it off. Incognito chats and unpublished, confidential or model-limited projects never go, nor do data files. Nothing is sent until you agree.</span>
+        <a id="hub-terms-agree" class="link soft" target="_blank" rel="noopener noreferrer">Read and agree</a>
+        <button id="hub-terms-off" class="link soft" type="button">Switch it off</button>
+      </div>
       <div id="update-bar" class="update-bar" role="status" hidden>
         <span id="update-text"></span>
         <a id="update-notes" class="link soft" target="_blank" rel="noopener noreferrer" hidden>What's new</a>
@@ -635,12 +641,21 @@
       <div id="set-pages" class="set-pages" data-region="settings-page">
         <section class="set-page" data-page="account" hidden>
           <h3 class="set-title">Account</h3>
-          <!-- what acts at once, in a card of its own at the top (.set-now): the switch letting the phone through the hub -->
+          <!-- what acts at once, in a card of its own at the top (.set-now): the switches letting the phone through the hub
+               and sharing chats and run records with the Kelvin team -->
           <div id="relay-field" class="field set-now" hidden>
             <div class="field-row"><span class="field-label">Your phone, through the Kelvin hub</span><span id="relay-status" class="hint"></span></div>
             <div class="sw-row"><span id="relay-on-label">Let my phone reach this Kelvin through the hub while I'm signed in here</span>
               <button id="relay-on" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="relay-on-label"><span></span></button></div>
             <span class="hint">Sign in to the iPhone app with this account. Unshared work never goes through the hub.</span>
+            <!-- sharing with the Kelvin team (hubsync.py), in the same card: on unless switched off, acting at once; off
+                 takes back what was shared -->
+            <div id="share-row" class="share-row" hidden>
+              <div class="field-row"><span class="field-label">Sharing with the Kelvin team</span><span id="share-status" class="hint"></span></div>
+              <div class="sw-row"><span id="hub-share-label">Share my chats and run records with the Kelvin team</span>
+                <button id="hub-share" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="hub-share-label"><span></span></button></div>
+              <span class="hint">Your chats, and the records of your runs (what ran, its settings, results and assessment), go to the Kelvin hub, where the Kelvin team can read them. Never incognito chats; unpublished, confidential or model-limited projects and their runs; data files; API keys or sign-ins. Off, Kelvin takes back what it shared.</span>
+            </div>
           </div>
           <div id="account-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Your account</span><span id="account-status" class="hint"></span></div>
@@ -655,17 +670,14 @@
             </details>
           </div>
           <div id="hub-field" class="field">
-            <div class="field-row"><span class="field-label">Your hub account</span><span id="hub-status" class="hint"></span></div>
-            <span class="hint">Shares your normal projects and chats, with their runs, with your lab. Never unpublished or confidential projects, incognito chats or API keys.</span>
-            <div class="key-row"><input id="hub-url" type="url" placeholder="https://hub.example.org" spellcheck="false" autocomplete="off" aria-label="The hub's address"><button id="hub-connect" class="btn small" type="button">Connect</button></div>
+            <div class="field-row"><span class="field-label">On the Kelvin hub</span><span id="hub-status" class="hint"></span></div>
             <div id="hub-actions" class="chatgpt-row" hidden>
               <a id="hub-account" class="link soft" href="#" target="_blank" rel="noopener noreferrer">Your account on the hub</a>
               <button id="hub-sync" class="link soft" type="button">Sync now</button>
-              <button id="hub-disconnect" class="link soft" type="button">Disconnect</button>
             </div>
             <span id="hub-sync-status" class="hint"></span>
-            <label class="check"><input id="hub-old-runs" name="hub_old_runs" type="checkbox"> Also share older runs</label>
-            <span class="hint">Only if your data folder is yours alone: older runs don't record who made them.</span>
+            <label id="hub-old-runs-row" class="check"><input id="hub-old-runs" name="hub_old_runs" type="checkbox"> Also share older runs</label>
+            <span id="hub-old-runs-hint" class="hint">Only if your data folder is yours alone: older runs don't record who made them.</span>
           </div>
         </section>
         <section class="set-page" data-page="models" hidden>
@@ -1281,11 +1293,11 @@
     <div id="project-sharing-field" class="field">
       <label class="field-label" for="project-sharing">On the Kelvin hub</label>
       <select id="project-sharing">
-        <option value="">Shared, with its chats and runs</option>
+        <option value="">Shared with the Kelvin team, with its chats and run records</option>
         <option value="unpublished">Unpublished: not shared</option>
         <option value="confidential">Confidential: not shared</option>
       </select>
-      <span class="hint" hidden>Unpublished and confidential projects are never shared on the hub.</span>
+      <span class="hint" hidden>Unpublished and confidential projects never go to the Kelvin hub, nor do their chats and runs. Marking a project takes back what the hub had of it.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Notes</span><span id="notes-count" class="hint"></span></div>

@@ -26,13 +26,15 @@ ENV = {
 }
 # a webhook or heartbeat URL is a credential too, and so is the email account's password
 SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key", "smtp_password", "heartbeat"}
-# secrets Kelvin keeps itself, never shown or set from the browser: the Kelvin hub's token (hubsync.py)
-SEALED = SECRET | {"hub_token", "account_token"}   # encrypted with the password
+# secrets Kelvin keeps itself, never shown or set from the browser: the Kelvin account's token on the hub (central.py;
+# sharing goes over it too, hubsync.py)
+SEALED = SECRET | {"account_token"}   # encrypted with the password
+GONE_HUB = ("hub_url", "hub_token", "hub_installations")   # Kelvin 0.3.9 to 0.3.12 connected to the hub on its own
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
                      "answer_words", "phone_relay", "ask_folder", "text_size", "card_language", "checklist",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
-                     "updates", "hub_old_runs", "collection", "idle_off", "idle_off_all",
+                     "updates", "hub_share", "hub_old_runs", "collection", "idle_off", "idle_off_all",
                      "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_from", "smtp_to",   # email notices
                      "heartbeat_minutes", "approval_wait", "lab_scripts_python",
                      "sequence_react",   # Kelvin answers a stop or a failure of the sequence at once (notices.py)
@@ -276,7 +278,7 @@ def unreadable(folder: Any, cipher: Any) -> int:
     folder = Path(folder)
     shut = lambda v: _sealed(v) and (cipher is None or cipher.decrypt(v) is None)   # noqa: E731
     data = _load(folder / "settings.json")
-    n = sum(1 for name in SECRET | {"account_token", "hub_token"} if shut(data.get(name)))
+    n = sum(1 for name in SECRET | {"account_token"} if shut(data.get(name)))
     n += sum(1 for s in data.get("services") or [] if isinstance(s, dict) and shut(s.get("api_key")))
     signin = _load(folder / "chatgpt.json")
     return n + (1 if "sealed" in signin and shut(signin["sealed"]) else 0)
@@ -371,6 +373,8 @@ class Settings:
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "phone_relay":  # phones through the Kelvin hub (relay.py): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
+            if name == "hub_share":  # share chats and run records with the Kelvin team (hubsync.py): on unless off
+                value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "hub_old_runs":  # also share runs from before Kelvin noted who made them: off unless on
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "answer_words":  # how long the model is asked to keep answers (brevity.py)
@@ -449,22 +453,13 @@ class Settings:
 
     # ------------------------------------------------------------------ the Kelvin hub (hubsync.py)
 
-    def set_hub(self, url: Optional[str], token: Optional[str]) -> None:
-        """The hub this person connected: its address, and the token (encrypted with their password, like the keys)."""
-        for name, value in (("hub_url", url), ("hub_token", token)):
-            if value:
-                self._user[name] = str(value)
-            else:
+    def forget_hub_connection(self) -> None:
+        """Kelvin 0.3.9 to 0.3.12 connected to the hub on its own (its address, a token and the ids it connected
+        with). Sharing goes over the Kelvin account's sign-in now, so what that kept goes, once."""
+        if any(name in self._user for name in GONE_HUB):
+            for name in GONE_HUB:
                 self._user.pop(name, None)
-        self._save()
-
-    def hub_installations(self) -> List[str]:
-        """The installation ids this person connected to the hub with, latest first (for the hub to fold together)."""
-        return [str(i) for i in self._user.get("hub_installations") or [] if i][:5]
-
-    def add_hub_installation(self, ident: str) -> None:
-        self._user["hub_installations"] = [ident] + [i for i in self.hub_installations() if i != ident][:4]
-        self._save()
+            self._save()
 
     def installation_id(self) -> str:
         """This Kelvin's own stable id, which the hub keys what it shares by: the computer's, made once."""
@@ -503,6 +498,7 @@ class Settings:
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "own_keys": _own_keys(),   # Kelvin from source: the person's own API keys and services (edition.py)
             "claude_code_path": self._user.get("claude_code_path", ""),
+            "hub_share": self._user.get("hub_share") != "off",
             "hub_old_runs": self._user.get("hub_old_runs") == "on",
             "idle_off": self.idle_off_minutes,
             "idle_off_all": self._lab.get("idle_off_all") == "on",

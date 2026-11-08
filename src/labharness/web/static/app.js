@@ -4541,80 +4541,96 @@
       applyModels(b.models.groups, b.default_model, b.auto_model, b.models.hub);
     } catch (e) { $("chatgpt-status").textContent = e.message; }
   }
-  // ------------------------------------------------------------------ the Kelvin hub (accounts across labs)
-  const HUB = { timer: 0, st: null };
+  // ------------------------------------------------------------------ sharing with the Kelvin team (hubsync.py)
+  // over the person's Kelvin account sign-in: on unless switched off (Settings → Account), once they agreed to the
+  // hub's terms. Only chats and run records go, never data files
+  const HUB = { st: null, on: false, timer: 0 };
   function hubSyncText(st) {
+    const n = (k, one, many) => (k ? k + " " + (k === 1 ? one : many) : "");
+    const there = st.on_hub || {};
+    const held = [n(there.chats, "chat", "chats"), n(there.runs, "run record", "run records")].filter(Boolean).join(" and ");
+    if (!st.sharing) {
+      if (st.syncing) return "Taking back what Kelvin shared…";
+      return st.taking_back ? "Taking back what Kelvin shared: " + (held || "a few items") + " still on the hub." : "Nothing of yours from this computer is on the hub.";
+    }
     if (st.syncing) return "Sharing now…";
+    if (st.waiting) return st.waiting;
     const s = st.sync;
-    if (!s) return st.connected ? "Kelvin shares what changes every few minutes." : "";
+    if (!s) return "Kelvin shares what changes every few minutes.";
+    if (s.waiting) return s.waiting;
     const at = (t) => new Date(t * 1000).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
     if (s.error) return s.error + (st.synced_at ? " Last shared " + at(st.synced_at) + "." : "");
-    const n = (k, one, many) => (k ? k + " " + (k === 1 ? one : many) : "");
-    const sent = [n(s.sent.projects, "project", "projects"), n(s.sent.chats, "chat", "chats"), n(s.sent.runs, "run", "runs"),
-      n(s.files, "run file", "run files")].filter(Boolean);
+    const sent = [n(s.sent.projects, "project", "projects"), n(s.sent.chats, "chat", "chats"), n(s.sent.runs, "run record", "run records")].filter(Boolean);
     const more = [n(s.removed, "item removed", "items removed"),
       n((s.refused || []).length, "item the hub didn't take", "items the hub didn't take"),
       n(s.older_runs, "older run stays here", "older runs stay here")].filter(Boolean);
-    return "Up to date, " + at(s.at) + (sent.length ? ": sent " + sent.join(", ") : "") + (more.length ? "; " + more.join("; ") : "") + ".";
+    return "Up to date, " + at(s.at) + (sent.length ? ": sent " + sent.join(", ") : "") + (more.length ? "; " + more.join("; ") : "") + "." +
+      (held ? " On the hub: " + held + "." : "");
   }
   function hubSkipped(st) {   // what the hub didn't take, for the status line's tooltip
     return ((st.sync && st.sync.refused) || []).map((r) =>
-      (r.chat ? "chat " + r.chat : r.project ? "project " + r.project : "run " + r.run + (r.file ? ", " + r.file : "")) + ": " + r.why).join("\n");
+      (r.chat ? "chat " + r.chat : r.project ? "project " + r.project : "run " + r.run) + ": " + r.why).join("\n");
   }
   function showHub(st) {
     HUB.st = st;
     const a = st.account;
+    $("share-row").hidden = !(HUB.on && st.signed_in);   // in the Account page's card, under the phone's switch
+    swSet($("hub-share"), !!st.sharing);
+    $("share-status").textContent = st.sharing ? "on" : "off";
     let text;
-    if (!st.connected) text = st.problem || "Not connected";
-    else if (a) text = "Connected as " + a.name + " (" + a.email + "), sharing " + (a.shares_into ? "into " + a.shares_into : "with only you (no lab)");
-    else text = "Connected to " + st.url + (st.problem ? ". " + st.problem : "");
-    if (a && a.needs_consent) text += ". The hub's terms changed: agree to them there to go on sharing";
+    if (!st.signed_in) text = "Sharing with the Kelvin team needs a Kelvin account: Kelvin shares nothing for this one.";
+    else if (st.problem) text = st.problem;
+    else if (a) text = a.name + " (" + a.email + ")" + (a.needs_consent ? ". The hub's terms changed: agree to them there, and Kelvin goes on sharing" : "");
+    else text = st.url;
     $("hub-status").textContent = text;
-    if (st.url) $("hub-url").value = st.url;
-    $("hub-url").disabled = !!st.connected;
-    $("hub-connect").hidden = !!st.connected;
-    $("hub-actions").hidden = !st.connected;
+    $("hub-actions").hidden = !st.signed_in;
     $("hub-account").href = a ? (a.needs_consent ? a.consent_url : a.account_url) : (st.url ? st.url + "/account" : "#");
-    $("hub-sync-status").textContent = hubSyncText(st);
+    $("hub-sync").textContent = st.sharing ? "Sync now" : "Take back now";
+    $("hub-sync").hidden = !st.sharing && !st.taking_back;
+    $("hub-sync-status").textContent = st.signed_in ? hubSyncText(st) : "";
     $("hub-sync-status").title = hubSkipped(st);
+    $("hub-old-runs-row").hidden = $("hub-old-runs-hint").hidden = !(st.signed_in && st.sharing);
   }
   async function loadHub() {
     $("hub-status").textContent = "…";
     try { showHub(await api("/api/hub")); } catch (e) { $("hub-status").textContent = e.message; }
   }
-  async function connectHub() {
-    const url = $("hub-url").value.trim();
-    if (!url) { $("hub-status").textContent = "Enter the hub's address first."; $("hub-url").focus(); return; }
-    try { await api("/api/hub/connect", { body: { url } }); }
-    catch (e) { $("hub-status").textContent = e.message; return; }
-    $("hub-status").textContent = "Finish connecting in your browser…";
+  async function syncHub() {
+    $("hub-sync-status").textContent = HUB.st && !HUB.st.sharing ? "Taking back what Kelvin shared…" : "Sharing now…";
+    try {
+      const st = await api("/api/hub/sync", { body: {} });
+      showHub(Object.assign({}, st, { account: (HUB.st || {}).account || null }));
+    } catch (e) { $("hub-sync-status").textContent = e.message; }
+  }
+  async function setHubShare(on) {   // its switch (swFlip): a refusal or a no turns it back, the reason beside it
+    if (!on && !(await askYes("Stop sharing with the Kelvin team?\nKelvin takes back from the hub what it shared there, and shares nothing more until you switch this on again.",
+      { ok: "Stop sharing" }))) throw new Error("kept");
+    try {
+      await api("/api/settings", { body: { hub_share: on ? "on" : "off" } });
+      if (S.settings) S.settings.hub_share = on;
+      $("share-status").textContent = on ? "on" : "off";
+      if (!on) $("hub-terms-bar").hidden = true;   // nothing waits for the hub's terms now
+      setTimeout(loadHub, 1500);
+    } catch (e) { $("share-status").textContent = e.message; throw e; }
+  }
+  // the notice row's bar while the hub waits for the person to agree to its new terms before Kelvin shares (the poll's
+  // hub_terms); it goes once they agreed (looked for after Read and agree) or switched sharing off
+  function hubTerms(t) {
+    $("hub-terms-bar").hidden = !t;
+    if (t) $("hub-terms-agree").href = t.consent_url;
+  }
+  function watchTerms() {
     clearInterval(HUB.timer);
     const until = Date.now() + 10 * 60 * 1000;
     HUB.timer = setInterval(async () => {
-      if (Date.now() > until) { clearInterval(HUB.timer); loadHub(); return; }
+      if (Date.now() > until || $("hub-terms-bar").hidden) { clearInterval(HUB.timer); return; }
       let st;
       try { st = await api("/api/hub"); } catch (e) { return; }
-      if (!st.connected) return;
+      if (!st.account || st.account.needs_consent) return;
       clearInterval(HUB.timer);
-      showHub(st);
-      toast("Kelvin is connected to the hub.");
-    }, 2000);
-  }
-  async function disconnectHub() {
-    if (!(await askYes("Disconnect Kelvin from the hub?\nIt stops sharing. What it shared stays on the hub until you delete it there.",
-      { ok: "Disconnect" }))) return;
-    try {
-      const st = await api("/api/hub/disconnect", { body: {} });
-      showHub(st);
-      toast(st.revoked ? "Disconnected from the hub." : "Disconnected here. The hub could not be reached, so also disconnect this Kelvin on your hub account page.");
-    } catch (e) { $("hub-status").textContent = e.message; }
-  }
-  async function syncHub() {
-    $("hub-sync-status").textContent = "Sharing now…";
-    try {
-      const st = await api("/api/hub/sync", { body: {} });
-      showHub(Object.assign({}, st, { account: st.connected ? (HUB.st || {}).account : null }));
-    } catch (e) { $("hub-sync-status").textContent = e.message; }
+      $("hub-terms-bar").hidden = true;
+      api("/api/hub/sync", { body: {} }).catch(() => {});   // agreed: share now
+    }, 3000);
   }
 
   function showPlanChip() {   // OpenAI asks apps to say when a request uses the ChatGPT plan
@@ -5273,6 +5289,7 @@
       }
     });
     part("the lab's tabs", () => { labTabSeen(); });   // seen if its part is on the screen now, else a dot on its tab
+    part("the hub's terms", () => hubTerms(HUB.on ? s.hub_terms : null));   // Kelvin shares once they are agreed to
     part("the answering chats", () => wakeState(s));
     part("the terminal", () => { termState(s); });   // the terminal first: an approval its own command needs is asked there
     part("the approval cards", () => {
@@ -10410,7 +10427,8 @@
     S.settings = boot.settings;
     appZoomOff();   // in the desktop app: its window's own zoom off, the old text size kept as the page size (once)
     S.claudeCode = !!boot.claude_code;   // Claude Code bridge (temporary)
-    $("hub-field").hidden = $("project-sharing-field").hidden = !boot.hub_sharing;   // off for now: the hub is for accounts
+    HUB.on = !!boot.hub_sharing;   // sharing on the Kelvin hub (HUB_SHARING in app.py): False shows nothing of it
+    $("hub-field").hidden = $("project-sharing-field").hidden = !HUB.on;
     showUpdate(boot.update);
     $("update-go").addEventListener("click", installUpdate);
     $("update-check").addEventListener("click", checkUpdate);
@@ -10495,11 +10513,11 @@
     $("svc-preset").addEventListener("change", servicePreset);
     $("chatgpt-signin").addEventListener("click", signInChatGPT);
     $("chatgpt-signout").addEventListener("click", signOutChatGPT);
-    $("hub-connect").addEventListener("click", connectHub);
-    $("hub-url").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); connectHub(); } });
     $("hub-sync").addEventListener("click", syncHub);
+    swFlip($("hub-share"), setHubShare);
+    $("hub-terms-agree").addEventListener("click", watchTerms);
+    $("hub-terms-off").addEventListener("click", () => { openSettings(); settingsPage("account"); });
     $("collection-sync").addEventListener("click", () => loadCollection(true));
-    $("hub-disconnect").addEventListener("click", disconnectHub);
     $("svc-add").addEventListener("click", addService);
     $("data-path").addEventListener("input", dataPathChanged);
     $("data-path").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); if (!$("data-use").disabled) useDataFolder(); } });
