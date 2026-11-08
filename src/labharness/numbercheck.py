@@ -15,8 +15,11 @@ UNITS = ("V", "A", "K", "T", "Hz", "W", "s", "Ω", "Ohm", "ohm", "F", "H", "m", 
          "bar", "mbar", "Torr", "S", "G", "Oe")
 NUMBER = re.compile(r"(?<![\w.:/\-\[])([-+−]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)(?:\s*[×x]\s*10\^?([-+−]?\d+))?"
                     r"(?:\s*(±|\+/-)\s*\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)?\s*([a-zA-Zµμ°Ω%]*)")
+# not numbers: citations, run ids, dates, times, list numbers, and ids of hex digits (a run's uuid, a seal's SHA-256),
+# which read as numbers otherwise: a uuid's 2123e834-… as 2123e834, or its 3abcdef0-… as 3
 SKIP = re.compile(r"\[[^\]]*\]|\b\d{8}-\d{6}[\w.-]*|\b\d{4}-\d{2}-\d{2}(?:[T ]\d{1,2}:\d{2}(?::\d{2})?)?|"
-                  r"\b\d{1,2}:\d{2}(?::\d{2})?\b|^\s*\d+[.)]\s", re.M)
+                  r"\b\d{1,2}:\d{2}(?::\d{2})?\b|^\s*\d+[.)]\s|"
+                  r"\b[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\b|\b(?=\d*[a-fA-F])[0-9a-fA-F]{16,}\b", re.M)
 
 
 def _float(text: str) -> float:
@@ -32,18 +35,20 @@ def numbers_in(text: str, counts: bool = True) -> List[Tuple[str, float, float, 
         raw, exp, _, unit = m.group(1), m.group(2), m.group(3), m.group(4) or ""
         try:
             v = _float(raw)
-        except ValueError:
+            decimals = len(raw.split(".")[1].split("e")[0].split("E")[0]) if "." in raw else 0
+            if "e" in raw.lower():
+                mant = raw.lower().split("e")[0]
+                decimals = len(mant.split(".")[1]) if "." in mant else 0
+                step = 0.5 * 10.0 ** (int(raw.lower().split("e")[1]) - decimals)
+            else:
+                step = 0.5 * 10.0 ** (-decimals)
+            if exp:
+                v *= 10.0 ** int(exp.replace("−", "-"))
+                step *= 10.0 ** int(exp.replace("−", "-"))
+        except (ValueError, OverflowError):   # not a number, or one no float holds (1e999)
             continue
-        decimals = len(raw.split(".")[1].split("e")[0].split("E")[0]) if "." in raw else 0
-        if "e" in raw.lower():
-            mant = raw.lower().split("e")[0]
-            decimals = len(mant.split(".")[1]) if "." in mant else 0
-            step = 10 ** (int(raw.lower().split("e")[1]) - decimals) * 0.5
-        else:
-            step = 0.5 * 10 ** (-decimals)
-        if exp:
-            v *= 10 ** int(exp.replace("−", "-"))
-            step *= 10 ** int(exp.replace("−", "-"))
+        if not (math.isfinite(v) and math.isfinite(step)):
+            continue
         known = unit in UNITS or unit in ("%", "°", "°C") or (len(unit) > 1 and unit[0] in PREFIX
                                                               and unit[1:] in UNITS)
         is_int = "." not in raw and not exp and "e" not in raw.lower()
