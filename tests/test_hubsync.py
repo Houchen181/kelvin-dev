@@ -386,6 +386,23 @@ def test_nothing_is_shared_before_the_hubs_new_terms_are_agreed_to(tmp_path, mon
     assert s["ok"] and s["sent"]["chats"] == 1
 
 
+def test_switching_off_takes_back_what_was_shared_before_the_new_terms_are_agreed_to(tmp_path, monkeypatch):
+    """Taking one's work off the hub never waits on terms: the hub takes a sync that only removes."""
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    k = portal(tmp_path, monkeypatch, browser)
+    sign_in(k)
+    chat(k.store, "Shared before the new terms")
+    assert k.link.sync_once()["ok"] and "Shared before" in on_the_hub(hub)
+    hub.config["consent_version"] = "2099-01-01"                       # new terms, not agreed to yet
+    chat(k.store, "Written after")
+    s = k.link.sync_once()
+    assert not s["ok"] and s["consent"] and "Written after" not in on_the_hub(hub)   # nothing new goes
+    k.client.post("/api/settings", headers=k.h, json={"hub_share": "off"})
+    s = k.link.sync_once()                                             # taking it back needs no agreement
+    assert s["ok"] and "Shared before" not in on_the_hub(hub)
+    assert k.link.sync_once() is None
+
+
 def test_a_hub_that_takes_no_shared_work_is_waited_for_quietly(tmp_path, monkeypatch, caplog):
     hub, browser = the_hub(tmp_path, monkeypatch)
     hub.config["sharing"] = False                                      # an older hub, or sharing off there: 404
