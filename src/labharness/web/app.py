@@ -58,7 +58,7 @@ from .agent import Busy, ChatAgent, runs_in, typed_stop
 from . import browse, labops, review, rules as rulebook
 from .chatgpt import SignIn, SignInError
 from . import notices as person_notices
-from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
+from .hubsync import SYNC_EVERY as HUB_EVERY, HubLink
 from .relay import RelayLink
 from .remote import (API as PHONE_API, Remote, addresses, allow_through_firewall, allowed, firewall_state,
                      remote_host_ok)
@@ -79,8 +79,9 @@ TEXT_TAIL = 256 * 1024      # of a script run's own text files, the last part a 
 # what works while nobody is signed in: signing in, a new account, and stopping whatever runs
 SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/accounts", "/api/accounts/remove",
               "/api/stop", "/api/runs/stop", "/api/app/show"}
-# sharing work with the Kelvin hub (hubsync.py) is switched off for now: the hub is for accounts only (central.py)
-HUB_SHARING = False
+# sharing work with the Kelvin hub (hubsync.py): over each person's Kelvin account sign-in, on unless they switch it off
+# (Settings -> Account), once they agreed to the hub's terms. False: Kelvin shares nothing and shows nothing of it
+HUB_SHARING = True
 # Claude Code bridge: while Claude works the screen, this computer's browser only reads and stops, so its clicks never
 # answer for a person (an approval, a rollback, Hands on the sample, a sample's protection, a project's rules, a PIN).
 # What passes: what only makes the lab safer (Stop, Bring to safe, an alarm's Got it, the restart card's safe: its
@@ -194,7 +195,7 @@ class Guard:
                     problem = (403, "bad host")
                 elif origin and origin.split("://", 1)[-1] != host:
                     problem = (403, "bad origin")
-                elif path in ("/auth/callback", "/hub/callback"):
+                elif path == "/auth/callback":
                     problem = (403, "sign in from the Kelvin computer")
                 elif path.startswith("/api/") and self.signed_in is not None and not self.signed_in():
                     problem = (401, "Nobody is signed in to Kelvin on its computer now.", {"signin": True})
@@ -350,7 +351,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     instrument collection up to date from GitHub while it is switched on (collection.py); without it, Kelvin only
     reads the copy it has."""
     signin = SignIn(Path(settings.path).parent)   # Sign in with ChatGPT (chatgpt.json next to the settings)
-    hub = HubLink(settings, store, lambda: runtime.data_dir)   # the Kelvin hub: the person's account across labs
+    # the Kelvin hub: what the person signed in with a Kelvin account shares there (their sign-in: hub_account, below)
+    hub = HubLink(settings, store, lambda: runtime.data_dir, lambda: hub_account())
     agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, signin), settings)
     runtime.project_info = agent.project_info            # reports: names, devices, notes, reading lists
     runtime.project_chat_runs = agent.project_chat_runs
@@ -616,7 +618,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         try:
             yield
         finally:
-            hub.stopping = True   # a sync in progress stops at its next file
+            hub.stopping = True   # a sync in progress stops before its next request
             for t in tasks:
                 t.cancel()
             runtime.stop_watching()
@@ -749,6 +751,28 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return None
         token = settings.get("account_token")
         return (hub_address(), token, user["name"]) if token else None
+
+    # ------------------------------------------------------------------ sharing on the Kelvin hub (hubsync.py)
+
+    def hub_account() -> Optional[Tuple[str, str, str]]:
+        """(the hub, the signed-in person's token there, the place on the hub what Kelvin shares goes to: their
+        account and this computer) while someone is signed in with a Kelvin account. Sharing has no sign-in of its
+        own: a connection of its own ended this one on the hub (it retired the computer's id)."""
+        user = session["user"]
+        if user is None or not user.get("email") or not central_on():
+            return None
+        token = settings.get("account_token")
+        if not token:
+            return None
+        return hub_address(), token, "%s|%s" % (str(user["email"]).lower(), settings.installation_id())
+
+    def hub_wake() -> None:
+        """The person's sign-in or their choice changed (often in a worker thread): a sync going with what was before
+        stops, and the next one starts at once."""
+        hub.refresh()
+        loop = loop_ref.get("loop")
+        if loop is not None and hub.wake is not None:
+            loop.call_soon_threadsafe(hub.wake.set)
 
     def relay_hello() -> Dict[str, Any]:
         return {"name": socket.gethostname()[:80], "version": __version__, "direct": remote.port is not None}
@@ -1100,6 +1124,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if online and answer and answer.get("access_token"):
             settings.put_secret("account_token", answer["access_token"])   # encrypted with their password
             relay_wake()   # sign_in's wake can reach the relay before the token is kept: look again with it
+            hub.wait_for_terms(hub_address() + "/consent" if answer.get("needs_consent") else "")
+            hub_wake()     # sharing goes on with this token: signing in replaced the one before on the hub
             if providers is None:   # and the hub's models (hubmodels.py) come with this token, not the one before:
                 agent.providers = make_providers(settings, signin)   # signing in replaced that one on the hub
         from .settings import unreadable
@@ -2016,11 +2042,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     # ------------------------------------------------------------------ the Kelvin hub (hubsync.py)
 
     async def hub_loop() -> None:
-        """Share what changed every few minutes, and at once after connecting."""
+        """Share what changed every few minutes (switched off: take back what was shared), and at once after a sign-in
+        or a change of the person's choice."""
         await asyncio.sleep(10)
         while True:
             hub.wake.clear()
-            if hub.connected:
+            if hub.linked:
                 try:
                     await asyncio.to_thread(hub.sync_once)
                 except Exception:   # never let one bad sync end the syncing
@@ -2031,53 +2058,18 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 pass
 
     async def hub_view(request: Request) -> Response:
-        """The person's hub: its address, who they are there, which lab Kelvin shares into and the last sync.
-        Never the token."""
+        """Sharing on the person's hub: whether it is on, who they are there, what of theirs is there and the last
+        sync. Never the token."""
         return JSONResponse(await asyncio.to_thread(hub.status))
 
-    async def hub_connect(request: Request) -> Response:
-        """POST {url}: open the hub's connect page in the browser; it comes back to /hub/callback on this address."""
-        if not HUB_SHARING:
-            return error(404, "Sharing with the Kelvin hub is switched off for now.")
-        body = await request.json()
-        port = request.url.port or 80
-        try:
-            url = await asyncio.to_thread(hub.begin, str(body.get("url") or ""),
-                                          "http://127.0.0.1:%d/hub/callback" % port)
-        except HubClientError as e:
-            return error(400, str(e))
-        await asyncio.to_thread(open_url, url)
-        return JSONResponse({"url": url})
-
-    async def hub_disconnect(request: Request) -> Response:
-        confirmed = await asyncio.to_thread(hub.disconnect)
-        return JSONResponse(dict(await asyncio.to_thread(hub.status, False), revoked=confirmed))
-
     async def hub_sync(request: Request) -> Response:
-        """Sync now, and say how it went."""
+        """Sync now (switched off: take back now what was shared), and say how it went."""
         if not HUB_SHARING:
-            return error(404, "Sharing with the Kelvin hub is switched off for now.")
-        if not hub.connected:
-            return error(409, "Kelvin is not connected to the hub.")
+            return error(404, "Kelvin shares nothing on the Kelvin hub.")
+        if not hub.linked:
+            return error(409, "Sign in with your Kelvin account to share on the Kelvin hub.")
         await asyncio.to_thread(hub.sync_once)
         return JSONResponse(await asyncio.to_thread(hub.status, False))
-
-    async def hub_callback(request: Request) -> Response:
-        title = "Kelvin could not connect to the hub"
-        try:
-            me = await asyncio.to_thread(hub.finish, dict(request.query_params))
-        except HubClientError as e:
-            return HTMLResponse(_page(title, str(e)), status_code=400)
-        except HUB_UNREACHABLE:
-            return HTMLResponse(_page(title, "Kelvin can't reach the hub now. Try again from Kelvin's Settings."),
-                                status_code=502)
-        hub.poke()
-        who = " as %s (%s)" % (me["name"], me.get("email") or "") if me.get("name") else ""
-        into = "sharing into %s" % me["shares_into"] if me.get("shares_into") else "sharing with only you (no lab)"
-        return HTMLResponse(_page("Kelvin is connected to the hub", (
-            "Connected%s, %s. Kelvin now shares your normal projects and unfiled chats there, with their runs; never "
-            "unpublished or confidential projects, or incognito chats. You can close this tab and go back to Kelvin."
-            % (who, into))))
 
     # ------------------------------------------------------------------ other model services
 
@@ -3703,6 +3695,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         data["team"] = team.last   # the team chat's newest message: the portal marks what you haven't read
         data["chats"] = await asyncio.to_thread(store.stamp)   # the sidebar reloads when a chat is made elsewhere
         data["home"] = runtime.home_board.stamp()   # Home reloads its blocks when Kelvin or a person changes them
+        data["hub_terms"] = hub.brief() if HUB_SHARING else None   # the hub waits for its new terms before sharing
         return JSONResponse(data)
 
     async def home_view(request: Request) -> Response:
@@ -3829,6 +3822,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     async def settings_view(request: Request) -> Response:
         if request.method == "POST":
             was_on = collection_on() is not None
+            sharing_was = (settings.get("hub_share"), settings.get("hub_old_runs"))
             try:
                 values = await request.json()
                 if isinstance(values, dict) and not edition.own_keys():   # the app takes no API keys
@@ -3855,6 +3849,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 loop_ref["collection"].set()   # switched on: fetch it now
             agent.providers = make_providers(settings, signin) if providers is None else providers
             relay_wake()   # phones through the hub may have been switched on or off
+            if (settings.get("hub_share"), settings.get("hub_old_runs")) != sharing_was:
+                hub_wake()   # sharing switched on or off (off: what was shared goes from the hub), or older runs
         models = await agent.models()
         return JSONResponse(dict(defaults_of(models), settings=settings.public(), models=models))
 
@@ -4493,10 +4489,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/chatgpt/signin", chatgpt_signin, methods=["POST"]),
         Route("/api/chatgpt/signout", chatgpt_signout, methods=["POST"]),
         Route("/api/chatgpt/welcomed", chatgpt_welcomed, methods=["POST"]),
-        Route("/hub/callback", hub_callback),
         Route("/api/hub", hub_view),
-        Route("/api/hub/connect", hub_connect, methods=["POST"]),
-        Route("/api/hub/disconnect", hub_disconnect, methods=["POST"]),
         Route("/api/hub/sync", hub_sync, methods=["POST"]),
         Route("/api/services", services_view, methods=["GET", "POST"]),
         Route("/api/services/{service_id}", service_view, methods=["DELETE", "PATCH"]),
