@@ -103,3 +103,17 @@ def test_notes_on_disk_read_back_without_their_links(tmp_path):
     line = (tmp_path / runnotes.FILE).read_text(encoding="utf-8").splitlines()[0]
     assert "prev" in json.loads(line) and "prev" not in runnotes.read(tmp_path)[0]
     assert runnotes.line(runnotes.read(tmp_path)[0]).startswith("looks fine (ann, ")
+
+
+def test_after_the_chat_read_the_web_the_person_says_whether_it_is_kept(tmp_path):
+    from labharness.agent.runtime import Viewer
+    from test_remove_instrument import runtime_on
+    rt = runtime_on(tmp_path, LAB, answers=[False])
+    rt.gate.outside_chat = "a page from the web"   # text that could be steering the model
+    with rt.viewing(Viewer(chat="c1", model="anthropic:claude-opus-5-5")):
+        said = rt.record_step("the sample cracked")
+    assert said == "declined: the person did not want it kept"
+    asked = rt.approver.requests[-1]
+    assert asked.title == "Keep this step in the lab's record?" and "Not approved by Kelvin itself" in str(asked)
+    assert not [e for e in rt.gate.log.events() if e["type"] == "step"]
+    assert rt.record_step("the sample cracked").startswith("recorded step")   # a person at the portal: kept

@@ -143,3 +143,28 @@ def test_without_a_model_the_subagent_says_so(rt, tmp_path):
             await agent.close()
     asyncio.run(go())
     assert events[-1]["type"] == "error" and "No model to draft with" in events[-1]["message"]
+
+
+def test_the_notebook_panel_reads_a_day_writes_a_persons_entry_and_signs_only_for_a_person(rt, tmp_path):
+    pytest.importorskip("starlette")
+    from starlette.testclient import TestClient
+    from labharness.web.app import STATIC, create_app
+    from labharness.web.settings import Settings
+    from labharness.web.store import ChatStore
+    settings = Settings(tmp_path / "settings.json")
+    client = TestClient(create_app(rt, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"]))
+    h = {"X-Kelvin-Token": settings.access_key}
+    rt.record_step("loaded chip 2", sample="D3")
+    r = client.post("/api/notebook", json={"title": "Loading", "body": "Loaded chip 2.", "day": ""}, headers=h)
+    assert r.status_code == 200 and r.json()["said"].startswith("kept entry e"), r.text
+    day = client.get("/api/notebook", headers=h).json()
+    assert [e["title"] for e in day["entries"]] == ["Loading"] and day["entries"][0]["status"] == "draft"
+    assert day["entries"][0]["by"] == "human" and any("loaded chip 2" in line for line in day["record"])
+    assert day["day"] in day["days"] and day["me"] is None
+    eid = day["entries"][0]["id"]
+    r = client.post("/api/notebook/sign", json={"entry": eid}, headers=h)
+    assert r.status_code == 400 and "Sign in to Kelvin" in r.json()["error"]
+    assert client.post("/api/notebook", json={"title": "x"}, headers=h).status_code == 400
+    page, js = (STATIC / "index.html").read_text(encoding="utf-8"), (STATIC / "app.js").read_text(encoding="utf-8")
+    assert 'id="toggle-notebook"' in page and 'id="nbpanel"' in page and 'aria-label="Draft this day\'s entry"' in page
+    assert 'nbpanel: [() => NB.open, "workcol"' in js and "/api/notebook/draft" in js

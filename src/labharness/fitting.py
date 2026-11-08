@@ -1233,7 +1233,7 @@ def fit_name(name: Any) -> str:
 
 
 def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any], by: str = "agent",
-          account: Optional[str] = None) -> str:
+          account: Optional[str] = None, ai: Optional[Dict[str, Any]] = None) -> str:
     """Keep a fit in the run's derived.h5 as /fits/<name> (replacing one of that name; run.h5, sealed when the run was
     kept, never changes): the model and how it was asked for as attributes, the values, errors and covariance, and the points with the model and residuals at each. Who
     kept it (by: the agent or a person; account: the person signed in, when people sign in) and when (stored) go with
@@ -1256,7 +1256,8 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
              "failed": result.get("failed"), "p_flat": result.get("p_flat"),
              "x_unit": result.get("x_unit", ""), "y_unit": result.get("y_unit", ""),
              "spec": {k: v for k, v in spec.items() if v not in (None, "", [], {})},
-             "stored": datetime.now().isoformat(timespec="seconds"), "by": by or "agent", "account": account or None}
+             "stored": datetime.now().isoformat(timespec="seconds"), "by": by or "agent", "account": account or None,
+             "ai": ai or None, "versions": _versions()}
     last: Optional[Exception] = None
     for _ in range(20):   # another reader may hold the file for a moment
         try:
@@ -1277,6 +1278,11 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
             last = e
             time.sleep(0.1)
     raise FitError("could not write derived.h5: %s" % last)
+
+
+def _versions() -> Dict[str, str]:
+    from .derivations import versions
+    return versions()
 
 
 def stored(folder: Path, with_data: bool = False) -> List[Dict[str, Any]]:

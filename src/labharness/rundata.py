@@ -601,12 +601,54 @@ def write_h5(folder: Path, rec: Recorded) -> Path:
                 ds.attrs["key"] = _attr(k)
             for a in ("unit", "role", "kind", "quantity"):
                 ds.attrs[a] = _attr(col.get(a) or "")
+            if col.get("unit"):
+                ds.attrs["units"] = _attr(col["unit"])   # as NeXus names it
         for k in frame_keys:
             _frames_into(framed, folder, h5_name(k), [r.get(k) for r in rows], np)
             framed[h5_name(k)].attrs.update({"role": "measured", "kind": "image",
                                              "unit": _attr(info.get(k, {}).get("unit", ""))})
+        _nexus(f, rec, meta)
     os.replace(tmp, folder / RUN_FILE)
     return folder / RUN_FILE
+
+
+def _nexus(f: Any, rec: Recorded, meta: Dict[str, Any]) -> None:
+    """NeXus's view of the run beside Kelvin's own layout, so NeXus readers (h5web, silx, NeXpy, NOMAD) open and plot
+    it without Kelvin: /entry (NXentry) with /entry/data (NXdata: the first reading against the innermost swept axis),
+    /entry/sample (NXsample: the device) and /entry/instrument (NXinstrument: every setting at the start), each a
+    link to what Kelvin keeps: nothing is copied."""
+    import h5py
+    points = f["points"]
+    axes = [a["key"] for a in rec.columns.get("axes") or []]
+    measures = [m["key"] for m in rec.columns.get("measures") or []]
+    signal = next((m for m in measures if h5_name(m) in points and points[h5_name(m)].dtype.kind in "fiu"), None)
+    axis = next((a for a in reversed(axes) if h5_name(a) in points), None) or ("t" if "t" in points else None)
+    f.attrs["default"] = "entry"
+    f.attrs["creator"] = "Kelvin %s" % (meta.get("labharness") or "")
+    entry = f.create_group("entry")
+    entry.attrs["NX_class"] = "NXentry"
+    text = h5py.string_dtype()
+    for name, key in (("title", "plan"), ("start_time", "started"), ("end_time", "finished")):
+        if meta.get(key):
+            entry.create_dataset(name, data=str(meta[key]), dtype=text)
+    if meta.get("uuid"):
+        entry.create_dataset("entry_identifier", data=str(meta["uuid"]), dtype=text)
+    if signal:
+        entry.attrs["default"] = "data"
+        data = entry.create_group("data")
+        data.attrs["NX_class"] = "NXdata"
+        data[h5_name(signal)] = h5py.SoftLink("/points/" + h5_name(signal))
+        data.attrs["signal"] = h5_name(signal)
+        if axis:
+            data[h5_name(axis)] = h5py.SoftLink("/points/" + h5_name(axis))
+            data.attrs["axes"] = [h5_name(axis)]
+    sample = entry.create_group("sample")
+    sample.attrs["NX_class"] = "NXsample"
+    if meta.get("device_name"):
+        sample.create_dataset("name", data=str(meta["device_name"]), dtype=text)
+    instrument = entry.create_group("instrument")
+    instrument.attrs["NX_class"] = "NXinstrument"
+    instrument["settings_at_start"] = h5py.SoftLink("/conditions/start")
 
 
 def _traces(group: Any, key: str, vals: List[Any], np: Any) -> Any:

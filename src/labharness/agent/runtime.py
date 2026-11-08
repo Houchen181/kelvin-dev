@@ -305,6 +305,8 @@ def event_line(e: Dict[str, Any]) -> str:
                           "disconnected from Kelvin: Kelvin sends it nothing")
     elif kind == "instrument_removed":
         text = "took %s (%s at %s) out of the lab" % (e.get("instrument"), e.get("card"), e.get("address"))
+    elif kind == "export":
+        text = "wrote %s (%s runs)" % (Path(str(e.get("path") or "")).name, e.get("runs"))
     elif kind == "entry":
         text = "%s notebook entry %s v%s: %s" % ("amended" if e.get("amends") else "kept", e.get("entry"),
                                                 e.get("version"), e.get("title"))
@@ -2366,6 +2368,18 @@ class LabRuntime:
         if digest:
             self.gate.log.write("run_sealed", by="kelvin", run=d.name, sha256=digest, late=late or None)
 
+    def _record_ok(self, title: str, lines: List[str]) -> Optional[str]:
+        """Kelvin's AI writing the lab's records (a step, a note, a sample, a procedure, an entry, an export): nobody
+        is asked, as it drives nothing, unless the chat has read text from outside the lab since the person last
+        wrote, which could be steering it: then the person answers. None when it may go ahead, else why not."""
+        if not self._actor_now():
+            return None   # a person, at the portal
+        why = self.gate.outside_reason()
+        if not why:
+            return None
+        request = ApprovalRequest(title, [x for x in lines if x] + ["Not approved by Kelvin itself: " + why])
+        return None if self.gate.ask(request) else "declined: the person did not want it kept"
+
     def record_step(self, text: str, kind: str = "step", sample: str = "", values: Optional[Dict[str, Any]] = None,
                     at: str = "", who: str = "", procedure: str = "", step: str = "", deviation: str = "") -> str:
         """A step done by hand, or something seen at the bench, kept in the lab's record as the person says it
@@ -2405,6 +2419,9 @@ class LabRuntime:
                 return "not recorded: name the step of %s (%s)" % (doc["procedure"], ", ".join(
                     str(x["name"]) for x in doc["steps"]))
             of = {"name": doc["procedure"], "version": version, "step": s["name"]}
+        refused = self._record_ok("Keep this %s in the lab's record?" % kind, [text, dev_name and "on " + dev_name])
+        if refused:
+            return refused
         e = self.gate.log.write("step", by="agent" if self._actor_now() else "human", kind=kind, text=text, at=when,
                                 who=" ".join(str(who or "").split())[:80] or self.user or None, device=dev_id,
                                 device_name=dev_name or None, project=project, values=vals or None, procedure=of,
@@ -2424,6 +2441,9 @@ class LabRuntime:
         """Keep a procedure (SOP) as its next version (procedures.py): an edit is a new version, every version kept.
         Drives nothing, so nobody is asked; its Kelvin steps' plans are checked and approved as they run."""
         from ..procedures import ProcedureError, outline
+        refused = self._record_ok("Keep this procedure?", [str(text or "")[:600]])
+        if refused:
+            return refused
         try:
             doc, n, new = self._procedures().save(text, by="agent" if self._actor_now() else "human",
                                                   account=self.user, ai=self._actor_now())
@@ -2574,6 +2594,10 @@ class LabRuntime:
             d = self._run_dir(run_id_of(self, run_id))
         except (KeyError, ToolError) as e:
             return "not kept: %s" % (e.args[0] if e.args else e)
+        refused = self._record_ok("Keep this note on run %s?" % d.name, [
+            "flag %s" % flag if flag else "", "tags %s" % tags if tags else "", str(text or "")])
+        if refused:
+            return refused
         try:
             note = runnotes.add(d, by=by, text=text, flag=flag, tags=tags, corrects=corrects, account=self.user,
                                 ai=self._actor_now())
@@ -2600,6 +2624,9 @@ class LabRuntime:
         m = self.mounted or {}
         project = there.get("project") if there else (m.get("project") if dev_id and dev_id == m.get("device")
                                                        else self.attribution.get("project"))
+        refused = self._record_ok("Keep this about sample %s?" % name, ["%s: %s" % kv for kv in fields.items() if kv[1]])
+        if refused:
+            return refused
         try:
             s, changed = book.update(dev_id, name, fields, by="agent" if self._actor_now() else "human",
                                      account=self.user, ai=self._actor_now(), project=project)
@@ -2709,6 +2736,9 @@ class LabRuntime:
             return "not kept: these runs can't be read here: %s (cite runs by their ids, as find_runs gives them)" % (
                 ", ".join(missing))
         check = numbercheck.check("%s\n%s\n%s" % (title, aim, body), recs)
+        refused = self._record_ok("Keep this notebook entry?", [str(title or ""), str(body or "")[:600]])
+        if refused:
+            return refused
         try:
             v = notebook.write(self.data_dir, {"title": title, "body": body, "aim": aim, "runs": runs_given,
                                                "samples": as_list(samples), "procedure": procedure, "day": day},
@@ -2761,6 +2791,153 @@ class LabRuntime:
         self.gate.log.write("entry_signed", by="human", entry=entry, version=sig["version"], role=role,
                             sha256=sig["sha256"])
         return sig
+
+    def export_crate(self, runs: Any = None, entries: Any = None, figures: Any = None, samples: Any = None,
+                     title: str = "", license: str = "", orcid: str = "") -> str:
+        """A zipped RO-Crate of runs and what goes with them (crate.py), in the data folder's exports/: for a
+        repository (Zenodo, an institutional one) or another ELN. Written here; nothing leaves the computer."""
+        from .. import crate
+        as_list = lambda v: [x.strip() for x in v.split(",") if x.strip()] if isinstance(v, str) \
+            else [str(x) for x in v or []]  # noqa: E731
+        if not (as_list(runs) or as_list(entries) or as_list(figures)):
+            return "not written: name the runs, notebook entries or figures to package"
+        refused = self._record_ok("Package these as an RO-Crate in the data folder's exports?", [
+            ", ".join(as_list(runs) + as_list(entries) + as_list(figures))])
+        if refused:
+            return refused
+        try:
+            out = crate.build(self, as_list(runs), as_list(entries), as_list(figures), as_list(samples), title,
+                              license, orcid)
+        except (KeyError, ValueError, OSError) as e:
+            return "not written: %s" % (e.args[0] if e.args else e)
+        self.gate.log.write("export", by="agent" if self._actor_now() else "human", kind="ro-crate",
+                            path=out["path"], runs=out["runs"], files=out["files"])
+        return "wrote %s: %d files, %.1f MB, %d run%s, described in ro-crate-metadata.json (RO-Crate 1.1)" % (
+            out["path"], out["files"], out["bytes"] / 1e6, out["runs"], "" if out["runs"] == 1 else "s")
+
+    def search_records(self, text: str, kinds: str = "", limit: int = 20) -> str:
+        """One search across what Kelvin keeps: runs (their cards and notes), samples, notebook entries, steps by
+        hand and observations, run notes, procedures and figures; the best matches first (every word found, then
+        the newest). kinds: some of runs, samples, entries, steps, notes, procedures, figures. Never what the
+        viewer of this thread may not see."""
+        import json as _json
+        from .. import notebook
+        from ..samples import SampleBook
+        words = [w for w in str(text or "").lower().split() if w]
+        if not words:
+            return "say what to look for"
+        want = {k.strip() for k in str(kinds or "").split(",") if k.strip()}
+        found: List[Tuple[int, str, str]] = []
+
+        def consider(kind: str, when: str, line: str, hay: str) -> None:
+            hay = hay.lower()
+            hits = sum(1 for w in words if w in hay)
+            if hits and (not want or kind in want):
+                found.append((hits, str(when or ""), "[%s] %s" % (kind, line)))
+        if not want or "runs" in want:
+            try:
+                for r in self._fresh_catalog().find(limit=200, skip=self._hidden_runs(), text=words[0]):
+                    consider("runs", r.get("started"), "%s: %s, %s%s" % (
+                        r["run_id"], r.get("plan"), r.get("status"), ", flagged " + r["flag"] if r.get("flag") else ""),
+                        " ".join(str(r.get(k) or "") for k in ("run_id", "plan", "device_name", "project_name",
+                                                                "assessment", "tags", "flag")) +
+                        _json.dumps(r.get("card") or {}) + " ".join(n.get("text") or "" for n in
+                                                                     runnotes.read(self._run_dir(r["run_id"]))))
+            except Exception:   # the catalog can't be read now: the rest is still searched
+                pass
+        for s in SampleBook(self.data_dir).all().values():
+            if s.get("project") and not self.may_see({"project": s["project"]}):
+                continue
+            consider("samples", s.get("created"), "%s (%s)" % (s.get("name"), ", ".join(
+                str(s[k]) for k in ("kind", "material", "location") if s.get(k))), _json.dumps(s, ensure_ascii=False))
+        for eid, e in notebook.read(self.data_dir).items():
+            v = notebook.latest(e)
+            if self.may_see(v.get("whose") or {}):
+                consider("entries", v.get("at"), notebook.summary(eid, e),
+                         " ".join(str(v.get(k) or "") for k in ("title", "aim", "body", "day")))
+        for e in self.seen_events(self.gate.log.events()):
+            if e.get("type") == "step":
+                consider("steps", e.get("wall"), "%s %s" % (str(e.get("at") or e.get("wall"))[:16].replace("T", " "),
+                                                            event_line(e).split(" ", 1)[-1]),
+                         " ".join(str(e.get(k) or "") for k in ("text", "device_name", "who", "deviation")) +
+                         _json.dumps(e.get("values") or {}))
+            elif e.get("type") == "annotation":
+                consider("notes", e.get("wall"), event_line(e).split(" ", 1)[-1],
+                         " ".join(str(x) for x in (e.get("text"), e.get("flag"), e.get("tags"), e.get("run")) if x))
+        book = self._procedures()
+        for name in book.names():
+            try:
+                t, n = book.text(name)
+            except KeyError:
+                continue
+            consider("procedures", "", "%s v%d" % (name, n), t)
+        figures = Path(self.data_dir) / "figures"
+        if figures.exists():
+            for p in figures.glob("*.json"):
+                try:
+                    rec = _json.loads(p.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(rec, dict):
+                    consider("figures", rec.get("made"), "%s (from %s)" % (rec.get("figure"), ", ".join(
+                        s.get("run", "") for s in rec.get("runs") or [])), _json.dumps(rec.get("spec") or {}) +
+                        str(rec.get("figure")))
+        if not found:
+            return "nothing found for %r" % text
+        found.sort(key=lambda f: (-f[0], f[1]), reverse=False)
+        best = sorted(found, key=lambda f: (f[0], f[1]), reverse=True)[:max(1, int(limit or 20))]
+        return "\n".join(["%d found, best first%s:" % (len(found), " (the first %d)" % len(best)
+                                                       if len(found) > len(best) else "")] + [f[2] for f in best])
+
+    def digest(self, since: str = "7d") -> str:
+        """What the record shows over a stretch, written by code (no model): runs by sample and how they ended, the
+        runs flagged, procedure steps and their checks, deviations, steps by hand, and entries signed or still
+        drafts; each run cited. since: 7d, 2026-11-01, yesterday..."""
+        from .. import catalog as _catalog, notebook
+        try:
+            start = _catalog._time(since or "7d", False)
+        except ValueError as e:
+            return "not a time: %s" % e
+        try:
+            rows = [r for r in self._fresh_catalog().find(limit=200, skip=self._hidden_runs(), since=start[:19])]
+        except Exception as e:
+            return "the catalog can't be read now: %s" % e
+        lines = ["since %s:" % start[:16].replace("T", " ")]
+        by_sample: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            by_sample.setdefault(r.get("device_name") or "no sample", []).append(r)
+        for sample, rs in sorted(by_sample.items()):
+            ended = {}
+            for r in rs:
+                ended[r.get("status")] = ended.get(r.get("status"), 0) + 1
+            lines.append("- %s: %d run%s (%s)" % (sample, len(rs), "" if len(rs) == 1 else "s",
+                                                   ", ".join("%d %s" % (n, s) for s, n in sorted(ended.items()))))
+        flagged = [r for r in rows if r.get("flag")]
+        if flagged:
+            lines.append("- flagged: " + "; ".join("%s [run:%s]" % (r["flag"], r["run_id"]) for r in flagged[:12]))
+        events = [e for e in self.seen_events(self.gate.log.events()) if str(e.get("wall", "")) >= start]
+        checks = [e for e in events if e.get("type") == "procedure_step"]
+        for e in checks[-8:]:
+            lines.append("- %s v%s, step %s: %s%s [run:%s]" % (
+                e.get("procedure"), e.get("version"), e.get("step"), e.get("check") or e.get("status"),
+                "; deviations: " + "; ".join(e["deviations"]) if e.get("deviations") else "", e.get("run")))
+        steps = [e for e in events if e.get("type") == "step"]
+        if steps:
+            lines.append("- %d step%s by hand and observation%s recorded%s" % (
+                len(steps), "" if len(steps) == 1 else "s", "" if len(steps) == 1 else "s",
+                "; deviations: " + "; ".join(e["deviation"] for e in steps if e.get("deviation"))
+                if any(e.get("deviation") for e in steps) else ""))
+        entries = [(k, e) for k, e in notebook.read(self.data_dir).items()
+                   if str(notebook.latest(e).get("at", "")) >= start and self.may_see(notebook.latest(e).get("whose")
+                                                                                       or {})]
+        if entries:
+            drafts = [k for k, e in entries if notebook.status(e) in ("draft", "amended")]
+            lines.append("- %d notebook entr%s, %d still to sign%s" % (
+                len(entries), "y" if len(entries) == 1 else "ies", len(drafts),
+                ": " + ", ".join(drafts[:8]) if drafts else ""))
+        if len(lines) == 1:
+            lines.append("- nothing recorded")
+        return "\n".join(lines)
 
     def verify_records(self, since: str = "", runs: str = "") -> str:
         """Verify (integrity.py): the lab's record, chain by chain (this person's record, the lab's instrument log,
@@ -3035,7 +3212,8 @@ class LabRuntime:
         except Exception:
             analysis = None   # the fits are a convenience; the numbers are kept
         rec.finish(**meta)
-        self.gate.log.write("run_imported", by=by, run=rec.run_id, files=len(files))
+        self.gate.log.write("run_imported", by=by, run=rec.run_id, files=len(files), uuid=rec.meta.get("uuid"),
+                            sha256=getattr(rec, "sha256", None))
         try:
             self.catalog.add(rec.path)
         except Exception:

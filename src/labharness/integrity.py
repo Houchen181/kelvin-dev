@@ -20,7 +20,7 @@ from . import rundata
 from .eventlog import verify_chain
 
 DEADLINE_S = 120.0   # runs checked at most this long in one go (newest first); the rest are named as not checked
-SEAL_EVENTS = ("run_end", "run_sealed")
+SEAL_EVENTS = ("run_end", "run_sealed", "run_imported")
 
 
 def check_logs(paths: Dict[str, Path]) -> Dict[str, Dict[str, Any]]:

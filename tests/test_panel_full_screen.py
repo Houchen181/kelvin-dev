@@ -18,7 +18,8 @@ PAGE = (STATIC / "index.html").read_text(encoding="utf-8")
 JS = (STATIC / "app.js").read_text(encoding="utf-8")
 CSS = (STATIC / "app.css").read_text(encoding="utf-8")
 PANELS = {"termpane": "close-term", "runpane": "close-runs", "edpane": "close-editor",
-          "anpane": "close-analysis", "labpanel": "close-lab", "teampanel": "close-team"}
+          "anpane": "close-analysis", "labpanel": "close-lab", "teampanel": "close-team",
+          "nbpanel": "close-notebook"}
 
 
 def _js(name):

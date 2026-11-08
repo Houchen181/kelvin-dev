@@ -91,6 +91,8 @@ You are connected to a physics lab through Kelvin.
   values, when if it was earlier; never a guess, nor from memory later. When they judge a run (bad: the sample
   warmed; a key result; look again), annotate it. A note is never changed: a correction is a new note naming it.
   Asked to write up the day or a result, write_entry: cite each run as [run:<id>], and only numbers the records hold.
+  Before proposing a plan for a sample, look at what was done on it: sample_history, and procedure_status when a
+  procedure is followed. For anything kept before ("the run where the sample warmed"), search_records.
 - Every run is kept as one file (run.h5) and listed in a catalog of all runs. For questions about earlier data:
   find_runs (query_runs for what its filters can't ask), describe_run for a run's card, then get_run_data or compute
   for its numbers. Ask compute for a number or a derived column rather than reading every row.
@@ -1179,6 +1181,41 @@ def build_server(rt: LabRuntime) -> MCPServer:
                                             x_range, y_range, heat_map, formats, name)
         except datatools.ToolError as e:
             return ["not drawn: %s" % e]
+        return [Image(data=png, format="png"), text] if png else [text]
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def export_crate(runs: Optional[List[str]] = None, entries: Optional[List[str]] = None,
+                     figures: Optional[List[str]] = None, samples: Optional[List[str]] = None, title: str = "",
+                     license: str = "", orcid: str = "") -> str:
+        """Package runs and what goes with them as a zipped RO-Crate (the standard data package repositories and
+        other ELNs read): each run's run.h5 with its seal, derived.h5 and notes; the figures and notebook entries
+        named (and the runs they rest on); the samples' records and the procedure versions followed; all described in
+        ro-crate-metadata.json. license: e.g. CC-BY-4.0; orcid: the person's ORCID iD. Written into the data folder's
+        exports/; nothing leaves the computer."""
+        return rt.export_crate(runs, entries, figures, samples, title, license, orcid)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def search_records(text: str, kinds: str = "", limit: int = 20) -> str:
+        """Search everything Kelvin keeps at once: runs (cards and notes), samples, notebook entries, steps by hand
+        and observations, run notes, procedures and figures. Best matches first. kinds: some of runs, samples,
+        entries, steps, notes, procedures, figures (comma-separated)."""
+        return rt.search_records(text, kinds, limit)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def digest(since: str = "7d") -> str:
+        """What the record shows since a time (7d, yesterday, 2026-11-01), written by code: runs by sample and how
+        they ended, flagged runs, procedure steps and their checks, deviations, steps by hand, entries still to
+        sign; each run cited as [run:<id>]. A start for a weekly summary or a meeting."""
+        return rt.digest(since)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def rebuild_figure(figure: str) -> List[Any]:
+        """Draw a figure Kelvin saved again from the raw data it was drawn from (its record names each run and its
+        seal), after checking every run is still as it was kept. figure: its file name or its record's id."""
+        try:
+            png, text = datatools.rebuild_figure(rt, figure)
+        except datatools.ToolError as e:
+            return [str(e)]
         return [Image(data=png, format="png"), text] if png else [text]
 
     @server.tool(annotations=ACT, structured_output=False)

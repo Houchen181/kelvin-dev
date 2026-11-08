@@ -297,12 +297,14 @@ def _keep_fit(rt: Any, src: Source, model: Any, result: Dict[str, Any], name: st
     default = "%s %s" % (spec.get("y") or "", result["model"] if result["model"] != "expression" else "model")
     account = getattr(rt, "user", None)
     try:
-        kept = fitting.store(folder, name or default.strip(), result, spec, by="agent", account=account)
+        actor = getattr(rt, "_actor_now", None)
+        kept = fitting.store(folder, name or default.strip(), result, spec, by="agent", account=account,
+                             ai=actor() if actor else None)
     except Exception as e:
         return "not kept: %s" % e
     rt.gate.log.write("fit_kept", by="agent", account=account, run=src.run_id, fit=kept, model=result["model"])
-    return "kept in %s as /fits/%s (with its covariance and residuals); fit_run again with the same name replaces " \
-           "it%s" % (folder / rundata.RUN_FILE, kept, _report_again(rt, src.run_id))
+    return "kept in %s as /fits/%s (with its covariance and residuals; run.h5 itself never changes); fit_run again " \
+           "with the same name replaces it%s" % (folder / rundata.DERIVED, kept, _report_again(rt, src.run_id))
 
 
 _REPORTS = threading.Lock()   # a run's scan report, written again by one fit at a time (two may be kept at once)
@@ -452,13 +454,57 @@ def plot_runs(rt: Any, curves: Optional[List[Dict[str, Any]]] = None, title: str
     base = "%s-%s" % (datetime.now().strftime("%Y%m%d-%H%M%S"),
                       _slug(name or title or (ys_seen[0] if ys_seen else "figure")))
     saved = []
-    png = plotting.to_png(fig)
+    from . import derivations
+    sources: List[Dict[str, Any]] = []
+    asked = [dict(c) for c in curves or [] if isinstance(c, dict)]
+    for c in asked:   # each run by its id (not "last"), so the record draws the same figure again
+        try:
+            c["run"] = run_id_of(rt, str(c.get("run") or "last"))
+            if c["run"] not in [s["run"] for s in sources]:
+                sources.append(derivations.source(rt, c["run"]))
+        except (KeyError, ToolError):
+            pass
+    heat = dict(heat_map) if isinstance(heat_map, dict) else None
+    if heat:
+        try:
+            heat["run"] = run_id_of(rt, str(heat.get("run") or "last"))
+            sources.append(derivations.source(rt, heat["run"]))
+        except (KeyError, ToolError):
+            pass
+    fid = str(__import__("uuid").uuid4())
+    png = derivations.tag_png(plotting.to_png(fig), "%s %s" % (fid, base))
     for f in formats:
         path = folder / ("%s.%s" % (base, f))
         path.write_bytes(png if f == "png" else plotting.RENDER[f](fig))
         saved.append(str(path))
-    rt.gate.log.write("figure", by="agent", files=[Path(s).name for s in saved])
-    return png, plotting.caption(fig) + "\nsaved: " + "; ".join(saved)
+    actor = getattr(rt, "_actor_now", None)
+    spec = {"curves": asked or None, "title": title, "x_label": x_label, "y_label": y_label, "x_unit": x_unit,
+            "y_unit": y_unit, "x_log": x_log, "y_log": y_log, "x_range": list(x_range) if x_range else None,
+            "y_range": list(y_range) if y_range else None, "heat_map": heat, "formats": formats, "name": name}
+    derivations.keep_figure(folder, base, spec, sources, [Path(s).name for s in saved], "agent",
+                            getattr(rt, "user", None), actor() if actor else None, fid)
+    rt.gate.log.write("figure", by="agent", files=[Path(s).name for s in saved], figure=fid,
+                      runs=[s["run"] for s in sources] or None)
+    return png, plotting.caption(fig) + "\nsaved: " + "; ".join(saved) + "\nits record: %s.json (its runs and how it " \
+        "was drawn: rebuild_figure draws it again)" % base
+
+
+def rebuild_figure(rt: Any, figure: str) -> Tuple[Optional[bytes], str]:
+    """A saved figure drawn again from the raw data its record names, once each run is checked to be as it was
+    sealed (derivations.py)."""
+    from . import derivations
+    try:
+        _, record = derivations.find_figure(Path(rt.data_dir) / "figures", figure)
+    except KeyError as e:
+        raise ToolError(e.args[0])
+    problems = derivations.check_sources(rt, record.get("runs") or [])
+    if problems:
+        raise ToolError("not rebuilt: " + "; ".join(problems))
+    spec = dict(record.get("spec") or {})
+    spec["name"] = "%s rebuilt" % (spec.get("name") or record.get("figure") or "figure")
+    png, text = plot_runs(rt, **spec)
+    return png, "rebuilt %s from %d run%s, each as it was sealed\n%s" % (
+        record.get("figure"), len(record.get("runs") or []), "" if len(record.get("runs") or []) == 1 else "s", text)
 
 
 def _heat(rt: Any, spec: Dict[str, Any]) -> Tuple[Any, str, str, str, str]:

@@ -21,7 +21,7 @@ from labharness.web.app import STATIC  # noqa: E402
 PAGE = (STATIC / "index.html").read_text(encoding="utf-8")
 JS = (STATIC / "app.js").read_text(encoding="utf-8")
 CSS = (STATIC / "app.css").read_text(encoding="utf-8")
-SIDE_PANELS = ("teampanel", "anpane", "runpane", "edpane", "labpanel")
+SIDE_PANELS = ("teampanel", "nbpanel", "anpane", "runpane", "edpane", "labpanel")
 
 
 def _js(name):
@@ -51,20 +51,21 @@ def _block(css, head):
 def test_the_panels_stand_in_the_order_of_their_buttons():
     bar = PAGE[PAGE.index('<div class="topbar-right">'):PAGE.index("</header>", PAGE.index('<div class="topbar-right">'))]
     buttons = re.findall(r'<button id="(toggle-[\w-]+)"', bar)
-    assert buttons == ["toggle-incognito", "toggle-term", "toggle-team", "toggle-analysis", "toggle-runs", "toggle-lab"]
+    assert buttons == ["toggle-incognito", "toggle-term", "toggle-team", "toggle-notebook", "toggle-analysis",
+                       "toggle-runs", "toggle-lab"]
     opens = dict(re.findall(r'\$\("(toggle-\w+)"\)\.addEventListener\("click", \(\) => pillClick\("(\w+)", ', JS))
     panels = [opens[b] for b in buttons if opens.get(b, "termpane") != "termpane"]   # the terminal: under the chat
-    assert panels == ["teampanel", "anpane", "runpane", "labpanel"]
+    assert panels == ["teampanel", "nbpanel", "anpane", "runpane", "labpanel"]
     on_page = sorted(SIDE_PANELS, key=_at)
     assert [p for p in on_page if p != "edpane"] == panels
     assert on_page.index("edpane") == on_page.index("runpane") + 1   # the scan editor: right beside Runs
     assert [p for p, _ in _panes()] == on_page   # their widths are given out left to right
-    assert "Team chat, Analysis, Runs with the scan editor beside it, then Lab" in JS   # the comment above PANES
+    assert "Team chat, Notebook, Analysis, Runs with the scan editor beside it, then Lab" in JS   # above PANES
 
 
 def test_panels_that_share_a_column_are_neighbours_in_that_order():
     cols = [c for _, c in _panes()]
-    assert cols == ["workcol"] * 4 + ["sidecol"]   # Team chat, Analysis, Runs and the editor; then Lab's own
+    assert cols == ["workcol"] * 5 + ["sidecol"]   # Team chat, Notebook, Analysis, Runs, the editor; Lab's own
     for col in set(cols):   # one stretch of the order each
         at = [i for i, c in enumerate(cols) if c == col]
         assert at == list(range(at[0], at[-1] + 1)), col

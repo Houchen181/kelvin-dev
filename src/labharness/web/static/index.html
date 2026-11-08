@@ -109,6 +109,9 @@
       <button id="toggle-team" class="pill icon-only team-btn" type="button" aria-label="Team chat" aria-pressed="false" title="Team chat">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h1v3l3.5-3"/><path d="M12 10h7a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-1v3l-3.5-3H12a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z"/></svg><span id="team-dot" class="team-dot" hidden></span>
       </button>
+      <button id="toggle-notebook" class="pill icon-only" type="button" aria-label="Notebook" aria-pressed="false" title="Notebook">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h11a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6z"/><path d="M9 3v18"/><path d="M12 8h4M12 12h4"/></svg>
+      </button>
       <button id="toggle-analysis" class="pill" type="button" title="Analysis" aria-label="Analysis" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 16l3.5-4 2.5 2.5"/><circle cx="16.5" cy="8.5" r="3"/><path d="M18.7 10.7L21 13"/></svg><span class="pill-text">Analysis</span>
       </button>
@@ -239,7 +242,7 @@
     </section>
   </main>
 
-  <!-- the side panels, left to right as the top bar's buttons: Team chat, Analysis, Runs with the scan editor beside it,
+  <!-- the side panels, left to right as the top bar's buttons: Team chat, Notebook, Analysis, Runs with the scan editor beside it,
        then Lab. Each opens on its own; side by side, or short of room one above the other in their column (fitLayout
        in app.js) -->
   <div id="workcol" class="dock-col" hidden>
@@ -265,6 +268,29 @@
       <textarea id="team-input" rows="1" maxlength="4000" placeholder="Message the team" aria-label="Message the team"></textarea>
       <button id="team-send" class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
     </form>
+  </aside>
+
+  <aside id="nbpanel" class="labpanel nbpanel" aria-label="Notebook" hidden>
+    <div id="nbpanel-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the notebook" tabindex="0"></div>
+    <header class="lab-head">
+      <h2>Notebook</h2>
+      <div class="nb-day">
+        <button id="nb-prev" class="icon-btn" type="button" aria-label="Earlier day" title="Earlier day"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
+        <button id="nb-day-label" class="nb-day-label" type="button" title="Pick a day"></button>
+        <input id="nb-date" class="nb-date-picker" type="date" aria-label="Day" tabindex="-1">
+        <button id="nb-next" class="icon-btn" type="button" aria-label="Later day" title="Later day"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+      </div>
+      <div class="spacer"></div>
+      <button id="nb-draft" class="icon-btn" type="button" aria-label="Draft this day's entry" title="Draft this day's entry"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg></button>
+      <button id="nb-new" class="icon-btn" type="button" aria-label="New entry" title="New entry"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+      <button class="icon-btn full-btn" type="button" data-pane="nbpanel" aria-label="Full screen" aria-pressed="false" title="Full screen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+      </button>
+      <button id="close-notebook" class="icon-btn" type="button" aria-label="Close the notebook">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div id="nb-body" class="nb-body" data-region="notebook"></div>
   </aside>
 
   <section id="anpane" class="runpane anpane" aria-label="Analysis" hidden>
