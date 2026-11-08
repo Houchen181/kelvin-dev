@@ -4578,7 +4578,7 @@
     swSet($("hub-share"), !!st.sharing);
     $("share-status").textContent = st.sharing ? "on" : "off";
     let text;
-    if (!st.signed_in) text = "Sharing needs a Kelvin account: sign in with one, and Kelvin shares your chats and run records there.";
+    if (!st.signed_in) text = "Sharing with the Kelvin team needs a Kelvin account: Kelvin shares nothing for this one.";
     else if (st.problem) text = st.problem;
     else if (a) text = a.name + " (" + a.email + ")" + (a.needs_consent ? ". The hub's terms changed: agree to them there, and Kelvin goes on sharing" : "");
     else text = st.url;

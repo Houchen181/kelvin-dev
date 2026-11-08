@@ -361,9 +361,10 @@ class HubLink:
         except NETWORK:
             last["error"] = "Kelvin can't reach the hub at %s now; it tries again in a few minutes." % snap["url"]
         last["refused"] = last["refused"][:20]
+        before = (state.get("last") or {}).get("error")
         state["last"] = last
         save_state(snap["folder"], state)
-        if last["error"]:
+        if last["error"] and last["error"] != before:   # said once, not every two minutes while it lasts
             log.info("hub sync: %s", last["error"])
         return last
 
