@@ -27,7 +27,7 @@ def test_a_finished_run_is_kept_as_one_hdf5_file(tmp_path):
     rec.add({"i": 0, "t": 0.0, "tc.T": 4.2, "sa.trace": [1.0, 2.0, 3.0], "sa.trace.axis": (100.0, 300.0)})
     rec.add({"i": 1, "t": 1.5, "tc.T": 4.3, "sa.trace": [4.0, 5.0, 6.0], "sa.trace.axis": (100.0, 300.0)})
     rec.finish(status="done")
-    assert sorted(p.name for p in rec.path.iterdir()) == ["run.h5"]
+    assert sorted(p.name for p in rec.path.iterdir()) == ["run.h5", "run.h5.sha256"]   # and its seal
     with h5py.File(rec.path / "run.h5", "r") as f:
         assert f.attrs["status"] == "done" and f.attrs["format"] == "kelvin-run/1"
         assert list(f["points/tc.T"][()]) == [4.2, 4.3] and f["points/tc.T"].attrs["quantity"] == "temperature"

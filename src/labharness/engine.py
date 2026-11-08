@@ -756,7 +756,8 @@ class RunEngine:
                 return report
         # the time left counts from the dry run's duration, else the card's estimate (timing.py), not points alone
         expected = sim.duration_s if sim is not None and sim.ok else forecast.seconds or None
-        report = self._execute(plan, grants, expected, meta, folder, since)
+        with self.gate.log.holding():   # the record's files stay open while it measures (EventLog.holding)
+            report = self._execute(plan, grants, expected, meta, folder, since)
         report.dry_run = sim
         if report.status != "done":   # something went wrong on them: check them again before the next run
             for name in plan.requires:
@@ -840,8 +841,10 @@ class RunEngine:
         timing, pace = getattr(lab, "timing", None), getattr(lab, "pace", None)
         took = Took()
         # reports say where a run was taken, even after the lab changes; meta: whose work it is, its queue item
+        ai = gate.log.ai_now()   # the AI whose chat started it (its model), kept with the run
         rec = self.store.create(plan.name, plan.source, gate.operator, folder, meta=dict(
-            {"lab": lab.config.name, "simulated": all(i.simulated for i in lab.instruments.values())}, **(meta or {})))
+            {"lab": lab.config.name, "simulated": all(i.simulated for i in lab.instruments.values())},
+            **dict({"ai": ai} if ai else {}, **(meta or {}))))
         start = lab.snapshot()
         try:   # its record's first lines: a folder that can't be written (its drive went away, a full disk) starts none
             rec.snapshot("start", start)
@@ -1350,7 +1353,7 @@ class RunEngine:
                 saved = False
                 warnings.append(self._unwritten(rec, e, ended=True))
             gate.log.write("run_end", by=gate.operator, run=rec.run_id, status=status, reason=reason, points=n,
-                           duration_s=round(duration, 3))
+                           duration_s=round(duration, 3), uuid=rec.meta.get("uuid"), sha256=rec.sha256)
             self._emit(event="end", run_id=rec.run_id, status=status, done=n, total=max(plan.points, n))
             told = True
         finally:

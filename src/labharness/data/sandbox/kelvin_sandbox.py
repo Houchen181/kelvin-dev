@@ -181,14 +181,14 @@ def _install_hook(scratch, reads):
 
 def _guard_h5py(scratch, runs):
     """h5py opens files with HDF5's own C code, which the audit hook doesn't see: a file outside the scratch folder
-    opens read-only, and only a run's run.h5 or a file in the scratch folder opens at all."""
+    opens read-only, and only a run's run.h5 (and derived.h5) or a file in the scratch folder opens at all."""
     try:
         import h5py.h5f as h5f
     except ImportError:
         return
     full, fold, sep = _canon_factory(scratch)
     mine = _roots([scratch], full, fold)
-    theirs = tuple(sorted(set(fold(full(r["h5"])) for r in runs.values() if r.get("h5"))))
+    theirs = tuple(sorted(set(fold(full(r[k])) for r in runs.values() for k in ("h5", "derived") if r.get(k))))
     open_, create, rdonly = h5f.open, h5f.create, h5f.ACC_RDONLY
     reading = (rdonly, rdonly | getattr(h5f, "ACC_SWMR_READ", 0))
 
@@ -199,8 +199,8 @@ def _guard_h5py(scratch, runs):
     def guarded_open(name, flags=rdonly, *a, **k):
         own, run = inside(name)
         if not own and (flags not in reading or not run):
-            raise PermissionError("run_python opens a run's run.h5 read-only, and other files only in its own "
-                                  "folder: not %s" % os.fsdecode(name))
+            raise PermissionError("run_python opens a run's run.h5 and derived.h5 read-only, and other files only "
+                                  "in its own folder: not %s" % os.fsdecode(name))
         return open_(name, flags, *a, **k)
 
     def guarded_create(name, *a, **k):
@@ -273,6 +273,12 @@ class Run:
                     item = {k: _value(v) for k, v in g.attrs.items()}
                     item.update({k: g[k][()] for k in g})
                     self.fits[name] = item
+            if self._info.get("derived"):   # fits kept after the run (derived.h5): run.h5 never changes once kept
+                with h5py.File(self._info["derived"], "r") as f:
+                    for name, g in f.get("fits", {}).items():
+                        item = {k: _value(v) for k, v in g.attrs.items()}
+                        item.update({k: g[k][()] for k in g})
+                        self.fits[name] = item
         else:
             with np.load(self.path, allow_pickle=False) as z:
                 for k in z.files:

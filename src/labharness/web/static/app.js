@@ -57,6 +57,7 @@
     folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
     "folder-open": '<path d="M3 7.5V5.5A1.5 1.5 0 0 1 4.5 4H9l2 2h6.5A1.5 1.5 0 0 1 19 7.5V9"/><path d="M2.6 10.2A1 1 0 0 1 3.6 9h16.8a1 1 0 0 1 1 1.2l-1.5 7.5a2 2 0 0 1-2 1.6H6a2 2 0 0 1-2-1.6z"/>',
     pencil: '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
+    image: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="M21 16l-5-5-8 8"/>',
     sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
     hand: '<path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/>',
     copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/>',
@@ -1556,7 +1557,7 @@
 
   // The side panels each open and close on their own, and each keeps the width it was left at (drag its left edge).
   // Beside the main column (the chat or Home), which keeps at least CHAT_MIN pixels, they stand side by side in the
-  // order of the top bar's buttons: Team chat, Analysis, Runs with the scan editor beside it, then Lab. Short of room,
+  // order of the top bar's buttons: Team chat, Notebook, Analysis, Runs with the scan editor beside it, then Lab. Short of room,
   // they shrink alike down to their least widths; when one more will not fit even so, the pane looked at least
   // recently (opened, pressed or focused: LOOK) is put away, its button flat and what it showed kept for next time.
   // A pane that cannot stand beside the main column even alone takes the content area by itself (.solo), and the main
@@ -1574,6 +1575,7 @@
   const CHAT_MIN = 520, SIDEBAR_W = 264;
   const PANES = {   // id: [open?, its column, its least width, where its width is kept, its least on a touch screen]
     teampanel: [() => TEAM.open, "workcol", 280, "lh.teamWidth"],
+    nbpanel: [() => NB.open, "workcol", 340, "lh.nbWidth"],
     anpane: [() => ANA.open, "workcol", 292, "lh.anWidth"],
     runpane: [() => RUNS.open, "workcol", 346, "lh.runsWidth", 362],
     edpane: [() => ED.open, "workcol", 360, "lh.edWidth", 800],
@@ -1720,9 +1722,11 @@
   const FULL = [];   // the panel in full screen: one at most
   const isOpen = (id) => (id === "termpane" ? TERM.open : PANES[id][0]());
   // the panels' top-bar buttons, each raised exactly when its panel is on the screen; and how each panel opens or closes
-  const PILLS = { termpane: "toggle-term", teampanel: "toggle-team", anpane: "toggle-analysis", runpane: "toggle-runs",
+  const PILLS = { termpane: "toggle-term", teampanel: "toggle-team", nbpanel: "toggle-notebook", anpane: "toggle-analysis",
+                  runpane: "toggle-runs",
                   labpanel: "toggle-lab" };
-  const TOGGLE = { termpane: toggleTerm, teampanel: toggleTeam, anpane: toggleAnalysis, runpane: toggleRuns,
+  const TOGGLE = { termpane: toggleTerm, teampanel: toggleTeam, nbpanel: toggleNotebook, anpane: toggleAnalysis,
+                   runpane: toggleRuns,
                    edpane: toggleEditor, labpanel: toggleLab };
   // a panel on the screen now: open, and not out of sight: in full screen the one shown; else not under the sidebar
   // that takes the content area, and the terminal (under the chat) not while a pane alone has the main column's place
@@ -1873,6 +1877,7 @@
     PANE_W.edpane = kept("lh.edWidth") || 460;
     PANE_W.labpanel = kept("lh.labWidth") || 380;
     PANE_W.teampanel = kept("lh.teamWidth") || PANE_W.labpanel;
+    PANE_W.nbpanel = kept("lh.nbWidth") || Math.max(PANE_W.labpanel, 440);
     if (sideNarrow()) SIDE.hidden = true;   // a narrow window opens on the chat or Home, never on the list (not kept)
     for (const id of Object.keys(PANES)) {
       // kept: the widths of the panes open (the one dragged, and those it read back), never a closed one's first width
@@ -3351,6 +3356,9 @@
         try { Object.assign(d, await api("/api/projects/" + p.id + "/devices/" + d.id, { method: "PATCH", body: { description: text } })); renderDevices(p); }
         catch (e) { $("project-msg").textContent = e.message; }
       });
+      const pics = h("div", { class: "dev-pics" });
+      const add = rowButton("image", "Add a picture of " + d.name, () => pickDevicePicture(p, d, pics));
+      loadDevicePictures(d, pics);
       const retire = h("button", { class: "link soft", type: "button" }, d.retired ? "Restore" : "Retire");
       retire.addEventListener("click", async () => {
         try { Object.assign(d, await api("/api/projects/" + p.id + "/devices/" + d.id, { method: "PATCH", body: { retired: !d.retired } })); renderDevices(p); loadMount(); }
@@ -3358,8 +3366,50 @@
       });
       return h("li", { class: "memory-note" + (d.retired ? " muted" : "") }, h("span", { class: "memory-kind" }, d.retired ? "retired" : "device"),
         h("div", { class: "memory-body" }, h("span", {}, d.name + (d.material ? " · " + d.material : "")),
-          h("span", { class: "memory-meta" }, d.description || "no description yet")), edit, retire);
+          h("span", { class: "memory-meta" }, d.description || "no description yet"), pics), add, edit, retire);
     }));
+  }
+  // a device's pictures (samples.py): kept as given, never changed; a click shows one bigger
+  const SAMPLE_PIC = new Map();
+  function samplePicURL(d, file) {
+    const key = d.id + "/" + file;
+    if (!SAMPLE_PIC.has(key)) {
+      SAMPLE_PIC.set(key, fetch("/api/samples/picture?device=" + encodeURIComponent(d.id) + "&name=" +
+        encodeURIComponent(d.name) + "&file=" + encodeURIComponent(file), { headers: { "X-Kelvin-Token": token } })
+        .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.blob(); })
+        .then((b) => URL.createObjectURL(b)));
+    }
+    return SAMPLE_PIC.get(key);
+  }
+  async function loadDevicePictures(d, box) {
+    let r;
+    try { r = await api("/api/samples/pictures?device=" + encodeURIComponent(d.id) + "&name=" + encodeURIComponent(d.name)); }
+    catch (e) { return; }
+    box.replaceChildren(...r.pictures.map((pic) => {
+      if (!pic.shown) return h("span", { class: "dev-pic-name", title: pic.caption || pic.file }, pic.file);
+      const img = h("img", { class: "dev-pic", alt: pic.caption || "A picture of " + d.name,
+                             title: (pic.caption ? pic.caption + " · " : "") + String(pic.at || "").slice(0, 10) });
+      samplePicURL(d, pic.file).then((url) => { img.src = url; }).catch(() => { img.alt = "(not there)"; });
+      img.addEventListener("click", () => img.classList.toggle("big"));
+      return img;
+    }));
+  }
+  function pickDevicePicture(p, d, box) {
+    const input = h("input", { type: "file", accept: "image/png,image/jpeg,image/gif,image/webp,image/tiff,image/bmp" });
+    input.addEventListener("change", async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const caption = await askText("What does it show?", { value: "", ok: "Keep" });
+      if (caption === null) return;
+      try {
+        const res = await fetch("/api/samples/pictures?device=" + encodeURIComponent(d.id) + "&name=" +
+          encodeURIComponent(d.name) + "&caption=" + encodeURIComponent(caption), { method: "POST",
+          headers: { "X-Kelvin-Token": token, "X-File-Name": encodeURIComponent(file.name) }, body: file });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "HTTP " + res.status);
+        loadDevicePictures(d, box);
+      } catch (e) { $("project-msg").textContent = e.message; }
+    });
+    input.click();
   }
   async function addDevice() {
     const p = editingProject;
@@ -9919,6 +9969,142 @@
       if (m) toast(m.name + ": " + (m.text.length > 90 ? m.text.slice(0, 90) + "…" : m.text), () => { toggleTeam(true); fullShow("teampanel"); });
     } catch (e) { /* the dot still says */ }
   }
+  // ------------------------------------------------------------------ the Notebook (notebook.py, web/notebook.py)
+  // a day's entries, newest last: Kelvin's drafts (its model named, its numbers checked against the runs they cite)
+  // and people's; Sign and Witness are people's alone; Draft asks the notebook subagent (the message box's model)
+  const NB = { open: false, day: "", data: null, edit: null, drafting: null };
+  const nbToday = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  function toggleNotebook(open) {
+    NB.open = open === undefined ? !NB.open : open;
+    $("nbpanel").hidden = !NB.open;
+    $("toggle-notebook").setAttribute("aria-pressed", String(NB.open));
+    $("toggle-notebook").classList.toggle("on", NB.open);
+    fitLayout();
+    if (NB.open) loadNotebook(NB.day || nbToday());
+  }
+  async function loadNotebook(day) {
+    NB.day = day;
+    $("nb-date").value = day;
+    $("nb-day-label").textContent = day === nbToday() ? "Today"
+      : new Date(day + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+    try { NB.data = await api("/api/notebook?day=" + encodeURIComponent(day)); }
+    catch (e) { NB.data = { error: e.message, entries: [], record: [], days: [] }; }
+    drawNotebook();
+  }
+  function nbStep(dir) {   // the next day that has something, else the next day
+    const days = ((NB.data && NB.data.days) || []).slice().sort();
+    const there = dir < 0 ? days.filter((d) => d < NB.day).pop() : days.find((d) => d > NB.day);
+    if (there) return loadNotebook(there);
+    const d = new Date(NB.day + "T12:00:00");
+    d.setDate(d.getDate() + dir);
+    loadNotebook(d.toISOString().slice(0, 10));
+  }
+  const nbWhen = (iso) => String(iso || "").slice(11, 16);
+  function nbEntryEl(e) {
+    const me = NB.data.me, mine = e.signs.filter((s) => s.account === me);
+    const status = { draft: ["Draft", "line"], signed: ["Signed", "ok"], witnessed: ["Witnessed", "ok"],
+                     amended: ["Amended", "warn"] }[e.status] || [e.status, "line"];
+    const by = e.ai ? "Kelvin" : (e.account || "a person");   // its model in the tooltip, as answers say Kelvin
+    const signers = e.signs.filter((s) => s.version >= (e.amends || 0)).map((s) => (s.role === "witness" ? "witness " : "") + s.account);
+    const meta = h("div", { class: "nb-meta" }, h("span", { class: "chip " + status[1] }, status[0]),
+      h("span", { title: e.ai ? "Drafted by Kelvin with " + e.ai.model : null },
+        by + " · " + nbWhen(e.at) + (e.version > 1 ? " · v" + e.version : "")),
+      signers.length ? h("span", null, "✓ " + signers.join(", ")) : null);
+    const check = e.check && e.check.checked ? (e.check.missing.length
+      ? h("span", { class: "chip warn", title: "Not in the records it cites: " + e.check.missing.join(", ") },
+          "Not in the records: " + e.check.missing.slice(0, 3).join(", ") + (e.check.missing.length > 3 ? "…" : ""))
+      : h("span", { class: "chip ok", title: e.check.checked + " numbers, each in the records it cites" }, "Numbers checked")) : null;
+    if (check) meta.append(check);
+    const cited = new Set();   // a run the text cites ([run:<id>]) is a chip where it is cited; the others below it
+    const text = md(e.body || "").replace(/\[run:([\w.-]+)\]/g, (m, r) => {
+      cited.add(r);
+      const t = /^\d{8}-(\d\d)(\d\d)\d\d-(.*)$/.exec(r);
+      return '<button type="button" class="chip line nb-cite" data-run="' + r + '" title="Open run ' + r + '">' +
+        (t ? t[1] + ":" + t[2] + " " + t[3] : r) + "</button>";
+    });
+    const rest = (e.runs || []).filter((r) => !cited.has(r));
+    const runs = rest.length ? h("div", { class: "nb-runs" }, ...rest.map((r) =>
+      h("button", { class: "chip line", type: "button", title: "Open run " + r, onclick: () => openRun(r) }, r))) : null;
+    const can = (role) => !!me && !mine.some((s) => s.role === role && s.version === e.version);
+    const acts = h("div", { class: "nb-actions" },
+      h("button", { class: "btn small", type: "button", onclick: () => { NB.edit = e; drawNotebook(); } }, "Edit"),
+      e.status === "draft" || e.status === "amended"
+        ? h("button", { class: "btn small primary", type: "button", disabled: !can("author"),
+                        title: me ? "Sign this version as its author" : "Sign in to Kelvin to sign",
+                        onclick: () => nbSign(e.id, "author") }, "Sign")
+        : e.status === "signed" && !mine.length
+          ? h("button", { class: "btn small", type: "button", disabled: !me, title: "Witness it: you read it and agree",
+                          onclick: () => nbSign(e.id, "witness") }, "Witness") : null);
+    return h("article", { class: "kcard nb-entry", "data-entry": e.id }, h("h3", null, e.title), meta,
+      e.aim ? h("p", { class: "nb-aim" }, e.aim) : null, h("div", { class: "nb-text", html: text }), runs, acts);
+  }
+  function nbEditor(e) {
+    const title = h("input", { maxlength: "200", placeholder: "Title", "aria-label": "Title", value: e.title || "" });
+    const aim = h("input", { maxlength: "1000", placeholder: "Aim", "aria-label": "Aim", value: e.aim || "" });
+    const body = h("textarea", { placeholder: "What was done, what was seen. Cite a run as [run:its id].", "aria-label": "Entry" });
+    body.value = e.body || "";
+    const save = async () => {
+      try {
+        await api("/api/notebook", { body: { entry: e.id || "", title: title.value, aim: aim.value, body: body.value, day: NB.day } });
+        NB.edit = null;
+        loadNotebook(NB.day);
+      } catch (err) { toast(err.message); }
+    };
+    setTimeout(() => (e.id ? body : title).focus(), 0);
+    return h("div", { class: "kcard nb-entry nb-edit" }, title, aim, body, h("div", { class: "nb-actions" },
+      h("button", { class: "btn small primary", type: "button", onclick: save }, e.id ? "Save version" : "Save"),
+      h("button", { class: "btn small", type: "button", onclick: () => { NB.edit = null; drawNotebook(); } }, "Cancel")));
+  }
+  function drawNotebook() {
+    const box = $("nb-body"), d = NB.data || { entries: [], record: [] };
+    box.textContent = "";
+    if (d.error) { box.append(h("p", { class: "nb-empty" }, d.error)); return; }
+    if (NB.edit && !NB.edit.id) box.append(nbEditor(NB.edit));
+    for (const e of d.entries) box.append(NB.edit && NB.edit.id === e.id ? nbEditor(e) : nbEntryEl(e));
+    if (NB.drafting) box.append(h("p", { class: "nb-steps", role: "status" }, NB.drafting));
+    if (!d.entries.length && !NB.edit && !NB.drafting) box.append(h("p", { class: "nb-empty" }, "No entries."));
+    if ((d.record || []).length) {
+      box.append(h("details", { class: "nb-record" }, h("summary", null, "Record · " + d.record.length),
+        h("ol", null, ...d.record.map((line) => h("li", null, line)))));
+    }
+  }
+  async function nbSign(id, role) {
+    try { await api("/api/notebook/sign", { body: { entry: id, role } }); loadNotebook(NB.day); }
+    catch (e) { toast(e.message); }
+  }
+  async function nbDraft() {
+    if (NB.drafting) return;
+    NB.drafting = "Reading the day…";
+    drawNotebook();
+    try {
+      const res = await fetch("/api/notebook/draft", { method: "POST",
+        headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ day: NB.day, model: $("model").value || "" }) });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      await readEvents(res, (ev) => {
+        if (ev.type === "step") { NB.drafting = ev.text + "…"; drawNotebook(); }
+        else if (ev.type === "error") toast(ev.message);
+      });
+    } catch (e) { toast("The draft stopped: " + e.message); }
+    NB.drafting = null;
+    loadNotebook(NB.day);
+  }
+  function initNotebook() {
+    $("toggle-notebook").addEventListener("click", () => pillClick("nbpanel", toggleNotebook));
+    $("close-notebook").addEventListener("click", () => toggleNotebook(false));
+    $("nb-prev").addEventListener("click", () => nbStep(-1));
+    $("nb-next").addEventListener("click", () => nbStep(1));
+    $("nb-date").addEventListener("change", () => { if ($("nb-date").value) loadNotebook($("nb-date").value); });
+    $("nb-day-label").addEventListener("click", () => {
+      try { $("nb-date").showPicker(); } catch (e) { $("nb-date").focus(); }
+    });
+    $("nb-body").addEventListener("click", (ev) => {
+      const cite = ev.target.closest(".nb-cite");
+      if (cite) openRun(cite.dataset.run);
+    });
+    $("nb-new").addEventListener("click", () => { NB.edit = {}; drawNotebook(); });
+    $("nb-draft").addEventListener("click", nbDraft);
+  }
   function initTeam() {
     $("toggle-team").addEventListener("click", () => pillClick("teampanel", toggleTeam));
     $("close-team").addEventListener("click", () => toggleTeam(false));
@@ -10472,6 +10658,7 @@
     initMotion();
     initRunsPane();
     initTeam();
+    initNotebook();
     initAnalysis();
     initEditor();
     fitLayout();

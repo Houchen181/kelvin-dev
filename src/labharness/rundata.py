@@ -22,15 +22,22 @@ run.h5 is the run's one data file. h5py, MATLAB (h5read), Igor Pro, Origin and H
     /analysis        the automatic fits and assessment (JSON text)
     /card            what an AI reads first about the run (JSON text)
 
+Once kept, run.h5 is sealed and never changes again: its SHA-256 goes into run.h5.sha256 beside it (`sha256sum -c
+run.h5.sha256` checks it) and into the lab's record with the run's end, and both files are marked read-only. What comes
+of the run afterwards (a fit kept, a re-analysis and its card) goes into derived.h5 beside it, which names the run
+(uuid) and the run.h5 it came from (run_sha256).
+
 Without h5py (Kelvin's core alone) a run keeps its record, and everything here reads that instead."""
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import stat
 import struct
 import sys
 import threading
@@ -47,6 +54,9 @@ RUN_FILE = "run.h5"
 RECORD = "record.bin"
 LOCK = "record.lock"     # held while a Kelvin records the run
 FORMAT = "kelvin-run/1"
+DERIVED = "derived.h5"          # what came of a kept run afterwards (fits, a re-analysis): run.h5 never changes
+SEAL = RUN_FILE + ".sha256"     # run.h5's SHA-256 as `sha256sum -c` reads it, written when run.h5 is kept
+DERIVED_LOCK = threading.RLock()   # one writer of a run's derived.h5 at a time in this Kelvin
 MAGIC = b"KELVIN-RECORD 1\n"
 _HEAD = struct.Struct("<II")     # a frame: payload length, CRC-32 of the payload
 SYNC_EVERY = 1.0                 # seconds between syncs of the record to disk
@@ -547,7 +557,7 @@ def write_h5(folder: Path, rec: Recorded) -> Path:
         f.attrs["format"] = FORMAT
         for k in ("run_id", "plan", "status", "started", "finished", "points", "planned_points", "duration_s",
                   "reason", "operator", "user", "lab", "simulated", "project", "project_name", "device",
-                  "device_name", "labharness"):
+                  "device_name", "labharness", "uuid"):
             if meta.get(k) is not None:
                 f.attrs[k] = _attr(meta[k])
         f.attrs["meta_json"] = json.dumps(_jsonable(meta), ensure_ascii=False)
@@ -591,12 +601,54 @@ def write_h5(folder: Path, rec: Recorded) -> Path:
                 ds.attrs["key"] = _attr(k)
             for a in ("unit", "role", "kind", "quantity"):
                 ds.attrs[a] = _attr(col.get(a) or "")
+            if col.get("unit"):
+                ds.attrs["units"] = _attr(col["unit"])   # as NeXus names it
         for k in frame_keys:
             _frames_into(framed, folder, h5_name(k), [r.get(k) for r in rows], np)
             framed[h5_name(k)].attrs.update({"role": "measured", "kind": "image",
                                              "unit": _attr(info.get(k, {}).get("unit", ""))})
+        _nexus(f, rec, meta)
     os.replace(tmp, folder / RUN_FILE)
     return folder / RUN_FILE
+
+
+def _nexus(f: Any, rec: Recorded, meta: Dict[str, Any]) -> None:
+    """NeXus's view of the run beside Kelvin's own layout, so NeXus readers (h5web, silx, NeXpy, NOMAD) open and plot
+    it without Kelvin: /entry (NXentry) with /entry/data (NXdata: the first reading against the innermost swept axis),
+    /entry/sample (NXsample: the device) and /entry/instrument (NXinstrument: every setting at the start), each a
+    link to what Kelvin keeps: nothing is copied."""
+    import h5py
+    points = f["points"]
+    axes = [a["key"] for a in rec.columns.get("axes") or []]
+    measures = [m["key"] for m in rec.columns.get("measures") or []]
+    signal = next((m for m in measures if h5_name(m) in points and points[h5_name(m)].dtype.kind in "fiu"), None)
+    axis = next((a for a in reversed(axes) if h5_name(a) in points), None) or ("t" if "t" in points else None)
+    f.attrs["default"] = "entry"
+    f.attrs["creator"] = "Kelvin %s" % (meta.get("labharness") or "")
+    entry = f.create_group("entry")
+    entry.attrs["NX_class"] = "NXentry"
+    text = h5py.string_dtype()
+    for name, key in (("title", "plan"), ("start_time", "started"), ("end_time", "finished")):
+        if meta.get(key):
+            entry.create_dataset(name, data=str(meta[key]), dtype=text)
+    if meta.get("uuid"):
+        entry.create_dataset("entry_identifier", data=str(meta["uuid"]), dtype=text)
+    if signal:
+        entry.attrs["default"] = "data"
+        data = entry.create_group("data")
+        data.attrs["NX_class"] = "NXdata"
+        data[h5_name(signal)] = h5py.SoftLink("/points/" + h5_name(signal))
+        data.attrs["signal"] = h5_name(signal)
+        if axis:
+            data[h5_name(axis)] = h5py.SoftLink("/points/" + h5_name(axis))
+            data.attrs["axes"] = [h5_name(axis)]
+    sample = entry.create_group("sample")
+    sample.attrs["NX_class"] = "NXsample"
+    if meta.get("device_name"):
+        sample.create_dataset("name", data=str(meta["device_name"]), dtype=text)
+    instrument = entry.create_group("instrument")
+    instrument.attrs["NX_class"] = "NXinstrument"
+    instrument["settings_at_start"] = h5py.SoftLink("/conditions/start")
 
 
 def _traces(group: Any, key: str, vals: List[Any], np: Any) -> Any:
@@ -635,7 +687,16 @@ def _frames_into(group: Any, folder: Path, key: str, refs: List[Any], np: Any) -
 
 
 def read_h5(folder: Path, with_rows: bool = True) -> Recorded:
-    """run.h5 read back as the record it came from (rows as Kelvin keeps them, frames as their place in run.h5)."""
+    """run.h5 read back as the record it came from (rows as Kelvin keeps them, frames as their place in run.h5), with
+    the run's latest analysis: a re-analysis kept in derived.h5 comes before the one run.h5 was kept with."""
+    rec = _read_run(folder, with_rows)
+    later = derived_text(folder, "analysis")
+    if later:
+        rec.analysis = json.loads(later)
+    return rec
+
+
+def _read_run(folder: Path, with_rows: bool) -> Recorded:
     rec = Recorded(finished=True)
     with h5_file(Path(folder) / RUN_FILE, "r") as f:
         rec.meta = json.loads(f.attrs.get("meta_json", "{}"))
@@ -731,6 +792,10 @@ def finish(folder: Path) -> Optional[Path]:
         (folder / LOCK).unlink()   # left by a crash (a Kelvin recording it deletes its own)
     except OSError:
         pass
+    try:
+        seal(folder)
+    except OSError:   # kept all the same: Kelvin seals it when it next finds it unsealed (tidy_runs)
+        pass
     return path
 
 
@@ -764,6 +829,10 @@ def upgrade(folder: Path, columns: Optional[Dict[str, Any]] = None) -> Optional[
             os.replace(str(p), str(legacy / name))
     for p in folder.glob("*.csv"):   # each trace's CSV
         os.replace(str(p), str(legacy / p.name))
+    try:
+        seal(folder)
+    except OSError:
+        pass
     return folder / RUN_FILE
 
 
@@ -991,6 +1060,9 @@ def meta(folder: Path) -> Dict[str, Any]:
 def card(folder: Path) -> Dict[str, Any]:
     folder = Path(folder)
     if (folder / RUN_FILE).exists() and have_h5():
+        later = derived_text(folder, "card")   # after a re-analysis
+        if later:
+            return json.loads(later or "{}")
         with h5_file(folder / RUN_FILE, "r") as f:
             if "card" in f:
                 return json.loads(_text(f["card"]) or "{}")
@@ -998,21 +1070,128 @@ def card(folder: Path) -> Dict[str, Any]:
 
 
 def set_analysis(folder: Path, analysis: Dict[str, Any]) -> None:
-    """Keep a run's analysis (and its card) up to date after a re-analysis."""
+    """Keep a run's analysis (and its card) up to date after a re-analysis: in its derived.h5, beside the analysis
+    run.h5 was kept with, which stays as it was."""
     folder = Path(folder)
     if (folder / RUN_FILE).exists() and have_h5():
-        import h5py
         rec = read_h5(folder)
         rec.analysis = analysis
         text = json.dumps(_jsonable(make_card(rec)), ensure_ascii=False)
-        with h5_file(folder / RUN_FILE, "r+") as f:
-            for name, value in (("analysis", json.dumps(_jsonable(analysis), ensure_ascii=False)), ("card", text)):
-                if name in f:
-                    del f[name]
-                f.create_dataset(name, data=value, dtype=h5py.string_dtype())
+        write_derived(folder, {"analysis": json.dumps(_jsonable(analysis), ensure_ascii=False), "card": text})
     elif (folder / RECORD).exists():
         r = Recorder(folder)
         try:
             r.write("analysis", {"analysis": analysis})
         finally:
             r.close()
+
+
+# ------------------------------------------------------------------ the seal, and what came of a run afterwards
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(4 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _read_only(path: Path) -> None:
+    """Mark a kept file read-only (on Windows its read-only attribute), so that no program changes it by mistake."""
+    try:
+        os.chmod(str(path), stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
+    except OSError:
+        pass
+
+
+def sealed(folder: Path) -> Optional[str]:
+    """run.h5's SHA-256 as its seal keeps it; None for a run not sealed (from before seals, or not kept yet)."""
+    try:
+        text = (Path(folder) / SEAL).read_text(encoding="ascii")
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = re.match(r"\s*([0-9a-f]{64})\b", text)
+    return m.group(1) if m else None
+
+
+def seal(folder: Path) -> Optional[Dict[str, Any]]:
+    """Seal a kept run: run.h5's SHA-256 in run.h5.sha256 beside it, and both marked read-only. A run is sealed once,
+    when it is kept (an older run when Kelvin first finds it unsealed); a seal is never written over. Returns
+    {"sha256", "bytes", "new"}; None without run.h5, or when a seal file is there that can't be read."""
+    folder = Path(folder)
+    path = folder / RUN_FILE
+    if not path.exists():
+        return None
+    there = sealed(folder)
+    if there:
+        return {"sha256": there, "bytes": path.stat().st_size, "new": False}
+    if (folder / SEAL).exists():   # a seal that doesn't read as one: Verify says so; it is never replaced
+        return None
+    digest = sha256_file(path)
+    tmp = folder / (SEAL + ".tmp")
+    tmp.write_bytes(("%s *%s\n" % (digest, RUN_FILE)).encode("ascii"))
+    os.replace(str(tmp), str(folder / SEAL))
+    _read_only(path)
+    _read_only(folder / SEAL)
+    return {"sha256": digest, "bytes": path.stat().st_size, "new": True}
+
+
+def check_seal(folder: Path) -> Tuple[str, str]:
+    """Whether a kept run is as it was sealed: ("intact", sha256), ("changed", its SHA-256 now), ("unsealed", ""),
+    ("unreadable", why) for a seal file that isn't one, or ("gone", "") when its run.h5 is not there."""
+    folder = Path(folder)
+    path = folder / RUN_FILE
+    digest = sealed(folder)
+    if digest is None:
+        if (folder / SEAL).exists():
+            return "unreadable", "%s is not a SHA-256 line" % SEAL
+        return ("unsealed", "") if path.exists() else ("gone", "")
+    if not path.exists():
+        return "gone", ""
+    now = sha256_file(path)
+    return ("intact", now) if now == digest else ("changed", now)
+
+
+def derived_text(folder: Path, name: str) -> Optional[str]:
+    """A text dataset of the run's derived.h5 (its latest analysis, its card); None when it has none."""
+    path = Path(folder) / DERIVED
+    if not path.exists() or not have_h5():
+        return None
+    with DERIVED_LOCK, h5_file(path, "r") as f:
+        return _text(f[name]) if name in f else None
+
+
+def derived_head(f: Any, folder: Path) -> None:
+    """What a run's derived.h5 says it came from: the run (its folder's name and uuid) and run.h5 by its seal."""
+    folder = Path(folder)
+    f.attrs["format"] = "kelvin-derived/1"
+    f.attrs["run_id"] = folder.name
+    digest = sealed(folder)
+    if digest:
+        f.attrs["run_sha256"] = digest
+    try:
+        uid = meta(folder).get("uuid")
+    except Exception:   # an older run, or one being kept: what it came from is its folder
+        uid = None
+    if uid:
+        f.attrs["run_uuid"] = _attr(uid)
+
+
+def write_derived(folder: Path, items: Dict[str, str]) -> None:
+    """Text datasets into the run's derived.h5 (made when needed), each replacing its earlier one."""
+    import h5py
+    folder = Path(folder)
+    last: Optional[Exception] = None
+    for _ in range(20):   # another reader may hold the file for a moment
+        try:
+            with DERIVED_LOCK, h5_file(folder / DERIVED, "a") as f:
+                derived_head(f, folder)
+                for name, value in items.items():
+                    if name in f:
+                        del f[name]
+                    f.create_dataset(name, data=value, dtype=h5py.string_dtype())
+            return
+        except BlockingIOError as e:
+            last = e
+            time.sleep(0.1)
+    raise OSError("could not write %s: %s" % (DERIVED, last))

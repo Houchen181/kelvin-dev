@@ -2160,7 +2160,8 @@ class ScriptRun:
                 report.warnings.append("automatic analysis failed: %s" % e)
         self.rec.finish(**meta)
         gate.log.write("run_end", by=gate.operator, run=self.rec.run_id, status=status, reason=reason,
-                       points=len(self.rows), duration_s=round(duration, 3), script=str(prep.path))
+                       points=len(self.rows), duration_s=round(duration, 3), script=str(prep.path),
+                       uuid=self.rec.meta.get("uuid"), sha256=getattr(self.rec, "sha256", None))
         self._emit(event="end", run_id=self.rec.run_id, status=status, done=len(self.rows), total=None)
         if status == "done":
             report.message = "script %s done: %s, %d instrument commands through the gate" % (

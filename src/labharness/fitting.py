@@ -20,7 +20,6 @@ from __future__ import annotations
 import ast
 import json
 import math
-import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -34,7 +33,7 @@ PHI0 = 2.067833848e-15
 MAX_POINTS = 200_000          # a fit's points (a long trace is fitted whole up to this)
 CURVE_POINTS = 400            # the model drawn over the data's range
 SIGNIFICANT = 1e-3            # a fit that beats a flat line by less than noise does this often is no finding
-_STORE = threading.Lock()     # one writer of run.h5 at a time in this Kelvin
+from .rundata import DERIVED_LOCK as _STORE   # noqa: E402 - one writer of a run's derived.h5 at a time
 OHMS = {"Ω": 1.0, "ohm": 1.0, "Ohm": 1.0, "ohms": 1.0, "mΩ": 1e-3, "kΩ": 1e3, "MΩ": 1e6, "GΩ": 1e9,
         "mOhm": 1e-3, "kOhm": 1e3, "MOhm": 1e6}
 TESLA = {"T": 1.0, "mT": 1e-3, "µT": 1e-6, "uT": 1e-6, "G": 1e-4, "kG": 0.1}
@@ -1234,15 +1233,15 @@ def fit_name(name: Any) -> str:
 
 
 def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any], by: str = "agent",
-          account: Optional[str] = None) -> str:
-    """Keep a fit in the run's run.h5 as /fits/<name> (replacing one of that name): the model and how it was asked
-    for as attributes, the values, errors and covariance, and the points with the model and residuals at each. Who
+          account: Optional[str] = None, ai: Optional[Dict[str, Any]] = None) -> str:
+    """Keep a fit in the run's derived.h5 as /fits/<name> (replacing one of that name; run.h5, sealed when the run was
+    kept, never changes): the model and how it was asked for as attributes, the values, errors and covariance, and the points with the model and residuals at each. Who
     kept it (by: the agent or a person; account: the person signed in, when people sign in) and when (stored) go with
     it, for the run's reports; so does why it failed (failed), for a failed fit kept on purpose."""
     np = _np()
-    from .rundata import RUN_FILE, h5_file
+    from .rundata import DERIVED, derived_head, h5_file
     name = fit_name(name) or result["model"]
-    path = Path(folder) / RUN_FILE
+    path = Path(folder) / DERIVED
     data = {k: np.asarray(result[k], dtype=float) for k in ("x", "y", "fit", "residuals") if result.get(k) is not None}
     if result.get("sigma") is not None:
         data["sigma"] = np.asarray(result["sigma"], dtype=float)
@@ -1257,11 +1256,13 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
              "failed": result.get("failed"), "p_flat": result.get("p_flat"),
              "x_unit": result.get("x_unit", ""), "y_unit": result.get("y_unit", ""),
              "spec": {k: v for k, v in spec.items() if v not in (None, "", [], {})},
-             "stored": datetime.now().isoformat(timespec="seconds"), "by": by or "agent", "account": account or None}
+             "stored": datetime.now().isoformat(timespec="seconds"), "by": by or "agent", "account": account or None,
+             "ai": ai or None, "versions": _versions()}
     last: Optional[Exception] = None
     for _ in range(20):   # another reader may hold the file for a moment
         try:
-            with _STORE, h5_file(path, "r+") as f:
+            with _STORE, h5_file(path, "a") as f:
+                derived_head(f, Path(folder))
                 fits = f.require_group("fits")
                 if name in fits:
                     del fits[name]
@@ -1276,16 +1277,32 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
         except (OSError, BlockingIOError) as e:
             last = e
             time.sleep(0.1)
-    raise FitError("could not write run.h5: %s" % last)
+    raise FitError("could not write derived.h5: %s" % last)
+
+
+def _versions() -> Dict[str, str]:
+    from .derivations import versions
+    return versions()
 
 
 def stored(folder: Path, with_data: bool = False) -> List[Dict[str, Any]]:
-    """The fits kept in a run's run.h5, oldest first (attributes read back as values). Read while no fit is being
-    kept in this Kelvin: one thread at a time has the file."""
-    from .rundata import RUN_FILE, h5_file, have_h5
-    path = Path(folder) / RUN_FILE
-    if not path.exists() or not have_h5():
+    """The fits kept with a run, oldest first (attributes read back as values): in its derived.h5, and those an
+    older Kelvin kept in its run.h5 (one of the same name in derived.h5 comes before). Read while no fit is being kept
+    in this Kelvin: one thread at a time has the file."""
+    from .rundata import DERIVED, RUN_FILE, have_h5
+    if not have_h5():
         return []
+    found: Dict[str, Dict[str, Any]] = {}
+    for file in (RUN_FILE, DERIVED):
+        path = Path(folder) / file
+        if path.exists():
+            for item in _fits_in(path, with_data):
+                found[item["name"]] = item
+    return sorted(found.values(), key=lambda i: str(i.get("stored", "")))
+
+
+def _fits_in(path: Path, with_data: bool) -> List[Dict[str, Any]]:
+    from .rundata import h5_file
     out = []
     with _STORE, h5_file(path, "r") as f:
         for name, g in (f["fits"].items() if "fits" in f else []):
@@ -1303,7 +1320,7 @@ def stored(folder: Path, with_data: bool = False) -> List[Dict[str, Any]]:
                 for k in g:
                     item[k] = g[k][()].tolist()
             out.append(item)
-    return sorted(out, key=lambda i: str(i.get("stored", "")))
+    return out
 
 
 def kept_curve(kept: Dict[str, Any]) -> Tuple[List[float], List[float]]:

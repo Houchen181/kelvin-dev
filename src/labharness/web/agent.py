@@ -385,6 +385,15 @@ DEFERRED = {
     "pulse boards and sequences": ["run_on_board", "show_sequence", "save_sequence"],
     "SQL on the catalog of runs": ["query_runs"],
     "a lab notebook (ELN) record of a run or a day": ["export_eln"],
+    "checking that the records and runs are as they were written": ["verify_records"],
+    "samples: what each is, what it came from, its history": ["update_sample", "sample_history"],
+    "the lab's procedures (SOPs): keeping, running and following them": ["save_procedure", "procedures",
+                                                                         "run_procedure_step", "procedure_status"],
+    "writing and reading the lab notebook's entries": ["write_entry", "notebook"],
+    "drawing a saved figure again from its raw data": ["rebuild_figure"],
+    "packaging runs for a repository or another ELN (RO-Crate)": ["export_crate"],
+    "a digest of what the record shows over days": ["digest"],
+    "a second copy of the records in another folder (backup)": ["backup_records"],
 }
 DEFERRED_NAMES = {n for names in DEFERRED.values() for n in names}
 MAX_FOUND = 10
@@ -396,7 +405,8 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
            "use_skill", "read_skill_file", "survey_scripts", "survey_labview", "survey_specialmeasure",
-           "run_provenance", "activity",
+           "run_provenance", "activity", "verify_records", "sample_history", "procedures", "procedure_status",
+           "notebook", "search_records", "digest",
            "shared_memory"}
 # agents over MCP keep a note in the lab's memory with remember_shared; the portal's chats with remember (scope lab),
 # which knows whose chat it is and asks the person after the chat read text from outside the lab
@@ -415,7 +425,9 @@ BESIDE_THE_LAB = {"queue_add", "queue_edit", "queue_change", "queue_pause", "que
 # call at a time across chats, filed under its own chat, as the gate's approvals are the lab's
 OFF_LAB = LOOKUPS | READINGS | BESIDE_THE_LAB | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe",
                                                  "save_sequence",   # a written pulse sequence: drives nothing
-                                                 "save_paper", "make_report", "write_file", "measurement_chain"}
+                                                 "save_paper", "make_report", "write_file", "measurement_chain",
+                                                 "record_step", "annotate", "update_sample", "save_procedure",
+                                                 "write_entry", "export_crate", "backup_records"}
 OFF_LAB |= {"export_eln"}   # reads kept runs and the record, writes its own folder (eln.py)
 # the analysis tools read kept runs and write only their own results (datatools.py): side by side, never the lab
 ANALYSIS = {"fit_run", "plot_runs", "export_run", "run_python"}
@@ -423,7 +435,7 @@ LOOKUPS |= ANALYSIS
 OFF_LAB |= ANALYSIS
 # the portal's own readers: the team chat, and the Analysis pane's work on kept runs
 LOOKUPS |= {"team_chat", "analyze"}
-OFF_LAB |= {"team_chat", "analyze"}
+OFF_LAB |= {"team_chat", "analyze", "keep_sample_picture"}
 # Home is the person's page, never the lab: its tools work beside a run, from any chat
 LOOKUPS |= {"home_list"}
 OFF_LAB |= HOME_TOOLS
@@ -530,6 +542,17 @@ MOUNT_DEVICE = {
         "device": {"type": "string", "description": "The device's name (add_device first if it is new), or empty"}}},
 }
 DEVICE_TOOLS = {"devices", "add_device", "mount_device"}
+KEEP_PICTURE = {
+    "name": "keep_sample_picture",
+    "description": "Keep a picture with a sample's record (a photo of the chip, a micrograph, the bonding, the "
+                   "sample in its holder): one the person attached in this chat, when they say which sample it shows. "
+                   "It is kept as given, never changed, with its caption; sample_history shows the latest.",
+    "schema": {"type": "object", "required": ["sample"], "properties": {
+        "sample": {"type": "string", "description": "The sample it shows, e.g. D3"},
+        "picture": {"type": "string", "description": "Which picture: its place in the person's latest message with "
+                                                     "pictures (1, 2...), or its file name; default: the last one"},
+        "caption": {"type": "string", "description": "What it shows, as the person said (after bonding, 50x)"}}},
+}
 
 TEAM_CHAT = {
     "name": "team_chat",
@@ -846,6 +869,41 @@ class ChatAgent:
         have = {t["name"] for t in context["tools"]}
         context["tools"] = context["tools"] + [t for t in self.tools if t["name"] in new and t["name"] not in have]
 
+    def _keep_picture(self, chat: Dict[str, Any], args: Any) -> Tuple[str, bool]:
+        """keep_sample_picture: a picture the person attached in this chat (the one named, else the latest), kept
+        with a sample (LabRuntime.add_sample_picture), as this chat's model may see the sample."""
+        a = args if isinstance(args, dict) else {}
+        wanted = " ".join(str(a.get("picture") or "").split()).lower()
+        found = None
+        for m in reversed(chat.get("messages") or []):
+            if m.get("role") != "user":
+                continue
+            images = [att for att in m.get("attachments") or [] if str(att.get("mime") or "").startswith("image/")]
+            if wanted.isdigit():   # its place among the pictures of the latest message that has any
+                if images:
+                    n = int(wanted)
+                    found = images[n - 1] if 1 <= n <= len(images) else None
+                    break
+                continue
+            for att in reversed(images):
+                if not wanted or wanted in (str(att.get("name") or "").lower(), str(att.get("file") or "").lower()):
+                    found = att
+                    break
+            if found:
+                break
+        if found is None:
+            return ("no picture %s attached in this chat: the person attaches it (the paperclip) and says which sample "
+                    "it shows" % ("named %r" % a.get("picture") if wanted else "")).replace("  ", " "), True
+        try:
+            data = self.store.media(chat["id"], found["file"])
+        except KeyError:
+            return "the picture is no longer kept with this chat: attach it again", True
+        with self.runtime.viewing(self.viewer_for(chat)):
+            said = self.runtime.add_sample_picture(str(a.get("sample") or ""), data, found["file"].rsplit(".", 1)[-1],
+                                                   str(a.get("caption") or ""), "attached in a chat as %s" %
+                                                   found.get("name", found["file"]))
+        return said, not said.startswith("kept")
+
     def _team_chat(self, args: Any) -> Tuple[str, bool]:
         """The team_chat tool: the lab's team chat, marked as what people wrote, never instructions."""
         if self.team is None:
@@ -869,6 +927,52 @@ class ChatAgent:
             return "not worked out: %s" % (str(e) or e.__class__.__name__), True
         await emit({"type": "analysis", "spec": spec, "result": result, "steps": analyst.steps(spec, result)})
         return workbench.describe(result) + "\n(The Analysis panel shows it, with its steps.)", False
+
+    # ------------------------------------------------------------------ the Notebook panel's subagent (notebook.py)
+
+    async def draft_entry(self, day: str, model_key: str, emit: Emit) -> None:
+        """The Notebook panel's subagent drafts a day's entry (web/notebook.py), told to the panel as it works: a step
+        at each lookup, then done {entry, said}. It reads as a viewer who sees shared work only, with its model kept
+        on the entry; Kelvin's code checks its numbers as write_entry does. With no model, it says so."""
+        from . import notebook as subagent
+        key = self.model_key(model_key) if str(model_key or "").strip() else ""
+        viewer = Viewer(model=key or None)
+        await emit({"type": "start", "day": day})
+        try:
+            provider, model_id = self.provider_for(key) if key else (None, "")
+        except ValueError as e:
+            await emit({"type": "error", "message": str(e)})
+            return
+        if provider is None:
+            await emit({"type": "error", "message": "No model to draft with: pick one under the message box, or add "
+                                                    "one in Settings → Models."})
+            return
+
+        async def lookup(name: str, args: Dict[str, Any]) -> Tuple[str, bool]:
+            try:
+                r = await self._tool(name, args, viewer)
+            except Exception as e:
+                return "tool failed: %s" % e, True
+            return "\n".join(c.text for c in r.content if getattr(c, "type", "") == "text"), bool(r.is_error)
+        tools = [t for t in self.tools if t["name"] in subagent.READS and t["name"] in self.read_only]
+        try:
+            found, calls = await asyncio.wait_for(subagent.draft(provider, model_id, day, tools, lookup, emit),
+                                                  subagent.DRAFT_S)
+        except asyncio.TimeoutError:
+            await emit({"type": "error", "message": "The draft took more than %d minutes and was stopped."
+                                                    % (subagent.DRAFT_S // 60)})
+            return
+        if found is None:
+            await emit({"type": "error", "message": "The model gave no draft."})
+            return
+
+        def keep() -> str:
+            with self.runtime.viewing(viewer):
+                return self.runtime.write_entry(found["title"], found["body"], found["aim"], found["runs"],
+                                                found["samples"], "", day, "", by="agent")
+        said = await asyncio.to_thread(contextvars.copy_context().run, keep)
+        m = re.search(r"\b(e[0-9a-f]{8})\b", said)
+        await emit({"type": "done", "entry": m.group(1) if m else None, "said": said, "calls": calls})
 
     # ------------------------------------------------------------------ the Analysis pane's subagent (analyst.py)
 
@@ -1056,8 +1160,8 @@ class ChatAgent:
         parts.append(self._folder(chat))   # last: it changes only when the person picks another folder
         remember = [remember_tool(bool(project), not private)] if learn and (project or not private) else []
         tools = self._lab_tools(chat) + remember + ([SAVE_PAPER] if project else []) + [
-            DEVICES, ADD_DEVICE, MOUNT_DEVICE, CHAT_HISTORY, TEAM_CHAT, ANALYZE, WAKE_ME, USE_SKILL, READ_SKILL_FILE,
-            FIND_TOOLS]
+            DEVICES, ADD_DEVICE, MOUNT_DEVICE, KEEP_PICTURE, CHAT_HISTORY, TEAM_CHAT, ANALYZE, WAKE_ME, USE_SKILL,
+            READ_SKILL_FILE, FIND_TOOLS]
         if project or not private:   # unshared work keeps what it learned in its project
             tools = tools + [SAVE_SKILL, SAVE_RECIPE]
         tools = tools + self._folder_tools(chat)
@@ -1484,7 +1588,7 @@ class ChatAgent:
             rules = rulebook.merge(*[r for r in marks.get("rules") or [] if r])
             return rulebook.allows(rules, key) and not (marks.get("confidential")
                                                         and through_hub(key.partition(":")[0]))
-        return Viewer(chat=chat.get("id"), project=whose["project"], allows=allows, whose=whose)
+        return Viewer(chat=chat.get("id"), project=whose["project"], allows=allows, whose=whose, model=key or None)
 
     async def _work(self, chat: Dict[str, Any], provider: Provider, context: Dict[str, Any], call: Dict[str, Any],
                     emit: Emit) -> Tuple[str, bool, Optional[Dict[str, Any]]]:
@@ -1691,6 +1795,9 @@ class ChatAgent:
             return compaction.search(chat, query), False, None
         if name == "team_chat":
             return _without_opinion(await asyncio.to_thread(self._team_chat, args))
+        if name == "keep_sample_picture" and not chat.get("incognito"):
+            return _without_opinion(await asyncio.to_thread(contextvars.copy_context().run, self._keep_picture, chat,
+                                                            args))
         if name == "analyze":
             return _without_opinion(await self._analyze(args, emit))
         if name in QUEUE_FILED or name == "stop_run":

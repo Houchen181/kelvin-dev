@@ -152,9 +152,9 @@ class ConfigVersions:
         os.replace(tmp, path)
 
     def _append(self, entry: Dict[str, Any]) -> None:
+        from .eventlog import append_chained   # chained as the lab's record is (each line keeps the one before's hash)
         self.folder.mkdir(parents=True, exist_ok=True)
-        with open(self.audit, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_chained(self.audit, entry)
 
     # ------------------------------------------------------------------ keeping versions
 
