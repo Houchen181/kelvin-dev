@@ -75,7 +75,7 @@ def test_a_run_a_crash_ended_is_kept_as_run_h5_marked_interrupted(tmp_path):
     pytest.importorskip("h5py")
     folder = crashed_run(tmp_path, points=5, torn=True)
     assert rundata.finish(folder)
-    assert sorted(p.name for p in folder.iterdir()) == ["run.h5"]                  # the record and its lock gone
+    assert sorted(p.name for p in folder.iterdir()) == ["run.h5", "run.h5.sha256"]   # the record and lock gone
     rec = rundata.load(folder)
     assert rec.meta["status"] == "interrupted" and rec.meta["points"] == 5 and "crash" in rec.meta["reason"]
     assert rec.meta["duration_s"] == 2.0 and rec.meta["finished"]
@@ -101,7 +101,7 @@ def test_any_key_and_value_a_run_records_is_kept_in_run_h5_and_read_back(tmp_pat
     for r in rows:
         rec.add(r)
     rec.finish(status="aborted", points=2, reason="error: got 'OK\x00'")
-    assert not rec.meta.get("warnings") and sorted(p.name for p in folder.iterdir()) == ["run.h5"]
+    assert not rec.meta.get("warnings") and sorted(p.name for p in folder.iterdir()) == ["run.h5", "run.h5.sha256"]
     back = rundata.load(folder)
     assert back.rows == [dict(rows[0], **{"dev.status": "OK"}), rows[1]]   # the NUL left out, the rest as it was
     assert back.meta["reason"] == "error: got 'OK\x00'"   # its meta keeps it (JSON); run.h5's attribute can't
@@ -145,7 +145,7 @@ def test_runs_from_before_run_h5_are_upgraded_and_their_files_kept(tmp_path):
     (crashed / "snapshot_start.json").write_text('{"smu": {"V": 0.0, "output": true}}', encoding="utf-8")
     assert rundata.load(crashed).rows[-1]["i"] == 1                        # readable even before the upgrade
     assert rundata.upgrade(crashed)
-    assert sorted(p.name for p in crashed.iterdir()) == ["legacy", "run.h5"]
+    assert sorted(p.name for p in crashed.iterdir()) == ["legacy", "run.h5", "run.h5.sha256"]   # and sealed
     assert sorted(p.name for p in (crashed / "legacy").iterdir()) == ["data.jsonl", "plan.yaml",
                                                                        "snapshot_start.json"]
     rec = rundata.load(crashed)
@@ -362,8 +362,8 @@ def test_kelvin_keeps_crashed_and_older_runs_when_it_starts(tmp_path):
     (old / "plan.yaml").write_text(SWEEP, encoding="utf-8")
     (old / "data.jsonl").write_text('{"i": 0, "t": 0.0, "smu.V": 0.0, "lockin.X": 1e-6, "smu.I": 0.0}\n',
                                     encoding="utf-8")
-    assert rt.tidy_runs() == {"interrupted": 1, "upgraded": 1, "failed": 0}
-    assert rt.tidy_runs() == {"interrupted": 0, "upgraded": 0, "failed": 0}          # once is enough
+    assert rt.tidy_runs() == {"interrupted": 1, "upgraded": 1, "failed": 0, "sealed": 0}   # sealed as they're kept
+    assert rt.tidy_runs() == {"interrupted": 0, "upgraded": 0, "failed": 0, "sealed": 0}   # once is enough
     found = rt.find_runs(status="interrupted")
     assert found.startswith("2 runs") and "20261024-101500-gate_sweep" in found and old.name in found
     assert rundata.card(old)["swept"][0]["unit"] == "V"                     # units from this lab's cards

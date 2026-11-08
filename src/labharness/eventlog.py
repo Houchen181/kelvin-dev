@@ -1,4 +1,11 @@
-"""The lab notebook's raw record: an append-only event log and per-run folders (each run's data: rundata.py)."""
+"""The lab notebook's raw record: an append-only event log and per-run folders (each run's data: rundata.py).
+
+The record is chained: each line keeps the SHA-256 of the line before it (prev; the first line of a file follows
+GENESIS), so a line changed or taken out afterwards breaks the chain where it was, and Verify (integrity.py) finds it.
+Lines an older Kelvin wrote keep no prev; the first chained line follows the last of them. While a run measures, the
+record's files stay open (EventLog.holding), each line still handed to the operating system as it is written, as
+closing the file did: a set in a plan costs some 15 µs of record instead of half a millisecond of opening and closing
+two files."""
 from __future__ import annotations
 
 import hashlib
@@ -7,9 +14,11 @@ import math
 import os
 import re
 import threading
+import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, BinaryIO, Callable, Dict, Iterator, List, Optional, Tuple
 
 import yaml
 
@@ -42,14 +51,120 @@ def plan_text(plan: Dict[str, Any]) -> str:
 
 _SHARED = threading.Lock()
 _SHARED_SEQ: Dict[str, int] = {}   # the lab's instrument log numbers its own lines: by file, counted once
+_SHARED_TAIL: Dict[str, List[Any]] = {}   # and chains them: [its last line's hash, its size] as this Kelvin left it
+GENESIS = "0" * 64                 # what the first line of a chained record follows
+_TAILS: Dict[str, List[Any]] = {}  # other chained records (append_chained): [last line's hash, size], by file
+_TAILS_LOCK = threading.Lock()
 
 
-def _lines(path: Path) -> int:
+def line_hash(line: bytes) -> str:
+    """A record line's SHA-256 (without its line end): what the next line keeps as prev."""
+    return hashlib.sha256(line.rstrip(b"\r\n")).hexdigest()
+
+
+def _tail(path: Path) -> Tuple[int, Optional[str], int]:
+    """(lines, its last line's hash or None, size in bytes) of a record file; (0, None, 0) without one."""
+    n, last, size = 0, None, 0
     try:
         with open(path, "rb") as f:
-            return sum(1 for _ in f)
+            for line in f:
+                n += 1
+                if line.strip():
+                    last = line
+            size = f.tell()
     except OSError:
-        return 0
+        return 0, None, 0
+    return n, (line_hash(last) if last is not None else None), size
+
+
+def _last_hash(path: Path) -> Optional[str]:
+    """The hash of a record file's last line, read from its end (someone else wrote to it since)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            back = min(size, 1 << 16)
+            while True:
+                f.seek(size - back)
+                lines = [x for x in f.read(back).splitlines() if x.strip()]
+                if len(lines) >= 2 or back == size:   # the first may be cut short
+                    break
+                back = min(size, back * 4)
+    except OSError:
+        return None
+    return line_hash(lines[-1]) if lines else None
+
+
+def _chained(path: Path, held: Optional[BinaryIO], tail: List[Any], record: Dict[str, Any]) -> None:
+    """Append one line to a chained record file, keeping the hash of the line before it (prev). tail: [the last line's
+    hash, the file's size] as this Kelvin left them, brought up to date when someone else wrote to the file since
+    (another Kelvin, a person's editor). held: the file kept open (EventLog.holding), else it is opened for the line."""
+    f = held if held is not None else open(path, "ab")
+    try:
+        size = os.fstat(f.fileno()).st_size if held is not None else f.tell()
+        if size != tail[1]:
+            tail[0] = _last_hash(path)
+        line = (json.dumps(dict(record, prev=tail[0] or GENESIS), ensure_ascii=False) + "\n").encode("utf-8")
+        f.write(line)
+        f.flush()
+        tail[0], tail[1] = line_hash(line), size + len(line)
+    finally:
+        if held is None:
+            f.close()
+
+
+def append_chained(path: Any, record: Dict[str, Any]) -> None:
+    """Append one line to a chained record file other than the event logs (the config history's audit.jsonl)."""
+    path = Path(path)
+    with _TAILS_LOCK:
+        key = str(path)
+        if key not in _TAILS:
+            _, last, size = _tail(path)
+            _TAILS[key] = [last, size]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _chained(path, None, _TAILS[key], record)
+
+
+def verify_chain(path: Any) -> Dict[str, Any]:
+    """Walk a chained record file. {"lines", "chained" (lines that keep their prev), "since" (the time of the first
+    chained line), "breaks" ([{"line", "seq", "wall", "why"}]: a line whose prev isn't the line before it, so that
+    line or the one before was changed, or lines between were taken out; or a line without prev after the chain
+    began, which something that doesn't chain wrote), "last" (the last line's hash)}."""
+    out: Dict[str, Any] = {"lines": 0, "chained": 0, "since": None, "breaks": [], "last": None}
+    before: Optional[str] = None
+    try:
+        f = open(path, "rb")
+    except OSError:
+        return out
+    with f:
+        for no, raw in enumerate(f, 1):
+            if not raw.strip():
+                continue
+            out["lines"] += 1
+            try:
+                e = json.loads(raw)
+            except ValueError:
+                e = None
+            if not isinstance(e, dict):
+                out["breaks"].append({"line": no, "why": "not a record line"})
+            elif e.get("prev") is not None:
+                out["chained"] += 1
+                if out["since"] is None:
+                    out["since"] = e.get("wall")
+                if e["prev"] != (before or GENESIS):
+                    out["breaks"].append({"line": no, "seq": e.get("seq"), "wall": e.get("wall"),
+                                          "why": "it doesn't follow the line before it"})
+            elif out["chained"]:
+                out["breaks"].append({"line": no, "seq": e.get("seq"), "wall": e.get("wall"),
+                                      "why": "a line without its link, written by something that doesn't chain"})
+            before = line_hash(raw)
+    out["last"] = before
+    return out
+
+
+def _unchained(event: Dict[str, Any]) -> Dict[str, Any]:
+    event.pop("prev", None)
+    return event
 
 
 class EventLog:
@@ -58,29 +173,78 @@ class EventLog:
     shared: the lab's instrument log (~/Kelvin/instrument-log.jsonl), where every event of everyone who uses these
     instruments is also written, with user: the signed-in person (None: nobody, such as setting up on start).
     whose: the marks of unshared work the writing thread does (LabRuntime._whose_now), kept with each event it writes,
-    so that other chats and phones through the Kelvin hub never see it."""
+    so that other chats and phones through the Kelvin hub never see it. actor: the AI the writing thread works for
+    (LabRuntime._actor_now: the chat's model and the chat), kept with each event as ai."""
 
     def __init__(self, path: Any = None, clock: Any = None, shared: Any = None, user: Optional[str] = None,
-                 whose: Optional[Callable[[], Optional[Dict[str, Any]]]] = None):
+                 whose: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+                 actor: Optional[Callable[[], Optional[Dict[str, Any]]]] = None):
         self.path = Path(path) if path else None
         self.clock = clock
         self.shared = Path(shared) if shared else None
         self.user = user
         self.whose = whose
+        self.actor = actor
         self._memory: List[Dict[str, Any]] = []
         self._seq = 0
+        self._tail: List[Any] = [None, 0]   # [the last line's hash, the file's size] (_chained)
+        self._held: Optional[BinaryIO] = None          # the record's files while a run measures (holding)
+        self._held_shared: Optional[BinaryIO] = None
+        self._holds = 0
         self._lock = threading.Lock()  # agent, plans and people write from different threads; keep every line
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.path.exists():
-                with open(self.path, "rb") as f:
-                    self._seq = sum(1 for _ in f)
+                self._seq, last, size = _tail(self.path)
+                self._tail = [last, size]
+
+    def ai_now(self) -> Optional[Dict[str, Any]]:
+        """The AI the calling thread works for (actor), or None: a person, Kelvin itself, a queue."""
+        try:
+            return self.actor() if self.actor is not None else None
+        except Exception:   # the record never loses an event to its marks
+            return None
+
+    @contextmanager
+    def holding(self) -> Iterator[None]:
+        """Keep the record's files open while a run measures (each line is still handed to the operating system as
+        it is written, as closing the file did; a crash loses nothing more)."""
+        with self._lock:
+            self._holds += 1
+            if self._holds == 1 and self.path:
+                try:
+                    self._held = open(self.path, "ab")
+                except OSError:
+                    self._held = None
+        if self.shared:
+            with _SHARED:
+                if self._holds == 1 and self._held_shared is None:
+                    try:
+                        self.shared.parent.mkdir(parents=True, exist_ok=True)
+                        self._held_shared = open(self.shared, "ab")
+                    except OSError:
+                        self._held_shared = None
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._holds -= 1
+                last = self._holds == 0
+                if last and self._held is not None:
+                    self._held.close()
+                    self._held = None
+            if last:
+                with _SHARED:
+                    if self._held_shared is not None:
+                        self._held_shared.close()
+                        self._held_shared = None
 
     def write(self, type_: str, **fields: Any) -> Dict[str, Any]:
         try:
             whose = self.whose() if self.whose is not None else None
         except Exception:   # the record never loses an event to its marks
             whose = None
+        ai = self.ai_now() if "ai" not in fields else None
         with self._lock:
             self._seq += 1
             event: Dict[str, Any] = {"seq": self._seq, "wall": _now(), "type": type_}
@@ -91,9 +255,10 @@ class EventLog:
                     event[k] = _jsonable(v)
             if whose and "whose" not in event:
                 event["whose"] = _jsonable(whose)
+            if ai:
+                event["ai"] = _jsonable(ai)
             if self.path:
-                with open(self.path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                _chained(self.path, self._held, self._tail, event)
             else:
                 self._memory.append(event)
         if self.shared:
@@ -102,14 +267,13 @@ class EventLog:
                     self.shared.parent.mkdir(parents=True, exist_ok=True)
                     key = str(self.shared)
                     if key not in _SHARED_SEQ:
-                        _SHARED_SEQ[key] = _lines(self.shared)
+                        _SHARED_SEQ[key], last, size = _tail(self.shared)
+                        _SHARED_TAIL[key] = [last, size]
                     _SHARED_SEQ[key] += 1
                     # its own numbering: each person's record numbers its events (own_seq), and those mixed in here
                     # read 34, 1, 35 (a field test's log, as Kelvin set up on start with nobody signed in)
-                    line = json.dumps(dict(event, seq=_SHARED_SEQ[key], own_seq=event["seq"], user=self.user),
-                                      ensure_ascii=False) + "\n"
-                    with open(self.shared, "a", encoding="utf-8") as f:
-                        f.write(line)
+                    _chained(self.shared, self._held_shared, _SHARED_TAIL[key],
+                             dict(event, seq=_SHARED_SEQ[key], own_seq=event["seq"], user=self.user))
             except OSError:   # the person's own record has it; the lab's log is a copy
                 pass
         return event
@@ -120,7 +284,7 @@ class EventLog:
         if not self.path.exists():
             return []
         with open(self.path, encoding="utf-8") as f:
-            return [json.loads(line) for line in f if line.strip()]
+            return [_unchained(json.loads(line)) for line in f if line.strip()]
 
 
 class RunRecord:
@@ -132,8 +296,9 @@ class RunRecord:
         self.path = path
         self.rows: List[Dict[str, Any]] = []
         self.snapshots: Dict[str, Dict[str, Any]] = {}
-        self.meta: Dict[str, Any] = {"run_id": run_id, "plan": plan.get("plan"), "operator": operator,
-                                     "started": _now(), "labharness": __version__}
+        self.meta: Dict[str, Any] = {"run_id": run_id, "uuid": str(uuid.uuid4()), "plan": plan.get("plan"),
+                                     "operator": operator, "started": _now(), "labharness": __version__}
+        self.sha256: Optional[str] = None   # run.h5's seal, once the run is kept (finish)
         self._plan = plan
         self._record: Optional[rundata.Recorder] = None
         if path:
@@ -181,6 +346,7 @@ class RunRecord:
         self._record.close()
         try:
             rundata.finish(self.path)
+            self.sha256 = rundata.sealed(self.path)
         except Exception as e:   # the record keeps every point; it becomes run.h5 at the next start
             self.meta.setdefault("warnings", []).append("run.h5 not written yet: %s" % e)
         finally:

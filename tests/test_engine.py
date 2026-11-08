@@ -40,7 +40,8 @@ def test_plan_runs_with_a_single_approval(lab, make_engine, tmp_path):
     assert "gate_sweep" in rec.plan_text and rec.snapshots["start"] and rec.snapshots["end"]
     assert rec.meta["status"] == "done" and rec.meta["points"] == 21 and len(rec.rows) == 21
     # one data file per run (run.h5); Kelvin's core alone keeps the record it would be written from
-    assert sorted(p.name for p in run_dir.iterdir()) == (["run.h5"] if rundata.have_h5() else ["record.bin"])
+    assert sorted(p.name for p in run_dir.iterdir()) == (["run.h5", "run.h5.sha256"] if rundata.have_h5() else
+                                                         ["record.bin"])
 
 
 def test_dry_run_leaves_the_lab_untouched(lab, make_engine):

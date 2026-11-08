@@ -312,6 +312,10 @@ DEFERRED = {
     "pulse boards and sequences": ["run_on_board", "show_sequence", "save_sequence"],
     "SQL on the catalog of runs": ["query_runs"],
     "a lab notebook (ELN) record of a run or a day": ["export_eln"],
+    "checking that the records and runs are as they were written": ["verify_records"],
+    "the lab's procedures (SOPs): keeping, running and following them": ["save_procedure", "procedures",
+                                                                         "run_procedure_step", "procedure_status"],
+    "writing and reading the lab notebook's entries": ["write_entry", "notebook"],
 }
 DEFERRED_NAMES = {n for names in DEFERRED.values() for n in names}
 MAX_FOUND = 10
@@ -323,7 +327,8 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
            "use_skill", "read_skill_file", "survey_scripts", "survey_labview", "survey_specialmeasure",
-           "run_provenance", "activity",
+           "run_provenance", "activity", "verify_records", "sample_history", "procedures", "procedure_status",
+           "notebook",
            "shared_memory"}
 # agents over MCP keep a note in the lab's memory with remember_shared; the portal's chats with remember (scope lab),
 # which knows whose chat it is and asks the person after the chat read text from outside the lab
@@ -342,7 +347,9 @@ BESIDE_THE_LAB = {"queue_add", "queue_edit", "queue_change", "queue_pause", "que
 # call at a time across chats, filed under its own chat, as the gate's approvals are the lab's
 OFF_LAB = LOOKUPS | READINGS | BESIDE_THE_LAB | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe",
                                                  "save_sequence",   # a written pulse sequence: drives nothing
-                                                 "save_paper", "make_report", "write_file", "measurement_chain"}
+                                                 "save_paper", "make_report", "write_file", "measurement_chain",
+                                                 "record_step", "annotate", "update_sample", "save_procedure",
+                                                 "write_entry"}
 OFF_LAB |= {"export_eln"}   # reads kept runs and the record, writes its own folder (eln.py)
 # the analysis tools read kept runs and write only their own results (datatools.py): side by side, never the lab
 ANALYSIS = {"fit_run", "plot_runs", "export_run", "run_python"}
@@ -790,6 +797,52 @@ class ChatAgent:
             return "not worked out: %s" % (str(e) or e.__class__.__name__), True
         await emit({"type": "analysis", "spec": spec, "result": result, "steps": analyst.steps(spec, result)})
         return workbench.describe(result) + "\n(The Analysis panel shows it, with its steps.)", False
+
+    # ------------------------------------------------------------------ the Notebook panel's subagent (notebook.py)
+
+    async def draft_entry(self, day: str, model_key: str, emit: Emit) -> None:
+        """The Notebook panel's subagent drafts a day's entry (web/notebook.py), told to the panel as it works: a step
+        at each lookup, then done {entry, said}. It reads as a viewer who sees shared work only, with its model kept
+        on the entry; Kelvin's code checks its numbers as write_entry does. With no model, it says so."""
+        from . import notebook as subagent
+        key = self.model_key(model_key) if str(model_key or "").strip() else ""
+        viewer = Viewer(model=key or None)
+        await emit({"type": "start", "day": day})
+        try:
+            provider, model_id = self.provider_for(key) if key else (None, "")
+        except ValueError as e:
+            await emit({"type": "error", "message": str(e)})
+            return
+        if provider is None:
+            await emit({"type": "error", "message": "No model to draft with: pick one under the message box, or add "
+                                                    "one in Settings → Models."})
+            return
+
+        async def lookup(name: str, args: Dict[str, Any]) -> Tuple[str, bool]:
+            try:
+                r = await self._tool(name, args, viewer)
+            except Exception as e:
+                return "tool failed: %s" % e, True
+            return "\n".join(c.text for c in r.content if getattr(c, "type", "") == "text"), bool(r.is_error)
+        tools = [t for t in self.tools if t["name"] in subagent.READS and t["name"] in self.read_only]
+        try:
+            found, calls = await asyncio.wait_for(subagent.draft(provider, model_id, day, tools, lookup, emit),
+                                                  subagent.DRAFT_S)
+        except asyncio.TimeoutError:
+            await emit({"type": "error", "message": "The draft took more than %d minutes and was stopped."
+                                                    % (subagent.DRAFT_S // 60)})
+            return
+        if found is None:
+            await emit({"type": "error", "message": "The model gave no draft."})
+            return
+
+        def keep() -> str:
+            with self.runtime.viewing(viewer):
+                return self.runtime.write_entry(found["title"], found["body"], found["aim"], found["runs"],
+                                                found["samples"], "", day, "", by="agent")
+        said = await asyncio.to_thread(contextvars.copy_context().run, keep)
+        m = re.search(r"\b(e[0-9a-f]{8})\b", said)
+        await emit({"type": "done", "entry": m.group(1) if m else None, "said": said, "calls": calls})
 
     # ------------------------------------------------------------------ the Analysis pane's subagent (analyst.py)
 
@@ -1369,7 +1422,7 @@ class ChatAgent:
             rules = rulebook.merge(*[r for r in marks.get("rules") or [] if r])
             return rulebook.allows(rules, key) and not (marks.get("confidential")
                                                         and through_hub(key.partition(":")[0]))
-        return Viewer(chat=chat.get("id"), project=whose["project"], allows=allows, whose=whose)
+        return Viewer(chat=chat.get("id"), project=whose["project"], allows=allows, whose=whose, model=key or None)
 
     async def _work(self, chat: Dict[str, Any], provider: Provider, context: Dict[str, Any], call: Dict[str, Any],
                     emit: Emit) -> Tuple[str, bool, Optional[Dict[str, Any]]]:

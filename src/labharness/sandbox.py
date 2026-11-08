@@ -189,6 +189,8 @@ def run(code: str, runs: Dict[str, Path], base: Path, timeout_s: float = TIME_LI
         item: Dict[str, Any] = {"folder": str(run_dir)}
         if h5.exists() and rundata.have_h5() and not rundata.being_recorded(run_dir):
             item["h5"] = str(h5)
+            if (run_dir / rundata.DERIVED).exists():   # the fits kept since (run.h5 never changes once kept)
+                item["derived"] = str(run_dir / rundata.DERIVED)
         else:   # still being measured (or no h5py): a snapshot of its points, in the scratch folder
             from .export import write_npz
             (folder / "runs").mkdir(exist_ok=True)

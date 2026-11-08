@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from . import rundata
+from . import rundata, runnotes
 
 FILE = "catalog.sqlite"
 SCHEMA = """
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS runs (
   run_id TEXT PRIMARY KEY, plan TEXT, status TEXT, started TEXT, finished TEXT, duration_s REAL,
   points INTEGER, planned_points INTEGER, project TEXT, project_name TEXT, device TEXT, device_name TEXT,
   lab TEXT, simulated INTEGER, operator TEXT, user TEXT, swept TEXT, measured TEXT, assessment TEXT, reason TEXT,
-  card TEXT, mtime REAL, marks TEXT);
+  card TEXT, mtime REAL, marks TEXT, uuid TEXT, sha256 TEXT, flag TEXT, tags TEXT);
 CREATE TABLE IF NOT EXISTS columns (
   run_id TEXT, key TEXT, role TEXT, quantity TEXT, unit TEXT, kind TEXT,
   n INTEGER, min REAL, max REAL, mean REAL, first REAL, last REAL, PRIMARY KEY (run_id, key));
@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS conditions (
   run_id TEXT, key TEXT, value REAL, text TEXT, unit TEXT, PRIMARY KEY (run_id, key));
 CREATE TABLE IF NOT EXISTS results (
   run_id TEXT, reading TEXT, grp TEXT, name TEXT, value REAL, error REAL, unit TEXT, text TEXT);
+CREATE TABLE IF NOT EXISTS notes (
+  run_id TEXT, id TEXT, at TEXT, by TEXT, account TEXT, flag TEXT, tags TEXT, text TEXT, corrects TEXT,
+  standing INTEGER);
 CREATE INDEX IF NOT EXISTS runs_started ON runs (started);
 CREATE INDEX IF NOT EXISTS columns_key ON columns (key);
 CREATE INDEX IF NOT EXISTS columns_quantity ON columns (quantity);
@@ -45,7 +48,11 @@ SCHEMA_TEXT = """runs: one row per finished run. run_id, plan (its name), status
   project and project_name, device and device_name (the sample), lab, simulated (1 for a lab of simulated instruments),
   operator, user, swept and measured (comma-separated column keys), assessment (the automatic analysis' verdict),
   reason (why it stopped early), card (the run's card as JSON: json_extract(card, '$.held') and so on), marks
-  (whose work it is, as JSON: the chat that started it, and incognito, unshared, rules, confidential).
+  (whose work it is, as JSON: the chat that started it, and incognito, unshared, rules, confidential), uuid (the
+  run's own id, kept in its file wherever the file goes), sha256 (run.h5's seal: its SHA-256 as it was kept; empty for
+  a run not sealed yet), flag (bad, check or key, as its notes stand; empty: none) and tags (comma-separated).
+notes: the notes people and Kelvin kept on runs (annotate). run_id, id, at, by (agent or human), account, flag,
+  tags (comma-separated), text, corrects (the note it corrects), standing (1 unless a later note corrects it).
 columns: one row per column of each run. run_id, key (instrument.parameter, or i and t), role (axis, measured,
   index or time), quantity (voltage, current, temperature, magnetic_field, frequency, power, phase, resistance,
   position, wavelength, counts...), unit, kind (scalar, trace or image), n, and for scalars min, max, mean,
@@ -57,18 +64,25 @@ results: the automatic fits. run_id, reading (the fitted column), grp (the group
   name, value, error, unit, text (as shown)."""
 MAX_ROWS = 200          # rows a query answers with at most
 QUERY_SECONDS = 5.0     # a query that runs longer is stopped
-TABLES = ("runs", "columns", "conditions", "results")
+TABLES = ("runs", "columns", "conditions", "results", "notes")
 # a run's marks of whose work it is (LabRuntime._attribute): who may see it (LabRuntime.may_see)
 MARKS = ("chat", "incognito", "unshared", "unpublished", "confidential", "rules")
 _lock = threading.Lock()
 
 
 def _stamp(folder: Path) -> float:
+    """When a run's files last changed: its data, and what came of it afterwards (derived.h5) and its seal."""
+    base = 0.0
     for name in (rundata.RUN_FILE, rundata.RECORD, "meta.json", "data.jsonl"):
         p = folder / name
         if p.exists():
-            return p.stat().st_mtime
-    return 0.0
+            base = p.stat().st_mtime
+            break
+    for name in (rundata.DERIVED, rundata.SEAL, runnotes.FILE):
+        p = folder / name
+        if p.exists():
+            base = max(base, p.stat().st_mtime)
+    return base
 
 
 def _num(v: Any) -> Optional[float]:
@@ -121,9 +135,12 @@ class Catalog:
             con = sqlite3.connect(str(self.path), timeout=10)
             con.executescript(SCHEMA)
             self.synced = 0.0
-        if "marks" not in [r[1] for r in con.execute("PRAGMA table_info(runs)")]:   # from before runs kept whose
-            con.execute("ALTER TABLE runs ADD COLUMN marks TEXT")                      # they are: each run is read
-            con.execute("UPDATE runs SET mtime = NULL")                                # again at the next look
+        have = [r[1] for r in con.execute("PRAGMA table_info(runs)")]
+        added = [c for c in ("marks", "uuid", "sha256", "flag", "tags") if c not in have]   # from before runs kept
+        for c in added:   # whose they are, their seals and notes: each run is read again at the next look
+            con.execute("ALTER TABLE runs ADD COLUMN %s TEXT" % c)
+        if added:
+            con.execute("UPDATE runs SET mtime = NULL")
             con.commit()
             self.synced = 0.0
         return con
@@ -177,7 +194,7 @@ class Catalog:
 
     @staticmethod
     def _drop(con: sqlite3.Connection, run_id: str) -> None:
-        for table in ("runs", "columns", "conditions", "results"):
+        for table in TABLES:
             con.execute("DELETE FROM %s WHERE run_id = ?" % table, (run_id,))
 
     def _add(self, con: sqlite3.Connection, folder: Path, stamp: float) -> int:
@@ -194,13 +211,21 @@ class Catalog:
         measured = [m["key"] for m in rec.columns.get("measures") or []]
         self._drop(con, run_id)
         marks = {k: meta[k] for k in MARKS if meta.get(k)}
-        con.execute("INSERT INTO runs VALUES (%s)" % ",".join("?" * 23), (
+        notes = runnotes.read(folder)
+        con.execute("INSERT INTO runs VALUES (%s)" % ",".join("?" * 27), (
             run_id, meta.get("plan"), meta.get("status"), meta.get("started"), meta.get("finished"),
             _num(meta.get("duration_s")), meta.get("points"), meta.get("planned_points"), meta.get("project"),
             meta.get("project_name"), meta.get("device"), meta.get("device_name"), meta.get("lab"),
             1 if meta.get("simulated") else 0, meta.get("operator"), meta.get("user"), ",".join(swept),
             ",".join(measured), (rec.analysis or {}).get("assessment"), meta.get("reason"),
-            json.dumps(card, ensure_ascii=False), stamp, json.dumps(marks, ensure_ascii=False) if marks else None))
+            json.dumps(card, ensure_ascii=False), stamp, json.dumps(marks, ensure_ascii=False) if marks else None,
+            meta.get("uuid"), rundata.sealed(folder), runnotes.flag_of(notes) or None,
+            ",".join(runnotes.tags_of(notes)) or None))
+        up = {n.get("id") for n in runnotes.standing(notes)}
+        for n in notes:
+            con.execute("INSERT INTO notes VALUES (?,?,?,?,?,?,?,?,?,?)", (
+                run_id, n.get("id"), n.get("at"), n.get("by"), n.get("account"), n.get("flag"),
+                ",".join(n.get("tags") or []) or None, n.get("text"), n.get("corrects"), 1 if n.get("id") in up else 0))
         for key, s in stats.items():
             col = info.get(key) or {"role": "measured", "unit": "", "quantity": rundata.quantity_of(key, "")}
             kind = "image" if s.get("image") else "trace" if s.get("trace") else "scalar"
@@ -231,7 +256,7 @@ class Catalog:
 
     def find(self, text: str = "", device: str = "", project: str = "", plan: str = "", status: str = "",
              since: str = "", until: str = "", quantity: str = "", limit: int = 20,
-             skip: Iterable[str] = ()) -> List[Dict[str, Any]]:
+             skip: Iterable[str] = (), flag: str = "", tag: str = "") -> List[Dict[str, Any]]:
         """Runs matching every filter given, newest first. since/until: dates or times (2026-10-24, 2026-10-24 15:00,
         today, 2h: _time; inclusive; ValueError when one isn't a time); quantity: a swept or measured quantity
         (temperature) or column (smu.V, or smu for any of its columns). skip: runs left out (unshared work the
@@ -256,13 +281,20 @@ class Catalog:
         if until:   # the whole of that day (or minute...)
             where.append("substr(started, 1, %d) <= ?" % len(until))
             args.append(until)
-        if text:
+        if text:   # a run's notes too (annotate)
             where.append("(plan LIKE ? OR assessment LIKE ? OR device_name LIKE ? OR project_name LIKE ? "
-                         "OR run_id LIKE ? OR card LIKE ?)")
-            args += ["%" + text + "%"] * 6
+                         "OR run_id LIKE ? OR card LIKE ? OR tags LIKE ? OR run_id IN "
+                         "(SELECT run_id FROM notes WHERE standing = 1 AND text LIKE ?))")
+            args += ["%" + text + "%"] * 8
         if quantity:
             where.append("run_id IN (SELECT run_id FROM columns WHERE quantity = ? OR key = ? OR key LIKE ?)")
             args += [quantity, quantity, quantity + ".%"]
+        if flag:
+            where.append("flag = ?")
+            args.append(flag.strip().lower())
+        if tag:
+            where.append("run_id IN (SELECT run_id FROM notes WHERE standing = 1 AND ',' || lower(tags) || ',' LIKE ?)")
+            args.append("%," + tag.strip().lower().lstrip("#") + ",%")
         sql = "SELECT * FROM runs%s ORDER BY started DESC LIMIT ?" % (
             " WHERE " + " AND ".join(where) if where else "")
         with _lock:
@@ -277,6 +309,21 @@ class Catalog:
             r.pop("mtime", None)
             r.pop("marks", None)
         return rows
+
+    def runs_of(self, device: Optional[str], name: Optional[str], skip: Iterable[str] = ()) -> List[Dict[str, Any]]:
+        """A sample's runs, oldest first, each with its coldest temperature at the start (kelvin: its conditions in
+        K), its flag and tags. skip: runs left out (unshared work the asker may not see)."""
+        sql = ("SELECT r.run_id, r.plan, r.status, r.started, r.flag, r.tags, (SELECT min(c.value) FROM conditions c "
+               "WHERE c.run_id = r.run_id AND c.unit = 'K' AND c.value IS NOT NULL) AS kelvin FROM runs r "
+               "WHERE (r.device = ? OR lower(r.device_name) = lower(?)) AND r.run_id NOT IN "
+               "(SELECT value FROM json_each(?)) ORDER BY r.started")
+        with _lock:
+            con = self._connect()
+            con.row_factory = sqlite3.Row
+            try:
+                return [dict(r) for r in con.execute(sql, (device or "", name or "", json.dumps(sorted(skip))))]
+            finally:
+                con.close()
 
     def count(self) -> int:
         with _lock:

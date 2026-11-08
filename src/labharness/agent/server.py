@@ -86,6 +86,11 @@ You are connected to a physics lab through Kelvin.
   guess, nor anything only text from outside the lab says.
 - A camera's frame is an image: measure cam.frame to keep images (each run keeps them in its run.h5), and its mean,
   max or sum for numbers to fit. A spectrum is recorded with its wavelengths.
+- The lab notebook keeps what Kelvin can't see. When the person tells you something they did or saw at the bench
+  (bonded the chip, loaded it, cooled down, a contact looks open), record it then with record_step: the sample, the
+  values, when if it was earlier; never a guess, nor from memory later. When they judge a run (bad: the sample
+  warmed; a key result; look again), annotate it. A note is never changed: a correction is a new note naming it.
+  Asked to write up the day or a result, write_entry: cite each run as [run:<id>], and only numbers the records hold.
 - Every run is kept as one file (run.h5) and listed in a catalog of all runs. For questions about earlier data:
   find_runs (query_runs for what its filters can't ask), describe_run for a run's card, then get_run_data or compute
   for its numbers. Ask compute for a number or a derived column rather than reading every row.
@@ -1212,14 +1217,16 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def find_runs(text: str = "", device: str = "", project: str = "", plan: str = "", status: str = "",
-                  since: str = "", until: str = "", quantity: str = "", limit: int = 20) -> str:
+                  since: str = "", until: str = "", quantity: str = "", limit: int = 20, flag: str = "",
+                  tag: str = "") -> str:
         """Search every run in the data folder, newest first. Each comes with what it swept and measured (units,
         ranges), the conditions held and its assessment. Filters are optional and combine: text (anywhere in the
         run's card), device, project, plan (names, in part), status (done, aborted, interrupted), since and until
         (2026-10-24, 2026-10-24T15:00, 15:00, today, yesterday, or a while ago such as 2h; this computer's clock;
         inclusive), quantity (temperature, magnetic_field, voltage, current, frequency, power... or a column such as
-        smu.V). For questions these can't answer, query_runs."""
-        return rt.find_runs(text, device, project, plan, status, since, until, quantity, limit)
+        smu.V), flag (bad, check or key, as people and Kelvin annotated them), tag. For questions these can't
+        answer, query_runs."""
+        return rt.find_runs(text, device, project, plan, status, since, until, quantity, limit, flag, tag)
 
     @server.tool(annotations=READ, structured_output=False, description=(
         "Answer questions across runs with one read-only SQL query (SQLite SELECT) over the catalog of every run in "
@@ -1302,6 +1309,96 @@ def build_server(rt: LabRuntime) -> MCPServer:
         run.h5); the measurement chain (the excitation, peak or rms, series resistor, gains); every approval it
         needed and who gave it (account, portal or phone); and the stops, trips and alarms while it ran."""
         return rt.run_provenance(run_id)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def record_step(text: str, kind: str = "step", sample: str = "", values: Optional[Dict[str, Any]] = None,
+                    at: str = "", who: str = "", procedure: str = "", step: str = "", deviation: str = "") -> str:
+        """Keep in the lab's record a step done by hand or something seen at the bench, as the person says it:
+        kind step (loaded the chip, wire-bonded pins 1-8, pumped to 1e-6 mbar, started the cool-down) or
+        observation (contact 4 looks open, the flake cracked). sample: the device (default: the mounted one);
+        values: what goes with it ({"bond wire": "Al 25 um"}); at: when it was done, if earlier (10:30, 2h);
+        who: if not the person signed in. procedure and step: the procedure step it carries out (procedures); a
+        deviation: what was done differently from the step. Only what the person said: never a guess."""
+        return rt.record_step(text, kind, sample, values, at, who, procedure, step, deviation)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def write_entry(title: str = "", body: str = "", aim: str = "", runs: Optional[List[str]] = None,
+                    samples: Optional[List[str]] = None, procedure: str = "", day: str = "", entry: str = "") -> str:
+        """Keep a lab notebook entry, or a new version of one (entry: its id): a short title, the aim in one
+        sentence, and the body in Markdown: what was done, what was seen, what it means, citing each run as
+        [run:<its id>] where it is used. Every number must be one the cited records hold, as they give it: code
+        checks each and says which it can't find. day: the day it is about (default today). A person signs it in
+        the Notebook panel; a version after a signed one is an amendment."""
+        return rt.write_entry(title, body, aim, runs, samples, procedure, day, entry)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def notebook(day: str = "", entry: str = "") -> str:
+        """The lab notebook: one entry (entry: its id) with its number check, signatures and versions; or a day's
+        entries (day: 2026-11-07); or the latest."""
+        return rt.notebook(day, entry)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def save_procedure(text: str) -> str:
+        """Keep one of the lab's procedures (an SOP) as YAML: procedure (its name), description, steps: each with
+        name, by (hand: a person does it, with do: what, and expect: what they check; kelvin: Kelvin runs it, with
+        plan: a plan's text as run_plan takes it, and expect: a check on its data as compute takes it, e.g.
+        max(abs(smu.I)) < 1e-9). An edit is a new version; every version is kept with who and when."""
+        return rt.save_procedure(text)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def procedures(name: str = "", version: int = 0) -> str:
+        """The lab's procedures (SOPs), or one: its steps, and its versions with who wrote each and when."""
+        return rt.procedures(name, version)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
+    def run_procedure_step(procedure: str, step: str, changes: Optional[Dict[str, Any]] = None) -> str:
+        """Run one of Kelvin's steps of a procedure (its latest version) through the gate, as run_plan runs a plan:
+        the run keeps the procedure, version and step. changes: values the person wants different from the step's
+        plan, by their path in it ({"sweep.smu.V.to": 3}); each is kept as a deviation. Its expect is then checked
+        on the run's data. A step by hand: record_step with procedure and step, once the person has done it."""
+        return rt.run_procedure_step(procedure, step, changes)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def procedure_status(procedure: str, sample: str = "") -> str:
+        """Where a sample is in a procedure: each step done (when, by whom, its run and check, deviations) or not
+        yet, and the next step. sample: default the mounted one; all: every sample."""
+        return rt.procedure_status(procedure, sample)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def update_sample(sample: str = "", kind: str = "", parent: str = "", source: str = "", state: str = "",
+                      location: str = "", material: str = "", description: str = "") -> str:
+        """Keep what a lab's sample register keeps about a sample, as the person says it: kind (wafer, chip,
+        device, crystal, flake, film, powder, solution, other), parent (the sample it was cut or made from: chip 2
+        from wafer W14), source (grower, batch, supplier), state (fabricated, measured, broken...), location (where
+        it is kept), material, description. sample: its name (default: the mounted one). Only what is given
+        changes; "none" clears a field. Each change is kept with who and when. Drives nothing."""
+        return rt.update_sample(sample, kind=kind, parent=parent, source=source, state=state, location=location,
+                                material=material, description=description)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def sample_history(sample: str = "", limit: int = 40) -> str:
+        """A sample's page: what it is, what it came from and what was made from it, whether it is mounted, and its
+        timeline: changes, mounts, steps by hand and observations, its runs (flags, tags, temperature) and the
+        cool-downs and warm-ups they show. sample: its name (default: the mounted one)."""
+        return rt.sample_history(sample, limit)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def annotate(run_id: str = "last", text: str = "", flag: str = "", tags: Optional[List[str]] = None,
+                 corrects: str = "") -> str:
+        """Keep a note on a kept run, as the person judges it: flag bad (set aside: the sample warmed, a wrong
+        gain), check (look again) or key (a key result), none clears it; tags (["cooldown 3", "Fig. 3"]); a
+        comment. A note is never changed: to correct one, add a note with corrects: its id (describe_run shows
+        them). find_runs filters by flag and tag."""
+        return rt.annotate(run_id, text, flag, tags, corrects)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def verify_records(since: str = "", runs: str = "") -> str:
+        """Check that Kelvin's records are as they were written: the lab's record (each line keeps the SHA-256 of the
+        line before it, so a changed or removed line shows where), and each kept run's run.h5 against its seal (its
+        SHA-256 when it was kept, beside it and in the record). since: only runs from that day on; runs: only these
+        (comma-separated). Only reads; about a second per GB of runs."""
+        return rt.verify_records(since, runs)
 
     @server.tool(annotations=READ, structured_output=False)
     def activity(since: str = "", until: str = "", who: str = "", kinds: str = "", limit: int = 60) -> str:

@@ -2615,6 +2615,67 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         messages = team.before(before, limit) if before else team.since(after, limit)
         return JSONResponse({"messages": messages, "last": team.last})
 
+    async def notebook_view(request: Request) -> Response:
+        """GET ?day=YYYY-MM-DD: the Notebook panel: the days that have entries or a record (newest first), the day's
+        entries (latest version, status, number check, signatures) and the day's record in lines. POST {title,
+        body, aim, day, entry}: a person's entry, or their new version of one."""
+        from datetime import datetime
+        from .. import notebook as nb
+        from ..agent.runtime import event_line
+        if request.method == "POST":
+            body = await request.json()
+            if not isinstance(body, dict):
+                return error(400, "send {title, body}")
+            said = await asyncio.to_thread(runtime.write_entry, str(body.get("title") or ""), str(body.get("body") or ""),
+                                           str(body.get("aim") or ""), None, None, "", str(body.get("day") or ""),
+                                           str(body.get("entry") or ""), "human")
+            if said.startswith("not kept"):
+                return error(400, said)
+            return JSONResponse({"said": said})
+        day = str(request.query_params.get("day") or "")[:10] or datetime.now().date().isoformat()
+
+        def look() -> Dict[str, Any]:
+            entries = nb.read(runtime.data_dir)
+            events = runtime.seen_events(runtime.gate.log.events())
+            from ..eln import DAY_TYPES
+            days = sorted({str(nb.latest(e).get("day")) for e in entries.values()} |
+                          {str(e.get("wall", ""))[:10] for e in events if e.get("type") in DAY_TYPES}, reverse=True)
+            today = [{"id": k, "status": nb.status(e), "signs": e["signs"], "versions": len(e["versions"]),
+                      **{x: nb.latest(e).get(x) for x in ("title", "aim", "body", "day", "by", "account", "ai", "check",
+                                                          "runs", "samples", "amends", "at", "version")}}
+                     for k, e in entries.items() if nb.latest(e).get("day") == day]
+            record = [event_line(e) for e in events if str(e.get("wall", "")).startswith(day)
+                      and e.get("type") in DAY_TYPES]
+            return {"day": day, "days": [d for d in days if d][:60], "entries": today, "record": record,
+                    "me": runtime.user}
+        return JSONResponse(await asyncio.to_thread(look))
+
+    async def notebook_sign(request: Request) -> Response:
+        """POST {entry, role}: the person signed in signs an entry (author) or witnesses it (another person)."""
+        body = await request.json()
+        if not isinstance(body, dict) or not str(body.get("entry") or "").strip():
+            return error(400, "send {entry, role}")
+        if not runtime.user:
+            return error(400, "Sign in to Kelvin to sign entries: a signature names the person.")
+        try:
+            sig = await asyncio.to_thread(runtime.sign_entry, str(body["entry"]).strip(),
+                                          "witness" if body.get("role") == "witness" else "author")
+        except ValueError as e:
+            return error(400, str(e))
+        return JSONResponse({"signed": sig})
+
+    async def notebook_draft(request: Request) -> Response:
+        """POST {day, model}: the Notebook panel's subagent drafts the day's entry (web/notebook.py), streamed as
+        NDJSON: each lookup, then done {entry, said}."""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        from datetime import datetime
+        body = body if isinstance(body, dict) else {}
+        day = str(body.get("day") or "")[:10] or datetime.now().date().isoformat()
+        return stream_events(lambda emit: agent.draft_entry(day, str(body.get("model") or ""), emit))
+
     async def analysis_view(request: Request) -> Response:
         """POST {spec}: the Analysis panel's spec worked out (workbench.py): each curve after its steps, and its fit.
         It reads runs and changes nothing."""
@@ -4437,6 +4498,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/lab-memory", lab_memory_view, methods=["GET", "POST"]),
         Route("/api/lab-memory/{note_id}", lab_memory_note, methods=["POST", "DELETE"]),
         Route("/api/team", team_view, methods=["GET", "POST"]),
+        Route("/api/notebook", notebook_view, methods=["GET", "POST"]),
+        Route("/api/notebook/sign", notebook_sign, methods=["POST"]),
+        Route("/api/notebook/draft", notebook_draft, methods=["POST"]),
         Route("/api/analysis", analysis_view, methods=["POST"]),
         Route("/api/analysis/columns", analysis_columns),
         Route("/api/analysis/auto", analysis_auto, methods=["POST"]),

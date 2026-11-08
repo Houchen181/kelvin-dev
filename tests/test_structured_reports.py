@@ -107,7 +107,10 @@ def test_kinds_can_be_switched_off_and_runs_before_this_version_still_count(tmp_
     old = rt.runs_index(1)[0]["run_id"]
     import json
     h5py = pytest.importorskip("h5py")
-    with h5py.File(rt._run_dir(old) / "run.h5", "r+") as f:                 # as Kelvin 0.3.4 kept it: no project
+    import os
+    import stat
+    os.chmod(str(rt._run_dir(old) / "run.h5"), stat.S_IREAD | stat.S_IWRITE)   # sealed; written over as an older
+    with h5py.File(rt._run_dir(old) / "run.h5", "r+") as f:                 # Kelvin 0.3.4 kept it: no project
         m = json.loads(f.attrs["meta_json"])
         for k in ("project", "project_name", "device", "device_name"):
             m.pop(k, None)
