@@ -128,59 +128,50 @@ Model traffic for many labs is more than Tailscale Funnel carries, so the hub mo
 5. **Put it online:** Cloudflare Tunnel (or Caddy with a domain name) to `127.0.0.1:8780`, then `--base-url https://hub.example.org` and, behind Cloudflare, `"client_ip_header": "CF-Connecting-IP"` ([Putting it online](#putting-it-online)).
 6. **Point Kelvin at it:** an update of Kelvin (`central.DEFAULT_HUB`) and the iPhone app (`Account.defaultHub`) changes the built-in address. Until people have that update, keep the old address answering.
 
-## Connecting a Kelvin
+## Sharing from Kelvin
 
-Sharing work, switched off for now. This works like Kelvin's Sign in with ChatGPT, with the hub as the sign-in page:
+Kelvin shares over the person's Kelvin account sign-in ([Signing in to Kelvin](#signing-in-to-kelvin)): it syncs with the token `/api/signin` gave this computer for them, at the hub they signed in to. Sharing has no connecting of its own.
 
-1. Kelvin opens `<hub>/connect` in the browser, with a PKCE challenge (S256), a state, its own installation id, name, platform and version, and its loopback callback `http://127.0.0.1:<port>/...`. The hub sends the browser back to nothing else.
-2. The person signs in, chooses which lab the Kelvin shares into, types their hub password, and presses **Connect**.
-   - **Why the password:** it's asked even when the browser is already signed in. On a shared computer, that session may be someone else's.
-   - **Who is shown:** the page names the account it would connect to, and the person using Kelvin (the optional `person` parameter Kelvin sends).
-   - **Not you?** This signs out and comes back to the request.
-   - **Limits:** the password here counts toward the same limit as signing in, so 10 wrong passwords, here or on the sign-in page, also block connecting for 15 minutes.
-3. The hub sends the browser back to the callback with a one-use code (10 minutes). Kelvin trades the code and its PKCE verifier for a token at `POST /api/token`. The code is used up together with the connection: if the hub is busy (429) Kelvin can try the same code again; a wrong verifier or callback uses it up.
-4. Kelvin keeps the token in the person's own settings, encrypted with their password. The hub keeps one token per account and installation id, so connecting the same Kelvin again replaces it. **Disconnect** on the account page, `DELETE /api/token`, or a password reset ends it.
-   - **Earlier ids:** Kelvin may name up to 5 earlier installation ids of its own (`previous`, comma-separated). The hub moves that account's projects, chats, runs and run files from those ids to the new one, keeps one copy where both have an item, and ends the old ids' connections. Where the new id has marked a project not shared since, the old ids' chats and runs of it are deleted, never moved into it.
-   - **Ids from before:** the new id's computer part (what Kelvin used before ids were per person) counts as an earlier id without being named.
+- **Why none of its own:** Kelvin 0.3.9 to 0.3.12 connected through the hub's `/connect` page (a PKCE code traded for a token per installation and lab). At that trade the hub folds the Kelvin's earlier ids into the new one and ends their tokens. One of those is the bare computer id, which the Kelvin sign-in uses, so connecting ended the person's sign-in on that computer. The hub still takes such connections from those versions. Kelvin no longer makes them, and forgets what one kept (`hub_url`, `hub_token` and `hub_installations` in the person's settings).
+- **Where it goes:** the sign-in's token is one per account and computer (its installation id, `hub_installation` in `~/Kelvin/settings.json`), with no lab. What a Kelvin shares is filed under that account and computer.
+- **A new token at each sign-in:** signing in again replaces the token on the hub. Kelvin syncs with the new one at once, and a sync still going with the old one stops before its next request. A 401 never makes Kelvin forget the token, which is the sign-in's: the status says to sign out and in again.
 
-`HubClient` in `hub/client.py` does Kelvin's side: `begin`, `finish`, `push`, `upload` and `disconnect`, plus `collect(store)`, which gathers what a `ChatStore` may share.
+`HubClient` in `hub/client.py` does Kelvin's side: `push` and `me` with the sign-in's token, plus `collect(store)`, which gathers what a `ChatStore` may share. Its `begin`, `finish`, `upload` and `disconnect` belong to the earlier connection, which Kelvin no longer makes.
 
 ### In the Kelvin app
 
-Settings → **Account** → Kelvin hub (`web/hubsync.py`, routes in `web/app.py`):
+Settings → **Account** (`web/hubsync.py`, routes in `web/app.py`), while someone is signed in with a Kelvin account:
 
-- **Connect:** the person types the hub's address and presses **Connect**. Kelvin opens the hub's `/connect` page in the browser, with its callback `http://127.0.0.1:<port>/hub/callback`.
-  - **Installation id:** one per person on this computer, so two people on one PC each keep their own connection. It's the computer's id (`hub_installation` in `~/Kelvin/settings.json`, made once), a colon, and the first 12 hex digits of the SHA-256 of the person's folder. The folder is resolved first (`Path.resolve()`, then `normcase`, lower case on Windows), so another spelling of it, such as an 8.3 short name, gives the same id.
-  - **Earlier ids (`previous`):** Kelvin remembers the ids each person connected with (`hub_installations` in their `settings.json`, the latest 5). On connect it sends them, plus the id that Kelvin's first hub branch made from the folder as spelled and the bare computer id, at most 5 in all. At the token trade the hub moves what was shared under those to the new id and ends their tokens, so it keeps one copy of everything.
-  - **Name:** Kelvin also sends the person's name (`person`), which the hub shows.
-  - **Callback:** works only on Kelvin's own computer, never from a phone. It answers at once, even while a sync of the old connection is still uploading.
-  - **Token:** the hub's address and the token go in the person's `settings.json` (`hub_url`, `hub_token`). The token is encrypted with their password like the API keys, and never reaches the browser or the logs.
-- **Status:** who the person is on the hub, which lab this Kelvin shares into, and the last sync of this connection (from `GET /api/me`). If the hub says the connection ended (disconnected on the account page, or after a password reset), Kelvin forgets the token and says so.
-- **Disconnect:** Kelvin forgets the token at once, then ends the connection on the hub (`DELETE /api/token`, confirmed only by a 204). A sync in progress stops before its next request. What was shared stays on the hub, and the account page deletes it.
-- **Background sync:** every two minutes, and right after connecting or **Sync now**, Kelvin sends what changed with `POST /api/sync`, projects first, in batches of at most 500 items or 16 MB.
-  - **What goes:** what `collect` returns: each chat with its marks and rules, and shared projects with theirs. Plus the finished runs in the person's data folder (those with a `meta.json`) in a shared project or in none.
+- **The switch:** **Share my chats and run records with the Kelvin team** (`hub_share` in the person's `settings.json`, on unless `off`), in a card of its own at the top. It acts at once.
+  - **Off** takes back from the hub what this Kelvin shared: the next syncs send everything in `hub-sync.json` as `removed` until nothing is left, then send nothing at all. The status says what is still there; **Take back now** does it at once.
+  - **On again** shares everything once more.
+- **The hub's terms:** the hub refuses a sync until the person has agreed to its current terms (403, with `consent_url`).
+  - **The bar:** a bar in the portal's notice row (`hub_terms` in `GET /api/state`) says what Kelvin shares, with **Read and agree** (the hub's `/consent` page) and **Switch it off** (Settings → **Account**). The sign-in's `needs_consent` shows it before any sync.
+  - **After Read and agree:** the page asks the hub every few seconds (`GET /api/hub`), and syncs once the terms are agreed.
+- **On the Kelvin hub:** who the person is on the hub, what of theirs is there (`on_hub`: chats and run records), the last sync, **Your account on the hub**, **Sync now** and **Also share older runs**.
+- **Background sync:** every two minutes, at once after a sign-in or a change of the switch, and on **Sync now**. Kelvin sends what changed with `POST /api/sync`, projects first, in batches of at most 500 items or 16 MB, and what is gone since (`removed`). When nothing changed, it sends nothing.
+  - **What goes:** what `collect` returns: each chat with its marks and rules, and shared projects with theirs. Plus the records of the finished runs in the person's data folder (those with a `meta.json`) in a shared project or in none: each run's `meta` (its plan, settings, results and assessment), never its files (`run.h5`, plots, reports).
   - **Whose runs:** only runs this person made (`meta.json` notes `user`), so a data folder shared with someone else never sends their runs.
   - **Runs that stay:** a run's `meta.json` says when an incognito chat started it (`incognito`), or a chat that keeps an unshared project's marks or limits (`unshared`, whatever project the run is filed under). Neither is ever sent.
   - **Older runs:** some runs are held back: those made before Kelvin noted who made them, those made without accounts, and those of queue items from before (`legacy`). They go only when the person ticks **Also share older runs** (`hub_old_runs`, off by default). The status says how many stay back.
-  - **Files:** then it uploads each new or changed run file (`run.h5`, reports; up to 200 MB each), and tells the hub what is gone since (`removed`). A file the hub refuses (400, 413) goes again only when it changes. When nothing changed, it sends nothing.
-  - **Retries:** a file the hub fails on (429 or 5xx, such as Cloudflare's 524 on a slow upload), or whose connection breaks while it goes (a timeout), waits while the others go on. It waits 5 minutes, then twice as long each time, up to 4 hours (`retry` in `hub-sync.json`). Three such failures in a row end that sync.
+  - **A hub that takes no shared work:** a 404 (an older hub, or one with sharing off) is said quietly ("The hub doesn't take shared work yet") and tried again at the next sync.
+- **Without a Kelvin account** (accounts on this computer only, or Kelvin without accounts), Kelvin shares nothing, and the section says sharing needs a Kelvin account.
 - **Marks on chats** (`web/store.py`):
   - **Leaving a project:** a chat moved out of an unpublished, confidential or model-limited project, or left when the project is deleted, keeps that mark and the project's limits as they are then. Changing a project's limits locks no chat. A chat keeps limits only when it runs under them, leaves the project or is left when it is deleted.
   - **Notes:** a chat in unshared work keeps no notes for every conversation.
   - **Runs:** its runs are filed in its own project, without another project's mounted sample.
-- **What was sent** is kept in `hub-sync.json` in the person's folder (`~/Kelvin/users/<name>/`): ids and fingerprints, never content, and a digest of the token it belongs to. A new connection sends everything once more.
+- **What was sent** is kept in `hub-sync.json` in the person's folder (`~/Kelvin/users/<name>/`): ids and fingerprints, never content, and a digest of the hub account and computer it went to (never the token). A new sign-in sends only what changed; another account or computer gets everything once more.
 - **Safety:**
-  - **Snapshot:** a sync works from a snapshot of the person's settings, chats and data folder. It stops when someone else signs in, or when the person disconnects or connects again, so work never goes out under another connection. A 401 that arrives after such a change never wipes the new token.
+  - **Snapshot:** a sync works from a snapshot of the person's sign-in, settings, chats and data folder. It stops when someone else signs in, or the person signs in again or flips the switch, so work never goes out under another's token. An old token's 401 after such a change ends only that sync.
   - **Redirects:** Kelvin never follows a redirect from the hub, so the token can't be sent on to another address.
-  - **Unreachable or new terms:** with the hub unreachable, Kelvin tries again at the next sync. With new terms, it waits until the person agrees to them on the hub.
+  - **Unreachable:** Kelvin tries again at the next sync.
 
 | Portal call | What it does |
 |---|---|
-| `GET /api/hub` | `{"connected", "url", "account", "problem", "sync", "synced_at", "syncing"}`, never the token |
-| `POST /api/hub/connect` | `{"url"}`: open the hub's connect page in the browser |
-| `GET /hub/callback` | Where the hub sends the browser back (this computer only) |
-| `POST /api/hub/sync` | Sync now |
-| `POST /api/hub/disconnect` | Disconnect, here and on the hub |
+| `GET /api/hub` | `{"signed_in", "sharing", "url", "account", "problem", "waiting", "sync", "synced_at", "syncing", "on_hub", "taking_back"}`, never the token |
+| `POST /api/hub/sync` | Sync now; switched off, take back now |
+| `POST /api/settings` | `{"hub_share": "on"}` or `"off"`; `{"hub_old_runs": "on"}` or `"off"` |
+| `GET /api/state` | `hub_terms`: `{"consent_url"}` while the hub waits for its new terms, else `null` |
 
 ## Running it
 
