@@ -1481,6 +1481,14 @@ body.resizing .plot-svg { pointer-events: none; }
   overflow-y: hidden; }
 .team-form .send { width: 34px; height: 34px; flex: none; }
 
+/* ---------- a device's pictures, in Project settings (samples.py) ---------- */
+.dev-pics { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.dev-pics:empty { display: none; }
+.dev-pic { width: 56px; height: 42px; object-fit: cover; border-radius: 6px; border: 1px solid var(--card-line);
+  cursor: zoom-in; background: var(--surface-1); }
+.dev-pic.big { width: auto; height: auto; max-width: 100%; max-height: 60vh; object-fit: contain; cursor: zoom-out; }
+.dev-pic-name { font-size: 12px; color: var(--muted); }
+
 /* ---------- the Notebook: a day's entries and record (notebook.py) ---------- */
 .nb-day { position: relative; display: inline-flex; align-items: center; gap: 0; margin-left: 4px; }
 .nb-day-label { border: 0; background: none; color: var(--text-2); font: inherit; font-size: 13px; font-weight: 600;

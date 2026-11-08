@@ -50,6 +50,7 @@
     folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
     "folder-open": '<path d="M3 7.5V5.5A1.5 1.5 0 0 1 4.5 4H9l2 2h6.5A1.5 1.5 0 0 1 19 7.5V9"/><path d="M2.6 10.2A1 1 0 0 1 3.6 9h16.8a1 1 0 0 1 1 1.2l-1.5 7.5a2 2 0 0 1-2 1.6H6a2 2 0 0 1-2-1.6z"/>',
     pencil: '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
+    image: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="M21 16l-5-5-8 8"/>',
     sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
     hand: '<path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/>',
     copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/>',
@@ -3288,6 +3289,9 @@
         try { Object.assign(d, await api("/api/projects/" + p.id + "/devices/" + d.id, { method: "PATCH", body: { description: text } })); renderDevices(p); }
         catch (e) { $("project-msg").textContent = e.message; }
       });
+      const pics = h("div", { class: "dev-pics" });
+      const add = rowButton("image", "Add a picture of " + d.name, () => pickDevicePicture(p, d, pics));
+      loadDevicePictures(d, pics);
       const retire = h("button", { class: "link soft", type: "button" }, d.retired ? "Restore" : "Retire");
       retire.addEventListener("click", async () => {
         try { Object.assign(d, await api("/api/projects/" + p.id + "/devices/" + d.id, { method: "PATCH", body: { retired: !d.retired } })); renderDevices(p); loadMount(); }
@@ -3295,8 +3299,50 @@
       });
       return h("li", { class: "memory-note" + (d.retired ? " muted" : "") }, h("span", { class: "memory-kind" }, d.retired ? "retired" : "device"),
         h("div", { class: "memory-body" }, h("span", {}, d.name + (d.material ? " · " + d.material : "")),
-          h("span", { class: "memory-meta" }, d.description || "no description yet")), edit, retire);
+          h("span", { class: "memory-meta" }, d.description || "no description yet"), pics), add, edit, retire);
     }));
+  }
+  // a device's pictures (samples.py): kept as given, never changed; a click shows one bigger
+  const SAMPLE_PIC = new Map();
+  function samplePicURL(d, file) {
+    const key = d.id + "/" + file;
+    if (!SAMPLE_PIC.has(key)) {
+      SAMPLE_PIC.set(key, fetch("/api/samples/picture?device=" + encodeURIComponent(d.id) + "&name=" +
+        encodeURIComponent(d.name) + "&file=" + encodeURIComponent(file), { headers: { "X-Kelvin-Token": token } })
+        .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.blob(); })
+        .then((b) => URL.createObjectURL(b)));
+    }
+    return SAMPLE_PIC.get(key);
+  }
+  async function loadDevicePictures(d, box) {
+    let r;
+    try { r = await api("/api/samples/pictures?device=" + encodeURIComponent(d.id) + "&name=" + encodeURIComponent(d.name)); }
+    catch (e) { return; }
+    box.replaceChildren(...r.pictures.map((pic) => {
+      if (!pic.shown) return h("span", { class: "dev-pic-name", title: pic.caption || pic.file }, pic.file);
+      const img = h("img", { class: "dev-pic", alt: pic.caption || "A picture of " + d.name,
+                             title: (pic.caption ? pic.caption + " · " : "") + String(pic.at || "").slice(0, 10) });
+      samplePicURL(d, pic.file).then((url) => { img.src = url; }).catch(() => { img.alt = "(not there)"; });
+      img.addEventListener("click", () => img.classList.toggle("big"));
+      return img;
+    }));
+  }
+  function pickDevicePicture(p, d, box) {
+    const input = h("input", { type: "file", accept: "image/png,image/jpeg,image/gif,image/webp,image/tiff,image/bmp" });
+    input.addEventListener("change", async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const caption = await askText("What does it show?", { value: "", ok: "Keep" });
+      if (caption === null) return;
+      try {
+        const res = await fetch("/api/samples/pictures?device=" + encodeURIComponent(d.id) + "&name=" +
+          encodeURIComponent(d.name) + "&caption=" + encodeURIComponent(caption), { method: "POST",
+          headers: { "X-Kelvin-Token": token, "X-File-Name": encodeURIComponent(file.name) }, body: file });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "HTTP " + res.status);
+        loadDevicePictures(d, box);
+      } catch (e) { $("project-msg").textContent = e.message; }
+    });
+    input.click();
   }
   async function addDevice() {
     const p = editingProject;

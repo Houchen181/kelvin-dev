@@ -2615,6 +2615,37 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         messages = team.before(before, limit) if before else team.since(after, limit)
         return JSONResponse({"messages": messages, "last": team.last})
 
+    async def sample_pictures(request: Request) -> Response:
+        """GET ?device=<id>&name=<name>: a sample's pictures, newest first. POST the picture's bytes (X-File-Name: its
+        name, URL-encoded; ?device, ?name and ?caption): kept with the sample, as given (samples.py)."""
+        from urllib.parse import unquote
+        q = request.query_params
+        device, name = str(q.get("device") or "") or None, str(q.get("name") or "")
+        if request.method == "POST":
+            data = await request.body()
+            file = unquote(request.headers.get("X-File-Name", ""))
+            ext = file.rsplit(".", 1)[-1] if "." in file else ""
+            said = await asyncio.to_thread(runtime.add_sample_picture, name, data, ext, str(q.get("caption") or ""),
+                                           "added in Project settings as %s" % (file or "a picture"), device)
+            if not said.startswith("kept"):
+                return error(400, said)
+        pictures = await asyncio.to_thread(runtime.sample_pictures, name, 0, device)
+        return JSONResponse({"pictures": [{k: p.get(k) for k in ("file", "caption", "at", "by", "account", "shown",
+                                                                    "bytes")} for p in pictures]})
+
+    async def sample_picture(request: Request) -> Response:
+        """GET ?device=<id>&name=<name>&file=<file>: one of a sample's pictures."""
+        from ..samples import PICTURES, SampleBook
+        q = request.query_params
+        try:
+            path, _ = SampleBook(runtime.data_dir).picture(str(q.get("device") or "") or None, str(q.get("name") or ""),
+                                                           str(q.get("file") or ""))
+            data = path.read_bytes()
+        except (KeyError, OSError) as e:
+            return error(404, str(e.args[0] if e.args else e))
+        return Response(data, media_type=PICTURES.get(path.suffix.lstrip(".").lower(), "application/octet-stream"),
+                        headers={"Cache-Control": "private, max-age=31536000, immutable"})   # never changed
+
     async def notebook_view(request: Request) -> Response:
         """GET ?day=YYYY-MM-DD: the Notebook panel: the days that have entries or a record (newest first), the day's
         entries (latest version, status, number check, signatures) and the day's record in lines. POST {title,
@@ -4499,6 +4530,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/lab-memory/{note_id}", lab_memory_note, methods=["POST", "DELETE"]),
         Route("/api/team", team_view, methods=["GET", "POST"]),
         Route("/api/notebook", notebook_view, methods=["GET", "POST"]),
+        Route("/api/samples/pictures", sample_pictures, methods=["GET", "POST"]),
+        Route("/api/samples/picture", sample_picture, methods=["GET"]),
         Route("/api/notebook/sign", notebook_sign, methods=["POST"]),
         Route("/api/notebook/draft", notebook_draft, methods=["POST"]),
         Route("/api/analysis", analysis_view, methods=["POST"]),

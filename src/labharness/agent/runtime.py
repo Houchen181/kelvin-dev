@@ -321,6 +321,8 @@ def event_line(e: Dict[str, Any]) -> str:
     elif kind == "procedure_step":
         text = "%s v%s, step %s: run %s %s%s" % (e.get("procedure"), e.get("version"), e.get("step"), e.get("run"),
                                                 e.get("status"), ", check %s" % e["check"] if e.get("check") else "")
+    elif kind == "sample_picture":
+        text = "kept a picture of %s%s" % (e.get("sample"), ": " + e["caption"] if e.get("caption") else "")
     elif kind == "sample":
         text = "%s sample %s%s" % ("kept" if e.get("new") else "changed", e.get("sample"),
                                    ": " + ", ".join("%s %s" % kv for kv in (e.get("changed") or {}).items())
@@ -2639,6 +2641,57 @@ class LabRuntime:
                             changed={k: v[1] for k, v in changed.items()} or None, new=not there or None)
         return "kept: %s" % describe(s, book.lineage(s["name"]), book.children(s["name"]))
 
+    def add_sample_picture(self, sample: str, data: bytes, ext: str, caption: str = "", source: str = "",
+                           device_id: Optional[str] = None) -> str:
+        """Keep a picture with a sample (samples.py): a photo of the chip, a micrograph, the bonding. sample: its
+        name (default: the mounted one); device_id: a project device's, when the portal names it. Its SHA-256 goes
+        into the sample's record and the lab's record; the file is kept read-only and never changed."""
+        from ..samples import SampleBook
+        if device_id:
+            dev_id, name = device_id, " ".join(str(sample or "").split())
+        else:
+            dev_id, name = self._chain_device(sample)
+        if not name:
+            return "not kept: name the sample (none is mounted)"
+        book = SampleBook(self.data_dir)
+        _, there = book.find(dev_id, name)
+        if there and there.get("project") and not self.may_see({"project": there["project"]}):
+            return "not kept: %s is unshared work (another project's)" % name
+        refused = self._record_ok("Keep this picture with sample %s?" % name, [caption, source])
+        if refused:
+            return refused
+        m = self.mounted or {}
+        project = there.get("project") if there else (m.get("project") if dev_id and dev_id == m.get("device")
+                                                       else self.attribution.get("project"))
+        by = "agent" if self._actor_now() else "human"
+        try:
+            pic = book.add_picture(dev_id, name, data, ext, caption, source, by, account=self.user,
+                                   ai=self._actor_now(), project=project)
+        except ValueError as e:
+            return "not kept: %s" % e
+        self.gate.log.write("sample_picture", by=by, sample=name, device=dev_id, file=pic["file"],
+                            sha256=pic["sha256"], caption=pic.get("caption"), source=source or None)
+        return "kept a picture of %s%s (%s, %.0f kB)" % (name, ": " + pic["caption"] if pic.get("caption") else "",
+                                                          pic["file"], pic["bytes"] / 1024)
+
+    def sample_pictures(self, sample: str = "", last: int = 3, device_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """A sample's pictures, newest first, each {file, caption, at, by, mime, shown (a browser or model shows
+        it), path}; [] for none, or a sample the viewer of this thread may not see."""
+        from ..samples import PICTURES, SHOWN, SampleBook
+        dev_id, name = (device_id, sample) if device_id else self._chain_device(sample)
+        if not name:
+            return []
+        book = SampleBook(self.data_dir)
+        key, s = book.find(dev_id, name)
+        if not s or (s.get("project") and not self.may_see({"project": s["project"]})):
+            return []
+        out = []
+        for p in reversed(s.get("pictures") or []):
+            ext = p["file"].rsplit(".", 1)[-1].lower()
+            out.append(dict(p, mime=PICTURES.get(ext, "application/octet-stream"), shown=ext in SHOWN,
+                            path=str(book.folder_of(key) / p["file"])))
+        return out[:max(0, int(last))] if last else out
+
     def sample_history(self, sample: str = "", limit: int = 40) -> str:
         """A sample's page: what it is (samples.py), its lineage and what was made from it, whether it is mounted,
         and its timeline from what Kelvin keeps: changes to it, mounts, steps by hand and observations, its runs
@@ -2658,8 +2711,9 @@ class LabRuntime:
             lines.append("mounted in %s now" % (self.lab.config.name or "this lab"))
         timeline: List[Tuple[str, str]] = []
         for c in s.get("changes") or []:
-            said = ", ".join("%s %s" % (k, v[1] if v[1] is not None else "cleared") for k, v in
-                             (c.get("fields") or {}).items()) or c.get("why") or "kept"
+            said = ", ".join(("picture added: %s" % v[1]) if k == "picture" else
+                             "%s %s" % (k, v[1] if v[1] is not None else "cleared")
+                             for k, v in (c.get("fields") or {}).items()) or c.get("why") or "kept"
             timeline.append((c.get("at") or "", "%s (%s)" % (said, c.get("account") or c.get("by") or "?")))
         names = {name.lower()} | ({dev_id} if dev_id else set())
         for e in self.seen_events(self.gate.log.events()):
@@ -3012,7 +3066,23 @@ class LabRuntime:
         folders = integrity.run_folders(self.runs.iterdir(), self._hidden_runs(), since,
                                         [r for r in str(runs or "").split(",") if r.strip()])
         result = integrity.check_runs(folders, integrity.recorded_seals(every))
-        return integrity.report(checked, result)
+        text = integrity.report(checked, result)
+        from ..samples import SampleBook
+        book, kept, changed = SampleBook(self.data_dir), 0, []
+        for key, s in book.all().items():
+            if s.get("project") and not self.may_see({"project": s["project"]}):
+                continue
+            for p in s.get("pictures") or []:
+                path = book.folder_of(key) / p["file"]
+                if not path.exists():
+                    changed.append("picture %s of %s is gone" % (p["file"], s.get("name")))
+                elif rundata.sha256_file(path) != p.get("sha256"):
+                    changed.append("picture %s of %s changed since it was kept" % (p["file"], s.get("name")))
+                else:
+                    kept += 1
+        if kept or changed:
+            text += "\nSample pictures: %d as they were kept%s" % (kept, "".join("\n- " + c for c in changed))
+        return text
 
     def tidy_later(self) -> None:
         """tidy_runs in the background."""

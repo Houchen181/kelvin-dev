@@ -9,15 +9,24 @@ observations, its runs with their notes, and the cool-downs and warm-ups its run
     <data folder>/samples.json
     {"samples": {"<device id, or name:<name>>": {"name", "kind", "parent", "source", "state", "location",
                                                  "material", "description", "project", "created",
+                                                 "pictures": [{"file", "sha256", "bytes", "caption", "source",
+                                                               "at", "by", "account", "ai"}],
                                                  "changes": [{"at", "by", "account", "ai", "fields"}]}}}
+    <data folder>/samples/<its key>/<time>-<sha>.<ext>   its pictures (a photo of the chip, a micrograph), each
+                                                         read-only, by its SHA-256 in the record
+
+A sample's pictures are kept as they were given and never changed or removed (asked for 2026-11-08: "it should be
+able to have images"): one is added in a chat (a picture the person attached) or in Project settings.
 
 A project's devices (Project settings) are samples whose name and protection are kept there; this file adds what a
 LIMS keeps about them. A sample may be no project's device (the wafer the chips came from). Nothing here is deleted:
 each change keeps what it changed from."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import stat
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +36,10 @@ FILE = "samples.json"
 KINDS = ("wafer", "chip", "device", "crystal", "flake", "film", "powder", "solution", "other")
 FIELDS = ("kind", "parent", "source", "state", "location", "material", "description")
 MAX_FIELD = 200
+PICTURES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp",
+            "tif": "image/tiff", "tiff": "image/tiff", "bmp": "image/bmp"}
+SHOWN = ("png", "jpg", "jpeg", "gif", "webp")   # what a browser and a model show; a TIFF or BMP is kept, listed
+MAX_PICTURE = 25 * 2 ** 20
 COLD_K = 30.0     # a run started below this is cold (a cool-down between a warm run and it)
 WARM_K = 200.0    # above this, warm
 
@@ -66,6 +79,70 @@ class SampleBook:
             if str(s.get("name", "")).lower() == wanted:
                 return key, s
         return _key(device_id, name), None
+
+    def folder_of(self, key: str) -> Path:
+        return self.path.parent / "samples" / "".join(c if c.isalnum() or c in "-_" else "_" for c in key)
+
+    def add_picture(self, device_id: Optional[str], name: str, data: bytes, ext: str, caption: str, source: str,
+                    by: str, account: Optional[str] = None, ai: Optional[Dict[str, Any]] = None,
+                    project: Optional[str] = None) -> Dict[str, Any]:
+        """Keep a picture with a sample (made when it has no record yet): the picture's entry. ValueError: not a
+        picture Kelvin keeps, too big, or one this sample has already."""
+        ext = str(ext or "").lower().lstrip(".")
+        if ext not in PICTURES:
+            raise ValueError("a sample's picture is PNG, JPEG, GIF, WebP, TIFF or BMP")
+        if not data:
+            raise ValueError("the picture is empty")
+        if len(data) > MAX_PICTURE:
+            raise ValueError("the picture is %.0f MB; at most %d MB" % (len(data) / 2 ** 20, MAX_PICTURE // 2 ** 20))
+        name = " ".join(str(name or "").split())[:80]
+        if not name:
+            raise ValueError("name the sample")
+        digest = hashlib.sha256(data).hexdigest()
+        caption = " ".join(str(caption or "").split())[:300]
+        with self._lock:
+            data_json = self._read()
+            samples = data_json["samples"]
+            key, s = self.find(device_id, name)
+            now = datetime.now().isoformat(timespec="seconds")
+            if s is None:
+                s = {"name": name, "created": now, "changes": []}
+                if project:
+                    s["project"] = project
+            pictures = s.setdefault("pictures", [])
+            if any(p.get("sha256") == digest for p in pictures):
+                raise ValueError("%s already has this picture" % s["name"])
+            folder = self.folder_of(key)
+            folder.mkdir(parents=True, exist_ok=True)
+            file = "%s-%s.%s" % (datetime.now().strftime("%Y%m%d-%H%M%S"), digest[:8], ext)
+            (folder / file).write_bytes(data)
+            try:
+                os.chmod(str(folder / file), stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
+            except OSError:
+                pass
+            picture: Dict[str, Any] = {"file": file, "sha256": digest, "bytes": len(data), "at": now, "by": by}
+            for k, v in (("caption", caption), ("source", source), ("account", account), ("ai", ai)):
+                if v:
+                    picture[k] = v
+            pictures.append(picture)
+            change: Dict[str, Any] = {"at": now, "by": by, "fields": {"picture": [None, "%s%s" % (
+                file, ": " + caption if caption else "")]}}
+            if account:
+                change["account"] = account
+            if ai:
+                change["ai"] = ai
+            s.setdefault("changes", []).append(change)
+            samples[key] = s
+            self._write(data_json)
+            return picture
+
+    def picture(self, device_id: Optional[str], name: str, file: str) -> Tuple[Path, Dict[str, Any]]:
+        """(where a sample's picture is, its entry). KeyError: no such picture of this sample."""
+        key, s = self.find(device_id, name)
+        for p in (s or {}).get("pictures") or []:
+            if p.get("file") == file:
+                return self.folder_of(key) / file, p
+        raise KeyError("%s has no picture %s" % (name, file))
 
     def lineage(self, name: str) -> List[str]:
         """The samples it came from, nearest first (its parent, the parent's parent...)."""
@@ -156,6 +233,9 @@ def describe(s: Dict[str, Any], lineage: List[str], children: List[str]) -> str:
     head = "%s (%s)" % (s.get("name"), "; ".join(b for b in bits if b)) if any(bits) else str(s.get("name"))
     if children:
         head += "; made into " + ", ".join(children)
+    pictures = s.get("pictures") or []
+    if pictures:
+        head += "; %d picture%s" % (len(pictures), "" if len(pictures) == 1 else "s")
     if s.get("description"):
         head += ". " + s["description"]
     return head

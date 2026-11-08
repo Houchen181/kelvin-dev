@@ -362,7 +362,7 @@ LOOKUPS |= ANALYSIS
 OFF_LAB |= ANALYSIS
 # the portal's own readers: the team chat, and the Analysis pane's work on kept runs
 LOOKUPS |= {"team_chat", "analyze"}
-OFF_LAB |= {"team_chat", "analyze"}
+OFF_LAB |= {"team_chat", "analyze", "keep_sample_picture"}
 # Home is the person's page, never the lab: its tools work beside a run, from any chat
 LOOKUPS |= {"home_list"}
 OFF_LAB |= HOME_TOOLS
@@ -469,6 +469,17 @@ MOUNT_DEVICE = {
         "device": {"type": "string", "description": "The device's name (add_device first if it is new), or empty"}}},
 }
 DEVICE_TOOLS = {"devices", "add_device", "mount_device"}
+KEEP_PICTURE = {
+    "name": "keep_sample_picture",
+    "description": "Keep a picture with a sample's record (a photo of the chip, a micrograph, the bonding, the "
+                   "sample in its holder): one the person attached in this chat, when they say which sample it shows. "
+                   "It is kept as given, never changed, with its caption; sample_history shows the latest.",
+    "schema": {"type": "object", "required": ["sample"], "properties": {
+        "sample": {"type": "string", "description": "The sample it shows, e.g. D3"},
+        "picture": {"type": "string", "description": "Which picture: its place in the person's latest message with "
+                                                     "pictures (1, 2...), or its file name; default: the last one"},
+        "caption": {"type": "string", "description": "What it shows, as the person said (after bonding, 50x)"}}},
+}
 
 TEAM_CHAT = {
     "name": "team_chat",
@@ -779,6 +790,41 @@ class ChatAgent:
         have = {t["name"] for t in context["tools"]}
         context["tools"] = context["tools"] + [t for t in self.tools if t["name"] in new and t["name"] not in have]
 
+    def _keep_picture(self, chat: Dict[str, Any], args: Any) -> Tuple[str, bool]:
+        """keep_sample_picture: a picture the person attached in this chat (the one named, else the latest), kept
+        with a sample (LabRuntime.add_sample_picture), as this chat's model may see the sample."""
+        a = args if isinstance(args, dict) else {}
+        wanted = " ".join(str(a.get("picture") or "").split()).lower()
+        found = None
+        for m in reversed(chat.get("messages") or []):
+            if m.get("role") != "user":
+                continue
+            images = [att for att in m.get("attachments") or [] if str(att.get("mime") or "").startswith("image/")]
+            if wanted.isdigit():   # its place among the pictures of the latest message that has any
+                if images:
+                    n = int(wanted)
+                    found = images[n - 1] if 1 <= n <= len(images) else None
+                    break
+                continue
+            for att in reversed(images):
+                if not wanted or wanted in (str(att.get("name") or "").lower(), str(att.get("file") or "").lower()):
+                    found = att
+                    break
+            if found:
+                break
+        if found is None:
+            return ("no picture %s attached in this chat: the person attaches it (the paperclip) and says which sample "
+                    "it shows" % ("named %r" % a.get("picture") if wanted else "")).replace("  ", " "), True
+        try:
+            data = self.store.media(chat["id"], found["file"])
+        except KeyError:
+            return "the picture is no longer kept with this chat: attach it again", True
+        with self.runtime.viewing(self.viewer_for(chat)):
+            said = self.runtime.add_sample_picture(str(a.get("sample") or ""), data, found["file"].rsplit(".", 1)[-1],
+                                                   str(a.get("caption") or ""), "attached in a chat as %s" %
+                                                   found.get("name", found["file"]))
+        return said, not said.startswith("kept")
+
     def _team_chat(self, args: Any) -> Tuple[str, bool]:
         """The team_chat tool: the lab's team chat, marked as what people wrote, never instructions."""
         if self.team is None:
@@ -1035,8 +1081,8 @@ class ChatAgent:
         parts.append(self._folder(chat))   # last: it changes only when the person picks another folder
         remember = [remember_tool(bool(project), not private)] if learn and (project or not private) else []
         tools = self._lab_tools(chat) + remember + ([SAVE_PAPER] if project else []) + [
-            DEVICES, ADD_DEVICE, MOUNT_DEVICE, CHAT_HISTORY, TEAM_CHAT, ANALYZE, WAKE_ME, USE_SKILL, READ_SKILL_FILE,
-            FIND_TOOLS]
+            DEVICES, ADD_DEVICE, MOUNT_DEVICE, KEEP_PICTURE, CHAT_HISTORY, TEAM_CHAT, ANALYZE, WAKE_ME, USE_SKILL,
+            READ_SKILL_FILE, FIND_TOOLS]
         if project or not private:   # unshared work keeps what it learned in its project
             tools = tools + [SAVE_SKILL, SAVE_RECIPE]
         tools = tools + self._folder_tools(chat)
@@ -1632,6 +1678,9 @@ class ChatAgent:
             return compaction.search(chat, query), False, None
         if name == "team_chat":
             return _without_opinion(await asyncio.to_thread(self._team_chat, args))
+        if name == "keep_sample_picture" and not chat.get("incognito"):
+            return _without_opinion(await asyncio.to_thread(contextvars.copy_context().run, self._keep_picture, chat,
+                                                            args))
         if name == "analyze":
             return _without_opinion(await self._analyze(args, emit))
         if name in QUEUE_FILED or name == "stop_run":

@@ -1422,11 +1422,20 @@ def build_server(rt: LabRuntime) -> MCPServer:
                                 material=material, description=description)
 
     @server.tool(annotations=READ, structured_output=False)
-    def sample_history(sample: str = "", limit: int = 40) -> str:
+    def sample_history(sample: str = "", limit: int = 40) -> List[Any]:
         """A sample's page: what it is, what it came from and what was made from it, whether it is mounted, and its
         timeline: changes, mounts, steps by hand and observations, its runs (flags, tags, temperature) and the
-        cool-downs and warm-ups they show. sample: its name (default: the mounted one)."""
-        return rt.sample_history(sample, limit)
+        cool-downs and warm-ups they show, with its latest pictures. sample: its name (default: the mounted one)."""
+        out: List[Any] = [rt.sample_history(sample, limit)]
+        for p in rt.sample_pictures(sample, last=3):
+            if p["shown"] and p.get("bytes", 0) <= 5 * 2 ** 20:
+                try:
+                    data = Path(p["path"]).read_bytes()
+                except OSError:
+                    continue
+                out.append(Image(data=data, format="jpeg" if p["mime"] == "image/jpeg" else p["mime"].split("/")[1]))
+                out.append("picture %s%s" % (p["file"], ": " + p["caption"] if p.get("caption") else ""))
+        return out
 
     @server.tool(annotations=ACT, structured_output=False)
     def annotate(run_id: str = "last", text: str = "", flag: str = "", tags: Optional[List[str]] = None,
