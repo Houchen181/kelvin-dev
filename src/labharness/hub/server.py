@@ -365,6 +365,26 @@ def record_rows(meta: Any) -> str:
     return '<div class="scroll"><table>%s</table></div>' % "".join(rows)
 
 
+FOUND = (("results", "Results"), ("assessment", "Assessment"), ("issues", "Issues"))
+
+
+def found_rows(card: Any) -> str:
+    """What a run found, from the card Kelvin sends in its record (meta's "card": rundata.card): its results,
+    assessment and issues first, then the rest of the card (what it swept and measured...), all escaped."""
+    if not isinstance(card, dict) or not card:
+        return '<p class="muted">Kelvin sent no results with this run.</p>'
+    rows = []
+    for key, label in FOUND:
+        value = card.get(key)
+        if isinstance(value, list) and value:
+            rows.append('<tr><th>%s</th><td>%s</td></tr>' % (label, "<br>".join(cut(v, 2000) for v in value[:20])))
+        elif value not in (None, "", [], {}):
+            rows.append('<tr><th>%s</th><td>%s</td></tr>' % (label, cut(value, 4000)))
+    rest = {k: v for k, v in card.items() if k not in dict(FOUND)}
+    return ('<div class="scroll"><table>%s</table></div>' % "".join(rows) if rows else "") + (
+        record_rows(rest) if rest else "")
+
+
 async def read_body(request: Request, limit: int) -> bytes:
     """The request's body, refused as soon as it would pass limit: by its Content-Length, or while it streams in."""
     declared = request.headers.get("content-length")
@@ -1723,10 +1743,12 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         files = ('<p>Files on the hub: %s</p>' % e(", ".join(run["files"]))) if run["files"] else (
             '<p class="muted">No data files: they stay on the person\'s computer.</p>')
         return admin_page(op, (
-            '%s<h2>Run %s</h2><div class="scroll"><table>%s</table></div>%s<h2>Its record</h2>%s'
+            '%s<h2>Run %s</h2><div class="scroll"><table>%s</table></div>%s<h2>What it found</h2>%s'
+            '<h2>Its record</h2>%s'
             '<details><summary>The record as Kelvin sent it (JSON)</summary><pre>%s</pre></details>'
             % (back_to(run), e(meta.get("plan") or run["local_id"]),
-               "".join('<tr><th>%s</th><td>%s</td></tr>' % kv for kv in facts), files, record_rows(meta),
+               "".join('<tr><th>%s</th><td>%s</td></tr>' % kv for kv in facts), files, found_rows(meta.get("card")),
+               record_rows({k: v for k, v in meta.items() if k != "card"}),
                e(json.dumps(meta, indent=1, ensure_ascii=False)))))
 
     async def admin_people_csv(request: Request) -> Response:

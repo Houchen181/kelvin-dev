@@ -693,7 +693,9 @@ def test_kelvin_shares_over_its_sign_in_and_the_owner_reads_it(tmp_path):
         "projects": [{"id": "p00000001", "name": "CrSBr"}],
         "chats": [{"id": "aaaaaaaaaaaa", "project": "p00000001", "title": "Gate " + TRAP, "messages": messages}],
         "runs": [{"id": "run1", "project": "p00000001", "device": "D1",
-                  "meta": {"plan": "gate_sweep", "status": "done", "results": ["V0: 1.2 V"]}}]})
+                  "meta": {"plan": "gate_sweep", "status": "done", "results": ["V0: 1.2 V"],
+                           "card": {"results": ["G: slope 2.5 uS"], "assessment": "clean sweep " + TRAP,
+                                    "swept": [{"key": "Vg", "unit": "V", "from": -1, "to": 1}]}}}]})
     assert r.status_code == 200 and (r.json()["chats"], r.json()["runs"]) == (1, 1)
     r = client.put("/api/sync/runs/run1/files/data.csv", content=b"1,2\n", headers=auth)
     assert r.status_code == 403 and r.json()["run_files"] is False and "records only" in r.json()["error"]
@@ -724,6 +726,9 @@ def test_kelvin_shares_over_its_sign_in_and_the_owner_reads_it(tmp_path):
     run_url = re.search(r'href="(/admin/users/1/runs/\d+)"', person).group(1)
     page = client.get(run_url).text
     assert "gate_sweep" in page and "V0: 1.2 V" in page and "No data files" in page
+    found = page[page.index("What it found"):page.index("Its record")]                # the card, laid out
+    assert "G: slope 2.5 uS" in found and "Assessment" in found and "clean sweep &lt;script&gt;" in found
+    assert "Vg" in found and TRAP not in page
     record = client.get("/admin/users/1").text
     for want in ("viewed chat", "downloaded chat", "viewed run"):
         assert want in record, want
