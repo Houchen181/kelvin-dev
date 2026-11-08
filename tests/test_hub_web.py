@@ -21,10 +21,11 @@ from labharness.hub.server import create_app  # noqa: E402
 CALLBACK = "http://127.0.0.1:8770/hub/callback"
 
 
-def make(tmp_path, sharing=True):
-    """sharing: labs, connected Kelvins and shared work (off on a hub that keeps Kelvin accounts only)."""
+def make(tmp_path, sharing=True, **config):
+    """sharing: Kelvins share work here (off on a hub that keeps Kelvin accounts only); config: other hub.json
+    settings, such as labs=True or run_files=True (both off by default)."""
     hub = Hub(tmp_path / "hub")
-    hub.config["sharing"] = sharing
+    hub.config.update(config, sharing=sharing)
     return hub, TestClient(create_app(hub, hosts=["testserver"], backups=False))
 
 
@@ -77,7 +78,7 @@ def test_register_sign_in_and_out(tmp_path):
 
 
 def test_forms_need_the_anti_forgery_value_and_this_site(tmp_path):
-    hub, client = make(tmp_path)
+    hub, client = make(tmp_path, labs=True)
     register(client)
     r = client.post("/labs", data={"name": "Smith Lab"})
     assert r.status_code == 400 and "expired" in r.text and hub.labs_of(1) == []
@@ -96,7 +97,7 @@ def test_forms_need_the_anti_forgery_value_and_this_site(tmp_path):
 
 
 def test_connecting_a_kelvin_through_the_browser_then_syncing(tmp_path):
-    hub, client = make(tmp_path)
+    hub, client = make(tmp_path, labs=True, run_files=True)
     register(client)
     client.post("/labs", data={"name": "Smith Lab", "csrf": csrf(client.get("/account"))})
     lab = hub.labs_of(1)[0]
@@ -238,7 +239,7 @@ def test_connecting_needs_the_password_of_the_account_signed_in(tmp_path):
 def test_bodies_are_capped_before_they_are_read(tmp_path, monkeypatch):
     """Review S1."""
     from labharness.hub import server
-    hub, client = make(tmp_path)
+    hub, client = make(tmp_path, run_files=True)
     big = b"email=a%40b.c&password=" + b"x" * (70 * 1024)
     assert client.post("/signin", content=big, headers={"Content-Type": "application/x-www-form-urlencoded"}
                        ).status_code == 413
@@ -265,7 +266,7 @@ def test_bodies_are_capped_before_they_are_read(tmp_path, monkeypatch):
 def test_odd_times_never_break_the_account_page(tmp_path):
     """Review S2: even times already stored before the check came in."""
     import sqlite3
-    hub, client = make(tmp_path)
+    hub, client = make(tmp_path, labs=True)
     register(client)
     lab_page = client.post("/labs", data={"name": "L", "csrf": csrf(client.get("/account"))})
     assert lab_page.status_code == 200
@@ -335,7 +336,7 @@ def test_one_persons_flood_never_holds_up_anyone_else(tmp_path, monkeypatch):
     from labharness.hub.db import challenge_of
     monkeypatch.setattr(hubdb, "LOCK_WAIT", 4.0)   # longer than the other person may wait
     hub = Hub(tmp_path / "hub")
-    hub.config["sharing"] = True
+    hub.config.update(sharing=True, run_files=True)
     with TestClient(create_app(hub, hosts=["testserver"], backups=False)) as client:   # one event loop, one pool
         register(client)                                                # Ada, in the browser
         m = hub.register("m@example.org", "M", "correct horse", consent=True)
@@ -628,3 +629,133 @@ def test_hub_json_edited_while_the_hub_runs_is_taken_in(tmp_path, monkeypatch):
         path.write_text("{half saved", encoding="utf-8")                        # mid-write: the settings stay
         time.sleep(0.3)
         assert hub.config["consent_version"] == "2099-01-01"
+
+
+def owner(client, hub):
+    """The Kelvin team opens the owner console in this client."""
+    key = hub.ensure_operator_key().read_text(encoding="utf-8").split()[-1]
+    return client.post("/admin/signin", data={"key": key})
+
+
+PC = {"id": "urn:uuid:lab-pc-0001", "name": "Lab PC", "platform": "win32", "version": "0.3.47"}
+TRAP = "<script>alert(1)</script>"
+
+
+def test_by_default_kelvin_shares_with_the_kelvin_team_and_there_are_no_labs(tmp_path):
+    hub, client = make(tmp_path)                    # the defaults: sharing on, labs and run files off
+    home = client.get("/").text
+    assert "with the Kelvin team" in home and "never their data files" in home and "labmates" not in home
+    terms, privacy = client.get("/terms").text, client.get("/privacy").text
+    assert "The Kelvin team, who run the hub, can read what is shared" in terms and "join code" not in terms
+    assert "No other user sees it" in privacy and "runs' data files (run.h5, plots, reports)" in privacy
+    assert "Kelvin shares your normal projects" in client.get("/register").text   # said before anyone agrees
+    register(client)
+    account = client.get("/account").text
+    for want in ("Shared with the Kelvin team", "Your Kelvins", "Nothing yet"):
+        assert want in account, want
+    for gone in ("Your labs", "Join a lab", "Shared in your labs", "Connected Kelvins"):
+        assert gone not in account, gone
+    assert client.post("/labs", data={"name": "Smith Lab", "csrf": csrf(client.get("/account"))}).status_code == 404
+    assert client.post("/labs/join", data={"code": "AAAA", "csrf": csrf(client.get("/account"))}).status_code == 404
+    assert hub.labs_of(1) == []
+    kelvin, pending, page, form = connect_form(client)            # an older Kelvin still connects: into no lab
+    assert "Share into" not in page.text and "with the Kelvin team" in page.text
+    r = client.post("/connect", data=dict(form, csrf=csrf(page), action="allow", password="correct horse", lab="1"),
+                    follow_redirects=False)
+    kelvin.finish({k: v[0] for k, v in parse_qs(urlsplit(r.headers["location"]).query).items()}, pending)
+    assert kelvin.me()["shares_into"] is None and kelvin.me()["labs"] == []
+
+
+def test_kelvin_shares_over_its_sign_in_and_the_owner_reads_it(tmp_path):
+    """Kelvin's own sign-in token shares (no /connect); the owner console lists and opens what it shared, never
+    running a chat's markup, and each opening goes in the person's record."""
+    hub, client = make(tmp_path)
+    r = client.post("/api/register", json={"name": "Ada", "email": "ada@example.org", "password": "correct horse",
+                                           "consent": True, "installation": PC})
+    auth = {"Authorization": "Bearer " + r.json()["access_token"]}
+    me = client.get("/api/me", headers=auth).json()
+    assert (me["shares_into"], me["labs"], me["needs_consent"], me["run_files"]) == (None, [], False, False)
+    messages = [
+        {"role": "user", "text": "sweep the gate " + TRAP, "attachments": [
+            {"name": "notes.pdf", "file": "a" * 24 + ".pdf", "mime": "application/pdf", "pages": 3}]},
+        {"role": "assistant", "model": "claude-opus-5-5", "blocks": [
+            {"type": "thinking", "text": "the gate first"}, {"type": "text", "text": "On it. " + TRAP},
+            {"type": "tool_call", "id": "t1", "name": "run_plan", "input": {"plan": TRAP}}]},
+        {"role": "tool", "results": [{"id": "t1", "name": "run_plan", "content": "x" * 30000, "is_error": False,
+                                      "images": [{"file": "b" * 24 + ".png", "mime": "image/png"}]}]},
+        {"role": "user", "text": "compare", "compare": {"models": ["a", "b"], "chosen": 0, "lanes": [
+            {"model": "a", "messages": []},
+            {"model": "b", "messages": [{"role": "assistant", "model": "b", "blocks": [
+                {"type": "text", "text": "lane b says " + TRAP}]}]}]}},
+        {"role": "user", "text": "", "events": ["the fridge warmed"], "wake": {"at": 1}},
+    ]
+    r = client.post("/api/sync", headers=auth, json={
+        "projects": [{"id": "p00000001", "name": "CrSBr"}],
+        "chats": [{"id": "aaaaaaaaaaaa", "project": "p00000001", "title": "Gate " + TRAP, "messages": messages}],
+        "runs": [{"id": "run1", "project": "p00000001", "device": "D1",
+                  "meta": {"plan": "gate_sweep", "status": "done", "results": ["V0: 1.2 V"]}}]})
+    assert r.status_code == 200 and (r.json()["chats"], r.json()["runs"]) == (1, 1)
+    r = client.put("/api/sync/runs/run1/files/data.csv", content=b"1,2\n", headers=auth)
+    assert r.status_code == 403 and r.json()["run_files"] is False and "records only" in r.json()["error"]
+
+    client.post("/signin", data={"email": "ada@example.org", "password": "correct horse"})   # Ada, in the browser
+    account = client.get("/account").text
+    chat_id = re.search(r'/shared/chats/(\d+)', account).group(1)
+    mine = client.get("/shared/chats/%s" % chat_id).text
+    assert "you and the Kelvin team" in mine and "&lt;script&gt;" in mine and TRAP not in mine
+    run_page = client.get("/shared/runs/%s" % re.search(r'/shared/runs/(\d+)', account).group(1)).text
+    assert "the data files stay on your computer" in run_page
+
+    client.cookies.clear()
+    admin = owner(client, hub).text
+    assert "Latest shared chats" in admin and "Gate &lt;script&gt;" in admin and TRAP not in admin
+    person = client.get("/admin/users/1").text
+    assert "1 project, 1 chat and 1 run" in person and "gate_sweep" in person and "CrSBr" in person
+    chat_url = re.search(r'href="(/admin/users/1/chats/\d+)"', person).group(1)
+    page = client.get(chat_url).text
+    assert TRAP not in page and page.count("&lt;script&gt;") >= 4               # every place it came, as text
+    for want in ("sweep the gate", "Thinking", "Calls run_plan", "run_plan result", "1 picture", "not shown here",
+                 "notes.pdf (application/pdf, 3 pages)", "more characters not shown", "b answered too",
+                 "Kelvin, coming back to the chat", "the fridge warmed", "Lab PC"):
+        assert want in page, want
+    r = client.get(chat_url + "/json")
+    assert "attachment" in r.headers["content-disposition"] and r.headers["content-type"].startswith("application/json")
+    assert r.json()["title"] == "Gate " + TRAP and r.json()["messages"] == messages
+    run_url = re.search(r'href="(/admin/users/1/runs/\d+)"', person).group(1)
+    page = client.get(run_url).text
+    assert "gate_sweep" in page and "V0: 1.2 V" in page and "No data files" in page
+    record = client.get("/admin/users/1").text
+    for want in ("viewed chat", "downloaded chat", "viewed run"):
+        assert want in record, want
+    client.cookies.clear()
+    for url in (chat_url, chat_url + "/json", run_url):                         # owners only
+        assert client.get(url, follow_redirects=False).status_code == 303, url
+
+
+def test_new_terms_say_what_changed_and_sharing_waits_for_them(tmp_path):
+    """The hub's terms changing to sharing by default (an older hub.json pins the accounts-only version): everyone is
+    asked again, sees what changed, and nothing is taken until they agree, except their own removals."""
+    hub = Hub(tmp_path / "hub")
+    hub.config.update(sharing=False, consent_version="2026-10-29")      # as an older hub wrote hub.json
+    client = TestClient(create_app(hub, hosts=["testserver"], backups=False))
+    register(client)
+    r = client.post("/api/signin", json={"email": "ada@example.org", "password": "correct horse", "installation": PC})
+    auth = {"Authorization": "Bearer " + r.json()["access_token"]}
+    hub.config["sharing"] = True                                        # the operator switches sharing on
+    assert client.get("/account", follow_redirects=False).headers["location"].startswith("/consent")
+    page = client.get("/consent")
+    assert "What changed" in page.text and "Kelvin now shares your chats" in page.text and "2026-11-08" in page.text
+    assert client.get("/api/me", headers=auth).json()["needs_consent"] is True
+    one = {"chats": [{"id": "aaaaaaaaaaaa", "title": "t", "messages": []}]}
+    r = client.post("/api/sync", headers=auth, json=one)
+    assert r.status_code == 403 and r.json()["needs_consent"] and r.json()["consent_url"].endswith("/consent")
+    big = b'{"removed": {"chats": []}, "pad": "' + b"x" * (300 * 1024) + b'"}'
+    assert client.post("/api/sync", headers=auth, content=big).status_code == 403   # refused before it is read
+    r = client.post("/api/sync", headers=auth, json={"removed": {"chats": ["aaaaaaaaaaaa"]}})
+    assert r.status_code == 200                                         # taking work off never waits on terms
+    client.post("/consent", data={"csrf": csrf(page), "consent": "yes", "next": "/account"})
+    r = client.post("/api/sync", headers=auth, json=one)
+    assert r.status_code == 200 and r.json()["chats"] == 1
+    client.cookies.clear()
+    register(client, "ben@example.org", "Ben")                          # someone new agrees to these at once
+    assert "What changed" not in client.get("/consent").text and hub.user(2)["consent_version"] == "2026-11-08"

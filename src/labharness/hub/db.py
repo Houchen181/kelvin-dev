@@ -13,7 +13,8 @@
 Passwords are PBKDF2-SHA256 hashes, as for Kelvin's local accounts. Session and app tokens, and the one-use codes
 (connecting a Kelvin, confirming an email, resetting a password), are stored only as their SHA-256.
 
-Everyone is equal: there is no role column. The Kelvin team runs the hub with the operator key, which is no account.
+Everyone is equal: there is no role column. The Kelvin team runs the hub with the operator key, which is no account,
+and reads what people's Kelvins shared in the owner console; each opening goes in the person's record (audit).
 """
 from __future__ import annotations
 
@@ -45,7 +46,10 @@ UPLOADS_AT_ONCE = 2              # per person
 LOCK_WAIT = 10.0                 # seconds a request waits for the same person's sync or upload before a 429
 MAX_PREVIOUS = 5                 # earlier installation ids a Kelvin may fold into its new one
 EARLIEST = 946684800.0           # 2000-01-01: an earlier or non-finite time from a Kelvin is taken as "now"
-CONSENT_VERSION = "2026-10-29"   # bump when the terms or privacy notice change; people then agree again
+# bump when the terms or privacy notice change; people then agree again. Two sets of terms, so two versions: with
+# sharing on (Kelvin shares people's chats and run records with the Kelvin team), and for Kelvin accounts only
+CONSENT_VERSION = "2026-11-08"
+CONSENT_VERSION_ACCOUNTS = "2026-10-29"
 SESSION_TTL = 30 * 86400
 CODE_TTL = {"connect": 600, "confirm": 7 * 86400, "reset": 3600}
 MIN_PASSWORD = 8
@@ -65,7 +69,10 @@ DEFAULTS: Dict[str, Any] = {
     "base_url": "http://127.0.0.1:8780",
     "consent_version": CONSENT_VERSION,
     "require_confirmed_email": False,   # True once mail works: unconfirmed people can sign in but not connect a Kelvin
-    "sharing": False,                   # labs, connected Kelvins and shared work; off: Kelvin accounts only
+    "sharing": True,                    # Kelvins share people's chats and run records here; off: Kelvin accounts only
+    "labs": False,                      # labs with join codes, whose members see each other's shared work; off: only
+                                        # its person and the Kelvin team see shared work
+    "run_files": False,                 # runs' data files from Kelvins; off: the hub keeps runs' records only
     "max_file_mb": 200,
     "quota_gb_per_user": 5,
     "backups_kept": 30,
@@ -189,17 +196,36 @@ CREATE INDEX IF NOT EXISTS runs_project ON runs (project_id);
 CREATE INDEX IF NOT EXISTS chats_user_bytes ON chats (user_id, bytes);
 CREATE INDEX IF NOT EXISTS runs_user_bytes ON runs (user_id, bytes);
 CREATE INDEX IF NOT EXISTS audit_user ON audit (user_id, at);
+-- lists of chats, newest first, read from these alone: a chat's other columns come after its conversation (up to
+-- 5 MB in overflow pages), which a list would otherwise read through for every row
+CREATE INDEX IF NOT EXISTS chats_user_updated ON chats (user_id, updated_at, title, bytes, project_id, lab_id,
+  installation_id);
+CREATE INDEX IF NOT EXISTS chats_updated ON chats (updated_at, user_id, title, bytes, project_id);
 """
 
 # who may see an item (alias x): its owner, or a member of the lab it was shared in while the owner is one too
 VISIBLE = ("(x.user_id = :me OR (x.lab_id IS NOT NULL"
            " AND EXISTS (SELECT 1 FROM lab_members a WHERE a.lab_id = x.lab_id AND a.user_id = :me)"
            " AND EXISTS (SELECT 1 FROM lab_members b WHERE b.lab_id = x.lab_id AND b.user_id = x.user_id)))")
+# ...while labs are off: its owner only (the Kelvin team reads shared work in the owner console)
+OWN = "(x.user_id = :me)"
+RECORD_KEYS = ("plan", "status", "started")   # what the owner's list of runs reads from each run's record
+NO_RUN_FILES = "This hub keeps runs' records only: a run's data files stay on your computer."
 
 
 class HubError(ValueError):
     """Something the person (or the Kelvin) can fix; the message says what."""
     status = 400
+
+
+class NeedsConsent(HubError):
+    """The terms changed and the person hasn't agreed to them yet: the hub takes nothing new from them until they do."""
+    status = 403
+
+
+class Refused(HubError):
+    """Something this hub doesn't take at all, such as run files while run_files is off."""
+    status = 403
 
 
 class TooMuch(HubError):
@@ -542,10 +568,10 @@ class Hub:
                     "INSERT INTO users (email, name, orcid, password_hash, salt, iterations, consent_version,"
                     " consent_at, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (email, name, orcid_id, _hash(password, salt, ITERATIONS), salt.hex(), ITERATIONS,
-                     self.config["consent_version"], now, now, now))
+                     self.consent_version, now, now, now))
             except sqlite3.IntegrityError:
                 raise HubError("There is already an account with that email. Sign in, or reset its password.")
-            self.audit(con, "user", "registered", cur.lastrowid, {"consent": self.config["consent_version"]}, ip)
+            self.audit(con, "user", "registered", cur.lastrowid, {"consent": self.consent_version}, ip)
             return _public(con.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone())
 
     def user(self, user_id: int) -> Dict[str, Any]:
@@ -580,14 +606,26 @@ class Hub:
                                                        row["id"], row["password_hash"]))
         return _public(row)
 
+    @property
+    def consent_version(self) -> str:
+        """The terms in force: the later of hub.json's consent_version and the code's for the terms served now (with
+        sharing, or for accounts only). Versions are dates (YYYY-MM-DD), so they compare as text. A hub.json written
+        by an older hub still pins the older version: everyone is asked again all the same, and the operator can
+        still raise it past the code's."""
+        code = CONSENT_VERSION if self.sharing else CONSENT_VERSION_ACCOUNTS
+        return max(str(self.config.get("consent_version") or ""), code)
+
     def needs_consent(self, user: Dict[str, Any]) -> bool:
-        return user.get("consent_version") != self.config["consent_version"]
+        """Has the person yet to agree to the terms in force? Only a later version asks again: switching sharing
+        off (back to the accounts-only terms, an earlier date) never does."""
+        return str(user.get("consent_version") or "") < self.consent_version
 
     def give_consent(self, user_id: int, ip: Optional[str] = None) -> None:
+        version = self.consent_version
         with self.connect() as con:
             con.execute("UPDATE users SET consent_version = ?, consent_at = ? WHERE id = ?",
-                        (self.config["consent_version"], time.time(), user_id))
-            self.audit(con, "user", "consented", user_id, {"consent": self.config["consent_version"]}, ip)
+                        (version, time.time(), user_id))
+            self.audit(con, "user", "consented", user_id, {"consent": version}, ip)
 
     def set_profile(self, user_id: int, name: Any, orcid: Any) -> Dict[str, Any]:
         name = _text(name, "Please give your name.", MAX_NAME)
@@ -776,9 +814,12 @@ class Hub:
 
     def connect_code(self, user: Dict[str, Any], redirect_uri: str, challenge: str, installation: Dict[str, Any],
                      lab_id: Optional[int], previous: Optional[List[str]] = None) -> str:
-        """After the person says yes on /connect: a code their Kelvin trades for its token (with the PKCE verifier)."""
+        """After the person says yes on /connect: a code their Kelvin trades for its token (with the PKCE verifier).
+        While labs are off, a Kelvin shares into no lab, whatever the form said."""
         if self.config.get("require_confirmed_email") and not user.get("email_confirmed_at"):
             raise HubError("Confirm your email address first (see the message we sent you).")
+        if not self.labs:
+            lab_id = None
         if lab_id is not None and not self.is_member(lab_id, user["id"]):
             raise HubError("You are not a member of that lab.")
         return self.new_code("connect", user["id"], {"redirect_uri": redirect_uri, "challenge": challenge,
@@ -1027,11 +1068,17 @@ class Hub:
         incognito, unpublished, confidential or model-limited chats, runs marked incognito, unpublished or
         confidential, and chats or runs in a project that isn't shared are refused (and deleted if the hub had
         them). Everything this Kelvin shared is filed under the lab it shares into now. Chats count toward the
-        person's share of the disk, as run files do."""
+        person's share of the disk, as run files do.
+
+        Until the person agrees to the terms in force, the hub takes nothing new (NeedsConsent), but a sync that only
+        removes is taken: taking one's work off the hub never waits on terms."""
         if not isinstance(payload, dict):
             raise HubError("The body must be a JSON object.")
         user = app["user"]
-        if self.config.get("require_confirmed_email") and not user.get("email_confirmed_at"):
+        taking = any(payload.get(k) for k in ("projects", "chats", "runs"))
+        if taking and self.needs_consent(user):
+            raise NeedsConsent("The hub's terms changed. Agree to them at %s/consent first." % self.base_url)
+        if taking and self.config.get("require_confirmed_email") and not user.get("email_confirmed_at"):
             raise HubError("Confirm your email address before sharing.")
         uid, inst, now = user["id"], app["installation_id"], time.time()
         done: Dict[str, Any] = {"projects": 0, "chats": 0, "runs": 0, "withheld": 0, "removed": 0, "refused": []}
@@ -1220,7 +1267,10 @@ class Hub:
 
     def reserve_upload(self, app: Dict[str, Any], run_local_id: Any, name: Any, size: int) -> Dict[str, Any]:
         """Before a file streams in: check its run and name, and hold its bytes against the person's share of the
-        disk, so parallel uploads can't overrun it. Release the ticket afterwards (release_upload)."""
+        disk, so parallel uploads can't overrun it. Release the ticket afterwards (release_upload). Refused while
+        the hub keeps runs' records only (run_files off)."""
+        if not self.run_files:
+            raise Refused(NO_RUN_FILES)
         parts = file_parts(name)
         uid = app["user"]["id"]
         local = _local_id(run_local_id, "A run")
@@ -1285,22 +1335,23 @@ class Hub:
     # ------------------------------------------------------------------ what a person can see
 
     def shared_with(self, user_id: int, limit: int = 200) -> Dict[str, List[Dict[str, Any]]]:
-        """Their own shared work, and what labmates shared in labs they are both in, newest first."""
-        me = {"me": user_id, "limit": limit}
+        """Their own shared work and, while labs are on, what labmates shared in labs they are both in; newest
+        first."""
+        me, seen = {"me": user_id, "limit": limit}, self._seen_by()
         with self.connect() as con:
             projects = con.execute(
                 "SELECT x.id, x.name, x.updated_at, x.user_id, u.name AS owner, l.name AS lab FROM projects x"
                 " JOIN users u ON u.id = x.user_id LEFT JOIN labs l ON l.id = x.lab_id"
-                " WHERE x.shared = 1 AND " + VISIBLE + " ORDER BY x.updated_at DESC LIMIT :limit", me).fetchall()
+                " WHERE x.shared = 1 AND " + seen + " ORDER BY x.updated_at DESC LIMIT :limit", me).fetchall()
             chats = con.execute(
                 "SELECT x.id, x.title, x.updated_at, x.user_id, u.name AS owner, l.name AS lab, p.name AS project"
                 " FROM chats x JOIN users u ON u.id = x.user_id LEFT JOIN labs l ON l.id = x.lab_id"
-                " LEFT JOIN projects p ON p.id = x.project_id WHERE " + VISIBLE +
+                " LEFT JOIN projects p ON p.id = x.project_id WHERE " + seen +
                 " ORDER BY x.updated_at DESC LIMIT :limit", me).fetchall()
             runs = con.execute(
                 "SELECT x.id, x.local_id, x.device, x.bytes, x.created_at, x.user_id, u.name AS owner, l.name AS lab,"
                 " p.name AS project FROM runs x JOIN users u ON u.id = x.user_id LEFT JOIN labs l ON l.id = x.lab_id"
-                " LEFT JOIN projects p ON p.id = x.project_id WHERE " + VISIBLE +
+                " LEFT JOIN projects p ON p.id = x.project_id WHERE " + seen +
                 " ORDER BY x.created_at DESC LIMIT :limit", me).fetchall()
         return {"projects": [dict(r) for r in projects], "chats": [dict(r) for r in chats],
                 "runs": [dict(r) for r in runs]}
@@ -1309,7 +1360,7 @@ class Hub:
         with self.connect() as con:
             row = con.execute("SELECT x.*, u.name AS owner, l.name AS lab, p.name AS project FROM chats x"
                               " JOIN users u ON u.id = x.user_id LEFT JOIN labs l ON l.id = x.lab_id"
-                              " LEFT JOIN projects p ON p.id = x.project_id WHERE x.id = :id AND " + VISIBLE,
+                              " LEFT JOIN projects p ON p.id = x.project_id WHERE x.id = :id AND " + self._seen_by(),
                               {"id": chat_id, "me": user_id}).fetchone()
         if row is None:
             raise HubError("No such chat, or it isn't shared with you.")
@@ -1321,7 +1372,7 @@ class Hub:
         with self.connect() as con:
             row = con.execute("SELECT x.*, u.name AS owner, l.name AS lab, p.name AS project FROM runs x"
                               " JOIN users u ON u.id = x.user_id LEFT JOIN labs l ON l.id = x.lab_id"
-                              " LEFT JOIN projects p ON p.id = x.project_id WHERE x.id = :id AND " + VISIBLE,
+                              " LEFT JOIN projects p ON p.id = x.project_id WHERE x.id = :id AND " + self._seen_by(),
                               {"id": run_id, "me": user_id}).fetchone()
         if row is None:
             raise HubError("No such run, or it isn't shared with you.")
@@ -1339,6 +1390,98 @@ class Hub:
         if folder not in path.parents or not path.is_file():
             raise HubError("No such file in this run.")
         return path
+
+    # ------------------------------------------------------------------ the owner's view of shared work
+
+    def shared_by(self, user_id: int, limit: int = 200) -> Dict[str, Any]:
+        """What one person's Kelvins shared, for the owner console, newest first: their shared projects, chats
+        (without the conversations) and runs (plan, status and start, read from each run's record), with how many
+        there are of each. Nothing here goes in their record: only opening a chat or a run does."""
+        args = {"u": user_id, "limit": limit}
+        with self.connect() as con:
+            projects = [dict(r) for r in con.execute(
+                "SELECT p.id, p.name, p.updated_at, i.name AS computer,"
+                " (SELECT COUNT(*) FROM chats c WHERE c.project_id = p.id) AS chats,"
+                " (SELECT COUNT(*) FROM runs r WHERE r.project_id = p.id) AS runs"
+                " FROM projects p LEFT JOIN installations i ON i.id = p.installation_id"
+                " WHERE p.user_id = :u AND p.shared = 1 ORDER BY p.updated_at DESC LIMIT :limit", args)]
+            chats = [dict(r) for r in con.execute(
+                "SELECT c.id, c.title, c.updated_at, c.bytes, p.name AS project, i.name AS computer FROM chats c"
+                " LEFT JOIN projects p ON p.id = c.project_id LEFT JOIN installations i ON i.id = c.installation_id"
+                " WHERE c.user_id = :u ORDER BY c.updated_at DESC LIMIT :limit", args)]
+            runs = self._run_list(con, "r.user_id = :u", args)
+            one = lambda sql: con.execute(sql, (user_id,)).fetchone()[0]   # noqa: E731
+            counts = {"projects": one("SELECT COUNT(*) FROM projects WHERE user_id = ? AND shared = 1"),
+                      "chats": one("SELECT COUNT(*) FROM chats WHERE user_id = ?"),
+                      "runs": one("SELECT COUNT(*) FROM runs WHERE user_id = ?")}
+        return {"projects": projects, "chats": chats, "runs": runs, "counts": counts}
+
+    @staticmethod
+    def _run_list(con: sqlite3.Connection, where: str, args: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Runs for a list, newest first, each with its plan, status and start from its record (RECORD_KEYS)."""
+        sql = ("SELECT r.id, r.user_id, r.local_id, r.device, r.created_at, r.bytes, p.name AS project, %s FROM runs r"
+               " LEFT JOIN projects p ON p.id = r.project_id WHERE " + where + " ORDER BY r.created_at DESC"
+               " LIMIT :limit")
+        try:
+            return [dict(r) for r in con.execute(sql % ", ".join(
+                "json_extract(r.meta, '$.%s') AS %s" % (k, k) for k in RECORD_KEYS), args)]
+        except sqlite3.OperationalError:   # an SQLite without its JSON functions: read the records here
+            out = []
+            for r in con.execute(sql % "r.meta", args):
+                row = dict(r)
+                try:
+                    meta = json.loads(row.pop("meta") or "{}")
+                except ValueError:
+                    meta = {}
+                meta = meta if isinstance(meta, dict) else {}
+                row.update({k: json.dumps(meta[k]) if isinstance(meta.get(k), (dict, list)) else meta.get(k)
+                            for k in RECORD_KEYS})
+                out.append(row)
+            return out
+
+    def latest_chats(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """The latest shared chats across everyone, for the owner console (without the conversations)."""
+        with self.connect() as con:
+            return [dict(r) for r in con.execute(
+                "SELECT c.id, c.user_id, c.title, c.updated_at, c.bytes, u.name AS owner, p.name AS project"
+                " FROM chats c JOIN users u ON u.id = c.user_id LEFT JOIN projects p ON p.id = c.project_id"
+                " ORDER BY c.updated_at DESC LIMIT ?", (limit,))]
+
+    def owner_chat(self, user_id: int, chat_id: Any, download: bool = False) -> Dict[str, Any]:
+        """One of a person's shared chats, whole, for the owner console. Each view or download goes in the hub's
+        record of their account (by the chat's own id, never its title, which hub.log would then keep), so their
+        Export shows it."""
+        with self.connect() as con:
+            row = con.execute("SELECT c.*, u.name AS owner, u.email, p.name AS project, i.name AS computer,"
+                              " i.platform, i.version FROM chats c JOIN users u ON u.id = c.user_id"
+                              " LEFT JOIN projects p ON p.id = c.project_id"
+                              " LEFT JOIN installations i ON i.id = c.installation_id"
+                              " WHERE c.id = ? AND c.user_id = ?", (chat_id, user_id)).fetchone()
+            if row is None:
+                raise HubError("No such chat.")
+            self.audit(con, "operator", "downloaded chat" if download else "viewed chat", user_id,
+                       {"chat": row["local_id"]})
+        chat = dict(row)
+        chat["messages"] = json.loads(chat["messages"])
+        return chat
+
+    def owner_run(self, user_id: int, run_id: Any) -> Dict[str, Any]:
+        """One of a person's shared runs, its record whole, for the owner console. The view goes in the hub's record
+        of their account, as a chat's does."""
+        with self.connect() as con:
+            row = con.execute("SELECT r.*, u.name AS owner, u.email, p.name AS project, i.name AS computer FROM runs r"
+                              " JOIN users u ON u.id = r.user_id LEFT JOIN projects p ON p.id = r.project_id"
+                              " LEFT JOIN installations i ON i.id = r.installation_id"
+                              " WHERE r.id = ? AND r.user_id = ?", (run_id, user_id)).fetchone()
+            if row is None:
+                raise HubError("No such run.")
+            self.audit(con, "operator", "viewed run", user_id, {"run": row["local_id"]})
+        run = dict(row)
+        run["meta"] = json.loads(run["meta"])
+        folder = self.home / run["files_path"] if run["files_path"] else None
+        run["files"] = sorted(f.relative_to(folder).as_posix() for f in folder.rglob("*") if f.is_file()) \
+            if folder is not None and folder.is_dir() else []
+        return run
 
     # ------------------------------------------------------------------ export and deletion
 
@@ -1438,8 +1581,25 @@ class Hub:
 
     @property
     def sharing(self) -> bool:
-        """Do people's Kelvins share work into labs here? Off (the default), the hub keeps Kelvin accounts only."""
+        """Do people's Kelvins share their work here (the default)? Off, the hub keeps Kelvin accounts only."""
         return bool(self.config.get("sharing"))
+
+    @property
+    def labs(self) -> bool:
+        """Labs with join codes, whose members see each other's shared work (only with sharing). Off (the default),
+        shared work is seen by its person and the Kelvin team only, and labs are out of sight; rows filed under a lab
+        before stay as they are."""
+        return self.sharing and bool(self.config.get("labs"))
+
+    @property
+    def run_files(self) -> bool:
+        """Does the hub take runs' data files? Off (the default), it keeps runs' records only, and the files stay on
+        people's computers."""
+        return bool(self.config.get("run_files"))
+
+    def _seen_by(self) -> str:
+        """The rule for what a person sees of shared work (alias x, parameter :me)."""
+        return VISIBLE if self.labs else OWN
 
     @staticmethod
     def _like(query: Any) -> str:

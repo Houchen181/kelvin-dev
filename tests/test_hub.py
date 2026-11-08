@@ -22,6 +22,12 @@ def last_code(hub, path):
     return [f for f in found if f][-1].group(1)
 
 
+def labs_and_files(hub):
+    """A hub with labs and runs' data files switched on (both off by default), as the tests of those use."""
+    hub.config.update(labs=True, run_files=True)
+    return hub
+
+
 def connected(hub, user, lab_id=None, inst=INST):
     """A Kelvin connected for this person, as the API sees it."""
     verifier = "v" * 50
@@ -40,7 +46,7 @@ def test_accounts_need_consent_and_keep_only_a_hash(tmp_path):
         hub.register("ada@example.org", "Ada", "correct horse", consent=True, orcid="0000-0002-1825-0098")
     ada = hub.register("Ada@Example.org", "Ada  Lovelace", "correct horse", consent=True, orcid="0000-0002-1825-0097")
     assert ada["email"] == "ada@example.org" and ada["name"] == "Ada Lovelace" and "password_hash" not in ada
-    assert ada["consent_version"] == hub.config["consent_version"] and ada["consent_at"]
+    assert ada["consent_version"] == hub.consent_version == hubdb.CONSENT_VERSION and ada["consent_at"]
     with pytest.raises(HubError):
         hub.register("ADA@example.org", "Someone", "another password", consent=True)   # one account per email
     assert hub.authenticate("ada@EXAMPLE.org", "correct horse")["id"] == ada["id"]
@@ -111,7 +117,7 @@ def test_connecting_a_kelvin_needs_the_verifier_and_a_loopback_callback(tmp_path
 
 
 def test_sync_shares_only_what_may_be_shared(tmp_path):
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
     cy = hub.register("cy@example.org", "Cy", "correct horse", consent=True)
@@ -163,7 +169,7 @@ def test_sync_shares_only_what_may_be_shared(tmp_path):
 
 def test_export_and_delete_take_everything(tmp_path):
     import zipfile
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     lab = hub.create_lab(ada["id"], "Solo Lab")
     _, app = connected(hub, ada, lab["id"])
@@ -241,7 +247,7 @@ def lab_sees(hub, user):
 def test_shared_work_follows_the_lab_a_kelvin_shares_into_now(tmp_path):
     """Review P1: reconnecting with another lab, or none, moves everything that Kelvin shared; leaving a lab is
     for good."""
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
     cy = hub.register("cy@example.org", "Cy", "correct horse", consent=True)
@@ -305,7 +311,7 @@ def test_times_from_a_kelvin_are_checked(tmp_path):
 def test_the_disk_share_holds_under_parallel_uploads(tmp_path, monkeypatch):
     """Review S3: bytes are reserved before a file streams in; chats count; only a few uploads at once."""
     import time
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     _, app = connected(hub, ada)
     hub.sync(app, {"runs": [{"id": "run1"}]})
@@ -497,7 +503,7 @@ def test_re_reading_hub_json_never_resets_it(tmp_path):
 
 def test_reconnecting_with_a_new_installation_id_folds_the_old_one_in(tmp_path):
     """Review A1: nothing stays behind under an earlier installation id of the same person's Kelvin."""
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
     lab = hub.create_lab(ada["id"], "Lab")
@@ -563,7 +569,7 @@ def test_chats_keep_their_size_and_an_old_database_learns_it(tmp_path):
 def test_folding_never_files_shared_work_into_a_project_made_private_since(tmp_path):
     """Review round 3: the old id shared project p with a chat and a run, and the new id has marked p not shared since.
     The old copies go; they are never re-filed into p, where a labmate would see them until the next sync."""
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
     lab = hub.create_lab(ada["id"], "Lab")
@@ -618,7 +624,7 @@ def test_a_connect_code_outlives_a_busy_hub_but_not_a_wrong_verifier(tmp_path, m
 def test_deleting_an_account_frees_the_database_before_its_files_go(tmp_path, monkeypatch):
     """Review round 3: the files of a large account can take a long time to delete; nobody else's sign-in or sync
     may wait for that, so the deletion is committed first."""
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     _, app = connected(hub, ada)
     hub.sync(app, {"runs": [{"id": "run1"}]})
@@ -642,3 +648,144 @@ def test_deleting_an_account_frees_the_database_before_its_files_go(tmp_path, mo
     monkeypatch.setattr(hubdb.shutil, "rmtree", rmtree)
     hub.delete_user(ada["id"])
     assert seen["write"] == "ok" and not list((tmp_path / "files").rglob("data.csv"))
+
+
+def test_without_labs_shared_work_is_its_persons_and_the_kelvin_teams(tmp_path):
+    """The default (2026-11-08): no labs. A labmate from before sees nothing; the rows keep their lab, so switching labs
+    on again shows them as before. A Kelvin connecting now shares into no lab, whatever it asks."""
+    hub = labs_and_files(Hub(tmp_path))
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
+    lab = hub.create_lab(ada["id"], "Smith Lab")
+    hub.join_lab(ben["id"], lab["join_code"])
+    _, app = connected(hub, ada, lab["id"])
+    hub.sync(app, {"chats": [{"id": "aaaaaaaaaaaa", "title": "gate sweep", "messages": []}],
+                   "runs": [{"id": "run1", "meta": {"plan": "sweep"}}]})
+    assert lab_sees(hub, ben) == ["gate sweep", "run1"]
+
+    hub.config["labs"] = False
+    assert not hub.labs and lab_sees(hub, ben) == [] and lab_sees(hub, ada) == ["gate sweep", "run1"]
+    with pytest.raises(HubError):
+        hub.chat(ben["id"], hub.shared_with(ada["id"])["chats"][0]["id"])
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        assert con.execute("SELECT lab_id FROM chats").fetchone()[0] == lab["id"]   # the row stays as it was
+    _, again = connected(hub, ada, lab["id"], inst=dict(INST, id="urn:uuid:5f0c1c55-0000-4000-8000-0000000000a2"))
+    assert again["lab_id"] is None                            # asked for the lab: shares into none
+    hub.config["labs"] = True
+    assert lab_sees(hub, ben) == ["gate sweep", "run1"]       # back as before
+    hub.config["sharing"] = False
+    assert not hub.labs                                        # labs only ever come with sharing
+
+
+def test_the_hub_keeps_runs_records_only_unless_run_files_is_on(tmp_path):
+    hub = Hub(tmp_path)
+    assert hub.sharing and not hub.labs and not hub.run_files   # the defaults
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    _, app = connected(hub, ada)
+    done = hub.sync(app, {"runs": [{"id": "run1", "device": "D1", "meta": {"plan": "gate_sweep", "status": "done"}}]})
+    assert done["runs"] == 1
+    upload = tmp_path / "tmp" / "u1"
+    upload.write_bytes(b"1,2\n")
+    with pytest.raises(hubdb.Refused, match="records only") as refused:
+        hub.store_run_file(app, "run1", "data.csv", upload, 4)
+    assert refused.value.status == 403 and not list((tmp_path / "files").rglob("data.csv"))
+    hub.config["run_files"] = True
+    assert hub.store_run_file(app, "run1", "data.csv", upload, 4)["bytes"] == 4
+
+
+def test_new_terms_ask_everyone_again_even_where_hub_json_pins_the_old_ones(tmp_path):
+    """A hub.json written by an older hub holds "sharing": false and the old consent_version. Sharing on brings the
+    sharing terms' version (the later one wins); the operator can still go past it; switching sharing off again asks
+    nobody (the accounts-only terms are older)."""
+    (tmp_path / "hub.json").write_text(json.dumps({"sharing": False, "consent_version": "2026-10-29"}),
+                                       encoding="utf-8")
+    hub = Hub(tmp_path)
+    assert hub.consent_version == hubdb.CONSENT_VERSION_ACCOUNTS == "2026-10-29"
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    assert not hub.needs_consent(ada)
+    hub.config["sharing"] = True                              # the operator switches sharing on
+    assert hub.consent_version == hubdb.CONSENT_VERSION == "2026-11-08" and hub.needs_consent(hub.user(ada["id"]))
+    hub.give_consent(ada["id"])
+    assert hub.user(ada["id"])["consent_version"] == "2026-11-08" and not hub.needs_consent(hub.user(ada["id"]))
+    hub.config["consent_version"] = "2027-01-01"              # the operator's own terms, later
+    assert hub.consent_version == "2027-01-01" and hub.needs_consent(hub.user(ada["id"]))
+    hub.give_consent(ada["id"])
+    hub.config.update(sharing=False, consent_version="2026-10-29")
+    assert not hub.needs_consent(hub.user(ada["id"]))         # back to accounts only: nobody is asked
+    actions = [a["action"] for a in hub.activity_of(ada["id"])]
+    assert actions.count("consented") == 2
+
+
+def test_a_sync_that_only_removes_needs_no_new_terms(tmp_path):
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    token, app = connected(hub, ada)
+    hub.sync(app, {"chats": [{"id": "aaaaaaaaaaaa", "title": "t", "messages": []}], "runs": [{"id": "run1"}]})
+    hub.config["consent_version"] = "2099-01-01"
+    with pytest.raises(hubdb.NeedsConsent) as asked:
+        hub.sync(app, {"chats": [{"id": "bbbbbbbbbbbb", "title": "new", "messages": []}]})
+    assert asked.value.status == 403 and "/consent" in str(asked.value)
+    hub.sync(app, {"chats": []})                               # nothing to take: fine
+    done = hub.sync(app, {"removed": {"chats": ["aaaaaaaaaaaa"], "runs": ["run1"]}})
+    assert done["removed"] == 2 and hub.shared_with(ada["id"]) == {"projects": [], "chats": [], "runs": []}
+
+
+def test_a_kelvin_shares_over_its_sign_in_and_the_owner_reads_it(tmp_path, caplog):
+    """Kelvin shares with the token of its own sign-in (no /connect): filed under no lab. The owner console's reads
+    of a chat or a run go in the person's record, by the item's own id: never its title, which hub.log would keep."""
+    import zipfile
+    caplog.set_level("INFO", logger="kelvin.hub")
+    hub = Hub(tmp_path)
+    hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    signed = hub.sign_in_app("ada@example.org", "correct horse", {"id": "urn:uuid:lab-pc-0001", "name": "Lab PC",
+                                                                  "platform": "win32", "version": "0.3.47"})
+    app = hub.app(signed["access_token"])
+    uid = app["user"]["id"]
+    assert app["lab_id"] is None and app["installation_id"] == "urn:uuid:lab-pc-0001"
+    done = hub.sync(app, {
+        "projects": [{"id": "p00000001", "name": "CrSBr"}],
+        "chats": [{"id": "aaaaaaaaaaaa", "project": "p00000001", "title": "Secret-ish title", "updated": 1.7e9,
+                   "messages": [{"role": "user", "text": "sweep the gate"}]},
+                  {"id": "bbbbbbbbbbbb", "title": "Unfiled", "updated": 1.75e9, "messages": []}],
+        "runs": [{"id": "run1", "project": "p00000001", "device": "D1",
+                  "meta": {"plan": "gate_sweep", "status": "done", "started": "2026-11-08 10:00"}}]})
+    assert (done["projects"], done["chats"], done["runs"]) == (1, 2, 1)
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        assert con.execute("SELECT COUNT(*) FROM chats WHERE lab_id IS NULL").fetchone()[0] == 2
+
+    shared = hub.shared_by(uid)
+    assert shared["counts"] == {"projects": 1, "chats": 2, "runs": 1}
+    assert [c["title"] for c in shared["chats"]] == ["Unfiled", "Secret-ish title"]          # newest first
+    assert shared["chats"][1]["project"] == "CrSBr" and shared["chats"][1]["computer"] == "Lab PC"
+    assert (shared["runs"][0]["plan"], shared["runs"][0]["status"]) == ("gate_sweep", "done")
+    assert shared["projects"][0]["chats"] == 1 and shared["projects"][0]["runs"] == 1
+    assert [c["title"] for c in hub.latest_chats()] == ["Unfiled", "Secret-ish title"]
+    assert not any(a["action"].startswith(("viewed", "downloaded")) for a in hub.activity_of(uid))   # lists: no
+
+    chat = hub.owner_chat(uid, shared["chats"][1]["id"])
+    assert chat["messages"] == [{"role": "user", "text": "sweep the gate"}] and chat["owner"] == "Ada"
+    hub.owner_chat(uid, shared["chats"][1]["id"], download=True)
+    run = hub.owner_run(uid, shared["runs"][0]["id"])
+    assert run["meta"]["plan"] == "gate_sweep" and run["files"] == []
+    with pytest.raises(HubError):
+        hub.owner_chat(uid + 1, shared["chats"][1]["id"])                                  # not that person's
+    record = [(a["actor"], a["action"], json.loads(a["detail"])) for a in hub.activity_of(uid)]
+    assert ("operator", "viewed chat", {"chat": "aaaaaaaaaaaa"}) in record
+    assert ("operator", "downloaded chat", {"chat": "aaaaaaaaaaaa"}) in record
+    assert ("operator", "viewed run", {"run": "run1"}) in record
+    assert not any("Secret-ish" in r.getMessage() for r in caplog.records)
+    with zipfile.ZipFile(hub.export(uid)) as z:                                              # the person sees it
+        assert {"viewed chat", "downloaded chat", "viewed run"} <= {a["action"] for a in
+                                                                    json.loads(z.read("activity.json"))}
+
+
+def test_lists_of_chats_never_read_the_conversations(tmp_path):
+    """A chat's other columns come after its conversation: lists are read from covering indexes alone."""
+    Hub(tmp_path)
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        for sql in ("SELECT id, title, updated_at, bytes, project_id, installation_id FROM chats WHERE user_id = 1"
+                    " ORDER BY updated_at DESC LIMIT 200",
+                    "SELECT id, user_id, title, updated_at, bytes, project_id FROM chats ORDER BY updated_at DESC"
+                    " LIMIT 50"):
+            plan = " ".join(r[-1] for r in con.execute("EXPLAIN QUERY PLAN " + sql))
+            assert "COVERING INDEX" in plan and "TEMP B-TREE" not in plan, plan
