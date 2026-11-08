@@ -313,6 +313,7 @@ DEFERRED = {
     "SQL on the catalog of runs": ["query_runs"],
     "a lab notebook (ELN) record of a run or a day": ["export_eln"],
     "checking that the records and runs are as they were written": ["verify_records"],
+    "samples: what each is, what it came from, its history": ["update_sample", "sample_history"],
     "the lab's procedures (SOPs): keeping, running and following them": ["save_procedure", "procedures",
                                                                          "run_procedure_step", "procedure_status"],
     "writing and reading the lab notebook's entries": ["write_entry", "notebook"],
