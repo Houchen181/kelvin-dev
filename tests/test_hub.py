@@ -22,6 +22,12 @@ def last_code(hub, path):
     return [f for f in found if f][-1].group(1)
 
 
+def labs_and_files(hub):
+    """A hub with labs and runs' data files switched on (both off by default), as the tests of those use."""
+    hub.config.update(labs=True, run_files=True)
+    return hub
+
+
 def connected(hub, user, lab_id=None, inst=INST):
     """A Kelvin connected for this person, as the API sees it."""
     verifier = "v" * 50
@@ -40,7 +46,7 @@ def test_accounts_need_consent_and_keep_only_a_hash(tmp_path):
         hub.register("ada@example.org", "Ada", "correct horse", consent=True, orcid="0000-0002-1825-0098")
     ada = hub.register("Ada@Example.org", "Ada  Lovelace", "correct horse", consent=True, orcid="0000-0002-1825-0097")
     assert ada["email"] == "ada@example.org" and ada["name"] == "Ada Lovelace" and "password_hash" not in ada
-    assert ada["consent_version"] == hub.config["consent_version"] and ada["consent_at"]
+    assert ada["consent_version"] == hub.consent_version == hubdb.CONSENT_VERSION and ada["consent_at"]
     with pytest.raises(HubError):
         hub.register("ADA@example.org", "Someone", "another password", consent=True)   # one account per email
     assert hub.authenticate("ada@EXAMPLE.org", "correct horse")["id"] == ada["id"]
@@ -111,7 +117,7 @@ def test_connecting_a_kelvin_needs_the_verifier_and_a_loopback_callback(tmp_path
 
 
 def test_sync_shares_only_what_may_be_shared(tmp_path):
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
     cy = hub.register("cy@example.org", "Cy", "correct horse", consent=True)
@@ -163,7 +169,7 @@ def test_sync_shares_only_what_may_be_shared(tmp_path):
 
 def test_export_and_delete_take_everything(tmp_path):
     import zipfile
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     lab = hub.create_lab(ada["id"], "Solo Lab")
     _, app = connected(hub, ada, lab["id"])
@@ -241,7 +247,7 @@ def lab_sees(hub, user):
 def test_shared_work_follows_the_lab_a_kelvin_shares_into_now(tmp_path):
     """Review P1: reconnecting with another lab, or none, moves everything that Kelvin shared; leaving a lab is
     for good."""
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
     cy = hub.register("cy@example.org", "Cy", "correct horse", consent=True)
@@ -305,7 +311,7 @@ def test_times_from_a_kelvin_are_checked(tmp_path):
 def test_the_disk_share_holds_under_parallel_uploads(tmp_path, monkeypatch):
     """Review S3: bytes are reserved before a file streams in; chats count; only a few uploads at once."""
     import time
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     _, app = connected(hub, ada)
     hub.sync(app, {"runs": [{"id": "run1"}]})
@@ -497,7 +503,7 @@ def test_re_reading_hub_json_never_resets_it(tmp_path):
 
 def test_reconnecting_with_a_new_installation_id_folds_the_old_one_in(tmp_path):
     """Review A1: nothing stays behind under an earlier installation id of the same person's Kelvin."""
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
     lab = hub.create_lab(ada["id"], "Lab")
@@ -563,7 +569,7 @@ def test_chats_keep_their_size_and_an_old_database_learns_it(tmp_path):
 def test_folding_never_files_shared_work_into_a_project_made_private_since(tmp_path):
     """Review round 3: the old id shared project p with a chat and a run, and the new id has marked p not shared since.
     The old copies go; they are never re-filed into p, where a labmate would see them until the next sync."""
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
     lab = hub.create_lab(ada["id"], "Lab")
@@ -618,7 +624,7 @@ def test_a_connect_code_outlives_a_busy_hub_but_not_a_wrong_verifier(tmp_path, m
 def test_deleting_an_account_frees_the_database_before_its_files_go(tmp_path, monkeypatch):
     """Review round 3: the files of a large account can take a long time to delete; nobody else's sign-in or sync
     may wait for that, so the deletion is committed first."""
-    hub = Hub(tmp_path)
+    hub = labs_and_files(Hub(tmp_path))
     ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
     _, app = connected(hub, ada)
     hub.sync(app, {"runs": [{"id": "run1"}]})

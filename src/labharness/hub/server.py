@@ -1,13 +1,14 @@
-"""The hub's web server: pages for people (register, sign in, labs, connected Kelvins, export, delete), the API that
-connected Kelvins use, and the operator's page.
+"""The hub's web server: pages for people (register, sign in, their shared work and computers, export, delete), the
+API that Kelvins use, and the owner console, where the Kelvin team also reads what people's Kelvins shared.
 
     kelvin-hub --home <folder>                  # serve on http://127.0.0.1:8780
     kelvin-hub backup | operator-key | stats --home <folder>
 
-Connecting a Kelvin works like Kelvin's Sign in with ChatGPT, with the hub as the sign-in page: Kelvin opens
-<hub>/connect in the browser with a PKCE challenge and its loopback callback (http://127.0.0.1:<port>/...); the person
-signs in and says yes; the hub sends the browser back with a one-use code; Kelvin trades the code and its verifier
-for a token at POST /api/token, and keeps the token in the person's own (encrypted) settings.
+Kelvin shares over the person's own sign-in token (POST /api/signin): its chats and run records, unless they switch
+it off. Older Kelvins connect through the browser instead, like Kelvin's Sign in with ChatGPT: Kelvin opens
+<hub>/connect with a PKCE challenge and its loopback callback (http://127.0.0.1:<port>/...); the person signs in and
+says yes; the hub sends the browser back with a one-use code; Kelvin trades the code and its verifier for a token at
+POST /api/token, and keeps the token in the person's own (encrypted) settings.
 
 The pages need no JavaScript. Every response forbids framing and inline scripts; forms carry an anti-forgery value
 and the hub refuses posts from other sites."""
@@ -45,7 +46,8 @@ from .._version import __version__
 from . import drawing, llm
 from . import relay as relaying
 from .catalog import Catalog
-from .db import DEFAULTS, SESSION_TTL, Busy, Hub, HubError, TooMuch, installation, loopback, log, previous_ids
+from .db import (CONSENT_VERSION, DEFAULTS, NO_RUN_FILES, SESSION_TTL, Busy, Hub, HubError, NeedsConsent, TooMuch,
+                 installation, loopback, log, previous_ids)
 
 COOKIE = "kelvin_hub"
 OPERATOR_COOKIE = "kelvin_hub_operator"
@@ -53,6 +55,10 @@ OPERATOR_TTL = 12 * 3600
 MAX_FORM = 64 * 1024               # bytes in a form post
 MAX_TOKEN = 16 * 1024              # bytes in a token trade
 MAX_SYNC = 64 * 1024 * 1024        # bytes in one sync
+REMOVALS_ONLY = 256 * 1024         # bytes: a sync that only removes is smaller (500 ids of each kind)
+CUT = 20_000                       # characters of a tool's result, a call's input or a model's thinking on a page
+TEXT_SHOWN = 100_000               # characters of one message's words on a page
+LATEST = 50                        # shared chats on the owner console's first page
 EXPORT_EVERY = 600                 # seconds between one person's exports
 CONFIG_EVERY = 30                  # seconds between looks at hub.json, taken in again when it changed
 AT_ONCE = 3                        # one person's syncs and uploads in flight; more get a 429 at once, on the event loop
@@ -111,13 +117,20 @@ text-transform:uppercase;letter-spacing:.03em}details{margin:.3rem 0}summary{cur
 ul.plain{padding-left:1.1rem}
 """
 
+# The terms and privacy notice while Kelvins share work here (hub.json sharing, the default). Their parts depend on the
+# hub's other switches (labs, run_files): terms_text() and privacy_text() put them together. Changing those switches
+# changes what people agreed to, so raise consent_version with them.
 TERMS = """<p class="note"><b>Draft.</b> The Kelvin team must review these terms before the hub opens to the public.</p>
 <ul class="plain">
-<li>The hub keeps your account and the work your Kelvin shares, so you and your labmates can see it.</li>
-<li>Share only work you are allowed to share. Mark unpublished or confidential projects as such in Kelvin: the hub
-never receives them.</li>
-<li>Labs have no owner: anyone with a lab's join code can join it and see what its members share there.</li>
-<li>The hub's models (Claude, GPT, Gemini, OpenCode with the Kelvin team's keys) come with a monthly budget. The
+<li>The hub keeps your Kelvin account, so the same email and password sign you in to Kelvin on any computer.</li>
+<li><b>Kelvin shares your work here unless you switch it off:</b> your normal projects, your unfiled chats with their
+whole conversations, and {runs}. The Kelvin team, who run the hub, can read what is shared, to help you and to
+improve Kelvin.</li>
+<li><b>Switching it off:</b> in Kelvin, Settings → Account. Kelvin then stops sending, and removes from the hub what
+it shared.</li>
+<li>Share only work you are allowed to share. Mark unpublished or confidential projects as such in Kelvin, or use an
+incognito chat: the hub never receives them.</li>
+{labs}<li>The hub's models (Claude, GPT, Gemini, OpenCode with the Kelvin team's keys) come with a monthly budget. The
 Kelvin team decides which models are offered and how large budgets are, and may change both.</li>
 <li>The Kelvin team may disable an account that abuses the hub.</li>
 <li>The hub is provided as it is, without warranty. Keep your own copies of your data; Kelvin keeps them on your
@@ -126,23 +139,62 @@ computer anyway.</li>
 
 PRIVACY = """<p class="note"><b>Draft.</b> The Kelvin team must review this notice before the hub opens to the public.</p>
 <ul class="plain">
-<li><b>What the hub keeps:</b> your name, email, optional ORCID iD, a hash of your password (never the password),
-your labs, the Kelvins you connected, and what they share: normal projects, unfiled chats with their whole
-conversations, and runs with their files.</li>
-<li><b>What is never shared to it:</b> unpublished, confidential or model-limited projects and incognito chats.
-API keys and ChatGPT or Claude Code sign-ins never reach it.</li>
+<li><b>What the hub keeps:</b> your name, email, optional ORCID iD, a hash of your password (never the password), the
+computers you sign in to Kelvin on (their name, operating system and Kelvin version, and when), and what your Kelvin
+shares unless you switch it off: normal projects, unfiled chats with their whole conversations, and {runs}.</li>
+<li><b>What never reaches it:</b> incognito chats; unpublished, confidential or model-limited projects, with their
+chats and runs; {files}API keys; and ChatGPT or Claude Code sign-ins.</li>
+<li><b>Who sees your shared work:</b> {who}</li>
+<li><b>Switching it off:</b> in Kelvin, Settings → Account. Kelvin stops sending, and removes from the hub what it
+shared. A chat or run you delete in Kelvin goes from the hub too.</li>
 <li><b>PDF pages to draw:</b> when your chat's model sees pictures but can't read PDFs, Kelvin sends the hub the
-pages it needs, from shared work only, and gets them back as pictures. The hub keeps nothing of them.</li>
-<li><b>The hub's models:</b> a chat with one of them passes through the hub to that model's service (Anthropic,
-OpenAI, Google or OpenCode). The hub keeps who used which model, how many tokens and what it cost, never the text.
-Confidential projects never use them.</li>
-<li><b>Who sees your shared work:</b> you, and the members of the lab it was shared in while you are a member too.
-Leaving a lab takes your work out of its view.</li>
-<li><b>Records:</b> the hub logs sign-ins, connections and changes, with the IP address, for security.</li>
+pages it needs (never from incognito chats or unpublished, confidential or model-limited projects) and gets them back
+as pictures. The hub keeps nothing of them.</li>
+<li><b>The hub's models:</b> when your chat uses one of them (Claude, GPT, Gemini or OpenCode with the Kelvin team's
+keys), your messages pass through the hub to that model's service: Anthropic, OpenAI, Google or OpenCode. Of these
+calls the hub keeps who used which model, how many tokens and what it cost, never the text. Confidential projects
+never use them.</li>
+<li><b>Records:</b> the hub logs sign-ins, connections and changes, with the IP address, for security; and each time
+the Kelvin team opens one of your chats or runs, which your <b>Export</b> shows.</li>
 <li><b>Your rights:</b> download everything with <b>Export</b>, and delete your account and all it shared with
 <b>Delete account</b>, both on your account page. Daily database backups are kept for up to 30 days, then
 removed.</li>
 </ul>"""
+
+RUNS_SHARED = ("the records of your finished runs (plan, status, settings, results and assessment), never their data "
+               "files")
+RUNS_SHARED_WITH_FILES = ("your finished runs: their records (plan, status, settings, results and assessment) and "
+                          "their data files")
+LABS_TERMS = ("<li>Labs have no owner: anyone with a lab's join code can join it and see what its members share "
+              "there.</li>\n")
+WHO_SEES = ("you, and the Kelvin team, who run the hub. They read it to help you and to improve Kelvin. No other user "
+            "sees it.")
+WHO_SEES_LABS = ("you; the members of the lab your Kelvin shares into, while you are a member too (leaving a lab takes "
+                 "your work out of its view); and the Kelvin team, who run the hub, who read it to help you and to "
+                 "improve Kelvin.")
+
+
+def terms_text(labs: bool, run_files: bool) -> str:
+    """The built-in terms while Kelvins share work here."""
+    return TERMS.replace("{runs}", RUNS_SHARED_WITH_FILES if run_files else RUNS_SHARED) \
+        .replace("{labs}", LABS_TERMS if labs else "")
+
+
+def privacy_text(labs: bool, run_files: bool) -> str:
+    """The built-in privacy notice while Kelvins share work here."""
+    return PRIVACY.replace("{runs}", RUNS_SHARED_WITH_FILES if run_files else RUNS_SHARED) \
+        .replace("{files}", "" if run_files else "runs' data files (run.h5, plots, reports); ") \
+        .replace("{who}", WHO_SEES_LABS if labs else WHO_SEES)
+
+
+def what_changed(agreed: str, hub: Hub) -> str:
+    """What changed since the terms a person agreed to, shown before they agree again (empty when nothing we can
+    name). Sharing by default came with CONSENT_VERSION."""
+    if not (hub.sharing and agreed and agreed < CONSENT_VERSION <= hub.consent_version):
+        return ""
+    return ("Kelvin now shares your chats and the records of your runs with the Kelvin team, unless you switch it off "
+            "in Kelvin's Settings → Account.%s Incognito chats and unpublished, confidential or model-limited projects "
+            "are never sent." % ("" if hub.run_files else " Runs' data files stay on your computer."))
 
 
 TERMS_ACCOUNTS = """<p class="note"><b>Draft.</b> The Kelvin team must review these terms before the hub opens to the
@@ -200,6 +252,116 @@ def size(n: Any) -> str:
             return ("%d %s" if unit == "B" else "%.1f %s") % (n, unit)
         n /= 1024
     return ""
+
+
+def cut(value: Any, limit: int = CUT) -> str:
+    """Escaped text for a page, cut past limit with a note of how much more there is. Other values are shown as
+    JSON."""
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else json.dumps(value, indent=1, ensure_ascii=False, default=str)
+    if len(text) <= limit:
+        return e(text)
+    return e(text[:limit]) + '<span class="muted"> … %s more characters not shown</span>' % "{:,}".format(
+        len(text) - limit)
+
+
+def named(items: Any) -> List[str]:
+    """The files a chat names (attachments, pictures, PDFs): each one's name and kind, or its kind alone."""
+    out = []
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict):
+            name, kind, pages = str(item.get("name") or ""), str(item.get("mime") or ""), item.get("pages")
+            words = name or kind or "a file"
+            if name and kind:
+                words += " (%s%s)" % (kind, ", %s pages" % pages if pages else "")
+            out.append(words)
+        elif item:
+            out.append(str(item))
+    return out
+
+
+def render_chat(messages: Any, depth: int = 0) -> str:
+    """A stored chat, read-only: each turn's words, tool calls and their results folded and cut, pictures and files
+    named but never shown. Everything is escaped: a chat's text is the person's, the models' and the tools', never
+    the hub's own. The chat format is Kelvin's (web/providers/base.py)."""
+    if not isinstance(messages, list) or not messages:
+        return '<p class="muted">No turns to show.</p>'
+    return "".join(render_message(m, depth) for m in messages)
+
+
+def render_message(m: Any, depth: int = 0) -> str:
+    if not isinstance(m, dict):
+        return '<div class="msg">%s</div>' % cut(m, 2000)
+    role = m.get("role", "")
+    if role == "user":
+        who = "Kelvin, coming back to the chat" if m.get("wake") else \
+            "Person, while Kelvin worked" if m.get("steer") else "Person"
+        parts = [cut(m.get("text") if m.get("text") is not None else m.get("content"), TEXT_SHOWN)]
+        events = [t for t in m.get("events") or [] if t] if isinstance(m.get("events"), list) else []
+        if events:
+            parts.append('<details><summary>What changed in the lab meanwhile (%d)</summary><pre>%s</pre></details>'
+                         % (len(events), cut("\n".join(str(t) for t in events))))
+        files = named(m.get("attachments"))
+        if files:
+            parts.append('<div class="muted">Attached, not shown here: %s</div>' % e("; ".join(files)))
+        compare = m.get("compare")
+        if isinstance(compare, dict) and isinstance(compare.get("lanes"), list) and depth == 0:
+            chosen = compare.get("chosen")
+            for i, lane in enumerate(compare["lanes"]):   # the lane the chat went on with follows in the chat itself
+                if i != chosen and isinstance(lane, dict):
+                    parts.append('<details><summary>%s answered too%s</summary>%s</details>' % (
+                        e(lane.get("model") or "Another model"), " (%s)" % e(lane["error"]) if lane.get("error") else "",
+                        render_chat(lane.get("messages"), depth + 1)))
+        return '<div class="msg user"><div class="who">%s</div>%s</div>' % (e(who), "".join(parts))
+    if role == "assistant":
+        parts = []
+        for b in m.get("blocks") or []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "text":
+                parts.append(cut(b.get("text"), TEXT_SHOWN))
+            elif b.get("type") == "thinking":
+                parts.append('<details><summary>Thinking</summary><pre>%s</pre></details>' % cut(b.get("text")))
+            elif b.get("type") == "tool_call":
+                parts.append('<details><summary>Calls %s</summary><pre>%s</pre></details>'
+                             % (e(b.get("name") or "a tool"), cut(b.get("input"), 4000)))
+        return '<div class="msg"><div class="who">Kelvin%s</div>%s</div>' % (
+            " · " + e(m["model"]) if m.get("model") else "", "".join(parts))
+    if role == "tool":
+        out = []
+        for r in m.get("results") or []:
+            if not isinstance(r, dict):
+                continue
+            also = []
+            pictures = r.get("images") if isinstance(r.get("images"), list) else []
+            if pictures:
+                also.append("%d picture%s" % (len(pictures), "" if len(pictures) == 1 else "s"))
+            also += ["PDF " + d for d in named(r.get("documents"))]
+            out.append('<details><summary>%s result%s%s</summary><pre>%s</pre></details>' % (
+                e(r.get("name") or "a tool"), " (error)" if r.get("is_error") else "",
+                ' <span class="muted">· %s, not shown here</span>' % e("; ".join(also)) if also else "",
+                cut(r.get("content"))))
+        return "".join(out)
+    return '<div class="msg">%s</div>' % cut(m, 2000)
+
+
+def shown_time(value: Any) -> str:
+    """A time from a run's record: a number as a date, text as it is."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return when(value)
+    return e(str(value)[:40]) if value not in (None, "") else "–"
+
+
+def record_rows(meta: Any) -> str:
+    """A run's record laid out as a table: plain values as text, lists and objects as JSON, all escaped."""
+    if not isinstance(meta, dict) or not meta:
+        return '<p class="muted">The record is empty.</p>'
+    rows = []
+    for key, value in meta.items():
+        shown = '<pre>%s</pre>' % cut(value, 4000) if isinstance(value, (dict, list)) else cut(value, 2000)
+        rows.append('<tr><th>%s</th><td>%s</td></tr>' % (e(key), shown))
+    return '<div class="scroll"><table>%s</table></div>' % "".join(rows)
 
 
 async def read_body(request: Request, limit: int) -> bytes:
@@ -413,7 +575,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     # ------------------------------------------------------------------ public pages
 
     def sharing_only(endpoint: Any) -> Any:
-        """Labs, connected Kelvins and shared work: not found while the hub keeps accounts only (hub.json sharing)."""
+        """Shared work and connected Kelvins: not found while the hub keeps accounts only (hub.json sharing)."""
         async def wrapped(request: Request) -> Response:
             if hub.sharing:
                 return await endpoint(request)
@@ -422,25 +584,45 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return page("Not found", "<p>This hub keeps Kelvin accounts only.</p>", await session_of(request), 404)
         return wrapped
 
+    def labs_only(endpoint: Any) -> Any:
+        """Labs: not found unless the hub has them (hub.json labs, with sharing)."""
+        async def wrapped(request: Request) -> Response:
+            if hub.labs:
+                return await endpoint(request)
+            return page("Not found", "<p>This hub has no labs.</p>", await session_of(request), 404)
+        return wrapped
+
+    def what_goes() -> str:
+        """What Kelvin shares here, in a phrase, for the pages."""
+        return ("your normal projects and unfiled chats with their whole conversations, and %s"
+                % (RUNS_SHARED_WITH_FILES if hub.run_files else RUNS_SHARED))
+
     async def home(request: Request) -> Response:
         sess = await session_of(request)
         if sess:
             return RedirectResponse("/account", 303)
+        links = '<p class="muted"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></p>'
         if not hub.sharing:
             return page("Your Kelvin account", (
                 '<p>One email and password sign you in to Kelvin on every computer. You can make your account in '
                 'Kelvin itself, on its sign-in screen. Here you can change your name or password, export your account '
                 'or delete it.</p><p>Your work stays on your computers: the hub keeps your account only.</p>'
                 '<p class="row"><a class="button" href="/signin">Sign in</a>'
-                '<a class="button plain" href="/register">Create account</a></p>'
-                '<p class="muted"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></p>'))
+                '<a class="button plain" href="/register">Create account</a></p>' + links))
+        if not hub.labs:
+            return page("Your Kelvin account", (
+                '<p>One email and password sign you in to Kelvin on every computer. You can make your account in '
+                'Kelvin itself, on its sign-in screen.</p>'
+                '<p>Kelvin shares %s with the Kelvin team here, unless you switch it off in Kelvin\'s Settings → '
+                'Account. Incognito chats, unpublished and confidential projects, API keys and sign-ins never leave '
+                'your computer.</p><p class="row"><a class="button" href="/signin">Sign in</a>'
+                '<a class="button plain" href="/register">Create account</a></p>' % e(what_goes())) + links)
         return page("One account for Kelvin, in every lab", (
-            '<p>Make one account, join your lab, and connect each Kelvin you use. Kelvin then shares your work with '
-            'your labmates here: normal projects and unfiled chats, with their runs and whole conversations.</p>'
+            '<p>Make one account and join your lab. Kelvin then shares %s with your labmates and the Kelvin team here, '
+            'unless you switch it off in Kelvin\'s Settings → Account.</p>'
             '<p>Unpublished and confidential projects, incognito chats, API keys and sign-ins never leave your '
             'computer.</p><p class="row"><a class="button" href="/register">Create account</a>'
-            '<a class="button plain" href="/signin">Sign in</a></p>'
-            '<p class="muted"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></p>'))
+            '<a class="button plain" href="/signin">Sign in</a></p>' % e(what_goes())) + links)
 
     async def logo(request: Request) -> Response:
         return FileResponse(LOGO, media_type="image/svg+xml") if LOGO.exists() else Response(status_code=404)
@@ -448,12 +630,13 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     async def terms(request: Request) -> Response:
         custom = hub.home / "terms.html"
         return page("Terms", custom.read_text(encoding="utf-8") if custom.exists() else
-                    TERMS if hub.sharing else TERMS_ACCOUNTS, await session_of(request))
+                    terms_text(hub.labs, hub.run_files) if hub.sharing else TERMS_ACCOUNTS, await session_of(request))
 
     async def privacy(request: Request) -> Response:
         custom = hub.home / "privacy.html"
         return page("Privacy", custom.read_text(encoding="utf-8") if custom.exists() else
-                    PRIVACY if hub.sharing else PRIVACY_ACCOUNTS, await session_of(request))
+                    privacy_text(hub.labs, hub.run_files) if hub.sharing else PRIVACY_ACCOUNTS,
+                    await session_of(request))
 
     def register_form(values: Dict[str, str], error: Optional[str] = None) -> HTMLResponse:
         return page("Create your account", (
@@ -464,12 +647,14 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             '<label>ORCID iD <span class="muted">(optional)</span><input type="text" name="orcid" '
             'placeholder="0000-0002-1825-0097" value="%s"></label>'
             '<label>Password <span class="muted">(8 characters or more)</span><input type="password" '
-            'name="password" autocomplete="new-password" required minlength="8"></label>'
+            'name="password" autocomplete="new-password" required minlength="8"></label>%s'
             '<label class="check"><input type="checkbox" name="consent" value="yes" required><span>I agree to the '
             '<a href="/terms">terms</a> and the <a href="/privacy">privacy notice</a>.</span></label>'
             '<button>Create account</button></form>'
             '<p class="muted">Already have one? <a href="/signin">Sign in</a>.</p>'
-            % (e(values.get("next", "")), e(values.get("name")), e(values.get("email")), e(values.get("orcid")))),
+            % (e(values.get("next", "")), e(values.get("name")), e(values.get("email")), e(values.get("orcid")),
+               '<p class="note">Kelvin shares %s with the Kelvin team here, unless you switch it off in Kelvin\'s '
+               'Settings → Account.</p>' % e(what_goes()) if hub.sharing else "")),
             error=error, status=400 if error else 200)
 
     async def register(request: Request) -> Response:
@@ -537,14 +722,16 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             if f.get("consent") == "yes":
                 await call(hub.give_consent, sess["user"]["id"], ip_of(request))
                 return RedirectResponse(safe_next(f.get("next")), 303)
+        changed = what_changed(str(sess["user"].get("consent_version") or ""), hub)
         return page("The terms have changed", (
-            '<p>Please read the <a href="/terms">terms</a> and the <a href="/privacy">privacy notice</a> '
+            '%s<p>Please read the <a href="/terms">terms</a> and the <a href="/privacy">privacy notice</a> '
             '(version %s), then agree to keep using the hub. If you don\'t agree, you can '
             '<a href="/account/export">export your data</a> and <a href="/account/delete">delete your account</a>.</p>'
             '<form class="stack" method="post" action="/consent">%s<input type="hidden" name="next" value="%s">'
             '<label class="check"><input type="checkbox" name="consent" value="yes" required><span>I agree.</span>'
-            '</label><button>Continue</button></form>' % (e(hub.config["consent_version"]), csrf_field(sess),
-                                                          e(target))), sess)
+            '</label><button>Continue</button></form>'
+            % ('<div class="note"><b>What changed:</b> %s</div>' % e(changed) if changed else "",
+               e(hub.consent_version), csrf_field(sess), e(target))), sess)
 
     async def confirm(request: Request) -> Response:
         sess = await session_of(request)
@@ -628,8 +815,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             '<p class="muted">Account made %s · agreed to the terms of %s · <a href="/terms">Terms</a> · '
             '<a href="/privacy">Privacy</a></p>'
             % (csrf, e(user["email"]), e(user["name"]), e(user["orcid"] or ""), csrf,
-               "your account, labs, connections, and all you shared" if hub.sharing else "your account and the hub's "
-               "record of it", csrf,
+               ("your account, %sthe computers you sign in on, all you shared, and the hub's record of your account"
+                % ("labs, " if hub.labs else "")) if hub.sharing else "your account and the hub's record of it", csrf,
                "This deletes your account and everything your Kelvins shared to the hub. Your own computers keep "
                "their copies." if hub.sharing else "This deletes your Kelvin account. Your computers keep your chats "
                "and data.", when(user["created_at"]), e(user["consent_version"])))
@@ -637,7 +824,10 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         return page("Your account", "".join(parts), sess, error=error, note=note, status=400 if error else 200)
 
     async def sharing_sections(parts: List[str], uid: int, csrf: str) -> None:
-        """The account page's labs, connected Kelvins and shared work (only while the hub shares work)."""
+        """The account page's shared work and Kelvins (only while the hub shares work), with labs if it has them."""
+        if not hub.labs:
+            await own_sections(parts, uid, csrf)
+            return
         labs, connections, shared = await asyncio.gather(
             call(hub.labs_of, uid), call(hub.connections, uid), call(hub.shared_with, uid))
         parts.append('<h2>Shared in your labs</h2>')
@@ -702,6 +892,42 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         else:
             parts.append('<p class="muted">None yet. Start the connection from the Kelvin you want to connect; it '
                          'opens this hub in your browser to ask you.</p>')
+
+    async def own_sections(parts: List[str], uid: int, csrf: str) -> None:
+        """The account page while labs are off: what this person's Kelvins shared, which only they and the Kelvin
+        team see, and the Kelvins they sign in to."""
+        connections, shared = await asyncio.gather(call(hub.connections, uid), call(hub.shared_with, uid))
+        parts.append('<h2>Shared with the Kelvin team</h2><p class="muted">Kelvin shares %s here, unless you switch it '
+                     'off in Kelvin\'s Settings → Account. Only you and the Kelvin team, who run the hub, see it.</p>'
+                     % e(what_goes()))
+        if shared["projects"]:
+            parts.append('<div class="scroll"><table><tr><th>Project</th><th>Updated</th></tr>%s</table></div>'
+                         % "".join('<tr><td>%s</td><td>%s</td></tr>' % (e(p["name"]), when(p["updated_at"]))
+                                   for p in shared["projects"]))
+        if shared["chats"]:
+            parts.append('<div class="scroll"><table><tr><th>Chat</th><th>Project</th><th>Updated</th></tr>%s</table>'
+                         '</div>' % "".join(
+                             '<tr><td><a href="/shared/chats/%d">%s</a></td><td>%s</td><td>%s</td></tr>'
+                             % (c["id"], e(c["title"]), e(c["project"] or "–"), when(c["updated_at"]))
+                             for c in shared["chats"]))
+        if shared["runs"]:
+            parts.append('<div class="scroll"><table><tr><th>Run</th><th>Device</th><th>Project</th><th>Started</th>'
+                         '</tr>%s</table></div>' % "".join(
+                             '<tr><td><a href="/shared/runs/%d">%s</a></td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                             % (r["id"], e(r["local_id"]), e(r["device"] or "–"), e(r["project"] or "–"),
+                                when(r["created_at"])) for r in shared["runs"]))
+        if not (shared["projects"] or shared["chats"] or shared["runs"]):
+            parts.append('<p class="muted">Nothing yet. What your Kelvin shares shows here.</p>')
+        parts.append('<h2>Your Kelvins</h2>')
+        if connections:
+            parts.append('<div class="scroll"><table><tr><th>Kelvin</th><th>Last used</th><th></th></tr>%s</table>'
+                         '</div>' % "".join(
+                             '<tr><td>%s<br><span class="muted">%s %s</span></td><td>%s</td><td><form class="inline" '
+                             'method="post" action="/connections/%d/revoke">%s<button class="plain">Disconnect</button>'
+                             '</form></td></tr>' % (e(c["name"] or "Kelvin"), e(c["platform"]), e(c["version"]),
+                                                    when(c["last_used"]), c["id"], csrf) for c in connections))
+        else:
+            parts.append('<p class="muted">None yet. Sign in to Kelvin with this account and it shows here.</p>')
 
     def account_action(fn: Any, any_consent: bool = False) -> Any:
         """A form on the account page: signed in, anti-forgery checked; a HubError shows on the page."""
@@ -788,27 +1014,11 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
 
     # ------------------------------------------------------------------ shared work
 
-    def render_message(m: Any) -> str:
-        if not isinstance(m, dict):
-            return '<div class="msg">%s</div>' % e(json.dumps(m, ensure_ascii=False)[:2000])
-        role = m.get("role", "")
-        if role == "user":
-            return '<div class="msg user"><div class="who">Person</div>%s</div>' % e(m.get("text") or m.get("content"))
-        if role == "assistant":
-            out = []
-            for b in m.get("blocks") or []:
-                if isinstance(b, dict) and b.get("type") == "text":
-                    out.append(e(b.get("text")))
-                elif isinstance(b, dict) and b.get("type") == "tool_call":
-                    out.append('<details><summary>%s</summary><pre>%s</pre></details>'
-                               % (e(b.get("name")), e(json.dumps(b.get("input"), indent=1, ensure_ascii=False)[:4000])))
-            return '<div class="msg"><div class="who">Kelvin · %s</div>%s</div>' % (e(m.get("model") or ""),
-                                                                                    "".join(out))
-        if role == "tool":
-            return "".join('<details><summary>%s result%s</summary><pre>%s</pre></details>'
-                           % (e(r.get("name")), " (error)" if r.get("is_error") else "",
-                              e(str(r.get("content"))[:4000])) for r in m.get("results") or [] if isinstance(r, dict))
-        return '<div class="msg">%s</div>' % e(json.dumps(m, ensure_ascii=False)[:2000])
+    def seen_by(item: Dict[str, Any]) -> str:
+        """Who sees a shared item, as the person's own pages say it."""
+        if hub.labs:
+            return item["lab"] or "only you"
+        return "you and the Kelvin team"
 
     async def shared_chat(request: Request) -> Response:
         sess, redirect = await signed_in(request)
@@ -819,8 +1029,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         except HubError as err:
             return page("Not found", "", sess, 404, error=str(err))
         return page(chat["title"], '<p class="muted">By %s · %s · %s · updated %s</p>%s' % (
-            e(chat["owner"]), e(chat["project"] or "no project"), e(chat["lab"] or "only you"), when(chat["updated_at"]),
-            "".join(render_message(m) for m in chat["messages"])), sess)
+            e(chat["owner"]), e(chat["project"] or "no project"), e(seen_by(chat)), when(chat["updated_at"]),
+            render_chat(chat["messages"])), sess)
 
     async def shared_run(request: Request) -> Response:
         sess, redirect = await signed_in(request)
@@ -831,12 +1041,15 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         except HubError as err:
             return page("Not found", "", sess, 404, error=str(err))
         files = "".join('<li><a href="/shared/runs/%d/files/%s">%s</a></li>' % (run["id"], quote(f), e(f))
-                        for f in run["files"]) or '<li class="muted">No files sent yet.</li>'
+                        for f in run["files"]) or (
+            '<li class="muted">No files sent yet.</li>' if hub.run_files else
+            '<li class="muted">None: this hub keeps runs\' records only, and the data files stay on your computer.'
+            '</li>')
         return page("Run %s" % run["local_id"], (
             '<p class="muted">By %s · %s · %s · %s · started %s</p><h2>Files</h2><ul class="plain">%s</ul>'
             '<h2>About the run</h2><pre>%s</pre>'
             % (e(run["owner"]), e(run["device"] or "no device"), e(run["project"] or "no project"),
-               e(run["lab"] or "only you"), when(run["created_at"]), files,
+               e(seen_by(run)), when(run["created_at"]), files,
                e(json.dumps(run["meta"], indent=1, ensure_ascii=False)))), sess)
 
     async def shared_run_file(request: Request) -> Response:
@@ -902,7 +1115,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                     signin_tries.hit("signin-ip:" + who(request))
                     raise HubError("That isn't the password of %s. Not you? Sign in as yourself below."
                                    % user["email"])
-                lab_id = int(params["lab"]) if params.get("lab") else None
+                lab_id = int(params["lab"]) if params.get("lab") and hub.labs else None
                 code = await call(hub.connect_code, user, req["redirect_uri"], req["challenge"], inst, lab_id,
                                   req["previous"])
             except (HubError, ValueError) as err:
@@ -914,7 +1127,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                            error: Optional[str] = None) -> Response:
         user = sess["user"]
         inst = req["installation"]
-        labs = await call(hub.labs_of, user["id"])
+        labs = await call(hub.labs_of, user["id"]) if hub.labs else []
         keep = {k: v for k, v in params.items() if k in ("redirect_uri", "state", "code_challenge",
                                                          "code_challenge_method", "installation", "name", "platform",
                                                          "version", "person", "previous")}
@@ -922,15 +1135,15 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         chosen = str(params.get("lab") or "")
         options = "".join('<option value="%d"%s>%s</option>' % (lab["id"], " selected" if str(lab["id"]) == chosen
                                                                 else "", e(lab["name"])) for lab in labs)
+        choose = ('<label>Share into<select name="lab">%s<option value="">No lab: only I and the Kelvin team see it'
+                  '</option></select></label>' % options) if hub.labs else ""
         person = " ".join(str(params.get("person") or "").split())[:80]
         return page("Connect Kelvin to your account?", (
             '<p><b>%s</b> <span class="muted">(%s, Kelvin %s)</span>%s wants to connect to the hub account of '
             '<b>%s</b> (%s).</p>'
-            '<div class="note"><b>It will share:</b> your normal projects and unfiled chats, with their runs and whole '
-            'conversations.<br><b>Never:</b> unpublished or confidential projects, incognito chats, API keys, or '
-            'ChatGPT and Claude Code sign-ins.</div>'
-            '<form class="stack" method="post" action="/connect">%s%s<label>Share into<select name="lab">%s'
-            '<option value="">No lab: only I see it</option></select></label>'
+            '<div class="note"><b>It will share%s:</b> %s.<br><b>Never:</b> unpublished or confidential projects, '
+            'incognito chats, API keys, or ChatGPT and Claude Code sign-ins.</div>'
+            '<form class="stack" method="post" action="/connect">%s%s%s'
             '<label>Your hub password <span class="muted">(to be sure it\'s you)</span><input type="password" '
             'name="password" autocomplete="current-password" required></label>'
             '<div class="row"><button name="action" value="allow">Connect</button><button class="plain" '
@@ -941,7 +1154,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             '<a href="/account">account page</a>.</p>'
             % (e(inst["name"]), e(inst["platform"] or "?"), e(inst["version"] or "?"),
                ", used by <b>%s</b> on that computer," % e(person) if person else "", e(user["name"]), e(user["email"]),
-               csrf_field(sess), hidden, options, csrf_field(sess), e("/connect?" + urlencode(keep)), e(user["name"]))),
+               "" if hub.labs else " with the Kelvin team", e(what_goes()), csrf_field(sess), hidden, choose,
+               csrf_field(sess), e("/connect?" + urlencode(keep)), e(user["name"]))),
             sess, error=error, status=400 if error else 200)
 
     # ------------------------------------------------------------------ the API for connected Kelvins
@@ -1179,26 +1393,35 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         if app is None:
             return api_error("not connected", 401)
         user = app["user"]
-        labs = await call(hub.labs_of, user["id"])
+        labs = await call(hub.labs_of, user["id"]) if hub.labs else []
         lab = next((lab["name"] for lab in labs if lab["id"] == app["lab_id"]), None)
         return JSONResponse({"name": user["name"], "email": user["email"], "orcid": user["orcid"],
                              "email_confirmed": bool(user["email_confirmed_at"]), "shares_into": lab,
                              "labs": [lab["name"] for lab in labs], "needs_consent": hub.needs_consent(user),
-                             "account_url": hub.base_url + "/account"})
+                             "consent_url": hub.base_url + "/consent", "account_url": hub.base_url + "/account",
+                             "run_files": hub.run_files})
+
+    def new_terms() -> JSONResponse:
+        return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403,
+                         consent_url=hub.base_url + "/consent", needs_consent=True)
 
     async def sync(request: Request) -> Response:
+        """What a Kelvin shares (db.Hub.sync). Before the person agrees to new terms, only a sync that removes is
+        taken; a body far larger than removals ever are is refused before it is read."""
         app = await app_of(request)
         if app is None:
             return api_error("not connected", 401)
-        if hub.needs_consent(app["user"]):
-            return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403,
-                             consent_url=hub.base_url + "/consent")
+        declared = request.headers.get("content-length", "")
+        if hub.needs_consent(app["user"]) and declared.isdigit() and int(declared) > REMOVALS_ONLY:
+            return new_terms()
         uid = app["user"]["id"]
         if not take_turn(uid):
             return api_error("The hub is still busy with your other requests; try again in a moment.", 429)
         try:
             body = await read_body(request, MAX_SYNC)
             return JSONResponse(await heavy(hub.sync, app, await heavy(json.loads, body or b"{}")))
+        except NeedsConsent:
+            return new_terms()
         except HubError as err:
             return api_error(str(err), err.status)
         except ValueError as err:
@@ -1210,6 +1433,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         app = await app_of(request)
         if app is None:
             return api_error("not connected", 401)
+        if not hub.run_files:   # runs' records only: the data files stay on the person's computer
+            return api_error(NO_RUN_FILES, 403, run_files=False)
         if hub.needs_consent(app["user"]):
             return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403)
         declared = request.headers.get("content-length", "")
@@ -1280,18 +1505,29 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             start = max(0, int(request.query_params.get("from", "0")))
         except ValueError:
             start = 0
-        stats, people, total, activity = await asyncio.gather(
+        stats, people, total, activity, latest = await asyncio.gather(
             call(hub.stats), call(hub.find_users, query, PAGE_SIZE, start), call(hub.count_users, query),
-            call(hub.recent_activity, 60))
+            call(hub.recent_activity, 60), call(hub.latest_chats, LATEST) if hub.sharing else asyncio.sleep(0, []))
         csrf = '<input type="hidden" name="csrf" value="%s">' % e(op["csrf"])
         rows = "".join(
             '<tr><td>%d</td><td><a href="/admin/users/%d">%s</a><br><span class="muted">%s</span></td><td>%s</td>'
             '%s<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><form class="inline" method="post" '
             'action="/admin/users/%d/%s">%s<button class="plain">%s</button></form></td></tr>'
             % (u["id"], u["id"], e(u["name"]), e(u["email"]), "yes" if u["email_confirmed_at"] else "no",
-               "<td>%s</td>" % u["labs"] if hub.sharing else "", u["computers"], e(u["kelvin"] or "–"),
+               "<td>%s</td>" % u["labs"] if hub.labs else "", u["computers"], e(u["kelvin"] or "–"),
                when(u["created_at"]), when(u["last_seen"]), u["id"], "enable" if u["disabled_at"] else "disable",
                csrf, "Enable" if u["disabled_at"] else "Disable") for u in people)
+        shared = ""
+        if hub.sharing:
+            shared = ('<h2>Latest shared chats</h2><p class="muted">Opening one goes in the hub\'s record of its '
+                      'person\'s account, which their Export shows.</p>' + (
+                          '<div class="scroll"><table><tr><th>Updated</th><th>Person</th><th>Chat</th><th>Project</th>'
+                          '<th>Size</th></tr>%s</table></div>' % "".join(
+                              '<tr><td>%s</td><td><a href="/admin/users/%d">%s</a></td><td><a href="/admin/users/%d/'
+                              'chats/%d">%s</a></td><td>%s</td><td>%s</td></tr>'
+                              % (when(c["updated_at"]), c["user_id"], e(c["owner"]), c["user_id"], c["id"],
+                                 e(c["title"]), e(c["project"] or "–"), size(c["bytes"])) for c in latest)
+                          if latest else '<p class="muted">None yet.</p>'))
         pages = []
         if start > 0:
             pages.append('<a href="/admin?%s">Newer</a>' % e(urlencode({"q": query, "from": max(0, start - PAGE_SIZE)})))
@@ -1302,10 +1538,12 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                          % (when(a["at"]), e(a["actor"]), e(a["action"]),
                             '<a href="/admin/users/%d">%d</a>' % (a["user_id"], a["user_id"]) if a["user_id"] else "",
                             e(a["detail"])) for a in activity)
-        shared_keys = {"labs", "projects", "chats", "runs", "run_bytes"}
+        hidden = set() if hub.sharing else {"labs", "projects", "chats", "runs", "run_bytes"}
+        hidden |= set() if hub.labs else {"labs"}
+        hidden |= set() if hub.run_files else {"run_bytes"}
         stats_rows = "".join('<tr><th>%s</th><td>%s</td></tr>' % (e(STAT_NAMES.get(k, k.replace("_", " "))),
                                                                    e(size(v) if k.endswith("bytes") else v))
-                             for k, v in stats.items() if hub.sharing or k not in shared_keys)
+                             for k, v in stats.items() if k not in hidden)
         return admin_page(op, (
             '<h2>The hub</h2><div class="scroll"><table>%s</table></div>'
             '<form class="inline" method="post" action="/admin/backup">%s<button class="plain">Back up the database '
@@ -1315,11 +1553,11 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             '<a href="/admin/people.csv">Download everyone (CSV)</a></form>'
             '<p class="muted">%s · newest first%s</p>'
             '<div class="scroll"><table><tr><th>#</th><th>Person</th><th>Confirmed</th>%s<th>Computers</th>'
-            '<th>Kelvin</th><th>Joined</th><th>Last seen</th><th></th></tr>%s</table></div><p class="row">%s</p>'
+            '<th>Kelvin</th><th>Joined</th><th>Last seen</th><th></th></tr>%s</table></div><p class="row">%s</p>%s'
             '<h2>Recent activity</h2><div class="scroll"><table><tr><th>When</th><th>Who</th><th>What</th><th>Account'
             '</th><th>Detail</th></tr>%s</table></div>'
             % (stats_rows, csrf, e(query), shown, " · matching “%s”" % e(query) if query else "",
-               "<th>Labs</th>" if hub.sharing else "", rows, " ".join(pages), events)),
+               "<th>Labs</th>" if hub.labs else "", rows, " ".join(pages), shared, events)),
             error=error, note=note)
 
     async def admin_person(request: Request, error: Optional[str] = None, note: Optional[str] = None) -> Response:
@@ -1332,16 +1570,18 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             user = await call(hub.user, uid)
         except HubError as err:
             return await admin(request, error="Account %d: %s" % (uid, err))
-        computers, activity, labs, usage = await asyncio.gather(
+        computers, activity, labs, usage, shared = await asyncio.gather(
             call(hub.connections, uid), call(hub.activity_of, uid, 200),
-            call(hub.labs_of, uid) if hub.sharing else asyncio.sleep(0, []), call(gateway.usage_of, uid))
+            call(hub.labs_of, uid) if hub.labs else asyncio.sleep(0, []), call(gateway.usage_of, uid),
+            call(hub.shared_by, uid) if hub.sharing else asyncio.sleep(0, None))
         csrf = '<input type="hidden" name="csrf" value="%s">' % e(op["csrf"])
         facts = [("Email", e(user["email"])), ("ORCID iD", e(user["orcid"] or "–")),
                  ("Email confirmed", when(user["email_confirmed_at"]) if user["email_confirmed_at"] else "not yet"),
                  ("Joined", when(user["created_at"])), ("Last seen", when(user["last_seen"])),
-                 ("Terms agreed", "%s (%s)" % (e(user["consent_version"] or "–"), when(user["consent_at"]))),
+                 ("Terms agreed", "%s (%s)%s" % (e(user["consent_version"] or "–"), when(user["consent_at"]),
+                                                  "; not yet those in force" if hub.needs_consent(user) else "")),
                  ("Status", "disabled since %s" % when(user["disabled_at"]) if user["disabled_at"] else "active")]
-        if hub.sharing:
+        if hub.labs:
             facts.append(("Labs", e(", ".join(lab["name"] for lab in labs) or "none")))
         machines = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
                            % (e(c["name"] or "Kelvin"), e(c["platform"] or "–"), e(c["version"] or "–"),
@@ -1355,7 +1595,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             '<div class="scroll"><table>%s</table></div>'
             '<form class="inline" method="post" action="/admin/users/%d/%s">%s<input type="hidden" name="back" '
             'value="person"><button class="plain">%s this account</button></form>'
-            '<h2>Computers</h2>%s'
+            '<h2>Computers</h2>%s%s'
             '<h2>Models</h2><p>$%.2f of $%.2f this month%s.</p><form class="row" method="post" '
             'action="/admin/users/%d/budget">%s<input type="hidden" name="back" value="person"><label>Own budget per '
             'month <input name="usd" value="%s" placeholder="the default" style="max-width:7rem"></label><button '
@@ -1366,10 +1606,125 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                verb.capitalize(),
                '<div class="scroll"><table><tr><th>Computer</th><th>System</th><th>Kelvin</th><th>First signed in'
                '</th><th>Last used</th></tr>%s</table></div>' % machines if computers else
-               '<p class="muted">Not signed in on any computer now.</p>', usage["spent"], usage["budget"],
-               " (their own budget)" if usage["own_budget"] else "", uid, csrf,
+               '<p class="muted">Not signed in on any computer now.</p>', shared_work(uid, shared),
+               usage["spent"], usage["budget"], " (their own budget)" if usage["own_budget"] else "", uid, csrf,
                "%g" % usage["budget"] if usage["own_budget"] else "", record)),
             error=error, note=note)
+
+    def shared_work(uid: int, shared: Optional[Dict[str, Any]]) -> str:
+        """A person's shared work on their page in the owner console: projects, then chats and runs, each linked to
+        its own page (opening one goes in their record)."""
+        if shared is None:
+            return ""
+        counts = shared["counts"]
+        out = ['<h2>Shared work</h2><p class="muted">%d project%s, %d chat%s and %d run%s, newest first. Opening a '
+               'chat or a run goes in the hub\'s record of this account, which its Export shows.</p>'
+               % (counts["projects"], "" if counts["projects"] == 1 else "s", counts["chats"],
+                  "" if counts["chats"] == 1 else "s", counts["runs"], "" if counts["runs"] == 1 else "s")]
+
+        def more(kind: str) -> str:
+            n = len(shared[kind])
+            return '<p class="muted">The latest %d of %d.</p>' % (n, counts[kind]) if counts[kind] > n else ""
+        if shared["projects"]:
+            out.append('<h3>Projects</h3><div class="scroll"><table><tr><th>Project</th><th>Chats</th><th>Runs</th>'
+                       '<th>Computer</th><th>Updated</th></tr>%s</table></div>%s' % ("".join(
+                           '<tr><td>%s</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td></tr>'
+                           % (e(p["name"]), p["chats"], p["runs"], e(p["computer"] or "–"), when(p["updated_at"]))
+                           for p in shared["projects"]), more("projects")))
+        if shared["chats"]:
+            out.append('<h3>Chats</h3><div class="scroll"><table><tr><th>Chat</th><th>Project</th><th>Computer</th>'
+                       '<th>Updated</th><th>Size</th></tr>%s</table></div>%s' % ("".join(
+                           '<tr><td><a href="/admin/users/%d/chats/%d">%s</a></td><td>%s</td><td>%s</td><td>%s</td>'
+                           '<td>%s</td></tr>' % (uid, c["id"], e(c["title"]), e(c["project"] or "–"),
+                                                 e(c["computer"] or "–"), when(c["updated_at"]), size(c["bytes"]))
+                           for c in shared["chats"]), more("chats")))
+        if shared["runs"]:
+            out.append('<h3>Runs</h3><div class="scroll"><table><tr><th>Run</th><th>Status</th><th>Started</th>'
+                       '<th>Device</th><th>Project</th></tr>%s</table></div>%s' % ("".join(
+                           '<tr><td><a href="/admin/users/%d/runs/%d">%s</a><br><span class="muted">%s</span></td>'
+                           '<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                           % (uid, r["id"], e(r["plan"] or r["local_id"]), e(r["local_id"]), e(r["status"] or "–"),
+                              shown_time(r["started"]) if r["started"] not in (None, "") else when(r["created_at"]),
+                              e(r["device"] or "–"), e(r["project"] or "–")) for r in shared["runs"]), more("runs")))
+        if not (shared["projects"] or shared["chats"] or shared["runs"]):
+            out.append('<p class="muted">Nothing shared.</p>')
+        return "".join(out)
+
+    def back_to(user: Dict[str, Any]) -> str:
+        return '<p><a href="/admin/users/%d">← %s</a></p>' % (user["user_id"], e(user["owner"]))
+
+    async def admin_chat(request: Request) -> Response:
+        """One person's shared chat, read-only, for the operator. The view goes in their record."""
+        op = operator_of(request)
+        if op is None:
+            return RedirectResponse("/admin", 303)
+        if not hub.sharing:
+            return admin_page(op, '<p class="muted">This hub keeps Kelvin accounts only.</p>')
+        uid = int(request.path_params["user_id"])
+        try:
+            chat = await call(hub.owner_chat, uid, int(request.path_params["chat_id"]))
+        except HubError as err:
+            return admin_page(op, '<p><a href="/admin/users/%d">← Back</a></p>' % uid, error=str(err))
+        messages = chat["messages"] if isinstance(chat["messages"], list) else []
+        facts = [("Person", '<a href="/admin/users/%d">%s</a> <span class="muted">%s</span>'
+                  % (uid, e(chat["owner"]), e(chat["email"]))),
+                 ("Project", e(chat["project"] or "none")),
+                 ("Computer", e(" ".join(x for x in (chat["computer"], chat["platform"], chat["version"]) if x) or "–")),
+                 ("Updated", when(chat["updated_at"])), ("Size", "%s · %d turns" % (size(chat["bytes"]), len(messages))),
+                 ("Kelvin's id", e(chat["local_id"]))]
+        return admin_page(op, (
+            '%s<h2>%s</h2><div class="scroll"><table>%s</table></div><p><a href="/admin/users/%d/chats/%d/json">'
+            'Download it (JSON)</a></p><h2>The conversation</h2>%s'
+            % (back_to(chat), e(chat["title"]), "".join('<tr><th>%s</th><td>%s</td></tr>' % kv for kv in facts), uid,
+               chat["id"], render_chat(messages))))
+
+    async def admin_chat_json(request: Request) -> Response:
+        """One person's shared chat as JSON, to keep, for the operator. The download goes in their record."""
+        if operator_of(request) is None:
+            return RedirectResponse("/admin", 303)
+        if not hub.sharing:
+            return api_error("not found", 404)
+        uid = int(request.path_params["user_id"])
+        try:
+            chat = await call(hub.owner_chat, uid, int(request.path_params["chat_id"]), True)
+        except HubError as err:
+            return api_error(str(err), 404)
+        keep = ("id", "local_id", "user_id", "owner", "email", "project", "computer", "installation_id", "title",
+                "updated_at", "bytes", "messages")
+        return Response(json.dumps({k: chat.get(k) for k in keep}, indent=1, ensure_ascii=False),
+                        media_type="application/json; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="kelvin-chat-%d-%s.json"'
+                                 % (uid, re.sub(r"[^A-Za-z0-9_.-]", "_", chat["local_id"])),
+                                 "Cache-Control": "no-store"})
+
+    async def admin_run(request: Request) -> Response:
+        """One person's shared run, its record laid out and whole, for the operator. The view goes in their
+        record."""
+        op = operator_of(request)
+        if op is None:
+            return RedirectResponse("/admin", 303)
+        if not hub.sharing:
+            return admin_page(op, '<p class="muted">This hub keeps Kelvin accounts only.</p>')
+        uid = int(request.path_params["user_id"])
+        try:
+            run = await call(hub.owner_run, uid, int(request.path_params["run_id"]))
+        except HubError as err:
+            return admin_page(op, '<p><a href="/admin/users/%d">← Back</a></p>' % uid, error=str(err))
+        meta = run["meta"] if isinstance(run["meta"], dict) else {}
+        facts = [("Person", '<a href="/admin/users/%d">%s</a> <span class="muted">%s</span>'
+                  % (uid, e(run["owner"]), e(run["email"]))),
+                 ("Plan", e(meta.get("plan") or "–")), ("Status", e(meta.get("status") or "–")),
+                 ("Started", shown_time(meta.get("started")) if meta.get("started") else when(run["created_at"])),
+                 ("Device", e(run["device"] or "–")), ("Project", e(run["project"] or "none")),
+                 ("Computer", e(run["computer"] or "–")), ("Kelvin's id", e(run["local_id"]))]
+        files = ('<p>Files on the hub: %s</p>' % e(", ".join(run["files"]))) if run["files"] else (
+            '<p class="muted">No data files: they stay on the person\'s computer.</p>')
+        return admin_page(op, (
+            '%s<h2>Run %s</h2><div class="scroll"><table>%s</table></div>%s<h2>Its record</h2>%s'
+            '<details><summary>The record as Kelvin sent it (JSON)</summary><pre>%s</pre></details>'
+            % (back_to(run), e(meta.get("plan") or run["local_id"]),
+               "".join('<tr><th>%s</th><td>%s</td></tr>' % kv for kv in facts), files, record_rows(meta),
+               e(json.dumps(meta, indent=1, ensure_ascii=False)))))
 
     async def admin_people_csv(request: Request) -> Response:
         """Everyone, as a table for the operator: no passwords, nothing anyone shared."""
@@ -1635,9 +1990,9 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/account/delete", delete_page),
         Route("/account/delete", account_action(delete_account, any_consent=True), methods=["POST"]),
         Route("/account/export", export),
-        Route("/labs", sharing_only(account_action(make_lab)), methods=["POST"]),
-        Route("/labs/join", sharing_only(account_action(join_lab)), methods=["POST"]),
-        Route("/labs/{lab_id:int}/leave", sharing_only(account_action(leave_lab)), methods=["POST"]),
+        Route("/labs", labs_only(account_action(make_lab)), methods=["POST"]),
+        Route("/labs/join", labs_only(account_action(join_lab)), methods=["POST"]),
+        Route("/labs/{lab_id:int}/leave", labs_only(account_action(leave_lab)), methods=["POST"]),
         Route("/connections/{token_id:int}/revoke", sharing_only(account_action(revoke)), methods=["POST"]),
         Route("/shared/chats/{chat_id:int}", sharing_only(shared_chat)),
         Route("/shared/runs/{run_id:int}", sharing_only(shared_run)),
@@ -1648,6 +2003,9 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/admin/signin", admin_signin, methods=["POST"]),
         Route("/admin/signout", admin_signout, methods=["POST"]),
         Route("/admin/users/{user_id:int}", admin_person),
+        Route("/admin/users/{user_id:int}/chats/{chat_id:int}", admin_chat),
+        Route("/admin/users/{user_id:int}/chats/{chat_id:int}/json", admin_chat_json),
+        Route("/admin/users/{user_id:int}/runs/{run_id:int}", admin_run),
         Route("/admin/users/{user_id:int}/budget", operator_action(admin_model_budget), methods=["POST"]),
         Route("/admin/users/{user_id:int}/{verb}", operator_action(admin_disable), methods=["POST"]),
         Route("/admin/models", admin_models),

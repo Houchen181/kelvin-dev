@@ -21,10 +21,11 @@ from labharness.hub.server import create_app  # noqa: E402
 CALLBACK = "http://127.0.0.1:8770/hub/callback"
 
 
-def make(tmp_path, sharing=True):
-    """sharing: labs, connected Kelvins and shared work (off on a hub that keeps Kelvin accounts only)."""
+def make(tmp_path, sharing=True, **config):
+    """sharing: Kelvins share work here (off on a hub that keeps Kelvin accounts only); config: other hub.json
+    settings, such as labs=True or run_files=True (both off by default)."""
     hub = Hub(tmp_path / "hub")
-    hub.config["sharing"] = sharing
+    hub.config.update(config, sharing=sharing)
     return hub, TestClient(create_app(hub, hosts=["testserver"], backups=False))
 
 
@@ -77,7 +78,7 @@ def test_register_sign_in_and_out(tmp_path):
 
 
 def test_forms_need_the_anti_forgery_value_and_this_site(tmp_path):
-    hub, client = make(tmp_path)
+    hub, client = make(tmp_path, labs=True)
     register(client)
     r = client.post("/labs", data={"name": "Smith Lab"})
     assert r.status_code == 400 and "expired" in r.text and hub.labs_of(1) == []
@@ -96,7 +97,7 @@ def test_forms_need_the_anti_forgery_value_and_this_site(tmp_path):
 
 
 def test_connecting_a_kelvin_through_the_browser_then_syncing(tmp_path):
-    hub, client = make(tmp_path)
+    hub, client = make(tmp_path, labs=True, run_files=True)
     register(client)
     client.post("/labs", data={"name": "Smith Lab", "csrf": csrf(client.get("/account"))})
     lab = hub.labs_of(1)[0]
@@ -238,7 +239,7 @@ def test_connecting_needs_the_password_of_the_account_signed_in(tmp_path):
 def test_bodies_are_capped_before_they_are_read(tmp_path, monkeypatch):
     """Review S1."""
     from labharness.hub import server
-    hub, client = make(tmp_path)
+    hub, client = make(tmp_path, run_files=True)
     big = b"email=a%40b.c&password=" + b"x" * (70 * 1024)
     assert client.post("/signin", content=big, headers={"Content-Type": "application/x-www-form-urlencoded"}
                        ).status_code == 413
@@ -265,7 +266,7 @@ def test_bodies_are_capped_before_they_are_read(tmp_path, monkeypatch):
 def test_odd_times_never_break_the_account_page(tmp_path):
     """Review S2: even times already stored before the check came in."""
     import sqlite3
-    hub, client = make(tmp_path)
+    hub, client = make(tmp_path, labs=True)
     register(client)
     lab_page = client.post("/labs", data={"name": "L", "csrf": csrf(client.get("/account"))})
     assert lab_page.status_code == 200
@@ -335,7 +336,7 @@ def test_one_persons_flood_never_holds_up_anyone_else(tmp_path, monkeypatch):
     from labharness.hub.db import challenge_of
     monkeypatch.setattr(hubdb, "LOCK_WAIT", 4.0)   # longer than the other person may wait
     hub = Hub(tmp_path / "hub")
-    hub.config["sharing"] = True
+    hub.config.update(sharing=True, run_files=True)
     with TestClient(create_app(hub, hosts=["testserver"], backups=False)) as client:   # one event loop, one pool
         register(client)                                                # Ada, in the browser
         m = hub.register("m@example.org", "M", "correct horse", consent=True)
