@@ -311,7 +311,8 @@ def render_message(m: Any, depth: int = 0) -> str:
             for i, lane in enumerate(compare["lanes"]):   # the lane the chat went on with follows in the chat itself
                 if i != chosen and isinstance(lane, dict):
                     parts.append('<details><summary>%s answered too%s</summary>%s</details>' % (
-                        e(lane.get("model") or "Another model"), " (%s)" % e(lane["error"]) if lane.get("error") else "",
+                        e(lane.get("model") or "Another model"),
+                        " (%s)" % e(lane["error"]) if lane.get("error") else "",
                         render_chat(lane.get("messages"), depth + 1)))
         return '<div class="msg user"><div class="who">%s</div>%s</div>' % (e(who), "".join(parts))
     if role == "assistant":
@@ -1669,8 +1670,10 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         facts = [("Person", '<a href="/admin/users/%d">%s</a> <span class="muted">%s</span>'
                   % (uid, e(chat["owner"]), e(chat["email"]))),
                  ("Project", e(chat["project"] or "none")),
-                 ("Computer", e(" ".join(x for x in (chat["computer"], chat["platform"], chat["version"]) if x) or "–")),
-                 ("Updated", when(chat["updated_at"])), ("Size", "%s · %d turns" % (size(chat["bytes"]), len(messages))),
+                 ("Computer", e(" ".join(x for x in (chat["computer"], chat["platform"], chat["version"]) if x)
+                                or "–")),
+                 ("Updated", when(chat["updated_at"])),
+                 ("Size", "%s · %d turns" % (size(chat["bytes"]), len(messages))),
                  ("Kelvin's id", e(chat["local_id"]))]
         return admin_page(op, (
             '%s<h2>%s</h2><div class="scroll"><table>%s</table></div><p><a href="/admin/users/%d/chats/%d/json">'
