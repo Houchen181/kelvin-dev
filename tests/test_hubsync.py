@@ -1,10 +1,11 @@
-"""The Kelvin hub in the portal: connecting from Settings through the browser, the token kept secret, and the
-background sync of what a person shares (never what is unpublished, confidential, model-limited or incognito)."""
+"""Sharing with the Kelvin team in the portal (hubsync.py): over the person's Kelvin account sign-in, on unless they
+switch it off (which takes back what was shared), run records without their files, nothing before the hub's terms
+are agreed to, and never what is unpublished, confidential, model-limited or incognito."""
 import json
-import re
-import sys
+import logging
+import threading
 from types import SimpleNamespace
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -23,7 +24,6 @@ from labharness.hub.client import collect  # noqa: E402
 from labharness.hub.db import Hub  # noqa: E402
 from labharness.hub.server import create_app as hub_app  # noqa: E402
 from labharness.web import hubsync  # noqa: E402
-from labharness.web.hubsync import installation_for, previous_installations  # noqa: E402
 from labharness.web.providers.base import ModelInfo, Provider, TurnResult  # noqa: E402
 from labharness.web.settings import Settings  # noqa: E402
 from labharness.web.store import ChatStore  # noqa: E402
@@ -34,14 +34,9 @@ try:
 except ImportError:
     CRYPTO = False
 
-HUB = "http://127.0.0.1:8780"
-
-
-@pytest.fixture(autouse=True)
-def sharing_on(monkeypatch):
-    """Sharing work with the hub is switched off in Kelvin for now (the hub is for accounts); these tests keep it
-    working for when it comes back."""
-    monkeypatch.setattr(web_app, "HUB_SHARING", True)
+HUB = "https://hub.test"
+ADA = {"email": "ada@example.org", "password": "correct horse"}
+BEN = {"email": "ben@example.org", "password": "battery staple"}
 
 SWEEP = """plan: gate_sweep
 setup: { lockin.amplitude: 0.05, smu.output: on }
@@ -49,10 +44,6 @@ sweep: { smu.V: {from: 0, to: 2, step: 0.5} }
 settle: 0.1
 measure: [lockin.X, smu.I]
 after: { smu.V: 0 }"""
-
-
-def csrf(page):
-    return re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
 
 
 def through(client, calls=None):
@@ -70,49 +61,44 @@ def through(client, calls=None):
     return http
 
 
-def the_hub(tmp_path, email="ada@example.org", lab="Smith Lab"):
-    """The hub, and the person's browser on it: registered, signed in, in a lab."""
+def the_hub(tmp_path, monkeypatch, *people):
+    """The hub with sharing on and these people registered there (they agreed to its terms), and every way Kelvin
+    reaches it (signing in, sharing) going to its test app."""
     hub = Hub(tmp_path / "hub")
     hub.config["sharing"] = True
     browser = TestClient(hub_app(hub, hosts=["testserver"], backups=False))
-    r = browser.post("/register", data={"name": email.split("@")[0].title(), "email": email,
-                                        "password": "correct horse", "consent": "yes"}, follow_redirects=False)
-    assert r.status_code == 303, r.text
-    if lab:
-        browser.post("/labs", data={"name": lab, "csrf": csrf(browser.get("/account"))})
+    for p in people or (ADA,):
+        hub.register(p["email"], p["email"].split("@")[0].title(), p["password"], True)
+    monkeypatch.setattr("labharness.hub.client._http", through(browser))
     return hub, browser
 
 
-def portal(tmp_path, monkeypatch, browser, accounts=None, calls=None, providers=None):
-    opened = []
-    monkeypatch.setattr(web_app, "open_url", opened.append)
+def portal(tmp_path, monkeypatch, browser, calls=None, providers=None, accounts=True, hub_address=HUB):
+    """A Kelvin whose people sign in with Kelvin accounts on the test hub (accounts=False: one person, as before
+    accounts, with nobody to share for)."""
     lab = build_virtual_lab(seed=1)
     runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))
     settings = Settings(tmp_path / "settings.json")
-    store = ChatStore(tmp_path / "lab" / "chats" if accounts else tmp_path / "chats", create=not accounts)
-    guard = web_app.create_app(runtime, settings, store, hosts=["testserver"], accounts=accounts,
-                               providers=providers)
-    guard.app.state.hub.http = through(browser, calls)
+    if hub_address:
+        settings.set_account_hub(hub_address)
+    acc = Accounts(tmp_path) if accounts else None
+    store = ChatStore(tmp_path / "lab" / "chats", create=False) if accounts else ChatStore(tmp_path / "chats")
+    guard = web_app.create_app(runtime, settings, store, hosts=["testserver"], accounts=acc, providers=providers)
+    link = guard.app.state.hub
+    link.http = through(browser, calls)
     return SimpleNamespace(client=TestClient(guard), h={"X-Kelvin-Token": settings.access_key}, runtime=runtime,
-                           settings=settings, store=store, opened=opened, link=guard.app.state.hub)
+                           settings=settings, store=store, link=link, home=tmp_path)
 
 
-def connect(k, browser, lab="Smith Lab", action="allow", password="correct horse"):
-    """Settings → Account → Kelvin hub → Connect, then the person's yes (with their hub password) on the hub's
-    page in their browser."""
-    url = k.client.post("/api/hub/connect", headers=k.h, json={"url": HUB}).json()["url"]
-    assert k.opened[-1] == url and url.startswith(HUB + "/connect?")
-    path = url[len(HUB):]
-    page = browser.get(path)
-    assert page.status_code == 200 and "wants to connect" in page.text
-    form = {key: v[0] for key, v in parse_qs(urlsplit(path).query).items()}
-    labs = dict(re.findall(r'<option value="(\d+)">([^<]+)</option>', page.text))
-    chosen = next((i for i, name in labs.items() if name == lab), "")
-    r = browser.post("/connect", data=dict(form, csrf=csrf(page), lab=chosen, action=action, password=password),
-                     follow_redirects=False)
-    back = urlsplit(r.headers["location"])
-    assert back.netloc.startswith("127.0.0.1:") and back.path == "/hub/callback"   # back to Kelvin, nowhere else
-    return k.client.get("/hub/callback?" + back.query)
+def sign_in(k, who=ADA):
+    r = k.client.post("/api/session", headers=k.h, json=who)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def mine(k, name="hub-sync.json"):
+    """A file in the signed-in person's own folder."""
+    return k.home / "users" / k.runtime.user / name
 
 
 def chat(store, title, project=None, incognito=False):
@@ -145,28 +131,29 @@ def on_the_hub(hub):
     return json.dumps(rows, ensure_ascii=False)
 
 
-def test_connecting_from_settings_then_sharing_in_the_background(tmp_path, monkeypatch):
-    hub, browser = the_hub(tmp_path)
+def hub_files(tmp_path):
+    return [p for p in (tmp_path / "hub" / "files").rglob("*") if p.is_file()]
+
+
+def test_sharing_goes_over_the_sign_in_and_never_sends_unshared_work(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path, monkeypatch)
     calls = []
     k = portal(tmp_path, monkeypatch, browser, calls=calls)
-    assert k.client.get("/api/hub", headers=k.h).json()["connected"] is False
-    assert k.client.post("/api/hub/connect", headers=k.h, json={"url": "http://hub.example.org"}).status_code == 400
-
-    page = connect(k, browser)
-    assert page.status_code == 200 and "connected to the hub" in page.text and "Smith Lab" in page.text
+    assert k.client.get("/api/hub", headers=k.h).status_code == 401      # nobody signed in yet
+    sign_in(k)                                                          # and nothing else to do: no connecting
     st = k.client.get("/api/hub", headers=k.h).json()
-    assert st["connected"] and st["url"] == HUB
-    assert st["account"]["email"] == "ada@example.org" and st["account"]["shares_into"] == "Smith Lab"
+    assert st["signed_in"] and st["sharing"] and st["url"] == HUB
+    assert st["account"]["email"] == ADA["email"] and st["account"]["needs_consent"] is False
     assert st["account"]["account_url"] == HUB + "/account"
-    token = k.settings.get("hub_token")
-    assert token.startswith("khub_") and k.settings.get("hub_url") == HUB
-    for path in ("/api/hub", "/api/settings", "/api/bootstrap"):
+    token = k.settings.get("account_token")
+    assert token.startswith("khub_")
+    for path in ("/api/hub", "/api/settings", "/api/bootstrap", "/api/state"):
         assert token not in k.client.get(path, headers=k.h).text              # the token never goes to the browser
-    k.client.post("/api/settings", headers=k.h, json={"hub_token": "khub_mine", "hub_url": "https://evil.example"})
-    assert k.settings.get("hub_token") == token and k.settings.get("hub_url") == HUB   # ...nor comes from it
-    assert "Kelvin" in browser.get("/account").text and k.client.get("/hub/callback?state=x").status_code == 400
+    assert k.client.post("/api/hub/connect", headers=k.h, json={"url": HUB}).status_code != 200   # no connecting
+    assert k.client.get("/hub/callback?state=x").status_code != 200
+    assert k.client.get("/api/settings", headers=k.h).json()["settings"]["hub_share"] is True   # on by default
 
-    store, rt = k.store, k.runtime
+    store, rt, me = k.store, k.runtime, k.runtime.user
     crsbr = store.create_project("CrSBr")
     secret = store.create_project("Secret sample")
     assert k.client.patch("/api/projects/" + secret["id"], headers=k.h,
@@ -179,17 +166,19 @@ def test_connecting_from_settings_then_sharing_in_the_background(tmp_path, monke
     hidden = chat(store, "Secret chat", secret["id"])
     chat(store, "Local chat", local["id"])
     chat(store, "Incognito chat", incognito=True)
-    run(rt, "20261020-100000-iv", crsbr["id"])
-    run(rt, "20261020-100100-general", None)
-    run(rt, "20261020-100200-secret", secret["id"])
-    run(rt, "20261020-100300-incognito", None, incognito=True)
-    run(rt, "20261020-100400-gone", "p0000dead")                      # its project was deleted: can't tell
+    run(rt, "20261020-100000-iv", crsbr["id"], user=me)
+    run(rt, "20261020-100100-general", None, user=me)
+    run(rt, "20261020-100200-secret", secret["id"], user=me)
+    run(rt, "20261020-100300-incognito", None, user=me, incognito=True)
+    run(rt, "20261020-100400-gone", "p0000dead", user=me)              # its project was deleted: can't tell
     (rt.data_dir / "runs" / "20261020-100500-running").mkdir()        # not finished yet
 
+    calls.clear()
     st = k.client.post("/api/hub/sync", headers=k.h).json()
     s = st["sync"]
-    assert s["ok"] and s["error"] is None and st["synced_at"]
-    assert s["sent"] == {"projects": 1, "chats": 2, "runs": 2} and s["withheld"] == 2 and s["files"] == 6
+    assert s["ok"] and s["error"] is None and st["synced_at"] and s["sharing"] is True
+    assert s["sent"] == {"projects": 1, "chats": 2, "runs": 2} and s["withheld"] == 2
+    assert [c for c in calls if c[0] != "POST" or c[1] != "/api/sync"] == []   # records only: never a file
     seen = hub.shared_with(1)
     assert sorted(c["title"] for c in seen["chats"]) == ["Gate sweep", "Unfiled question"]
     assert sorted(r["local_id"] for r in seen["runs"]) == ["20261020-100000-iv", "20261020-100100-general"]
@@ -197,10 +186,9 @@ def test_connecting_from_settings_then_sharing_in_the_background(tmp_path, monke
     everything = on_the_hub(hub)
     for never in ("Secret", "Local only", "Local chat", "Incognito", "incognito", "gone", "running"):
         assert never not in everything
-    files = sorted(p.name for p in (tmp_path / "hub" / "files").rglob("*") if p.is_file())
-    assert files == ["data.csv", "data.csv", "meta.json", "meta.json", "plan.yaml", "plan.yaml"]
-    assert "Gate sweep" in browser.get("/account").text                # on the person's account page
-    assert token not in (tmp_path / "hub-sync.json").read_text(encoding="utf-8")
+    assert hub_files(tmp_path) == []                                    # the data files stay on this computer
+    state = mine(k).read_text(encoding="utf-8")
+    assert token not in state and '"files"' not in state and st["on_hub"] == {"chats": 2, "runs": 2}
 
     calls.clear()
     assert k.link.sync_once()["ok"] and calls == []                    # nothing changed: nothing sent
@@ -208,20 +196,212 @@ def test_connecting_from_settings_then_sharing_in_the_background(tmp_path, monke
     store.delete(unfiled["id"])                                        # removed here, removed there
     store.assign(hidden["id"], None)                                   # out of the unpublished project: still not shared
     k.client.patch("/api/projects/" + crsbr["id"], headers=k.h, json={"sharing": "confidential"})
-    (rt.data_dir / "runs" / "20261020-100100-general" / "fit.csv").write_text("a,b\n", encoding="utf-8")
     s = k.client.post("/api/hub/sync", headers=k.h).json()["sync"]
-    assert s["ok"] and s["files"] == 1 and s["removed"] >= 1
+    assert s["ok"] and s["removed"] >= 1
     seen = hub.shared_with(1)
     assert seen["chats"] == [] and seen["projects"] == []
     assert [r["local_id"] for r in seen["runs"]] == ["20261020-100100-general"]
     assert "CrSBr" not in on_the_hub(hub) and "Secret chat" not in on_the_hub(hub)
-    assert sorted(c["title"] for c in collect(store)["chats"]) == []
+    assert collect(store)["chats"] == []
 
-    r = k.client.post("/api/hub/disconnect", headers=k.h).json()
-    assert r["revoked"] is True and r["connected"] is False
-    assert k.settings.get("hub_token") is None and k.settings.get("hub_url") == HUB   # the address stays
-    assert browser.get("/api/me", headers={"Authorization": "Bearer " + token}).status_code == 401
+    k.client.delete("/api/session", headers=k.h)
+    assert k.link.sync_once() is None                                  # nobody signed in: nothing goes
+    sign_in(k)                                                          # a new token, the same place on the hub:
+    assert k.settings.get("account_token") not in ("", None, token)
+    calls.clear()
+    s = k.link.sync_once()
+    assert s["ok"] and s["sent"] == {"projects": 0, "chats": 0, "runs": 0} and calls == []   # nothing again
+
+
+def test_switching_sharing_off_takes_back_what_was_shared(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    calls = []
+    k = portal(tmp_path, monkeypatch, browser, calls=calls)
+    sign_in(k)
+    crsbr = k.store.create_project("CrSBr")
+    chat(k.store, "Gate sweep", crsbr["id"])
+    chat(k.store, "Unfiled")
+    run(k.runtime, "20261020-100000-iv", crsbr["id"], user=k.runtime.user)
+    assert k.link.sync_once()["ok"] and len(hub.shared_with(1)["chats"]) == 2
+
+    gen = k.link.gen
+    assert k.client.post("/api/settings", headers=k.h, json={"hub_share": "off"}).status_code == 200
+    assert k.link.gen > gen                                            # a sync going on stops at its next request
+    assert k.client.get("/api/settings", headers=k.h).json()["settings"]["hub_share"] is False
+    st = k.client.get("/api/hub", headers=k.h).json()
+    assert st["sharing"] is False and st["taking_back"] and st["on_hub"] == {"chats": 2, "runs": 1}
+    s = k.client.post("/api/hub/sync", headers=k.h).json()["sync"]   # "Take back now" (or the next look)
+    assert s["ok"] and s["sharing"] is False and s["sent"] == {"projects": 0, "chats": 0, "runs": 0}
+    seen = hub.shared_with(1)
+    assert seen["chats"] == [] and seen["runs"] == [] and seen["projects"] == []
+    assert "Gate sweep" not in on_the_hub(hub) and "CrSBr" not in on_the_hub(hub)
+    st = k.client.get("/api/hub", headers=k.h).json()
+    assert not st["taking_back"] and st["on_hub"] == {"chats": 0, "runs": 0}
+
+    calls.clear()
+    chat(k.store, "Written while it is off")
+    assert k.link.sync_once() is None and calls == []                  # off, with nothing there: no request at all
+    assert "Written while it is off" not in on_the_hub(hub)
+
+    k.client.post("/api/settings", headers=k.h, json={"hub_share": "on"})
+    s = k.link.sync_once()                                             # on again: everything once more
+    assert s["ok"] and s["sent"] == {"projects": 1, "chats": 3, "runs": 1}
+    assert sorted(c["title"] for c in hub.shared_with(1)["chats"]) == ["Gate sweep", "Unfiled", "Written while it is off"]
+
+
+def test_a_new_sign_in_is_used_at_once_and_a_sync_with_the_old_token_stops(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    k = portal(tmp_path, monkeypatch, browser)
+    sign_in(k)
+    chat(k.store, "First")
+    old = k.settings.get("account_token")
+    base = through(browser)
+    at_sync, go, out = threading.Event(), threading.Event(), []
+
+    def held_at_first_sync(method, url, body=None, headers=None):
+        if method == "POST" and url.endswith("/api/sync") and not at_sync.is_set():
+            at_sync.set()
+            go.wait(20)
+        return base(method, url, body, headers)
+    k.link.http = held_at_first_sync
+    syncing = threading.Thread(target=lambda: out.append(k.link.sync_once()))
+    syncing.start()
+    assert at_sync.wait(20)
+    sign_in(k)                                                          # signed in again meanwhile: a new token
+    new = k.settings.get("account_token")
+    assert new and new != old
+    go.set()                                                            # the old one goes on: the hub refuses it
+    syncing.join(20)
+    assert out and not out[0]["ok"] and "Interrupted" in out[0]["error"]
+    assert k.settings.get("account_token") == new                     # the old sync's 401 forgot nothing
+    k.link.http = base
+    s = k.link.sync_once()
+    assert s["ok"] and s["sent"]["chats"] == 1 and [c["title"] for c in hub.shared_with(1)["chats"]] == ["First"]
+
+
+def test_a_sign_in_the_hub_ended_is_kept_and_said(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    k = portal(tmp_path, monkeypatch, browser)
+    sign_in(k)
+    chat(k.store, "Before")
+    assert k.link.sync_once()["ok"]
+    token = k.settings.get("account_token")
+    assert browser.post("/api/signout", headers={"Authorization": "Bearer " + token}).status_code == 204
+    chat(k.store, "After")
+    s = k.link.sync_once()
+    assert not s["ok"] and s["signed_out"] and "signed this computer out" in s["error"]
+    assert k.settings.get("account_token") == token                   # the sign-in's to keep: never forgotten here
+    st = k.client.get("/api/hub", headers=k.h).json()
+    assert st["signed_in"] and "signed this computer out" in st["problem"]
+    sign_in(k)                                                          # signing in again: sharing goes on
+    s = k.link.sync_once()
+    assert s["ok"] and s["sent"]["chats"] == 1
+
+    def down(method, url, body=None, headers=None):
+        raise OSError("connection refused")
+    k.link.http = down
+    chat(k.store, "Offline")
+    s = k.link.sync_once()
+    assert not s["ok"] and "can't reach the hub" in s["error"]
+    st = k.client.get("/api/hub", headers=k.h).json()
+    assert st["signed_in"] and "can't reach the hub" in st["problem"] and k.settings.get("account_token")
+
+
+def test_nothing_is_shared_before_the_hubs_new_terms_are_agreed_to(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    k = portal(tmp_path, monkeypatch, browser)
+    sign_in(k)
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] is None
+    chat(k.store, "Waiting for the terms")
+    hub.config["consent_version"] = "2099-01-01"                       # new terms on the hub
+    s = k.link.sync_once()
+    assert not s["ok"] and s["consent"] and "terms changed" in s["error"]
+    assert hub.shared_with(1)["chats"] == [] and "Waiting" not in on_the_hub(hub)   # nothing went
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == {"consent_url": HUB + "/consent"}
+
+    k.client.delete("/api/session", headers=k.h)
+    assert sign_in(k)["needs_consent"] is True                         # the sign-in says so too, before any sync
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == {"consent_url": HUB + "/consent"}
+    k.client.post("/api/settings", headers=k.h, json={"hub_share": "off"})
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] is None   # off: nothing waits for them
+    k.client.post("/api/settings", headers=k.h, json={"hub_share": "on"})
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"]
+
+    hub.give_consent(1)                                                # agreed on the hub's page
+    st = k.client.get("/api/hub", headers=k.h).json()                  # Kelvin looks again (after Read and agree)
+    assert st["account"]["needs_consent"] is False
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] is None
+    s = k.link.sync_once()
+    assert s["ok"] and s["sent"]["chats"] == 1
+
+
+def test_a_hub_that_takes_no_shared_work_is_waited_for_quietly(tmp_path, monkeypatch, caplog):
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    hub.config["sharing"] = False                                      # an older hub, or sharing off there: 404
+    k = portal(tmp_path, monkeypatch, browser)
+    sign_in(k)
+    chat(k.store, "Kept here")
+    caplog.set_level(logging.INFO, logger="labharness.hubsync")
+    s = k.link.sync_once()
+    assert not s["ok"] and s["error"] is None and s["waiting"] == hubsync.NOT_TAKEN
+    assert not [r for r in caplog.records if r.name == "labharness.hubsync"]   # nothing in the log
+    st = k.client.get("/api/hub", headers=k.h).json()
+    assert st["signed_in"] and st["problem"] is None
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] is None
+    hub.config["sharing"] = True                                       # the hub takes it now
+    assert k.link.sync_once()["ok"] and [c["title"] for c in hub.shared_with(1)["chats"]] == ["Kept here"]
+
+
+def test_each_person_shares_as_themselves_and_their_token_is_encrypted(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path, monkeypatch, ADA, BEN)
+    k = portal(tmp_path, monkeypatch, browser)
+    sign_in(k, ADA)
+    ada = k.runtime.user
+    chat(k.store, "Ada's chat")
+    assert k.link.sync_once()["ok"]
+    token = k.settings.get("account_token")
+    raw = (k.home / "users" / ada / "settings.json").read_text(encoding="utf-8")
+    if CRYPTO:
+        assert token not in raw and "enc:" in raw                        # sealed with her password
+    sign_in(k, BEN)                                                     # Ben, on the same computer
+    assert k.runtime.user != ada
+    chat(k.store, "Ben's chat")
+    assert k.link.sync_once()["ok"]
+    assert [c["title"] for c in hub.shared_with(1)["chats"]] == ["Ada's chat"]
+    assert [c["title"] for c in hub.shared_with(2)["chats"]] == ["Ben's chat"]
+    sign_in(k, ADA)
+    s = k.link.sync_once()
+    assert s["ok"] and s["sent"] == {"projects": 0, "chats": 0, "runs": 0}   # hers are there already
+
+
+def test_without_a_kelvin_account_nothing_is_shared(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    Accounts(tmp_path).create("Cat", "")                               # an account on this computer only
+    k = portal(tmp_path, monkeypatch, browser, hub_address="")
+    chat(k.store, "Cat's chat")
+    st = k.client.get("/api/hub", headers=k.h).json()
+    assert st["signed_in"] is False and st["account"] is None
     assert k.client.post("/api/hub/sync", headers=k.h).status_code == 409
+    assert k.link.sync_once() is None and "Cat" not in on_the_hub(hub)
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] is None
+
+    solo = portal(tmp_path / "solo", monkeypatch, browser, accounts=False)   # no accounts at all
+    chat(solo.store, "Solo chat")
+    assert solo.link.sync_once() is None and "Solo" not in on_the_hub(hub)
+
+
+def test_a_connection_of_its_own_from_before_is_dropped(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    k = portal(tmp_path, monkeypatch, browser)
+    sign_in(k)
+    path = mine(k, "settings.json")
+    k.client.delete("/api/session", headers=k.h)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(hub_url="https://hub.example.org", hub_token="khub_old", hub_installations=["urn:uuid:x:0123456789ab"])
+    path.write_text(json.dumps(data), encoding="utf-8")                # as Kelvin 0.3.12 left it
+    sign_in(k)
+    kept = json.loads(path.read_text(encoding="utf-8"))
+    assert not {"hub_url", "hub_token", "hub_installations"} & set(kept) and kept.get("account_token")
 
 
 def test_unpublished_marks_stay_with_chats_that_leave(tmp_path):
@@ -256,69 +436,6 @@ def test_runs_from_incognito_chats_say_so(tmp_path):
     runtime.attribution = {}
     assert runtime._attribute(plan, None, True)["incognito"] is True
     assert "incognito" not in runtime._attribute(plan, None, False)
-
-
-def test_each_person_has_their_own_hub_and_its_token_is_encrypted(tmp_path, monkeypatch):
-    hub, browser = the_hub(tmp_path)
-    acc = Accounts(tmp_path)
-    acc.create("Ada", "pw1234")
-    acc.create("Ben", "")
-    k = portal(tmp_path, monkeypatch, browser, accounts=acc)
-    assert k.client.get("/api/hub", headers=k.h).status_code == 401      # nobody signed in yet
-    k.client.post("/api/session", headers=k.h, json={"name": "Ada", "password": "pw1234"})
-    assert connect(k, browser).status_code == 200
-    token = k.settings.get("hub_token")
-    raw = (tmp_path / "users" / "Ada" / "settings.json").read_text(encoding="utf-8")
-    if CRYPTO:
-        assert token not in raw and "enc:" in raw                        # sealed with Ada's password
-    installation = json.loads((tmp_path / "settings.json").read_text())["hub_installation"]
-    assert installation.startswith("urn:uuid:")                         # this Kelvin's, for everyone on it
-
-    k.client.post("/api/session", headers=k.h, json={"name": "Ben"})
-    assert k.client.get("/api/hub", headers=k.h).json()["connected"] is False
-    chat(k.store, "Ben's chat")
-    assert k.client.post("/api/hub/sync", headers=k.h).status_code == 409
-    assert k.link.sync_once() is None and "Ben" not in on_the_hub(hub)
-
-    k.client.post("/api/session", headers=k.h, json={"name": "Ada", "password": "pw1234"})
-    chat(k.store, "Ada's chat")
-    st = k.client.post("/api/hub/sync", headers=k.h).json()
-    assert st["connected"] and st["sync"]["sent"]["chats"] == 1
-    assert [c["title"] for c in hub.shared_with(1)["chats"]] == ["Ada's chat"]
-    assert json.loads((tmp_path / "settings.json").read_text())["hub_installation"] == installation
-
-
-def test_cancelled_ended_and_unreachable_connections(tmp_path, monkeypatch):
-    hub, browser = the_hub(tmp_path, lab=None)
-    k = portal(tmp_path, monkeypatch, browser)
-    page = connect(k, browser, action="cancel")
-    assert page.status_code == 400 and "cancelled" in page.text and k.settings.get("hub_token") is None
-
-    page = connect(k, browser, lab="")
-    assert page.status_code == 200 and "only you" in page.text
-    assert k.client.get("/api/hub", headers=k.h).json()["account"]["shares_into"] is None
-
-    def down(method, url, body=None, headers=None):
-        raise OSError("connection refused")
-    k.link.http = down
-    st = k.client.get("/api/hub", headers=k.h).json()
-    assert st["connected"] and "can't reach the hub" in st["problem"]
-    chat(k.store, "Waiting")
-    s = k.client.post("/api/hub/sync", headers=k.h).json()["sync"]
-    assert not s["ok"] and "can't reach the hub" in s["error"]
-    assert k.settings.get("hub_token")                                  # kept: it tries again later
-
-    k.link.http = through(browser)
-    s = k.client.post("/api/hub/sync", headers=k.h).json()["sync"]
-    assert s["ok"] and s["sent"]["chats"] == 1
-    hub.revoke(1, hub.connections(1)[0]["id"])                          # disconnected on the hub's account page
-    st = k.client.get("/api/hub", headers=k.h).json()
-    assert st["connected"] is False and "ended this connection" in st["problem"]
-    assert k.settings.get("hub_token") is None
-
-    k.client.app.remote.port = 8771                                     # as if phone access were on
-    phone = TestClient(k.client.app, base_url="http://192.168.1.50:8771")
-    assert phone.get("/hub/callback", params={"state": "x"}).status_code == 403   # only on this computer
 
 
 # ------------------------------------------------------------------ after review: what must never leave, and races
@@ -357,29 +474,32 @@ def test_model_limited_chats_keep_the_rules_they_leave_with(tmp_path):
 
 
 def test_only_this_persons_newer_runs_go_and_older_ones_on_request(tmp_path, monkeypatch):
-    hub, browser = the_hub(tmp_path)
-    acc = Accounts(tmp_path)
-    acc.create("Ada", "")
-    acc.create("Ben", "")
-    k = portal(tmp_path, monkeypatch, browser, accounts=acc)
-    k.client.post("/api/session", headers=k.h, json={"name": "Ben"})
-    connect(k, browser)
-    run(k.runtime, "20261020-100000-bens", None, user="Ben")
+    hub, browser = the_hub(tmp_path, monkeypatch, BEN)
+    k = portal(tmp_path, monkeypatch, browser)
+    sign_in(k, BEN)
+    ben = k.runtime.user
+    run(k.runtime, "20261020-100000-bens", None, user=ben)
     run(k.runtime, "20261020-100100-adas", None, user="Ada")          # a data folder Ada and Ben share
     run(k.runtime, "20261020-100200-older", None, old=True)            # from before Kelvin said who made runs
     run(k.runtime, "20261020-100300-no-accounts", None, user=None)     # ...or from before accounts
-    run(k.runtime, "20261020-100400-incognito", None, user="Ben", incognito=True)
-    run(k.runtime, "20261020-100500-queued-then", None, user="Ben", legacy=True)   # an old queue item's run
+    run(k.runtime, "20261020-100400-incognito", None, user=ben, incognito=True)
+    run(k.runtime, "20261020-100500-queued-then", None, user=ben, legacy=True)   # an old queue item's run
     s = k.client.post("/api/hub/sync", headers=k.h).json()["sync"]
     assert s["ok"] and s["older_runs"] == 3
     assert [r["local_id"] for r in hub.shared_with(1)["runs"]] == ["20261020-100000-bens"]
     assert k.client.get("/api/settings", headers=k.h).json()["settings"]["hub_old_runs"] is False
+    gen = k.link.gen
     k.client.post("/api/settings", headers=k.h, json={"hub_old_runs": "on"})   # "Also share older runs"
+    assert k.link.gen > gen                                            # looked at again at once
     s = k.client.post("/api/hub/sync", headers=k.h).json()["sync"]
     assert s["ok"] and s["older_runs"] == 0
     assert sorted(r["local_id"] for r in hub.shared_with(1)["runs"]) == [
         "20261020-100000-bens", "20261020-100200-older", "20261020-100300-no-accounts", "20261020-100500-queued-then"]
     assert "adas" not in on_the_hub(hub) and "incognito" not in on_the_hub(hub)   # never anyone else's
+    gen = k.link.gen
+    k.client.post("/api/settings", headers=k.h, json={"hub_old_runs": "on", "learn": "on"})
+    assert k.link.gen == gen                                           # nothing of sharing changed: left alone
+    assert hub_files(tmp_path) == []                                    # records only, here too
 
     lab = build_virtual_lab(seed=1)
     runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "solo", demo_envelope(lab))
@@ -398,31 +518,7 @@ def test_only_this_persons_newer_runs_go_and_older_ones_on_request(tmp_path, mon
     assert runtime._attribute(SimpleNamespace(device=None), None, False, False, True)["legacy"] is True
 
 
-def test_two_people_on_one_computer_keep_their_own_connections(tmp_path, monkeypatch):
-    hub, browser = the_hub(tmp_path)
-    acc = Accounts(tmp_path)
-    acc.create("Ada", "")
-    acc.create("Ben", "")
-    k = portal(tmp_path, monkeypatch, browser, accounts=acc)
-    tokens = {}
-    for name in ("Ada", "Ben"):        # both use the same hub account here, the case that clashed before
-        k.client.post("/api/session", headers=k.h, json={"name": name})
-        assert connect(k, browser).status_code == 200
-        query = parse_qs(urlsplit(k.opened[-1]).query)
-        assert query["person"] == [name]                                # the hub shows whose Kelvin it is
-        assert re.match(r"^[A-Za-z0-9:_.-]{8,80}$", query["installation"][0])
-        tokens[name] = (k.settings.get("hub_token"), query["installation"][0])
-    computer = {tokens[name][1].rsplit(":", 1)[0] for name in tokens}
-    assert tokens["Ada"][1] != tokens["Ben"][1] and len(computer) == 1           # one computer, two installations
-    assert len(hub.connections(1)) == 2
-    for name in ("Ada", "Ben"):
-        k.client.post("/api/session", headers=k.h, json={"name": name})
-        assert k.client.get("/api/hub", headers=k.h).json()["connected"]
-        assert browser.get("/api/me", headers={"Authorization": "Bearer " + tokens[name][0]}).status_code == 200
-
-
 def test_a_redirect_never_carries_the_token():
-    import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from labharness.hub.client import HubClient, HubClientError
     seen = []
@@ -467,130 +563,9 @@ def test_a_redirect_never_carries_the_token():
         server.server_close()
 
 
-def test_disconnecting_or_reconnecting_during_a_sync(tmp_path, monkeypatch):
-    import threading
-    hub, browser = the_hub(tmp_path)
-    k = portal(tmp_path, monkeypatch, browser)
-    connect(k, browser)
-    for i in range(3):
-        run(k.runtime, "20261020-10000%d-scan" % i, None)
-    base = through(browser)
-    puts = []
-
-    def disconnect_at_first_file(method, url, body=None, headers=None):
-        if method == "PUT":
-            puts.append(url)
-            if len(puts) == 1:
-                k.link.disconnect()        # pressed while the first file goes up
-        return base(method, url, body, headers)
-    k.link.http = disconnect_at_first_file
-    s = k.link.sync_once()
-    assert not s["ok"] and "Interrupted" in s["error"] and len(puts) == 1   # nothing more after that
-    assert k.settings.get("hub_token") is None and not k.link.connected
-
-    k.link.http = base
-    connect(k, browser)
-    old = k.settings.get("hub_token")
-    at_upload, go, out, again = threading.Event(), threading.Event(), [], []
-
-    def held_at_first_file(method, url, body=None, headers=None):
-        if method == "PUT" and not at_upload.is_set():
-            at_upload.set()
-            go.wait(20)
-        return base(method, url, body, headers)
-    k.link.http = held_at_first_file
-    syncing = threading.Thread(target=lambda: out.append(k.link.sync_once()))
-    syncing.start()
-    assert at_upload.wait(20)
-    reconnecting = threading.Thread(target=lambda: again.append(connect(k, browser)))
-    reconnecting.start()
-    reconnecting.join(20)               # the page answers at once, while that upload still hangs
-    new = k.link.token
-    assert not reconnecting.is_alive() and again and again[0].status_code == 200 and new not in ("", old)
-    assert k.client.get("/api/hub", headers=k.h).json()["sync"] is None    # this connection hasn't synced yet
-    go.set()
-    syncing.join(20)
-    assert out and not out[0]["ok"] and "Interrupted" in out[0]["error"]
-    assert k.settings.get("hub_token") == new and k.link.connected   # the old sync's 401 didn't wipe the new one
-    k.link.http = base
-    s = k.link.sync_once()                                            # a new connection sends everything again
-    assert s["ok"] and s["sent"]["runs"] == 3 and s["files"] == 9
-
-
-def test_a_file_the_hub_keeps_failing_on_waits_while_the_others_go(tmp_path, monkeypatch):
-    hub, browser = the_hub(tmp_path)
-    k = portal(tmp_path, monkeypatch, browser)
-    connect(k, browser)
-    d = run(k.runtime, "20261020-100000-scan", None)
-    (d / "bad.csv").write_text("x", encoding="utf-8")
-    base = through(browser)
-    tries = []
-
-    def bad_fails(method, url, body=None, headers=None):
-        if method == "PUT" and url.endswith("/bad.csv"):
-            tries.append(url)
-            return 500, {"error": "the hub fell over"}   # as a 524 from Cloudflare on a slow big upload would
-        return base(method, url, body, headers)
-    k.link.http = bad_fails
-    s = k.link.sync_once()
-    assert s["ok"] and s["files"] == 3 and len(tries) == 1               # the others went
-    assert [r["again"] for r in s["refused"] if r.get("file") == "bad.csv"] == [300]
-    assert k.link.sync_once()["ok"] and len(tries) == 1                 # not again so soon
-    state_file = tmp_path / "hub-sync.json"
-
-    def due_now():
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-        for files in state["retry"].values():
-            for entry in files.values():
-                entry[0] = 0
-        state_file.write_text(json.dumps(state), encoding="utf-8")
-        return state
-    due_now()
-    k.link.sync_once()
-    retry = json.loads(state_file.read_text(encoding="utf-8"))["retry"]
-    assert len(tries) == 2 and retry["20261020-100000-scan"]["bad.csv"][1] == 600   # waits twice as long now
-
-    for i in range(5):
-        run(k.runtime, "20261020-1001%02d-more" % i, None)
-    k.link.http = lambda m, u, b=None, h=None: (503, {"error": "down"}) if m == "PUT" else base(m, u, b, h)
-    s = k.link.sync_once()                                              # a hub failing on everything:
-    assert not s["ok"] and "down" in s["error"]                         # the sync ends after a few files
-    assert len([r for r in s["refused"] if "down" in r["why"]]) == hubsync.FAILURES
-    k.link.http = base
-    due_now()
-    s = k.link.sync_once()
-    assert s["ok"] and s["files"] == 5 * 3 + 1                         # all of them, bad.csv too, once it works
-    assert json.loads(state_file.read_text(encoding="utf-8"))["retry"] == {}
-
-
-def test_a_connection_that_breaks_on_one_file_holds_back_only_that_file(tmp_path, monkeypatch):
-    """A big upload that times out, or a hub that closes the connection after refusing it, is a network error, not
-    an answer: that file waits, the others go (it used to end every sync at that file)."""
-    hub, browser = the_hub(tmp_path)
-    k = portal(tmp_path, monkeypatch, browser)
-    connect(k, browser)
-    d = run(k.runtime, "20261020-100000-scan", None)
-    (d / "big.csv").write_text("x", encoding="utf-8")
-    run(k.runtime, "20261020-100100-other", None)
-    base = through(browser)
-    tries = []
-
-    def big_times_out(method, url, body=None, headers=None):
-        if method == "PUT" and url.endswith("/big.csv"):
-            tries.append(url)
-            raise TimeoutError("timed out")
-        return base(method, url, body, headers)
-    k.link.http = big_times_out
-    s = k.link.sync_once()
-    assert s["ok"] and s["files"] == 6 and len(tries) == 1               # both runs' other files went
-    again = [r for r in s["refused"] if r.get("file") == "big.csv"]
-    assert again[0]["again"] == 300 and "connection broke" in again[0]["why"]
-    assert k.link.sync_once()["ok"] and len(tries) == 1                 # and it waits before trying again
-
-
 def test_unshared_work_keeps_its_place_and_its_notes(tmp_path, monkeypatch):
-    hub, browser = the_hub(tmp_path)
-    k = portal(tmp_path, monkeypatch, browser)
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    k = portal(tmp_path, monkeypatch, browser, accounts=False)
     store, rt = k.store, k.runtime
     shared, secret = store.create_project("Shared sample"), store.create_project("Secret")
     store.set_sharing(secret["id"], "confidential")
@@ -643,11 +618,12 @@ def turn(k, chat_id, text="measure something"):
 
 
 def test_runs_from_a_chat_that_keeps_unshared_marks_stay_here(tmp_path, monkeypatch):
-    hub, browser = the_hub(tmp_path)
+    hub, browser = the_hub(tmp_path, monkeypatch)
     recorder = Recorder()
     k = portal(tmp_path, monkeypatch, browser, providers={"scripted": recorder})
+    sign_in(k)
     agent = k.client.app.app.state.agent
-    store = k.store
+    store, me = k.store, k.runtime.user
     secret = store.create_project("Secret")
     store.set_sharing(secret["id"], "confidential")
     left = chat(store, "left the secret", secret["id"])
@@ -668,55 +644,8 @@ def test_runs_from_a_chat_that_keeps_unshared_marks_stay_here(tmp_path, monkeypa
     assert k.runtime.queue_add(SWEEP).startswith("added") and k.runtime.queue.items[-1].unshared   # queued: too
     k.runtime.attribution = {}
 
-    connect(k, browser)
-    run(k.runtime, "20261020-100000-from-left", None, unshared=True)
-    run(k.runtime, "20261020-100100-plain", None)
+    run(k.runtime, "20261020-100000-from-left", None, user=me, unshared=True)
+    run(k.runtime, "20261020-100100-plain", None, user=me)
     assert k.link.sync_once()["ok"]
     assert [r["local_id"] for r in hub.shared_with(1)["runs"]] == ["20261020-100100-plain"]
     assert sorted(c["title"] for c in hub.shared_with(1)["chats"]) == ["plain"]
-
-
-def test_connecting_again_names_the_earlier_installations(tmp_path, monkeypatch):
-    hub, browser = the_hub(tmp_path)
-    k = portal(tmp_path, monkeypatch, browser)
-    computer, folder = k.settings.installation_id(), tmp_path          # without accounts: the settings' folder
-    connect(k, browser)
-    query = parse_qs(urlsplit(k.opened[-1]).query)
-    mine = query["installation"][0]
-    assert mine == installation_for(computer, folder) and k.settings.hub_installations() == [mine]
-    sent = query["previous"][0].split(",")
-    assert sent == previous_installations(computer, folder) and computer in sent and mine not in sent
-    assert all(re.match(r"^[A-Za-z0-9:_.-]{8,80}$", i) for i in sent) and len(sent) <= 5
-    assert installation_for(computer, folder / "x" / "..") == mine      # the same folder, spelled otherwise
-    if sys.platform == "win32":
-        assert installation_for(computer, str(folder).upper()) == mine
-    later = folder / "users" / "Ada"                                     # say, accounts are turned on later
-    assert previous_installations(computer, later, k.settings.hub_installations())[0] == mine
-    connect(k, browser)                                                  # connecting again: still one id
-    assert k.settings.hub_installations() == [mine]
-
-
-def test_the_hub_folds_in_what_earlier_installations_shared(tmp_path, monkeypatch):
-    hub, browser = the_hub(tmp_path)
-    k = portal(tmp_path, monkeypatch, browser)
-    real = hubsync.installation_for
-    # connected before under another digest of the folder (a short 8.3 name, say): only Kelvin knows that id
-    monkeypatch.setattr(hubsync, "installation_for", lambda computer, folder: computer + ":0123456789ab")
-    connect(k, browser)
-    old = k.settings.get("hub_token")
-    crsbr = k.store.create_project("CrSBr")
-    chat(k.store, "Unfiled once")
-    chat(k.store, "In CrSBr", crsbr["id"])
-    assert k.link.sync_once()["ok"]
-    monkeypatch.setattr(hubsync, "installation_for", real)
-    connect(k, browser)                                                  # this version's id, naming the old one
-    assert k.link.sync_once()["ok"]
-    mine = real(k.settings.installation_id(), tmp_path)
-    with hub.connect() as con:
-        chats = [dict(r) for r in con.execute("SELECT installation_id, title FROM chats")]
-    assert sorted(c["title"] for c in chats) == ["In CrSBr", "Unfiled once"]   # one copy each,
-    assert {c["installation_id"] for c in chats} == {mine}                     # under the new id
-    assert browser.get("/api/me", headers={"Authorization": "Bearer " + old}).status_code == 401
-    k.client.patch("/api/projects/" + crsbr["id"], headers=k.h, json={"sharing": "confidential"})
-    assert k.link.sync_once()["ok"]
-    assert "CrSBr" not in on_the_hub(hub) and len(hub.connections(1)) == 1

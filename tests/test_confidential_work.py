@@ -203,7 +203,7 @@ def test_a_run_keeps_its_marks_for_the_hub_whatever_its_project_is_marked_later(
     p.turn(p.other, [("run_plan", {"plan": OPEN})])
     p.store.set_sharing(p.nda, "")
     p.store.set_rules(p.nda, None)   # the project shared later: its earlier runs stay as they were made
-    shared = [item["id"] for item, _ in run_items(rt.runs, {p.nda}, None)[0]]
+    shared = [item["id"] for item in run_items(rt.runs, {p.nda}, None)[0]]
     assert any(r.endswith("thesis_gate") for r in shared) and not any(r.endswith("acme_gate") for r in shared)
 
 # ------------------------------------------------------------------ the portal's reports and records (t06)
@@ -416,7 +416,7 @@ def test_work_outside_every_chat_stays_under_the_mounted_confidential_sample_wit
     run, meta = newest(rt, "acme_gate")
     assert (meta["project"], meta["device_name"], meta.get("confidential")) == (p.nda, SECRET, True)
     assert meta["rules"]["providers"] == ["scripted"]
-    assert run not in [item["id"] for item, _ in run_items(rt.runs, {p.nda}, None)[0]]
+    assert run not in [item["id"] for item in run_items(rt.runs, {p.nda}, None)[0]]
     looked = p.turn(p.other, [("list_runs", {}), ("describe_run", {"run_id": run})])
     assert run not in looked["c0"] and "unshared work" in looked["c1"]
     rt.attribution = {}   # an agent over MCP: no chat either
