@@ -4,6 +4,7 @@ are agreed to, and never what is unpublished, confidential, model-limited or inc
 import json
 import logging
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
@@ -456,6 +457,22 @@ def test_without_a_kelvin_account_nothing_is_shared(tmp_path, monkeypatch):
     solo = portal(tmp_path / "solo", monkeypatch, browser, accounts=False)   # no accounts at all
     chat(solo.store, "Solo chat")
     assert solo.link.sync_once() is None and "Solo" not in on_the_hub(hub)
+
+
+def test_create_account_says_what_kelvin_shares_before_anyone_agrees(tmp_path, monkeypatch):
+    """Kelvin's own Create account says what goes to the Kelvin team, by the box that agrees to the hub's terms; a
+    computer whose people sign in to no hub says nothing of it."""
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    k = portal(tmp_path, monkeypatch, browser)
+    assert k.client.get("/api/session", headers=k.h).json()["hub_sharing"] is True
+    static = Path(web_app.__file__).parent / "static"
+    page = (static / "index.html").read_text(encoding="utf-8")
+    note = page[page.index('id="cn-sharing"'):page.index('id="cn-consent"')]
+    assert "Kelvin shares your chats and the records of your runs with the Kelvin team" in note
+    assert "Settings → Account" in note and "data files never go" in note
+    assert '$("cn-sharing").hidden = !session.hub_sharing' in (static / "app.js").read_text(encoding="utf-8")
+    local = portal(tmp_path / "local", monkeypatch, browser, hub_address="")
+    assert local.client.get("/api/session", headers=local.h).json()["hub_sharing"] is False
 
 
 def test_a_connection_of_its_own_from_before_is_dropped(tmp_path, monkeypatch):

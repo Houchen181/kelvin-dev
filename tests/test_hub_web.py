@@ -648,7 +648,8 @@ def test_by_default_kelvin_shares_with_the_kelvin_team_and_there_are_no_labs(tmp
     terms, privacy = client.get("/terms").text, client.get("/privacy").text
     assert "The Kelvin team, who run the hub, can read what is shared" in terms and "join code" not in terms
     assert "No other user sees it" in privacy and "runs' data files (run.h5, plots, reports)" in privacy
-    assert "Kelvin shares your normal projects" in client.get("/register").text   # said before anyone agrees
+    assert "Kelvin shares with the Kelvin team here: your normal projects" in client.get("/register").text   # said
+    # before anyone agrees
     register(client)
     account = client.get("/account").text
     for want in ("Shared with the Kelvin team", "Your Kelvins", "Nothing yet"):

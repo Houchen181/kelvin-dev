@@ -634,13 +634,13 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return page("Your Kelvin account", (
                 '<p>One email and password sign you in to Kelvin on every computer. You can make your account in '
                 'Kelvin itself, on its sign-in screen.</p>'
-                '<p>Kelvin shares %s with the Kelvin team here, unless you switch it off in Kelvin\'s Settings → '
-                'Account. Incognito chats, unpublished and confidential projects, API keys and sign-ins never leave '
+                '<p>Unless you switch it off in Kelvin\'s Settings → Account, Kelvin shares with the Kelvin team here: '
+                '%s. Incognito chats, unpublished and confidential projects, API keys and sign-ins never leave '
                 'your computer.</p><p class="row"><a class="button" href="/signin">Sign in</a>'
                 '<a class="button plain" href="/register">Create account</a></p>' % e(what_goes())) + links)
         return page("One account for Kelvin, in every lab", (
-            '<p>Make one account and join your lab. Kelvin then shares %s with your labmates and the Kelvin team here, '
-            'unless you switch it off in Kelvin\'s Settings → Account.</p>'
+            '<p>Make one account and join your lab. Unless you switch it off in Kelvin\'s Settings → Account, Kelvin '
+            'then shares with your labmates and the Kelvin team here: %s.</p>'
             '<p>Unpublished and confidential projects, incognito chats, API keys and sign-ins never leave your '
             'computer.</p><p class="row"><a class="button" href="/register">Create account</a>'
             '<a class="button plain" href="/signin">Sign in</a></p>' % e(what_goes())) + links)
@@ -674,8 +674,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             '<button>Create account</button></form>'
             '<p class="muted">Already have one? <a href="/signin">Sign in</a>.</p>'
             % (e(values.get("next", "")), e(values.get("name")), e(values.get("email")), e(values.get("orcid")),
-               '<p class="note">Kelvin shares %s with the Kelvin team here, unless you switch it off in Kelvin\'s '
-               'Settings → Account.</p>' % e(what_goes()) if hub.sharing else "")),
+               '<p class="note">Unless you switch it off in Kelvin\'s Settings → Account, Kelvin shares with the Kelvin '
+               'team here: %s.</p>' % e(what_goes()) if hub.sharing else "")),
             error=error, status=400 if error else 200)
 
     async def register(request: Request) -> Response:
@@ -918,9 +918,9 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         """The account page while labs are off: what this person's Kelvins shared, which only they and the Kelvin
         team see, and the Kelvins they sign in to."""
         connections, shared = await asyncio.gather(call(hub.connections, uid), call(hub.shared_with, uid))
-        parts.append('<h2>Shared with the Kelvin team</h2><p class="muted">Kelvin shares %s here, unless you switch it '
-                     'off in Kelvin\'s Settings → Account. Only you and the Kelvin team, who run the hub, see it.</p>'
-                     % e(what_goes()))
+        parts.append('<h2>Shared with the Kelvin team</h2><p class="muted">Unless you switch it off in Kelvin\'s '
+                     'Settings → Account, Kelvin shares here: %s. Only you and the Kelvin team, who run the hub, see '
+                     'it.</p>' % e(what_goes()))
         if shared["projects"]:
             parts.append('<div class="scroll"><table><tr><th>Project</th><th>Updated</th></tr>%s</table></div>'
                          % "".join('<tr><td>%s</td><td>%s</td></tr>' % (e(p["name"]), when(p["updated_at"]))

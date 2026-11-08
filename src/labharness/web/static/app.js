@@ -374,6 +374,7 @@
     };
     $("cn-terms").href = session.hub + "/terms";
     $("cn-privacy").href = session.hub + "/privacy";
+    $("cn-sharing").hidden = !session.hub_sharing;   // what Kelvin shares with the Kelvin team, said before agreeing
     const known = (session.accounts || []).filter((a) => a.email);
     $("signin-people").replaceChildren(...known.map((p) => {
       const name = p.display || p.name;

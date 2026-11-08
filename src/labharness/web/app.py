@@ -722,6 +722,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 "busy": busy, "busy_user": runtime.user if busy else None,
                 "legacy": not listed and has_legacy(home) and not accounts.legacy_taken(),
                 "central": on, "hub": hub_address(), "account_url": hub_address() + "/account" if on else None,
+                "hub_sharing": HUB_SHARING and on,   # said on Create account, before the person agrees to the terms
                 "unlinked": accounts.unlinked() if on else [],
                 "relay": dict(relay_link.view(), on=settings.get("phone_relay") != "off") if on else None,
                 "setup": setup_brief()}
