@@ -2,7 +2,8 @@
 (settingsBody), and the same function says what waits for Save: what it would send now that differs from what it sent
 as the dialog opened. Save is offered only then; the button beside it reads Close while nothing waits and Cancel once
 something does, and a dot on a section's name says where the change is. What acts at once stands in a card of its own
-at the top of its page (.set-now): the phone through the hub on Account, Compare models on Models, the skills on
+at the top of its page (.set-now): the phone through the hub and sharing with the Kelvin team on Account, Compare
+models on Models, the skills on
 Memory, Phone access, Page size. On the Settings pages a switch acts at once and a tick box waits for Save (or for the
 button of its own row); in a row, a skill's switch and a service's Pictures (a choice of three) act at once, and no list
 does. The lab's roles picked for each person wait for Save like any field, which sends them to their own endpoint. The
@@ -143,9 +144,12 @@ def test_what_acts_at_once_stands_in_a_card_at_the_top_of_its_page():
 
 def test_a_switch_acts_at_once_and_a_tick_box_waits_for_save():
     js, dlg = _read("app.js"), _dialog()
-    # every switch on the pages stands in a card of what acts at once, and turns at a press (swFlip)
+    # every switch on the pages stands in a card of what acts at once, and turns at a press (swFlip); sharing with the
+    # Kelvin team (since 2026-11-08) is in Account's card, under the phone's
     switches = re.findall(r'<button\b[^>]*\bclass="switch"[^>]*>', dlg)
-    assert len(switches) == 3
+    assert len(switches) == 4
+    account, = _cards(_page("account"))
+    assert account.index('id="relay-on"') < account.index('id="hub-share"')
     cards = "".join(c for p in ("account", "models", "phone", "display") for c in _cards(_page(p)))
     for sw in switches:
         assert sw in cards, sw

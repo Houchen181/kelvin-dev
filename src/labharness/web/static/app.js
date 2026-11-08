@@ -4574,7 +4574,7 @@
   function showHub(st) {
     HUB.st = st;
     const a = st.account;
-    $("share-field").hidden = !(HUB.on && st.signed_in);
+    $("share-row").hidden = !(HUB.on && st.signed_in);   // in the Account page's card, under the phone's switch
     swSet($("hub-share"), !!st.sharing);
     $("share-status").textContent = st.sharing ? "on" : "off";
     let text;

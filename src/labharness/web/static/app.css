@@ -2425,7 +2425,8 @@ body.incognito .composer { background: color-mix(in srgb, var(--text) 4%, var(--
 
 /* ===== fit S: Settings, Save and Cancel ===== */
 /* Settings keep Save and Cancel. What acts at once stands in a card of its own at the top of its
-   page (.set-now: the phone through the hub on Account, Compare models on Models, the skills on Memory, Phone access,
+   page (.set-now: the phone through the hub and sharing with the Kelvin team on Account, Compare models on Models, the
+   skills on Memory, Phone access,
    Page size), drawn as the kit's cards are; on the Settings pages a switch acts at once and a tick box waits for Save */
 .set-page > .set-now { padding: 12px 14px; border: 1px solid var(--card-line); border-radius: var(--radius);
   background: var(--card); box-shadow: var(--card-shadow); }
@@ -2440,6 +2441,10 @@ body.incognito .composer { background: color-mix(in srgb, var(--text) 4%, var(--
 /* without the hub's card over it (a local account), Account is a section of one field again: its title says what
    "Your account" would */
 .set-page[data-page="account"] > #relay-field[hidden] + #account-field > .field-row:first-child > .field-label { visibility: hidden; }
+/* sharing with the Kelvin team, under the phone's switch in Account's card: a part of its own, ruled off as a list's rows
+   are (showHub in app.js shows it while someone is signed in with a Kelvin account) */
+.set-now > .share-row { display: grid; gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--card-line); }
+.set-now > .share-row[hidden] { display: none; }
 /* a service's Pictures (Models → Other model services): a choice of three that acts at once, on a line of its own under
    the service's address, as a skill's switch acts in its row */
 .svc-pics-label { font-size: 13px; color: var(--text-2); }

@@ -142,7 +142,7 @@ Kelvin shares over the person's Kelvin account sign-in ([Signing in to Kelvin](#
 
 Settings → **Account** (`web/hubsync.py`, routes in `web/app.py`), while someone is signed in with a Kelvin account:
 
-- **The switch:** **Share my chats and run records with the Kelvin team** (`hub_share` in the person's `settings.json`, on unless `off`), in a card of its own at the top. It acts at once.
+- **The switch:** **Share my chats and run records with the Kelvin team** (`hub_share` in the person's `settings.json`, on unless `off`), in the card at the top of the page, under the phone's switch. It acts at once.
   - **Off** takes back from the hub what this Kelvin shared: the next syncs send everything in `hub-sync.json` as `removed` until nothing is left, then send nothing at all. The status says what is still there; **Take back now** does it at once.
   - **On again** shares everything once more.
 - **The hub's terms:** the hub refuses a sync until the person has agreed to its current terms (403, with `consent_url`).

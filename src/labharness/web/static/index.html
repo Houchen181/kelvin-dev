@@ -641,19 +641,21 @@
       <div id="set-pages" class="set-pages" data-region="settings-page">
         <section class="set-page" data-page="account" hidden>
           <h3 class="set-title">Account</h3>
-          <!-- what acts at once, in a card of its own at the top (.set-now): the switch letting the phone through the hub -->
+          <!-- what acts at once, in a card of its own at the top (.set-now): the switches letting the phone through the hub
+               and sharing chats and run records with the Kelvin team -->
           <div id="relay-field" class="field set-now" hidden>
             <div class="field-row"><span class="field-label">Your phone, through the Kelvin hub</span><span id="relay-status" class="hint"></span></div>
             <div class="sw-row"><span id="relay-on-label">Let my phone reach this Kelvin through the hub while I'm signed in here</span>
               <button id="relay-on" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="relay-on-label"><span></span></button></div>
             <span class="hint">Sign in to the iPhone app with this account. Unshared work never goes through the hub.</span>
-          </div>
-          <!-- sharing with the Kelvin team (hubsync.py): on unless switched off, acting at once; off takes back what was shared -->
-          <div id="share-field" class="field set-now" hidden>
-            <div class="field-row"><span class="field-label">Sharing with the Kelvin team</span><span id="share-status" class="hint"></span></div>
-            <div class="sw-row"><span id="hub-share-label">Share my chats and run records with the Kelvin team</span>
-              <button id="hub-share" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="hub-share-label"><span></span></button></div>
-            <span class="hint">Your chats, and the records of your runs (what ran, its settings, results and assessment), go to the Kelvin hub, where the Kelvin team can read them. Never incognito chats; unpublished, confidential or model-limited projects and their runs; data files; API keys or sign-ins. Off, Kelvin takes back what it shared.</span>
+            <!-- sharing with the Kelvin team (hubsync.py), in the same card: on unless switched off, acting at once; off
+                 takes back what was shared -->
+            <div id="share-row" class="share-row" hidden>
+              <div class="field-row"><span class="field-label">Sharing with the Kelvin team</span><span id="share-status" class="hint"></span></div>
+              <div class="sw-row"><span id="hub-share-label">Share my chats and run records with the Kelvin team</span>
+                <button id="hub-share" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="hub-share-label"><span></span></button></div>
+              <span class="hint">Your chats, and the records of your runs (what ran, its settings, results and assessment), go to the Kelvin hub, where the Kelvin team can read them. Never incognito chats; unpublished, confidential or model-limited projects and their runs; data files; API keys or sign-ins. Off, Kelvin takes back what it shared.</span>
+            </div>
           </div>
           <div id="account-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Your account</span><span id="account-status" class="hint"></span></div>
