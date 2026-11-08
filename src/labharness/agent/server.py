@@ -1194,6 +1194,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
         exports/; nothing leaves the computer."""
         return rt.export_crate(runs, entries, figures, samples, title, license, orcid)
 
+    @server.tool(annotations=ACT, structured_output=False)
+    def backup_records(folder: str) -> str:
+        """Copy the lab's records into a folder the person names (a NAS, a OneDrive folder, a second disk), under
+        Kelvin backup/<lab>: runs as they were sealed (each run.h5 checked against its seal once copied), the lab's
+        record, the notebook, samples, procedures and figures. Only what is new or grew is copied; nothing there is
+        deleted, and a run.h5 there that differs is never written over."""
+        return rt.backup_records(folder)
+
     @server.tool(annotations=READ, structured_output=False)
     def search_records(text: str, kinds: str = "", limit: int = 20) -> str:
         """Search everything Kelvin keeps at once: runs (cards and notes), samples, notebook entries, steps by hand

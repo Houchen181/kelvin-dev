@@ -305,6 +305,9 @@ def event_line(e: Dict[str, Any]) -> str:
                           "disconnected from Kelvin: Kelvin sends it nothing")
     elif kind == "instrument_removed":
         text = "took %s (%s at %s) out of the lab" % (e.get("instrument"), e.get("card"), e.get("address"))
+    elif kind == "backup":
+        text = "backed up the records into %s (%s files copied%s)" % (
+            e.get("folder"), e.get("copied"), ", %d problems" % len(e["problems"]) if e.get("problems") else "")
     elif kind == "export":
         text = "wrote %s (%s runs)" % (Path(str(e.get("path") or "")).name, e.get("runs"))
     elif kind == "entry":
@@ -2814,6 +2817,48 @@ class LabRuntime:
                             path=out["path"], runs=out["runs"], files=out["files"])
         return "wrote %s: %d files, %.1f MB, %d run%s, described in ro-crate-metadata.json (RO-Crate 1.1)" % (
             out["path"], out["files"], out["bytes"] / 1e6, out["runs"], "" if out["runs"] == 1 else "s")
+
+    def backup_records(self, folder: str) -> str:
+        """A second copy of the lab's records (backup.py) in a folder the person names: runs as sealed (each run.h5
+        checked against its seal once copied), the lab's record, the notebook, samples, procedures and figures. Only
+        what is new or grew is copied. Not into Kelvin's own folders, nor one that may hold keys. Kelvin approves it
+        itself (it drives nothing), unless the chat read text from outside the lab: then the person answers."""
+        from .. import backup
+        from ..folderfiles import secret
+        raw = str(folder or "").strip().strip('"')
+        if not raw or not Path(raw).is_absolute():
+            return "not backed up: give the backup folder's full path (a NAS, a OneDrive folder, a second disk)"
+        target = Path(raw)
+        try:
+            resolved = target.resolve()
+        except OSError as e:
+            return "not backed up: %s" % e
+        mine = [Path(self.data_dir).resolve()] + ([Path(self.home).resolve()] if self.home else [])
+        if any(resolved == m or m in resolved.parents or resolved in m.parents for m in mine) or secret(resolved):
+            return "not backed up: %s is Kelvin's own folder, or holds it: a backup goes somewhere else" % target
+        if not target.exists():
+            return "not backed up: %s doesn't exist (connect the drive, or make the folder first)" % target
+        request = ApprovalRequest("Back up the lab's records into %s?" % target, [
+            "runs as they were sealed, the lab's record, the notebook, samples, procedures and figures",
+            "into %s" % (target / "Kelvin backup")])
+        if self._actor_now() and not self.gate.auto_simple(request, "copying the records to a folder the person "
+                                                                     "named drives nothing") \
+                and not self.gate.ask(request):
+            return "declined: the person did not want the records copied there"
+        versions = getattr(self.versions, "audit", None)
+        records = {"events.jsonl": self.events_path,
+                   "instrument-log.jsonl": Path(self.shared_log) if self.shared_log else None,
+                   "entries.jsonl": Path(self.data_dir) / "notebook" / "entries.jsonl",
+                   "samples.json": Path(self.data_dir) / "samples.json",
+                   "config-audit.jsonl": Path(versions) if versions else None}
+        folders = {"procedures": Path(self.home) / "procedures" if self.home else None,
+                   "figures": Path(self.data_dir) / "figures"}
+        out = backup.backup(list(self.runs.iterdir()), records, folders, target,
+                            getattr(self.lab.config, "name", "") or "lab")
+        text, trouble = backup.said(out)
+        self.gate.log.write("backup", by="agent" if self._actor_now() else "human", folder=str(target),
+                            copied=out["copied"], problems=out["problems"][:20] or None)
+        return text
 
     def search_records(self, text: str, kinds: str = "", limit: int = 20) -> str:
         """One search across what Kelvin keeps: runs (their cards and notes), samples, notebook entries, steps by

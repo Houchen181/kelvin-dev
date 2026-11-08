@@ -319,6 +319,7 @@ DEFERRED = {
     "drawing a saved figure again from its raw data": ["rebuild_figure"],
     "packaging runs for a repository or another ELN (RO-Crate)": ["export_crate"],
     "a digest of what the record shows over days": ["digest"],
+    "a second copy of the records in another folder (backup)": ["backup_records"],
 }
 DEFERRED_NAMES = {n for names in DEFERRED.values() for n in names}
 MAX_FOUND = 10
@@ -352,7 +353,7 @@ OFF_LAB = LOOKUPS | READINGS | BESIDE_THE_LAB | {"find_tools", "remember", "wake
                                                  "save_sequence",   # a written pulse sequence: drives nothing
                                                  "save_paper", "make_report", "write_file", "measurement_chain",
                                                  "record_step", "annotate", "update_sample", "save_procedure",
-                                                 "write_entry", "export_crate"}
+                                                 "write_entry", "export_crate", "backup_records"}
 OFF_LAB |= {"export_eln"}   # reads kept runs and the record, writes its own folder (eln.py)
 # the analysis tools read kept runs and write only their own results (datatools.py): side by side, never the lab
 ANALYSIS = {"fit_run", "plot_runs", "export_run", "run_python"}
