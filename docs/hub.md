@@ -1,28 +1,30 @@
 # The Kelvin hub
 
-The hub is the Kelvin team's server for **Kelvin accounts**: one email and password that signs a person in to Kelvin on every computer ([portal.md](portal.md#kelvin-accounts-one-account-every-computer)). There is one hub for every Kelvin user in every lab, built into Kelvin (`central.DEFAULT_HUB`) and the iPhone app (`Account.defaultHub`); labs run none of their own. It is the owners' tool, not a place for users: the **owner console** (`/admin`) shows everyone's account, the computers each signs in on, and what happened to it. It is built for a few thousand people (about 5,000): one SQLite file.
+The hub is the Kelvin team's server for **Kelvin accounts**: one email and password that signs a person in to Kelvin on every computer ([portal.md](portal.md#kelvin-accounts-one-account-every-computer)). There is one hub for every Kelvin user in every lab, built into Kelvin (`central.DEFAULT_HUB`) and the iPhone app (`Account.defaultHub`); labs run none of their own. It is the owners' tool, not a place for users: the **owner console** (`/admin`) shows everyone's account, the computers each signs in on, what happened to it, and what their Kelvins shared. It is built for a few thousand people (about 5,000): one SQLite file.
 
 **Where it runs:** `https://kelvin.tail269ee5.ts.net`, on a lab workstation through Tailscale Funnel, for now. That carries light traffic only (Funnel has fixed bandwidth limits), so before other labs join, the hub moves to an always-on server with its own domain ([Putting it online](#putting-it-online)), and an update of Kelvin and the iPhone app changes the address they have built in.
 
-**What users see:** only what an account needs. That is creating one (in Kelvin, or on the hub), the email confirmation and password reset links, and a short account page: name and ORCID iD, password, export and delete. The hub keeps no one's work, and no user sees another.
+**What users see:** only what an account needs. That is creating one (in Kelvin, or on the hub), the email confirmation and password reset links, and a short account page: name and ORCID iD, password, what their Kelvins shared, the Kelvins they sign in to, export and delete. No user sees another's work.
 
-**Sharing, switched off:** the hub can also keep people's shared work: labs with join codes, Kelvins connected to share into them, shared projects, chats and runs. That is built and tested but off, on both sides:
-- On the hub, `"sharing": false` in `hub.json` (the default). Those pages and API calls answer 404, and the account page and owner console leave them out.
-- In Kelvin, `HUB_SHARING = False` in `web/app.py`.
+**Sharing, on by default (since 2026-11-08):** Kelvin shares each signed-in person's normal projects, unfiled chats with their whole conversations, and the records of their finished runs with the Kelvin team here, unless the person switches it off in Kelvin's Settings → **Account** ([In the Kelvin app](#in-the-kelvin-app)). The Kelvin team reads it in the owner console ([The owner console](#the-owner-console)). Three switches in `hub.json` decide what the hub takes and who sees it:
+- **`"sharing": true`** (the default): Kelvins share work here. With `false`, the hub keeps Kelvin accounts only: shared work's pages and API calls answer 404, the account page and owner console leave it out, and the terms and privacy notice are the accounts-only ones. **A `hub.json` written by an older hub says `"sharing": false`: set it to `true`.**
+- **`"labs": false`** (the default): no labs. Shared work is seen by its person and the Kelvin team only, and labs' pages, join codes and API calls answer 404. With `true`, people make and join labs, whose members see each other's shared work ([Accounts and labs](#accounts-and-labs)).
+- **`"run_files": false`** (the default): the hub keeps runs' records only, and refuses their data files (403), which stay on people's computers. With `true`, it takes them too, from Kelvins that still send them.
 
-The sections below on sharing describe it for when it is switched on.
+Changing `labs` or `run_files` changes the built-in terms: raise `consent_version` with it, so everyone agrees again.
 
 **Status:**
-- **Built and tested:** the server, its database, a Kelvin's client (`hub/client.py`), Kelvin's sign-in with Kelvin accounts (`central.py`), and sharing (Settings → **Account** → Kelvin hub, and syncing in the background: `web/hubsync.py`; switched off).
+- **Built and tested:** the server, its database, a Kelvin's client (`hub/client.py`), Kelvin's sign-in with Kelvin accounts (`central.py`), sharing (syncing in the background: `web/hubsync.py`), and the owner console's pages for shared work.
 - **Drafts:** the terms and privacy notice.
 - **To do:** moving the hub to a server for good ([Moving the hub to a server](#moving-the-hub-to-a-server)); Kelvin's built-in address (`central.DEFAULT_HUB`) then changes with an update.
 
 ## What is shared
 
-- **Shared by default:** normal projects and unfiled chats, with their runs and whole conversations.
+- **Shared by default:** normal projects, unfiled chats with their whole conversations, and the records of finished runs (each run's `meta`: plan, status, settings, results and assessment).
 - **Never sent:**
   - projects marked unpublished or confidential, and projects whose **Who may see this project** limits the models or literature search;
   - incognito chats, and chats that ran under such limits;
+  - runs' data files (`run.h5`, plots, reports), while `run_files` is off: the hub refuses them (403);
   - API keys, and ChatGPT or Claude Code sign-ins.
 
   Kelvin's client (`collect` in `hub/client.py`) leaves these out, and sends an unshared project only as its id and "not shared", never its name.
@@ -35,20 +37,26 @@ The sections below on sharing describe it for when it is switched on.
 
   It can only check the marks Kelvin sends: an unmarked chat or run is taken as shared.
 - **Marking a project:** in Kelvin, a project's **Project settings → On the Kelvin hub** is *Shared* (the default), *Unpublished* or *Confidential*. A chat moved out of an unpublished, confidential or model-limited project, or left unfiled when that project is deleted, keeps the mark (or the project's model limits) and stays unshared. Changing a project's limits locks none of its chats. A run started (or queued) from an incognito chat, or from a chat that keeps an unshared project's marks or limits, says so in its `meta.json`, and is never sent. Every run also keeps the chat that started it and the rules and marks it ran under (`chat`, `rules`, `confidential`, `unpublished`), so it stays unshared when its project's marks change later. Nor is a run whose project is gone, since Kelvin can't tell whether that project was shared.
-- **Who sees it:** its owner, and the other members of the lab it was shared in, while both are members. A Kelvin connected with "No lab" shares only with its person.
-- **Which lab:** everything a Kelvin shared is filed under the lab it shares into now. Connecting it again with another lab, or with "No lab", moves all of it at once.
+- **Who sees it:** its person, and the Kelvin team in the owner console. While `labs` is on, also the other members of the lab it was shared in, while both are members; a Kelvin connected with "No lab" shares only with its person and the Kelvin team.
+- **Taking it back:** switching sharing off in Kelvin removes what that Kelvin shared, and a chat or run deleted in Kelvin goes from the hub at the next sync. A sync that only removes is taken even before the person agrees to new terms. **Delete account** removes everything.
+- **Which lab** (while `labs` is on): everything a Kelvin shared is filed under the lab it shares into now. Connecting it again with another lab, or with "No lab", moves all of it at once. Kelvin's own sign-in shares into no lab.
 - **Leaving a lab** takes your work out of it for good: joining again doesn't bring it back, only connecting a Kelvin into that lab again does.
+- **Labs switched off:** work shared into a lab before keeps its lab, but nobody sees it through the lab; switching `labs` on again shows it as before. A Kelvin that connects meanwhile shares into no lab, whatever it asks.
 
 ## Accounts and labs
 
-- **Registering:** name, email, an optional ORCID iD (its check digit is checked) and a password of 8 characters or more. Agreeing to the terms and the privacy notice is required, and the hub records which version and when. When the version in `hub.json` changes, everyone is asked to agree again before going on, and syncing pauses until they do.
+- **Registering:** name, email, an optional ORCID iD (its check digit is checked) and a password of 8 characters or more. Agreeing to the terms and the privacy notice is required, and the hub records which version and when. While sharing is on, the form says above the box what Kelvin shares.
+- **New terms:** when the version in force goes up, everyone is asked to agree again before going on. Until they do, syncing takes nothing new (a sync that only removes still goes), and the hub's models and PDF drawing wait too.
+  - **The version in force:** the later of `consent_version` in `hub.json` and the code's for the terms served: `CONSENT_VERSION` (2026-11-08) with sharing, `CONSENT_VERSION_ACCOUNTS` (2026-10-29) for accounts only. A `hub.json` written by an older hub pins 2026-10-29, so switching sharing on asks everyone again; the operator can still raise it past the code's for terms of their own.
+  - **Dates:** versions are dates (YYYY-MM-DD) and compare as text. Only a later one asks again, so switching sharing off asks nobody.
+  - **What changed:** someone who agreed before sharing by default sees, on the consent page, that Kelvin now shares their chats and run records with the Kelvin team unless they switch it off.
 - **Passwords:** PBKDF2-SHA256 with 600,000 iterations, as OWASP suggests.
   - **Older hashes:** a hash made with fewer is redone at the person's next sign-in, unless the password changed meanwhile.
   - **Timing:** checking it takes as long as a current one, as does checking an email that has no account. Browser sessions, app tokens and one-use codes are stored only as their SHA-256. A one-use code works once, even when two requests bring it at the same moment.
 - **Email:** the hub sends a confirmation link, and password reset links. Until an SMTP server is set, or when sending fails, these go to `outbox/` in the hub's folder for the operator to pass on. `"require_confirmed_email": true` then stops unconfirmed people from connecting a Kelvin or sharing.
 - **Resetting a password:** the reset page gives the same answer, and as fast, whether or not the account exists; the mail goes out after the answer. A new password that won't do leaves the link working. A reset signs out every browser and disconnects every Kelvin of the account. A password change in the account page signs out the other browsers but keeps the Kelvins connected.
-- **Labs have no owner.** Anyone can make a lab. Everyone in it sees its join code (like `K7Q2-9XMB-4TRA`) and can pass it on. A lab nobody is in any more is deleted.
-- **Your data:** **Export everything** on the account page downloads a zip of the account, labs, connections, everything shared and the hub's record of the account's activity. It can be made once every 10 minutes.
+- **Labs** (only while `labs` is on) **have no owner.** Anyone can make a lab. Everyone in it sees its join code (like `K7Q2-9XMB-4TRA`) and can pass it on. A lab nobody is in any more is deleted.
+- **Your data:** **Export everything** on the account page downloads a zip of the account, labs, connections, everything shared and the hub's record of the account's activity, which also says each time the Kelvin team opened one of the person's chats or runs. It can be made once every 10 minutes.
 - **Deleting an account:** **Delete account** (with the password) deletes the account and all it shared, even if the person hasn't agreed to new terms. Its files are deleted after the database is updated, so a large account never holds up anyone else's sign-in or sync.
   - **Also removed:** the Kelvins only that account used, and mail to it waiting in `outbox/`.
   - **Timing:** it waits for the person's sync or upload in progress, so no file lands afterwards.
@@ -62,6 +70,7 @@ Kelvin's sign-in screen talks to the hub with JSON (`central.py`; routes `api_si
   - **The installation's shape:** an object whose `id` is the Kelvin's installation id, for example `{"id": "urn:uuid:…", "name": "Lab PC", "platform": "win32", "version": "0.3.12"}`. This differs from `/connect`, whose query sends the id as `installation=`. Without an `id` the hub answers 400.
   - **The token:** one per account and installation; signing in again replaces it. Kelvin keeps it in the person's settings, encrypted with their password, to change the password later.
   - **The installation** is recorded as a connected Kelvin, without a lab, so the account page lists the computers.
+  - **Sharing:** while sharing is on, the same token shares the person's work (`POST /api/sync`), into no lab. No `/connect` step.
   - **Limits:** a wrong password is 401, and counts toward the same limits as the sign-in page (10 per email or address in 15 minutes, then 429). A disabled account is 403. So is an unconfirmed one, once `require_confirmed_email` is on.
 - **`POST /api/register`** `{name, email, password, consent: true, orcid?, installation}` makes the account, mails the confirmation link, and signs in as above. When the hub wants the address confirmed first, it answers 403 with `registered: true`. Registrations count toward the same limit as the registration page.
 - **`POST /api/reset`** `{email}` mails a reset link and always answers `{ok: true}`, so nobody can probe for accounts.
@@ -110,11 +119,11 @@ People signed in to Kelvin with their Kelvin account use Claude, GPT, Gemini and
 - **Which models:** each service offers every model it lists, or only those the owner names on the Models page. A model that isn't offered is refused (403).
 - **Who may use it:** each service is everyone's, or only the accounts whose emails the owner lists on the Models page; Kelvin doesn't show it to anyone else, and the hub refuses them (403). For a key that is one person's, such as OpenCode Go's single-person plans (Go Teams is per member).
 - **OpenCode's sessions:** OpenCode routes and caches by conversation, and OpenCode Go refuses a request without `x-opencode-session`. Kelvin sends one per chat (a hash of it, never the chat's id); the hub passes it on, and for a Kelvin that sends none it sends one per person.
-- **What is kept:** for each answer, who, which lab, which service and model, the tokens (prompt, cached, written to cache, answer) and what it cost. Never the text. Costs use [models.dev](https://models.dev)'s prices, read once a day with the list of models that see pictures (`hub/catalog.py`, `models-dev.json`), with dearer tiers past a context size, Claude's cache writes kept an hour at twice the input price (models.dev's write price is the 5-minute one; Kelvin's chats ask for the hour), GPT's cache writes at their own price, and Claude's web searches at $0.01 each; a model models.dev doesn't list counts at $15 in and $75 out per million tokens. The services' own bills are what the owner pays.
+- **What is kept:** for each answer, who, which lab, which service and model, the tokens (prompt, cached, written to cache, answer) and what it cost. Never the text: what a chat says reaches the hub only as Kelvin shares it ([What is shared](#what-is-shared)), never from these calls. Costs use [models.dev](https://models.dev)'s prices, read once a day with the list of models that see pictures (`hub/catalog.py`, `models-dev.json`), with dearer tiers past a context size, Claude's cache writes kept an hour at twice the input price (models.dev's write price is the 5-minute one; Kelvin's chats ask for the hour), GPT's cache writes at their own price, and Claude's web searches at $0.01 each; a model models.dev doesn't list counts at $15 in and $75 out per million tokens. The services' own bills are what the owner pays.
 - **Budgets:** each person has a monthly budget in dollars: $20 until the owner sets another default, or their own on their page in the console. A lab can have one too (with labs switched on). A request past either is refused (402) with what to do, which Kelvin shows in the chat. Months are UTC calendar months.
 - **The 80% mail:** an answer that takes a person past 80% of their budget sends them a mail, once a month.
 - **Limits:** per person, 60 requests a minute and 4 answers at once; 40 MB a request. `"llm": {"per_minute", "at_once", "alert_at", "fallback_price"}` in `hub.json` changes them.
-- **Confidential work never goes through the hub:** Kelvin refuses the hub's models in confidential projects and in chats that left one. Other chats (unpublished projects and incognito chats too) pass through the hub to the model's service; the hub keeps none of their text. The terms and privacy notice say so; their version (`CONSENT_VERSION`) moved to 2026-10-29, so people agree to them again.
+- **Confidential work never goes through the hub:** Kelvin refuses the hub's models in confidential projects and in chats that left one. Other chats (unpublished projects and incognito chats too) pass through the hub to the model's service; the hub keeps none of their text from these calls. The terms and privacy notice say so (version 2026-10-29, and 2026-11-08 with sharing).
 - **What a person sees when it fails:** a sign-in that ended (401: sign out and in again), a budget used up (402), a model not offered or new terms (403), too many at once (429), the service refusing the hub's key or out of reach (502: tell the hub's owner), no key on the hub for that service (503).
 
 ### Moving the hub to a server
@@ -213,9 +222,9 @@ The hub's folder:
 | Path | What it is |
 |---|---|
 | `hub.sqlite3` | Accounts, labs, connected Kelvins and what they share (SQLite, WAL). An older database is brought up to date when the hub starts (schema 3) |
-| `hub.json` | Settings: `base_url`, `consent_version`, `require_confirmed_email`, `max_file_mb` (200), `quota_gb_per_user` (5), `backups_kept` (30), `client_ip_header`, `mail`, and the operator key's hash. No secrets |
+| `hub.json` | Settings: `base_url`, `consent_version`, `require_confirmed_email`, `sharing` (true), `labs` (false), `run_files` (false), `max_file_mb` (200), `quota_gb_per_user` (5), `backups_kept` (30), `client_ip_header`, `mail`, and the operator key's hash. No secrets. The hub writes it with the defaults at its first start, so one written by an older hub keeps that hub's: `"sharing": false` and `"consent_version": "2026-10-29"` |
 | `operator-key.txt` | The operator key, written once. Move it to a password manager, then delete the file |
-| `files/<user_id>/<run_id>/` | Run files |
+| `files/<user_id>/<run_id>/` | Run files, while `run_files` is on (or from before) |
 | `backups/hub-YYYY-MM-DD.sqlite3` | One copy of the database a day, made while the hub runs (SQLite's online backup) |
 | `outbox/` | Mail the hub would have sent, while no SMTP server is set |
 | `terms.html`, `privacy.html` | Optional: your own terms and privacy notice, replacing the built-in drafts |
@@ -230,9 +239,22 @@ The hub's folder:
 `/admin` asks for the operator key. It is the Kelvin team's, not an account or a role. No user sees any of this.
 - **The hub:** people, confirmed, disabled, active in 30 days, computers, sign-ins, the database's size and the last backup. **Back up the database now** makes a backup at once.
 - **Models** (`/admin/models`): each model service's key (set, replace, remove; only its last 4 characters shown), the models it offers, the default monthly budget, and the month's use: by person (requests, tokens, cost, budget, share used), by model and by lab, with a CSV of it. A person's page shows their month and takes their own budget ([Models through the hub](#models-through-the-hub)).
-- **People:** everyone, newest first, 200 to a page (**Older** and **Newer**), and searchable by name or email. Each row shows whether the email is confirmed, how many computers the person is signed in on, the Kelvin version they last used, when they joined and when they were last seen. **Disable** stops an account from signing in and ends its sign-ins on every computer; **Enable** undoes it.
-- **Download everyone (CSV):** `kelvin-people.csv`, one row per person: id, name, email, ORCID iD, email confirmed, joined, last seen, disabled, computers, Kelvin version, terms agreed. It never includes a password or its hash.
-- **A person's page** (`/admin/users/<id>`, from their name): the account, the computers they sign in to Kelvin on (name, system, Kelvin version, first sign-in, last used), and the hub's record of the account (sign-ins, changes, resets, with IP addresses), newest first.
+- **People:** everyone, newest first, 200 to a page (**Older** and **Newer**), and searchable by name or email. Each row shows whether the email is confirmed, how many computers the person is signed in on, the Kelvin version they last used, when they joined and when they were last seen (and their labs, while `labs` is on). **Disable** stops an account from signing in and ends its sign-ins on every computer; **Enable** undoes it.
+- **Download everyone (CSV):** `kelvin-people.csv`, one row per person: id, name, email, ORCID iD, email confirmed, joined, last seen, disabled, computers, Kelvin version, terms agreed. It never includes a password or its hash, nor anything anyone shared.
+- **Latest shared chats** (while sharing is on): the 50 most recently updated across everyone, each with its person, project and size, linked to its page.
+- **A person's page** (`/admin/users/<id>`, from their name): the account (with the terms they agreed to, and whether those are the ones in force), the computers they sign in to Kelvin on (name, system, Kelvin version, first sign-in, last used), their shared work, and the hub's record of the account (sign-ins, changes, resets, with IP addresses), newest first.
+  - **Shared work:** how many projects, chats and runs; then the projects (with how many chats and runs each), the chats (title, project, computer, last updated, size) and the runs (plan, status, started, device, project), newest first, the latest 200 of each, each chat and run linked to its own page.
+- **A chat's page** (`/admin/users/<id>/chats/<chat>`): the conversation, read-only.
+  - **Turns:** each one's words.
+  - **Folded:** a model's thinking, tool calls and tool results. A result is cut past 20,000 characters and a call's input past 4,000, saying how much more there is.
+  - **Files:** pictures and attached files are named, never shown.
+  - **Escaped:** a chat's text is shown as text: markup in it never runs.
+  - **Download it (JSON)** (`…/json`) gives the chat as Kelvin sent it.
+- **A run's page** (`/admin/users/<id>/runs/<run>`): its record (`meta`) laid out, then whole as JSON.
+- **The person's record:** each opening or download of a chat or a run goes in the hub's record of their account, so their **Export** shows it.
+  - **Identified by its own id** (Kelvin's chat or run id), never its title, which `hub.log` would then keep.
+  - **No address:** the operator's IP address isn't put on it.
+  - **Lists:** reading the lists of shared work isn't recorded.
 - **Recent activity:** the last 60 entries of the hub's record, each linked to its account.
 
 `GET /api/admin/stats` with an `X-Operator-Key` header gives the counts as JSON.
@@ -243,14 +265,14 @@ The hub's folder:
 2. Reach it through [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) (free https, no open ports) or a university hostname.
 3. Start it with `--base-url https://hub.example.org`, which is saved in `hub.json`. Links in mails use this address, and the hub answers only to it and to `127.0.0.1`/`localhost`. Behind Cloudflare, also set `"client_ip_header": "CF-Connecting-IP"`, so sign-in limits and the record see real addresses; behind Tailscale Funnel (or `tailscale serve`), `"client_ip_header": "X-Forwarded-For"`, which `tailscaled` sets to the client's address. Without it, everyone there counts as one address, so ten wrong sign-ins from anyone hold off every sign-in for 15 minutes. The hub believes that header only from a proxy on its own computer (`cloudflared`, `tailscaled`), and takes its last value.
 4. Set `mail` in `hub.json` (`smtp_host`, `smtp_port`, `starttls`, `username`, `from`) and the password in the `KELVIN_HUB_SMTP_PASSWORD` environment variable. Then turn on `require_confirmed_email`.
-5. Replace the draft terms and privacy notice (`terms.html`, `privacy.html`), and raise `consent_version` whenever they change.
+5. Replace the draft terms and privacy notice (`terms.html`, `privacy.html`), and raise `consent_version` (a date, YYYY-MM-DD) whenever they change, or when you switch `labs` or `run_files`: the built-in ones change with those.
 
 Kelvin accepts a hub address on the internet only with https.
 
 ## Safety
 
 - **Pages:** no JavaScript, no framing, and a Content-Security-Policy on every response. Forms carry an anti-forgery value, and posts from other sites are refused.
-- **Files:** run files are always downloaded, never shown in the browser.
+- **Files:** run files are always downloaded, never shown in the browser. A chat's pictures and attachments never reach the hub; their names are shown as text.
 - **Rate limits:** kept in memory, so a restart resets them. An IPv6 address counts by its /64. These are all of them:
 
   | What | Limit |
@@ -267,6 +289,7 @@ Kelvin accepts a hub address on the internet only with https.
   Account-page forms have none. One person's flood of syncs or uploads never takes the worker threads from anyone else, and all syncs and uploads together hold at most 16 of the hub's 40 worker threads (the rest wait their turn without one), so pages and sign-ins always have threads left. A sync's JSON is read in a worker thread, never on the event loop.
 - **Request bodies** are capped as they stream in: forms at 64 kB, token trades at 16 kB, one sync at 64 MB.
 - **Uploads:**
+  - refused (403) while `run_files` is off;
   - names are checked part by part (no `..`, and no device names, even with a space as in `NUL .txt`);
   - each file needs a `Content-Length` and may be at most `max_file_mb`;
   - its bytes are held against the person's share (`quota_gb_per_user`, which chats count toward too) before it streams in, so parallel uploads can't overrun the share. The share is summed from each chat's stored size, never by reading the chats;
@@ -293,11 +316,11 @@ Kelvin accepts a hub address on the internet only with https.
 | `* /api/relay/kelvins/{id}/api/...` | A phone's call to one of them, passed through. 503 with `offline: true` when it isn't online |
 | `POST /api/token` | `{"grant_type": "authorization_code", "code", "code_verifier", "redirect_uri"}` → `{"access_token", "user", "lab"}` |
 | `DELETE /api/token` | Disconnect this Kelvin |
-| `GET /api/me` | The person, their labs, the lab this Kelvin shares into, `needs_consent` |
-| `POST /api/sync` | `{"projects": [...], "chats": [...], "runs": [...], "removed": {"projects", "chats", "runs"}}`, at most 500 of each → counts, plus what was refused and why. 413 over 64 MB |
-| `PUT /api/sync/runs/{run}/files/{name}` | One run file, as the raw body with a `Content-Length` (send the run first). Errors: 411 without a length, 413 over the size or the person's share, 429 with 2 uploads already running |
+| `GET /api/me` | The person, their labs (while `labs` is on), the lab this Kelvin shares into, `needs_consent`, `consent_url`, `account_url`, and `run_files` (whether the hub takes run files) |
+| `POST /api/sync` | `{"projects": [...], "chats": [...], "runs": [...], "removed": {"projects", "chats", "runs"}}`, at most 500 of each → counts, plus what was refused and why. 413 over 64 MB. Before the person agrees to new terms, 403 with `needs_consent` and `consent_url`, unless it only removes (one over 256 kB is refused unread) |
+| `PUT /api/sync/runs/{run}/files/{name}` | One run file, as the raw body with a `Content-Length` (send the run first). Errors: 403 with `run_files: false` while the hub keeps runs' records only, 411 without a length, 413 over the size or the person's share, 429 with 2 uploads already running |
 
-Every call but `health`, `token`, `signin`, `register` and `reset` needs `Authorization: Bearer <token>`. Items are keyed by the Kelvin's own ids:
+Every call but `health`, `token`, `signin`, `register` and `reset` needs `Authorization: Bearer <token>`: the token of Kelvin's own sign-in (`/api/signin`), or of an older Kelvin's connection (`/api/token`). Items are keyed by the Kelvin's own ids:
 - projects: `id`, `name`, and `shared`, `unpublished`, `confidential`, `rules` as in Kelvin;
 - chats: `id`, `project`, `title`, `messages` (up to 5 MB), `updated`, and `incognito`, `shared`, `unpublished`, `confidential`, `rules`;
 - runs: `id`, `project`, `device`, `meta` (up to 256 kB), `created`, and `incognito`, `unpublished`, `confidential` (also read from `meta`).
@@ -311,10 +334,13 @@ Every call but `health`, `token`, `signin`, `register` and `reset` needs `Author
 - **Registration:** it says when an email already has an account.
 - **Quoting:** Kelvin's tools never read an unshared run into another chat ([data.md](data.md#your-data)), but a person can still paste it there. The chat then carries it to the hub.
 - **Each sync** looks through everything for what changed.
+- **Who opened it:** the operator key is the Kelvin team's, not one person's, so the record says the team opened a chat, not who in it.
+- **Earlier connections:** what a Kelvin shared through `/connect` (Kelvin 0.3.9 to 0.3.12) stays under that connection's installation id. Kelvin's sign-in shares under the computer's own id, so work both shared is on the hub twice; the old copy goes only with the account (**Delete account**).
 
 ## Not built yet
 
-- Seeing labmates' shared work from inside Kelvin. For now it is on the hub's account page.
+- Seeing labmates' shared work from inside Kelvin (labs are off). With labs on, it is on the hub's account page.
+- A person deleting one shared chat or run on the hub itself. Deleting it in Kelvin removes it, as **Delete account** removes everything.
 - Removing one file of a shared run from the hub. A run removed in Kelvin goes with all its files.
 - Signing in with ORCID or Google (the `external_identity` column is there for it).
 - Changing one's email address.

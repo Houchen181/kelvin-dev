@@ -13,7 +13,8 @@
 Passwords are PBKDF2-SHA256 hashes, as for Kelvin's local accounts. Session and app tokens, and the one-use codes
 (connecting a Kelvin, confirming an email, resetting a password), are stored only as their SHA-256.
 
-Everyone is equal: there is no role column. The Kelvin team runs the hub with the operator key, which is no account.
+Everyone is equal: there is no role column. The Kelvin team runs the hub with the operator key, which is no account,
+and reads what people's Kelvins shared in the owner console; each opening goes in the person's record (audit).
 """
 from __future__ import annotations
 
