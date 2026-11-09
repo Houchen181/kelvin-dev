@@ -18,6 +18,8 @@ jobs:
     permissions:
       contents: read
       id-token: write   # code signing: a tag build signs in to Azure with GitHub's own token, no stored secret
+    outputs:
+      signed-new: ${{ steps.sign.outputs.new }}   # 1: files were newly signed, the signing-store job keeps them
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -56,8 +58,11 @@ jobs:
           tenant-id: 6ffa22f4-4568-4105-ad43-2e3ad4726957
           allow-no-subscriptions: true
       - name: Sign the app
+        id: sign
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Microsoft's signing plug-in for SignTool (a pinned version), and the newest SignTool on the runner
           $tools = "$env:RUNNER_TEMP\signing"
@@ -83,12 +88,44 @@ jobs:
           # Smart App Control checks each one that Kelvin loads
           $files = @(Get-ChildItem dist\Kelvin -Recurse -File -Include *.exe, *.dll, *.pyd |
             Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid' } | ForEach-Object FullName)
-          "signing $($files.Count) files"
-          for ($i = 0; $i -lt $files.Count; $i += 50) {
-            $batch = $files[$i..([math]::Min($i + 49, $files.Count - 1))]
+          # Most of them are the same in every build (numpy's, scipy's, ...). The last build's signed copies are kept in
+          # the pre-release signing-store, each named by the SHA-256 of the file before signing: a file that matches one
+          # is replaced by it, so a build signs only what changed and stays well inside the account's 5,000 a month
+          $store = "$tools\store"
+          New-Item -ItemType Directory -Force $store | Out-Null
+          gh release download signing-store --pattern signed-modules.zip --dir $tools --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) { Expand-Archive "$tools\signed-modules.zip" $store } else { "no signed files stored yet" }
+          $publisher = "CN=Richen Xiong, O=Richen Xiong, L=Cambridge, S=MA, C=US"   # the certificate profile's subject
+          $hash = @{}
+          $todo = @(foreach ($f in $files) {
+            $hash[$f] = (Get-FileHash $f -Algorithm SHA256).Hash
+            $kept = "$store\$($hash[$f])"
+            $sig = if (Test-Path $kept) { Get-AuthenticodeSignature $kept }
+            if ($sig -and $sig.Status -eq 'Valid' -and $sig.SignerCertificate.Subject -eq $publisher) { Copy-Item $kept $f -Force }
+            else { $f }
+          })
+          "$($files.Count) files need a signature: $($files.Count - $todo.Count) signed in an earlier build, signing $($todo.Count)"
+          for ($i = 0; $i -lt $todo.Count; $i += 50) {
+            $batch = $todo[$i..([math]::Min($i + 49, $todo.Count - 1))]
             & $signtool sign /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $dlib /dmdf "$tools\metadata.json" $batch
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
+          # something newly signed: this build's signed files become the store for the next build (job signing-store)
+          if ($todo.Count) {
+            $keep = "$tools\keep"
+            New-Item -ItemType Directory -Force $keep | Out-Null
+            foreach ($f in $files) { Copy-Item $f "$keep\$($hash[$f])" }
+            Compress-Archive "$keep\*" signed-modules.zip
+            "new=1" >> $env:GITHUB_OUTPUT
+          }
+          $global:LASTEXITCODE = 0
+      - name: Keep the signed files for the next build
+        if: steps.sign.outputs.new == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-modules
+          path: signed-modules.zip
+          retention-days: 1
       - name: Build the installer
         shell: pwsh
         run: |
@@ -153,6 +190,29 @@ jobs:
           name: kelvin-windows
           path: dist/Kelvin-Setup-*.exe
 
+  signing-store:
+    name: Keep the signed files for the next build
+    needs: windows
+    if: needs.windows.outputs.signed-new == '1'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-modules
+      - name: Into the pre-release signing-store
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # never "latest", and its tag isn't vX.Y.Z or private-vX.Y.Z, so installed Kelvins never take it for an update
+          if ! gh release view signing-store --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create signing-store --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Signed files for the Windows build (not a release)" \
+              --notes "The release workflow keeps the last Windows build's code-signed files here, so the next build signs only what changed. Not an app: there is nothing here to install."
+          fi
+          gh release upload signing-store signed-modules.zip --clobber --repo "$GITHUB_REPOSITORY"
+
   macos:
     name: macOS app (Apple silicon)
     if: ${{ !startsWith(github.ref, 'refs/tags/private-v') }}
@@ -196,6 +256,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: out
+          pattern: kelvin-*   # the apps, not the signed-modules kept for the next build
           merge-multiple: true
       - name: The private build, as a pre-release (never "latest")
         if: startsWith(github.ref, 'refs/tags/private-v')
