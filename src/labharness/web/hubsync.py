@@ -51,7 +51,8 @@ OLD = object()                    # a run's meta without "user": made before Kel
 INTERRUPTED = "Interrupted; Kelvin goes on at the next sync."
 SIGNED_OUT = ("The hub signed this computer out (a password reset, or the account was disabled there). Sign out of "
               "Kelvin and in again, and Kelvin goes on sharing.")
-TERMS = "The hub's terms changed: agree to them on the hub, and Kelvin goes on sharing."
+TERMS = ("The hub's terms changed: agree to them in Kelvin (the notice at its top, or Settings → Account), and Kelvin "
+         "goes on sharing.")
 NOT_TAKEN = "The hub doesn't take shared work yet; Kelvin tries again later."
 
 
@@ -68,6 +69,16 @@ def connection_of(place: str) -> str:
 def said(e: HubClientError) -> str:
     """What the hub said, without the status code."""
     return str(e.body["error"]) if isinstance(e.body, dict) and e.body.get("error") else str(e)
+
+
+def terms_of(url: str, answer: Any) -> Dict[str, str]:
+    """What Kelvin shows its person before they agree to the hub's terms in force, here in Kelvin: their version and
+    what changed (from the hub's answer), and the hub's pages to read them on, at the address Kelvin reaches the hub
+    by. An older hub says no consent_version: there they agree on its own page (consent_url)."""
+    a = answer if isinstance(answer, dict) else {}
+    return {"consent_url": url + "/consent", "consent_version": str(a.get("consent_version") or ""),
+            "terms_changed": str(a.get("terms_changed") or ""), "terms_url": url + "/terms",
+            "privacy_url": url + "/privacy"}
 
 
 def wants_terms(e: HubClientError) -> bool:
@@ -217,7 +228,7 @@ class HubLink:
         self.gen = 0                      # counts changes of person, sign-in and choice: a sync of another stops
         self.folder: Optional[Path] = None
         self.person: Optional[str] = None
-        self.terms = ""                   # where to agree to the hub's new terms, while it waits for that (brief())
+        self.terms: Optional[Dict[str, str]] = None   # the hub's new terms while it waits for them (terms_of, brief())
         self.syncing = False
         self.stopping = False
         self.wake: Any = None             # an asyncio.Event the portal's sync loop waits on
@@ -229,7 +240,7 @@ class HubLink:
             self.gen += 1
             self.folder = Path(folder) if folder is not None else None
             self.person = person if folder is not None else None
-            self.terms = ""
+            self.terms = None
         forget = getattr(self.settings, "forget_hub_connection", None)
         if folder is not None and forget is not None:
             forget()   # a connection of its own, from Kelvin 0.3.9 to 0.3.12: gone
@@ -240,15 +251,16 @@ class HubLink:
         with self._switch:
             self.gen += 1
 
-    def wait_for_terms(self, consent_url: str) -> None:
-        """The hub waits for the person to agree to its new terms ("": it doesn't), as their sign-in said."""
+    def wait_for_terms(self, terms: Optional[Dict[str, str]]) -> None:
+        """The hub waits for the person to agree to its new terms (terms_of; None: it doesn't), as their sign-in said,
+        or they agreed to them here in Kelvin."""
         with self._switch:
-            self.terms = consent_url
+            self.terms = terms or None
 
-    def _terms_now(self, gen: int, consent_url: str) -> None:
+    def _terms_now(self, gen: int, terms: Optional[Dict[str, str]]) -> None:
         with self._switch:
             if gen == self.gen:
-                self.terms = consent_url
+                self.terms = terms or None
 
     def _link(self) -> Optional[Tuple[str, str, str]]:
         try:
@@ -279,11 +291,11 @@ class HubLink:
     # ------------------------------------------------------------------ status
 
     def brief(self) -> Optional[Dict[str, Any]]:
-        """For the portal's poll, without asking the hub: where to agree to the hub's new terms, while Kelvin waits
-        for that before it shares; None otherwise."""
+        """For the portal's poll, without asking the hub: the hub's new terms (terms_of), while Kelvin waits for the
+        person to agree to them before it shares; None otherwise."""
         with self._switch:
-            terms = self.terms if self.folder is not None else ""
-        return {"consent_url": terms} if terms and self.sharing else None
+            terms = self.terms if self.folder is not None else None
+        return dict(terms) if terms and self.sharing else None
 
     def status(self, check: bool = True) -> Dict[str, Any]:
         """For the browser: whether Kelvin shares and where, who the person is on the hub, what of theirs is there and
@@ -313,11 +325,11 @@ class HubLink:
             except NETWORK:
                 out["problem"] = "Kelvin can't reach the hub at %s now." % url
             else:
-                consent = bool(me.get("needs_consent"))
-                self._terms_now(gen, url + "/consent" if consent else "")
-                out["account"] = {"name": me.get("name"), "email": me.get("email"),
-                                  "email_confirmed": bool(me.get("email_confirmed")), "needs_consent": consent,
-                                  "account_url": url + "/account", "consent_url": url + "/consent"}
+                consent, terms = bool(me.get("needs_consent")), terms_of(url, me)
+                self._terms_now(gen, terms if consent else None)
+                out["account"] = dict(terms, name=me.get("name"), email=me.get("email"),
+                                      email_confirmed=bool(me.get("email_confirmed")), needs_consent=consent,
+                                      account_url=url + "/account")
         return out
 
     # ------------------------------------------------------------------ syncing
@@ -364,7 +376,7 @@ class HubLink:
             self._send(client, snap, state, last)
             last["ok"] = True
             state["synced_at"] = last["at"]
-            self._terms_now(snap["gen"], "")
+            self._terms_now(snap["gen"], None)
         except Stopped:
             last["error"] = INTERRUPTED
         except HubClientError as e:
@@ -374,7 +386,7 @@ class HubLink:
                 last["error"], last["signed_out"] = SIGNED_OUT, True
             elif wants_terms(e):
                 last["error"], last["consent"] = TERMS, True
-                self._terms_now(snap["gen"], snap["url"] + "/consent")
+                self._terms_now(snap["gen"], terms_of(snap["url"], e.body))
             elif e.status == 404:   # a hub that takes no shared work (yet): said quietly, never an error
                 last["waiting"] = NOT_TAKEN
             else:

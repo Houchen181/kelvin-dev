@@ -369,20 +369,31 @@ def test_nothing_is_shared_before_the_hubs_new_terms_are_agreed_to(tmp_path, mon
     s = k.link.sync_once()
     assert not s["ok"] and s["consent"] and "terms changed" in s["error"]
     assert hub.shared_with(1)["chats"] == [] and "Waiting" not in on_the_hub(hub)   # nothing went
-    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == {"consent_url": HUB + "/consent"}
+    waiting = {"consent_url": HUB + "/consent", "consent_version": "2099-01-01", "terms_changed": "",
+               "terms_url": HUB + "/terms", "privacy_url": HUB + "/privacy"}   # agreed to here, in Kelvin
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == waiting
 
     k.client.delete("/api/session", headers=k.h)
-    assert sign_in(k)["needs_consent"] is True                         # the sign-in says so too, before any sync
-    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == {"consent_url": HUB + "/consent"}
+    signed = sign_in(k)
+    assert signed["needs_consent"] is True and signed["terms"] == waiting   # the sign-in screen asks, before any sync
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == waiting
     k.client.post("/api/settings", headers=k.h, json={"hub_share": "off"})
     assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] is None   # off: nothing waits for them
     k.client.post("/api/settings", headers=k.h, json={"hub_share": "on"})
     assert k.client.get("/api/state", headers=k.h).json()["hub_terms"]
 
-    hub.give_consent(1)                                                # agreed on the hub's page
-    st = k.client.get("/api/hub", headers=k.h).json()                  # Kelvin looks again (after Read and agree)
+    st = k.client.get("/api/hub", headers=k.h).json()
+    assert st["account"]["needs_consent"] is True and st["account"]["consent_version"] == "2099-01-01"
+    r = k.client.post("/api/hub/terms", headers=k.h, json={"version": "2026-11-08"})   # not the terms in force
+    assert r.status_code == 409 and r.json()["terms"] == waiting
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == waiting   # still waiting for them
+    assert k.client.post("/api/hub/terms", headers=k.h, json={}).status_code == 400
+    r = k.client.post("/api/hub/terms", headers=k.h, json={"version": "2099-01-01"})   # agreed here, in Kelvin
+    assert r.status_code == 200 and r.json() == {"agreed": "2099-01-01"}
+    assert hub.user(1)["consent_version"] == "2099-01-01"
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] is None   # the bar goes at once
+    st = k.client.get("/api/hub", headers=k.h).json()
     assert st["account"]["needs_consent"] is False
-    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] is None
     s = k.link.sync_once()
     assert s["ok"] and s["sent"]["chats"] == 1
 

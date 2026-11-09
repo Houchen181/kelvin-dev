@@ -271,7 +271,7 @@ def test_only_kelvins_calls_pass_and_only_for_a_signed_in_kelvin(gateway):
     assert not services.seen                                                  # none of them reached a service
     hub.config["consent_version"] = "2099-01-01"
     r = client.post("/llm/anthropic/v1/messages", headers=auth, json=msg)
-    assert r.status_code == 403 and "/consent" in r.json()["error"]["message"]   # new terms first
+    assert r.status_code == 403 and "Agree to them in Kelvin" in r.json()["error"]["message"]   # new terms first
 
 
 def test_the_owner_chooses_the_models(gateway):
@@ -411,9 +411,10 @@ def test_new_terms_hold_chats_but_not_the_model_list(gateway):
     assert r.status_code == 200 and "kimi-k3" in r.text                       # nothing of theirs passes
     r = client.post("/llm/opencode/openai/v1/chat/completions", headers=auth,
                     json={"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}]})
-    assert r.status_code == 403 and "Agree to them at" in r.json()["error"]["message"]
+    assert r.status_code == 403 and "Agree to them in Kelvin" in r.json()["error"]["message"]
     status = client.get("/api/llm", headers=auth).json()
     assert status["needs_consent"] is True and status["consent_url"].endswith("/consent")
+    assert status["consent_version"] and status["terms_url"].endswith("/terms")   # what Kelvin shows to agree to
 
 
 def test_opencode_go_is_a_service_of_its_own(gateway):

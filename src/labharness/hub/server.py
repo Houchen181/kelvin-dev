@@ -46,7 +46,8 @@ from .._version import __version__
 from . import drawing, llm
 from . import relay as relaying
 from .catalog import Catalog
-from .db import (CONSENT_VERSION, DEFAULTS, NO_RUN_FILES, SESSION_TTL, Busy, Hub, HubError, NeedsConsent, TooMuch,
+from .db import (CONSENT_VERSION, DEFAULTS, NEW_TERMS, NO_RUN_FILES, SESSION_TTL, Busy, Hub, HubError, NeedsConsent,
+                 TooMuch,
                  installation, loopback, log, previous_ids)
 
 COOKIE = "kelvin_hub"
@@ -1204,7 +1205,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         if app is None:
             return llm.refusal(401, "Sign in to Kelvin with your Kelvin account again to use the hub's models.")
         if request.method == "POST" and hub.needs_consent(app["user"]):   # model lists carry nothing of theirs
-            return llm.refusal(403, "The Kelvin hub's terms changed. Agree to them at %s/consent first." % hub.base_url)
+            return llm.refusal(403, NEW_TERMS)
         try:
             body = await read_body(request, llm.MAX_BODY) if request.method == "POST" else b""
         except TooMuch:
@@ -1222,7 +1223,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         services, usage = await asyncio.gather(call(gateway.offered, app["user"]),
                                                call(gateway.usage_of, app["user"]["id"], app.get("lab_id")))
         return JSONResponse(dict(usage, services=services, needs_consent=hub.needs_consent(app["user"]),
-                                 consent_url=hub.base_url + "/consent"))
+                                 consent_url=hub.base_url + "/consent", **terms_for(app["user"])))
 
     async def pdf_pages(request: Request) -> Response:
         """A signed-in Kelvin's PDF pages (only those a model needs) drawn as pictures, for a model that sees pictures
@@ -1231,7 +1232,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         if app is None:
             return api_error("not connected", 401)
         if hub.needs_consent(app["user"]):
-            return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403)
+            return api_error(NEW_TERMS, 403)
         if not drawing.can_draw():
             return api_error("This hub can't draw PDF pages (pypdfium2 isn't installed there).", 501)
         user_id = app["user"]["id"]
@@ -1318,6 +1319,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                 return api_error(str(err), 401)
             return api_error(str(err), 403 if "disabled" in str(err) or "Confirm" in str(err) else 400)
         signin_tries.clear(keys[0])
+        if result.get("needs_consent"):   # agreed to on Kelvin's own sign-in screen (POST /api/consent)
+            result.update(terms_for(result["user"]))
         return JSONResponse(result)
 
     async def api_register(request: Request) -> Response:
@@ -1354,6 +1357,26 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             form_tries.hit("reset:" + who(request))
             response.background = BackgroundTask(hub.start_reset, body.get("email"), ip_of(request) or "?")
         return response
+
+    async def api_consent(request: Request) -> Response:
+        """In Kelvin itself, its person agrees to the terms in force (Kelvin's sign-in screen, its notice when the terms
+        change, Settings → Account), with the token of their sign-in there, so nobody signs in to a page of the hub's
+        to agree: {version}, the version Kelvin showed them. Terms that changed again since are refused (409) with the
+        version in force, which Kelvin shows them first."""
+        app = await app_of(request)
+        if app is None:
+            return api_error("not connected", 401)
+        try:
+            body = await json_body(request)
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+        user = app["user"]
+        if str(body.get("version") or "") != hub.consent_version:
+            return api_error("The terms changed again since Kelvin showed them: read the version of %s first."
+                             % hub.consent_version, 409, **terms_for(user))
+        if hub.needs_consent(user):
+            await call(hub.give_consent, user["id"], ip_of(request), "kelvin")
+        return JSONResponse({"agreed": hub.consent_version, "needs_consent": False})
 
     async def api_password(request: Request) -> Response:
         """{old, new}: change the password of the person signed in to this Kelvin. Their Kelvins stay signed in."""
@@ -1420,11 +1443,18 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                              "email_confirmed": bool(user["email_confirmed_at"]), "shares_into": lab,
                              "labs": [lab["name"] for lab in labs], "needs_consent": hub.needs_consent(user),
                              "consent_url": hub.base_url + "/consent", "account_url": hub.base_url + "/account",
-                             "run_files": hub.run_files})
+                             "run_files": hub.run_files, **terms_for(user)})
 
-    def new_terms() -> JSONResponse:
-        return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403,
-                         consent_url=hub.base_url + "/consent", needs_consent=True)
+    def terms_for(user: Dict[str, Any]) -> Dict[str, Any]:
+        """What Kelvin shows its person before they agree to the terms in force, in Kelvin itself (POST /api/consent):
+        their version, what changed since the version they agreed to, and where to read the terms and the privacy
+        notice (pages anyone reads, signed in or not)."""
+        return {"consent_version": hub.consent_version,
+                "terms_changed": what_changed(str(user.get("consent_version") or ""), hub),
+                "terms_url": hub.base_url + "/terms", "privacy_url": hub.base_url + "/privacy"}
+
+    def new_terms(user: Dict[str, Any]) -> JSONResponse:
+        return api_error(NEW_TERMS, 403, consent_url=hub.base_url + "/consent", needs_consent=True, **terms_for(user))
 
     async def sync(request: Request) -> Response:
         """What a Kelvin shares (db.Hub.sync). Before the person agrees to new terms, only a sync that removes is
@@ -1434,7 +1464,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return api_error("not connected", 401)
         declared = request.headers.get("content-length", "")
         if hub.needs_consent(app["user"]) and declared.isdigit() and int(declared) > REMOVALS_ONLY:
-            return new_terms()
+            return new_terms(app["user"])
         uid = app["user"]["id"]
         if not take_turn(uid):
             return api_error("The hub is still busy with your other requests; try again in a moment.", 429)
@@ -1442,7 +1472,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             body = await read_body(request, MAX_SYNC)
             return JSONResponse(await heavy(hub.sync, app, await heavy(json.loads, body or b"{}")))
         except NeedsConsent:
-            return new_terms()
+            return new_terms(app["user"])
         except HubError as err:
             return api_error(str(err), err.status)
         except ValueError as err:
@@ -1457,7 +1487,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         if not hub.run_files:   # runs' records only: the data files stay on the person's computer
             return api_error(NO_RUN_FILES, 403, run_files=False)
         if hub.needs_consent(app["user"]):
-            return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403)
+            return api_error(NEW_TERMS, 403)
         declared = request.headers.get("content-length", "")
         if not declared.isdigit():
             return api_error("send the file with a Content-Length", 411)
@@ -2047,6 +2077,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/api/register", api_register, methods=["POST"]),
         Route("/api/reset", api_reset, methods=["POST"]),
         Route("/api/password", api_password, methods=["POST"]),
+        Route("/api/consent", api_consent, methods=["POST"]),
         Route("/api/signout", api_signout, methods=["POST"]),
         Route("/api/account/delete", api_account_delete, methods=["POST"]),
         Route("/api/models/pictures", model_pictures),

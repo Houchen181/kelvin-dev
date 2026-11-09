@@ -15,7 +15,7 @@ pytest.importorskip("httpx")
 from starlette.testclient import TestClient  # noqa: E402
 
 from labharness.hub.client import HubClient  # noqa: E402
-from labharness.hub.db import Hub  # noqa: E402
+from labharness.hub.db import CONSENT_VERSION, Hub  # noqa: E402
 from labharness.hub.server import create_app  # noqa: E402
 
 CALLBACK = "http://127.0.0.1:8770/hub/callback"
@@ -476,7 +476,8 @@ def test_kelvin_signs_in_with_its_own_api(tmp_path):
     assert r.status_code == 400 and '"installation": {"id"' in r.json()["error"]   # says what shape it wants
     r = client.post("/api/register", json=dict(ada, consent=True))
     assert r.status_code == 200 and r.json()["access_token"].startswith("khub_")
-    assert r.json()["user"] == {"name": "Ada", "email": "ada@example.org", "email_confirmed": False}
+    assert r.json()["user"] == {"name": "Ada", "email": "ada@example.org", "email_confirmed": False,
+                                "consent_version": CONSENT_VERSION}   # the terms they agreed to
     assert "/confirm?code=" in next((tmp_path / "hub" / "outbox").glob("*.txt")).read_text(encoding="utf-8")
     assert client.post("/api/register", json=dict(ada, consent=True)).status_code == 400   # one account per email
 
@@ -765,3 +766,43 @@ def test_new_terms_say_what_changed_and_sharing_waits_for_them(tmp_path):
     client.cookies.clear()
     register(client, "ben@example.org", "Ben")                          # someone new agrees to these at once
     assert "What changed" not in client.get("/consent").text and hub.user(2)["consent_version"] == "2026-11-08"
+
+
+def test_kelvin_agrees_to_new_terms_in_kelvin_itself(tmp_path):
+    """Asked for 2026-11-09: nobody signs in to the hub's pages to agree to its terms. Kelvin's sign-in says the terms
+    in force (their version, what changed, where to read them), and Kelvin sends the agreement with the token of its
+    sign-in (POST /api/consent), for the version it showed: terms that changed again since are refused (409)."""
+    import json as js
+    hub = Hub(tmp_path / "hub")
+    hub.config.update(sharing=False, consent_version="2026-10-29")      # as an older hub wrote hub.json
+    client = TestClient(create_app(hub, hosts=["testserver"], backups=False))
+    register(client)
+    client.cookies.clear()
+    hub.config["sharing"] = True                                        # sharing by default: new terms
+    r = client.post("/api/signin", json={"email": "ada@example.org", "password": "correct horse", "installation": PC})
+    a = r.json()
+    assert a["needs_consent"] is True and a["consent_version"] == "2026-11-08" and a["user"]["consent_version"] == "2026-10-29"
+    assert "Kelvin now shares your chats" in a["terms_changed"]
+    assert a["terms_url"] == hub.base_url + "/terms" and a["privacy_url"] == hub.base_url + "/privacy"
+    auth = {"Authorization": "Bearer " + a["access_token"]}
+    me = client.get("/api/me", headers=auth).json()
+    assert me["needs_consent"] is True and me["consent_version"] == "2026-11-08" and me["terms_changed"]
+    assert client.post("/api/consent", json={"version": "2026-11-08"}).status_code == 401   # its sign-in's token
+    r = client.post("/api/consent", headers=auth, json={"version": "2026-10-29"})   # not the terms in force
+    assert r.status_code == 409 and r.json()["consent_version"] == "2026-11-08" and r.json()["terms_changed"]
+    assert client.get("/api/me", headers=auth).json()["needs_consent"] is True
+    r = client.post("/api/consent", headers=auth, json={"version": "2026-11-08"})
+    assert r.status_code == 200 and r.json() == {"agreed": "2026-11-08", "needs_consent": False}
+    me = client.get("/api/me", headers=auth).json()
+    assert me["needs_consent"] is False and me["terms_changed"] == ""
+    agreed = [x for x in hub.activity_of(1) if x["action"] == "consented"]
+    detail = agreed[0]["detail"]
+    detail = js.loads(detail) if isinstance(detail, str) else detail
+    assert detail == {"consent": "2026-11-08", "in": "kelvin"}                 # the audit says where
+    one = {"chats": [{"id": "aaaaaaaaaaaa", "title": "t", "messages": []}]}
+    assert client.post("/api/sync", headers=auth, json=one).status_code == 200   # shared at once
+    assert client.post("/api/consent", headers=auth, json={"version": "2026-11-08"}).status_code == 200   # again: fine
+    assert len([x for x in hub.activity_of(1) if x["action"] == "consented"]) == 1   # and kept once
+    hub.config["consent_version"] = "2099-01-01"                        # the terms change again
+    r = client.post("/api/sync", headers=auth, json=one)
+    assert r.status_code == 403 and r.json()["consent_version"] == "2099-01-01" and "in Kelvin" in r.json()["error"]

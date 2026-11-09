@@ -55,6 +55,13 @@
       <label class="check"><input id="cn-consent" type="checkbox"><span>I agree to the hub's <a id="cn-terms" target="_blank" rel="noopener noreferrer">terms</a> and <a id="cn-privacy" target="_blank" rel="noopener noreferrer">privacy notice</a></span></label>
       <div class="signin-actions"><button id="cn-back" class="link" type="button">Back</button><button class="btn primary" type="submit">Create account</button></div>
     </form>
+    <!-- the Kelvin hub's terms in force, agreed to here as part of signing in when the person's agreement is to older
+         terms, never on a page of the hub's they would sign in to (POST /api/hub/terms) -->
+    <form id="central-terms" class="signin-form" hidden>
+      <p id="ct-changed" class="hint" hidden></p>
+      <label class="check"><input id="ct-consent" type="checkbox"><span>I agree to the hub's <a id="ct-terms" target="_blank" rel="noopener noreferrer">terms</a> and <a id="ct-privacy" target="_blank" rel="noopener noreferrer">privacy notice</a></span></label>
+      <div class="signin-actions"><button id="ct-later" class="link" type="button">Not now</button><button id="ct-agree" class="btn primary" type="submit" disabled>Agree</button></div>
+    </form>
     <div id="central-link" class="signin-form" hidden>
       <p>Is one of these accounts yours?</p>
       <div id="link-people" class="signin-people"></div>
@@ -129,10 +136,11 @@
     <div id="notices" class="notices">
       <!-- no poll answered for 10 s: Kelvin quit, crashed, or its computer sleeps or is busy (app.js reach) -->
       <div id="unreachable" class="update-bar warn" role="alert" hidden><span id="unreachable-text"></span></div>
-      <!-- the Kelvin hub's new terms: Kelvin shares nothing until the person agrees there, or switches sharing off (hubsync.py) -->
+      <!-- the Kelvin hub's new terms: Kelvin shares nothing until the person agrees here (Read and agree: the terms
+           dialog), or switches sharing off (hubsync.py) -->
       <div id="hub-terms-bar" class="update-bar" role="status" hidden>
         <span>The Kelvin hub's terms changed: Kelvin now shares your chats and run records with the Kelvin team, unless you switch it off. Incognito chats and unpublished, confidential or model-limited projects never go, nor do data files. Nothing is sent until you agree.</span>
-        <a id="hub-terms-agree" class="link soft" target="_blank" rel="noopener noreferrer">Read and agree</a>
+        <button id="hub-terms-agree" class="link soft" type="button">Read and agree</button>
         <button id="hub-terms-off" class="link soft" type="button">Switch it off</button>
       </div>
       <div id="update-bar" class="update-bar" role="status" hidden>
@@ -700,6 +708,7 @@
           <div id="hub-field" class="field">
             <div class="field-row"><span class="field-label">On the Kelvin hub</span><span id="hub-status" class="hint"></span></div>
             <div id="hub-actions" class="chatgpt-row" hidden>
+              <button id="hub-agree" class="link soft" type="button" hidden>Read and agree to the new terms</button>
               <a id="hub-account" class="link soft" href="#" target="_blank" rel="noopener noreferrer">Your account on the hub</a>
               <button id="hub-sync" class="link soft" type="button">Sync now</button>
             </div>
@@ -1415,6 +1424,30 @@
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Keep locked</button>
       <button id="hands-unlock" class="btn primary" type="button" disabled>Unlock</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- the Kelvin hub's new terms, agreed to here in Kelvin, never on a page of the hub's they would sign in to (POST
+     /api/hub/terms): from the notice's Read and agree, Settings → Account, or Settings → Models while the hub's
+     models wait for them (app.js openTerms) -->
+<dialog id="terms-dialog" class="dialog" aria-labelledby="terms-dialog-title">
+  <form id="terms-form" method="dialog">
+    <header class="dialog-head">
+      <h2 id="terms-dialog-title">The Kelvin hub's terms changed</h2>
+      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div class="dialog-body" data-region="dialog">
+      <p id="terms-changed" hidden></p>
+      <label class="check wrap"><input id="terms-consent" type="checkbox"> I agree to the hub's <a id="terms-read" target="_blank" rel="noopener noreferrer">terms</a> and <a id="terms-privacy" target="_blank" rel="noopener noreferrer">privacy notice</a></label>
+    </div>
+    <footer class="dialog-foot">
+      <span id="terms-msg" class="muted small" role="status"></span>
+      <div class="spacer"></div>
+      <button class="btn" value="cancel" type="submit">Not now</button>
+      <button id="terms-agree" class="btn primary" type="button" disabled>Agree</button>
     </footer>
   </form>
 </dialog>

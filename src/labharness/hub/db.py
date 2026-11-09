@@ -50,6 +50,9 @@ EARLIEST = 946684800.0           # 2000-01-01: an earlier or non-finite time fro
 # sharing on (Kelvin shares people's chats and run records with the Kelvin team), and for Kelvin accounts only
 CONSENT_VERSION = "2026-11-08"
 CONSENT_VERSION_ACCOUNTS = "2026-10-29"
+# said to a Kelvin whose person has yet to agree to the terms in force: they agree in Kelvin itself (its sign-in
+# screen, its notice, Settings → Account: POST /api/consent), never on a page of the hub's they would sign in to
+NEW_TERMS = "The Kelvin hub's terms changed. Agree to them in Kelvin first: the notice at its top, or Settings → Account."
 SESSION_TTL = 30 * 86400
 CODE_TTL = {"connect": 600, "confirm": 7 * 86400, "reset": 3600}
 MIN_PASSWORD = 8
@@ -620,12 +623,15 @@ class Hub:
         off (back to the accounts-only terms, an earlier date) never does."""
         return str(user.get("consent_version") or "") < self.consent_version
 
-    def give_consent(self, user_id: int, ip: Optional[str] = None) -> None:
+    def give_consent(self, user_id: int, ip: Optional[str] = None, via: str = "") -> None:
+        """The person agreed to the terms in force: on the hub's page, or in Kelvin itself (via "kelvin": its sign-in
+        screen or its notice, with the token of their sign-in there), as the audit says."""
         version = self.consent_version
         with self.connect() as con:
             con.execute("UPDATE users SET consent_version = ?, consent_at = ? WHERE id = ?",
                         (version, time.time(), user_id))
-            self.audit(con, "user", "consented", user_id, {"consent": version}, ip)
+            self.audit(con, "user", "consented", user_id, dict({"consent": version}, **({"in": via} if via else {})),
+                       ip)
 
     def set_profile(self, user_id: int, name: Any, orcid: Any) -> Dict[str, Any]:
         name = _text(name, "Please give your name.", MAX_NAME)
@@ -809,7 +815,8 @@ class Hub:
                                                                           "name": inst["name"]}, ip)
         return {"access_token": token, "token_type": "Bearer",
                 "user": {"name": user["name"], "email": user["email"],
-                         "email_confirmed": bool(user.get("email_confirmed_at"))},
+                         "email_confirmed": bool(user.get("email_confirmed_at")),
+                         "consent_version": str(user.get("consent_version") or "")},   # the terms they agreed to
                 "needs_consent": self.needs_consent(user), "account_url": self.base_url + "/account"}
 
     def connect_code(self, user: Dict[str, Any], redirect_uri: str, challenge: str, installation: Dict[str, Any],
@@ -1077,7 +1084,7 @@ class Hub:
         user = app["user"]
         taking = any(payload.get(k) for k in ("projects", "chats", "runs"))
         if taking and self.needs_consent(user):
-            raise NeedsConsent("The hub's terms changed. Agree to them at %s/consent first." % self.base_url)
+            raise NeedsConsent(NEW_TERMS)
         if taking and self.config.get("require_confirmed_email") and not user.get("email_confirmed_at"):
             raise HubError("Confirm your email address before sharing.")
         uid, inst, now = user["id"], app["installation_id"], time.time()
