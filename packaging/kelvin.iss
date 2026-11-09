@@ -32,6 +32,10 @@ WizardStyle=modern
 CloseApplications=yes
 ; Kelvin holds this mutex while it runs, so installing or uninstalling waits until it is closed
 AppMutex=Kelvin-8C0F6E5A
+; tag builds sign the installer and the uninstaller in it: release.yml passes /DSign and the sign tool "azure"
+#ifdef Sign
+SignTool=azure
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
