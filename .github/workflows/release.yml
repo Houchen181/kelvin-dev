@@ -15,6 +15,9 @@ jobs:
   windows:
     name: Windows installer
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write   # code signing: a tag build signs in to Azure with GitHub's own token, no stored secret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,6 +44,51 @@ jobs:
           $p = Start-Process dist\Kelvin\Kelvin.exe -ArgumentList "--self-test","--home","$env:RUNNER_TEMP\kelvin-a" -Wait -PassThru
           Get-Content "$env:RUNNER_TEMP\kelvin-a\kelvin.log"
           if ($p.ExitCode -ne 0) { exit 1 }
+      # Tag builds are code-signed with Microsoft's Artifact Signing (account kelvinsigning, East US, certificate
+      # profile kelvinpublic, in Richen's Azure subscription), so Smart App Control and SmartScreen trust them.
+      # Azure trusts GitHub's token from tag builds of this repository only (the managed identity
+      # kelvin-release-signing, matched on the repository's id), so nothing secret is stored here: these ids aren't.
+      - name: Sign in to Azure, for code signing
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: azure/login@v3
+        with:
+          client-id: 58345f3c-524d-4e81-8ffd-2a627dda14bd
+          tenant-id: 6ffa22f4-4568-4105-ad43-2e3ad4726957
+          allow-no-subscriptions: true
+      - name: Sign the app
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          # Microsoft's signing plug-in for SignTool (a pinned version), and the newest SignTool on the runner
+          $tools = "$env:RUNNER_TEMP\signing"
+          New-Item -ItemType Directory -Force $tools | Out-Null
+          Invoke-WebRequest https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/1.0.151/microsoft.artifactsigning.client.1.0.151.nupkg -OutFile "$tools\client.zip"
+          Expand-Archive "$tools\client.zip" "$tools\client"
+          $dlib = "$tools\client\bin\x64\Azure.CodeSigning.Dlib.dll"
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.*\x64\signtool.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1).FullName
+          @{
+            Endpoint = "https://eus.codesigning.azure.net"
+            CodeSigningAccountName = "kelvinsigning"
+            CertificateProfileName = "kelvinpublic"
+            # only the Azure CLI sign-in of the step before
+            ExcludeCredentials = @("EnvironmentCredential", "WorkloadIdentityCredential", "ManagedIdentityCredential",
+              "SharedTokenCacheCredential", "VisualStudioCredential", "VisualStudioCodeCredential",
+              "AzurePowerShellCredential", "AzureDeveloperCliCredential", "InteractiveBrowserCredential")
+          } | ConvertTo-Json | Set-Content "$tools\metadata.json"
+          "SIGNTOOL=$signtool" >> $env:GITHUB_ENV
+          "SIGN_DLIB=$dlib" >> $env:GITHUB_ENV
+          "SIGN_METADATA=$tools\metadata.json" >> $env:GITHUB_ENV
+          # Kelvin.exe and every program file or module without a signature (Python's and Microsoft's have theirs):
+          # Smart App Control checks each one that Kelvin loads
+          $files = @(Get-ChildItem dist\Kelvin -Recurse -File -Include *.exe, *.dll, *.pyd |
+            Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid' } | ForEach-Object FullName)
+          "signing $($files.Count) files"
+          for ($i = 0; $i -lt $files.Count; $i += 50) {
+            $batch = $files[$i..([math]::Min($i + 49, $files.Count - 1))]
+            & $signtool sign /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $dlib /dmdf "$tools\metadata.json" $batch
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
       - name: Build the installer
         shell: pwsh
         run: |
@@ -48,7 +96,15 @@ jobs:
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
           $version = python -c "import sys; sys.path.insert(0, 'src'); from labharness._version import __version__; print(__version__)"
           $suffix = if ("$env:GITHUB_REF" -like "refs/tags/private-v*") { "-private" } else { "" }
-          & $iscc "/DAppVersion=$version" "/DSuffix=$suffix" packaging\kelvin.iss
+          # tag builds: Inno Setup signs the installer and the uninstaller in it with SignTool (SignTool=azure in
+          # kelvin.iss); $q is a quote and $f the file for Inno, so they stay in single quotes here
+          $signing = @()
+          if ($env:SIGNTOOL) {
+            $sign = '$q' + $env:SIGNTOOL + '$q sign /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $q' +
+              $env:SIGN_DLIB + '$q /dmdf $q' + $env:SIGN_METADATA + '$q $f'
+            $signing = "/DSign", "/Sazure=$sign"
+          }
+          & $iscc "/DAppVersion=$version" "/DSuffix=$suffix" @signing packaging\kelvin.iss
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Install it and self-test the installed app
         shell: pwsh
@@ -66,6 +122,15 @@ jobs:
           if ($private -ne ($log -match "Claude Code bridge on")) { throw "the Claude Code bridge is in the wrong build" }
           # no build brings makers' instrument libraries: the app installs them into an environment and imports them
           if (-not ($log -match "instrument environments: ok")) { throw "instrument environments don't work in the app" }
+      - name: Everything is signed, the installer and the installed app with its uninstaller
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem dist\Kelvin-Setup-*.exe) +
+            @(Get-ChildItem "$env:LOCALAPPDATA\Programs\Kelvin" -Recurse -File -Include *.exe, *.dll, *.pyd)
+          $unsigned = @($files | Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid' })
+          if ($unsigned) { $unsigned.FullName; throw "$($unsigned.Count) files are not signed" }
+          Get-AuthenticodeSignature (Get-ChildItem dist\Kelvin-Setup-*.exe).FullName | Format-List Status, SignerCertificate
       - name: Uninstall it; Kelvin's own data go, measurements stay
         shell: pwsh
         run: |
@@ -180,8 +245,8 @@ jobs:
           ## Install
 
           **Windows 10/11:** download `Kelvin-Setup-….exe` and run it. No admin rights are needed.
-          The installer is not code-signed yet, so Windows may say "Windows protected your PC":
-          click **More info → Run anyway**.
+          The installer is code-signed. While Windows is still getting to know the signature, it may
+          say "Windows protected your PC": click **More info → Run anyway**.
 
           **macOS (Apple silicon):** download `Kelvin-…-macOS.zip`, unzip it, and move `Kelvin.app`
           to Applications. The app is not signed yet, so the first time, right-click it and choose **Open**.
