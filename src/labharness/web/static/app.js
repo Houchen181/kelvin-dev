@@ -377,7 +377,6 @@
     };
     $("cn-terms").href = session.hub + "/terms";
     $("cn-privacy").href = session.hub + "/privacy";
-    $("cn-sharing").hidden = !session.hub_sharing;   // what Kelvin shares with the Kelvin team, said before agreeing
     const known = (session.accounts || []).filter((a) => a.email);
     $("signin-people").replaceChildren(...known.map((p) => {
       const name = p.display || p.name;
@@ -402,8 +401,6 @@
     // An older hub says no version: the notice at the top sends them to its page as before
     const showTerms = (r) => {
       const t = r.terms, next = () => after(Object.assign({}, r, { needs_consent: false }));
-      $("ct-changed").textContent = t.terms_changed || "";
-      $("ct-changed").hidden = !t.terms_changed;
       $("ct-terms").href = t.terms_url;
       $("ct-privacy").href = t.privacy_url;
       $("ct-consent").checked = false;
@@ -4712,8 +4709,6 @@
     }
     if (!t) return;
     if (!t.consent_version) { if (t.consent_url) { window.open(t.consent_url, "_blank", "noopener"); watchTerms(); } return; }
-    $("terms-changed").textContent = t.terms_changed || "";
-    $("terms-changed").hidden = !t.terms_changed;
     $("terms-read").href = t.terms_url;
     $("terms-privacy").href = t.privacy_url;
     $("terms-consent").checked = false;

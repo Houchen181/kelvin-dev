@@ -72,13 +72,12 @@ def said(e: HubClientError) -> str:
 
 
 def terms_of(url: str, answer: Any) -> Dict[str, str]:
-    """What Kelvin shows its person before they agree to the hub's terms in force, here in Kelvin: their version and
-    what changed (from the hub's answer), and the hub's pages to read them on, at the address Kelvin reaches the hub
-    by. An older hub says no consent_version: there they agree on its own page (consent_url)."""
+    """What Kelvin shows its person before they agree to the hub's terms in force, here in Kelvin: their version (from
+    the hub's answer), and the hub's pages to read them on, at the address Kelvin reaches the hub by; the terms say
+    what changed. An older hub says no consent_version: there they agree on its own page (consent_url)."""
     a = answer if isinstance(answer, dict) else {}
     return {"consent_url": url + "/consent", "consent_version": str(a.get("consent_version") or ""),
-            "terms_changed": str(a.get("terms_changed") or ""), "terms_url": url + "/terms",
-            "privacy_url": url + "/privacy"}
+            "terms_url": url + "/terms", "privacy_url": url + "/privacy"}
 
 
 def wants_terms(e: HubClientError) -> bool:

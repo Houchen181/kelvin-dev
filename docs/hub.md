@@ -45,11 +45,11 @@ Changing `labs` or `run_files` changes the built-in terms: raise `consent_versio
 
 ## Accounts and labs
 
-- **Registering:** name, email, an optional ORCID iD (its check digit is checked) and a password of 8 characters or more. Agreeing to the terms and the privacy notice is required, and the hub records which version and when. While sharing is on, the form says above the box what Kelvin shares.
+- **Registering:** name, email, an optional ORCID iD (its check digit is checked) and a password of 8 characters or more. Agreeing to the terms and the privacy notice is required, and the hub records which version and when. Beside the box nothing more: the terms and the privacy notice say what Kelvin shares and what never goes.
 - **New terms:** when the version in force goes up, everyone is asked to agree again before going on, in Kelvin itself: nobody signs in to the hub's pages to agree (see **The hub's terms** below; the hub's `/consent` page stays for its own pages and for older Kelvins). Until they do, syncing takes nothing new (a sync that only removes still goes), and the hub's models and PDF drawing wait too.
   - **The version in force:** the later of `consent_version` in `hub.json` and the code's for the terms served: `CONSENT_VERSION` (2026-11-08) with sharing, `CONSENT_VERSION_ACCOUNTS` (2026-10-29) for accounts only. A `hub.json` written by an older hub pins 2026-10-29, so switching sharing on asks everyone again; the operator can still raise it past the code's for terms of their own.
   - **Dates:** versions are dates (YYYY-MM-DD) and compare as text. Only a later one asks again, so switching sharing off asks nobody.
-  - **What changed:** someone who agreed before sharing by default sees, in Kelvin and on the consent page, that Kelvin now shares their chats and run records with the Kelvin team unless they switch it off.
+  - **What changed:** the terms say it at their top ("Changed on 2026-11-08: Kelvin now shares your work here unless you switch it off"). Kelvin's step and dialog and the hub's consent page show the box, with the terms and the privacy notice to read, and nothing more.
 - **Passwords:** PBKDF2-SHA256 with 600,000 iterations, as OWASP suggests.
   - **Older hashes:** a hash made with fewer is redone at the person's next sign-in, unless the password changed meanwhile.
   - **Timing:** checking it takes as long as a current one, as does checking an email that has no account. Browser sessions, app tokens and one-use codes are stored only as their SHA-256. A one-use code works once, even when two requests bring it at the same moment.
@@ -66,7 +66,7 @@ Changing `labs` or `run_files` changes the built-in terms: raise `consent_versio
 
 Kelvin's sign-in screen talks to the hub with JSON (`central.py`; routes `api_signin`, `api_register`, `api_reset` and `api_password` in `hub/server.py`):
 
-- **`POST /api/signin`** `{email, password, installation: {id, name, platform, version}}` returns `{access_token, user: {name, email, email_confirmed, consent_version}, needs_consent, account_url}`, and while `needs_consent` the terms in force: `consent_version`, `terms_changed` (what changed since the version they agreed to), `terms_url` and `privacy_url`.
+- **`POST /api/signin`** `{email, password, installation: {id, name, platform, version}}` returns `{access_token, user: {name, email, email_confirmed, consent_version}, needs_consent, account_url}`, and while `needs_consent` the terms in force: `consent_version`, `terms_url` and `privacy_url`.
   - **The installation's shape:** an object whose `id` is the Kelvin's installation id, for example `{"id": "urn:uuid:…", "name": "Lab PC", "platform": "win32", "version": "0.3.12"}`. This differs from `/connect`, whose query sends the id as `installation=`. Without an `id` the hub answers 400.
   - **The token:** one per account and installation; signing in again replaces it. Kelvin keeps it in the person's settings, encrypted with their password, to change the password later.
   - **The installation** is recorded as a connected Kelvin, without a lab, so the account page lists the computers.
@@ -155,9 +155,9 @@ Settings → **Account** (`web/hubsync.py`, routes in `web/app.py`), while someo
   - **Off** takes back from the hub what this Kelvin shared: the next syncs send everything in `hub-sync.json` as `removed` until nothing is left, then send nothing at all. The status says what is still there; **Take back now** does it at once.
   - **On again** shares everything once more.
 - **The hub's terms:** the hub refuses a sync until the person has agreed to its current terms (403, with `consent_url`).
-  - **The bar:** a bar in the portal's notice row (`hub_terms` in `GET /api/state`) says what Kelvin shares, with **Read and agree** (the terms dialog, here in Kelvin) and **Switch it off** (Settings → **Account**). The sign-in's `needs_consent` shows it before any sync. Otherwise it shows at the first sync the hub refuses: a Kelvin with nothing new to send learns of new terms when something changes (a chat's next turn), and sends nothing meanwhile.
-  - **Before agreeing at all:** Kelvin's own **Create a Kelvin account** says, by the box that agrees to the hub's terms, what Kelvin shares with the Kelvin team unless it is switched off, and what never goes (`hub_sharing` in `GET /api/session`).
-  - **Agreeing in Kelvin:** signing in when the person's agreement is to older terms, the sign-in screen has a step with what changed, the terms and the privacy notice to read (the hub's pages, which anyone reads signed in or not), **I agree**, **Agree** and **Not now**. The bar's **Read and agree**, Settings → **Account** (**Read and agree to the new terms**) and Settings → **Models** (while the hub's models wait) open the same in a dialog. Kelvin sends the version it showed with the token of its sign-in (`POST /api/hub/terms`, then the hub's `POST /api/consent`, whose audit says `in: kelvin`), clears the bar and syncs. Terms that changed again meanwhile are shown before anything is agreed to (409).
+  - **The bar:** a bar in the portal's notice row (`hub_terms` in `GET /api/state`) says the terms changed and Kelvin now shares your work with the Kelvin team, with **Read and agree** (the terms dialog, here in Kelvin) and **Switch it off** (Settings → **Account**). The sign-in's `needs_consent` shows it before any sync. Otherwise it shows at the first sync the hub refuses: a Kelvin with nothing new to send learns of new terms when something changes (a chat's next turn), and sends nothing meanwhile.
+  - **Before agreeing at all:** Kelvin's own **Create a Kelvin account** has the box that agrees to the hub's terms and privacy notice, and nothing beside it: those say what Kelvin shares with the Kelvin team unless it is switched off, and what never goes.
+  - **Agreeing in Kelvin:** signing in when the person's agreement is to older terms, the sign-in screen has a step with the terms (which say what changed) and the privacy notice to read (the hub's pages, which anyone reads signed in or not), **I agree**, **Agree** and **Not now**. The bar's **Read and agree**, Settings → **Account** (**Read and agree to the new terms**) and Settings → **Models** (while the hub's models wait) open the same in a dialog. Kelvin sends the version it showed with the token of its sign-in (`POST /api/hub/terms`, then the hub's `POST /api/consent`, whose audit says `in: kelvin`), clears the bar and syncs. Terms that changed again meanwhile are shown before anything is agreed to (409).
   - **An older hub** says no version: Kelvin opens its `/consent` page in the browser, asks the hub every few seconds (`GET /api/hub`), and syncs once the terms are agreed.
 - **On the Kelvin hub:** who the person is on the hub, what of theirs is there (`on_hub`: chats and run records), the last sync, **Your account on the hub**, **Sync now** and **Also share older runs**.
 - **Background sync:** every two minutes, at once after a sign-in or a change of the switch, and on **Sync now**. Kelvin sends what changed with `POST /api/sync`, projects first, in batches of at most 500 items or 16 MB, and what is gone since (`removed`). When nothing changed, it sends nothing.
@@ -184,7 +184,7 @@ Settings → **Account** (`web/hubsync.py`, routes in `web/app.py`), while someo
 | `POST /api/hub/sync` | Sync now; switched off, take back now |
 | `POST /api/settings` | `{"hub_share": "on"}` or `"off"`; `{"hub_old_runs": "on"}` or `"off"` |
 | `POST /api/hub/terms` | `{"version"}`: the person agrees to the hub's terms of that version (the one shown), with the token of their sign-in → `{"agreed"}`; 409 with `terms` when they changed again, 404 on an older hub |
-| `GET /api/state` | `hub_terms`: `{"consent_url", "consent_version", "terms_changed", "terms_url", "privacy_url"}` while the hub waits for its new terms, else `null` |
+| `GET /api/state` | `hub_terms`: `{"consent_url", "consent_version", "terms_url", "privacy_url"}` while the hub waits for its new terms, else `null` |
 
 ## Running it
 
@@ -312,7 +312,7 @@ Kelvin accepts a hub address on the internet only with https.
 | `* /api/relay/kelvins/{id}/api/...` | A phone's call to one of them, passed through. 503 with `offline: true` when it isn't online |
 | `POST /api/token` | `{"grant_type": "authorization_code", "code", "code_verifier", "redirect_uri"}` → `{"access_token", "user", "lab"}` |
 | `DELETE /api/token` | Disconnect this Kelvin |
-| `GET /api/me` | The person, their labs (while `labs` is on), the lab this Kelvin shares into, `needs_consent`, `consent_url`, `account_url`, `run_files` (whether the hub takes run files), and the terms in force (`consent_version`, `terms_changed`, `terms_url`, `privacy_url`) |
+| `GET /api/me` | The person, their labs (while `labs` is on), the lab this Kelvin shares into, `needs_consent`, `consent_url`, `account_url`, `run_files` (whether the hub takes run files), and the terms in force (`consent_version`, `terms_url`, `privacy_url`) |
 | `POST /api/sync` | `{"projects": [...], "chats": [...], "runs": [...], "removed": {"projects", "chats", "runs"}}`, at most 500 of each → counts, plus what was refused and why. 413 over 64 MB. Before the person agrees to new terms, 403 with `needs_consent` and `consent_url`, unless it only removes (one over 256 kB is refused unread) |
 | `PUT /api/sync/runs/{run}/files/{name}` | One run file, as the raw body with a `Content-Length` (send the run first). Errors: 403 with `run_files: false` while the hub keeps runs' records only, 411 without a length, 413 over the size or the person's share, 429 with 2 uploads already running |
 

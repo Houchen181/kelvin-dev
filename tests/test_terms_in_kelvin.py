@@ -3,7 +3,8 @@
 letting user to login to hub to agree a term specifically"). Create a Kelvin account has its box; signing in when the
 person's agreement is to older terms shows the terms in force as a step of the sign-in screen; the notice's Read and
 agree, Settings → Account and Settings → Models open the same in a dialog. An older hub, which says no version, still
-takes the agreement on its own page."""
+takes the agreement on its own page. Beside the box, nothing: what Kelvin shares, what never goes and what changed,
+the terms and the privacy notice say (asked for 2026-11-09: "fold all these into the terms or privacy")."""
 import pytest
 
 pytest.importorskip("starlette")
@@ -28,9 +29,10 @@ def _part(start, end):
 
 def test_the_sign_in_screen_asks_for_the_terms_in_force_as_a_step():
     form = _part('<form id="central-terms"', "</form>")
-    for part in ('id="ct-changed"', 'id="ct-consent" type="checkbox"', 'id="ct-terms"', 'id="ct-privacy"',
-                 'id="ct-later"', 'id="ct-agree" class="btn primary" type="submit" disabled>Agree'):
+    for part in ('id="ct-consent" type="checkbox"', 'id="ct-terms"', 'id="ct-privacy"', 'id="ct-later"',
+                 'id="ct-agree" class="btn primary" type="submit" disabled>Agree'):
         assert part in form, part
+    assert "<p " not in form and "ct-changed" not in JS                    # beside the box, nothing
     assert PAGE.index('<form id="central-new"') < PAGE.index('<form id="central-terms"') < PAGE.index('id="central-link"')
     central = JS[JS.index("function showCentral(session)"):JS.index("function setupRemove(")]
     assert '"central-terms"' in central and 'terms: ["central-terms"] }[mode]' in central
@@ -51,10 +53,12 @@ def test_the_notice_settings_and_models_agree_here_in_a_dialog():
     bar = _part('<div id="hub-terms-bar"', "</div>")
     assert '<button id="hub-terms-agree" class="link soft" type="button">Read and agree</button>' in bar
     assert "target=" not in bar and "href" not in bar                    # nothing sends the person to the hub to agree
+    assert "<span>The Kelvin hub's terms changed: Kelvin now shares your work with the Kelvin team.</span>" in bar
     dialog = _part('<dialog id="terms-dialog"', "</dialog>")
-    for part in ('id="terms-changed"', 'id="terms-consent" type="checkbox"', 'id="terms-read"', 'id="terms-privacy"',
-                 'id="terms-msg"', 'id="terms-agree" class="btn primary" type="button" disabled>Agree'):
+    for part in ('id="terms-consent" type="checkbox"', 'id="terms-read"', 'id="terms-privacy"', 'id="terms-msg"',
+                 'id="terms-agree" class="btn primary" type="button" disabled>Agree'):
         assert part in dialog, part
+    assert "<p " not in dialog and "terms-changed" not in JS               # beside the box, nothing
     assert '<button id="hub-agree" class="link soft" type="button" hidden>Read and agree to the new terms</button>' in PAGE
     opened = _js("openTerms")
     assert "if (!t.consent_version) { if (t.consent_url) { window.open(t.consent_url" in opened   # an older hub
@@ -74,8 +78,24 @@ def test_the_notice_settings_and_models_agree_here_in_a_dialog():
 def test_the_sync_says_to_agree_in_kelvin_and_names_the_hubs_pages_at_its_own_address():
     assert "in Kelvin" in hubsync.TERMS and "on the hub" not in hubsync.TERMS
     t = hubsync.terms_of("https://hub.test", {"consent_url": "http://elsewhere/consent", "consent_version": "2099-01-01",
-                                              "terms_changed": "Kelvin now shares", "terms_url": "http://elsewhere/t"})
+                                              "terms_url": "http://elsewhere/t"})
     assert t == {"consent_url": "https://hub.test/consent", "consent_version": "2099-01-01",
-                 "terms_changed": "Kelvin now shares", "terms_url": "https://hub.test/terms",
-                 "privacy_url": "https://hub.test/privacy"}
+                 "terms_url": "https://hub.test/terms", "privacy_url": "https://hub.test/privacy"}
     assert hubsync.terms_of("https://hub.test", None)["consent_version"] == ""   # an older hub: its own page
+
+
+def test_the_terms_say_what_changed_and_the_privacy_notice_what_never_goes():
+    """What Create account and the terms-changed step said beside the box, the hub's built-in terms and privacy
+    notice say: what Kelvin shares and how to switch it off, since when (the terms' top), and what never goes."""
+    from labharness.hub.db import CONSENT_VERSION
+    from labharness.hub.server import privacy_text, terms_text
+    for labs in (False, True):
+        for files in (False, True):
+            terms = terms_text(labs, files)
+            assert "<b>Changed on %s:</b> Kelvin now shares your work here unless you switch it off." % CONSENT_VERSION \
+                in terms and "{changed}" not in terms
+            assert "Kelvin shares your work here unless you switch it off:" in terms and "Settings → Account" in terms
+            never = privacy_text(labs, files)
+            never = never[never.index("What never reaches it"):]
+            assert "incognito chats" in never and "model-limited projects" in never[:300]
+    assert "runs' data files" in privacy_text(False, False) and "runs' data files" not in privacy_text(False, True)

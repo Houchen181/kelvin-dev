@@ -50,15 +50,14 @@
       <input id="cn-email" type="email" autocomplete="email" spellcheck="false">
       <label for="cn-password">Password <span class="muted">(8 characters or more)</span></label>
       <input id="cn-password" type="password" autocomplete="new-password">
-      <!-- sharing with the Kelvin team (hubsync.py), said before the person agrees: shown while Kelvin shares (session.hub_sharing) -->
-      <p id="cn-sharing" class="hint" hidden>Unless you switch it off in Settings → Account, Kelvin shares your chats and the records of your runs with the Kelvin team on the hub. Incognito chats, unpublished, confidential or model-limited projects, and runs' data files never go.</p>
+      <!-- beside the box, nothing: the terms and the privacy notice say what goes to the Kelvin team and what never
+           goes (hub/server.py TERMS, PRIVACY) -->
       <label class="check"><input id="cn-consent" type="checkbox"><span>I agree to the hub's <a id="cn-terms" target="_blank" rel="noopener noreferrer">terms</a> and <a id="cn-privacy" target="_blank" rel="noopener noreferrer">privacy notice</a></span></label>
       <div class="signin-actions"><button id="cn-back" class="link" type="button">Back</button><button class="btn primary" type="submit">Create account</button></div>
     </form>
     <!-- the Kelvin hub's terms in force, agreed to here as part of signing in when the person's agreement is to older
          terms, never on a page of the hub's they would sign in to (POST /api/hub/terms) -->
     <form id="central-terms" class="signin-form" hidden>
-      <p id="ct-changed" class="hint" hidden></p>
       <label class="check"><input id="ct-consent" type="checkbox"><span>I agree to the hub's <a id="ct-terms" target="_blank" rel="noopener noreferrer">terms</a> and <a id="ct-privacy" target="_blank" rel="noopener noreferrer">privacy notice</a></span></label>
       <div class="signin-actions"><button id="ct-later" class="link" type="button">Not now</button><button id="ct-agree" class="btn primary" type="submit" disabled>Agree</button></div>
     </form>
@@ -139,7 +138,7 @@
       <!-- the Kelvin hub's new terms: Kelvin shares nothing until the person agrees here (Read and agree: the terms
            dialog), or switches sharing off (hubsync.py) -->
       <div id="hub-terms-bar" class="update-bar" role="status" hidden>
-        <span>The Kelvin hub's terms changed: Kelvin now shares your chats and run records with the Kelvin team, unless you switch it off. Incognito chats and unpublished, confidential or model-limited projects never go, nor do data files. Nothing is sent until you agree.</span>
+        <span>The Kelvin hub's terms changed: Kelvin now shares your work with the Kelvin team.</span>
         <button id="hub-terms-agree" class="link soft" type="button">Read and agree</button>
         <button id="hub-terms-off" class="link soft" type="button">Switch it off</button>
       </div>
@@ -1440,8 +1439,7 @@
       </button>
     </header>
     <div class="dialog-body" data-region="dialog">
-      <p id="terms-changed" hidden></p>
-      <label class="check wrap"><input id="terms-consent" type="checkbox"> I agree to the hub's <a id="terms-read" target="_blank" rel="noopener noreferrer">terms</a> and <a id="terms-privacy" target="_blank" rel="noopener noreferrer">privacy notice</a></label>
+      <label class="check wrap"><input id="terms-consent" type="checkbox"><span>I agree to the hub's <a id="terms-read" target="_blank" rel="noopener noreferrer">terms</a> and <a id="terms-privacy" target="_blank" rel="noopener noreferrer">privacy notice</a></span></label>
     </div>
     <footer class="dialog-foot">
       <span id="terms-msg" class="muted small" role="status"></span>

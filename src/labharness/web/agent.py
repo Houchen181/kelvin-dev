@@ -767,7 +767,7 @@ class ChatAgent:
                 groups.append({"provider": p.name, "label": p.label, "models": [], "error": describe_error(p, e)})
         status = hubs[0].hub.status() if hubs else None
         month = {k: status.get(k) for k in ("month", "spent", "budget", "renews", "lab", "needs_consent",
-                                            "consent_url", "consent_version", "terms_changed", "terms_url",
+                                            "consent_url", "consent_version", "terms_url",
                                             "privacy_url")} if status else None
         if status and status.get("needs_consent"):   # said beside the hub's models, where the person looks
             for g in groups:

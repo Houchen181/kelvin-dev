@@ -120,8 +120,11 @@ ul.plain{padding-left:1.1rem}
 
 # The terms and privacy notice while Kelvins share work here (hub.json sharing, the default). Their parts depend on the
 # hub's other switches (labs, run_files): terms_text() and privacy_text() put them together. Changing those switches
-# changes what people agreed to, so raise consent_version with them.
+# changes what people agreed to, so raise consent_version with them. Beside the box that agrees (Kelvin's screens,
+# the hub's own Create account and consent page) nothing more: these say it all, the terms what changed and when
+# ({changed}: CONSENT_VERSION, when sharing by default came).
 TERMS = """<p class="note"><b>Draft.</b> The Kelvin team must review these terms before the hub opens to the public.</p>
+<p><b>Changed on {changed}:</b> Kelvin now shares your work here unless you switch it off.</p>
 <ul class="plain">
 <li>The hub keeps your Kelvin account, so the same email and password sign you in to Kelvin on any computer.</li>
 <li><b>Kelvin shares your work here unless you switch it off:</b> your normal projects, your unfiled chats with their
@@ -178,7 +181,7 @@ WHO_SEES_LABS = ("you; the members of the lab your Kelvin shares into, while you
 def terms_text(labs: bool, run_files: bool) -> str:
     """The built-in terms while Kelvins share work here."""
     return TERMS.replace("{runs}", RUNS_SHARED_WITH_FILES if run_files else RUNS_SHARED) \
-        .replace("{labs}", LABS_TERMS if labs else "")
+        .replace("{labs}", LABS_TERMS if labs else "").replace("{changed}", CONSENT_VERSION)
 
 
 def privacy_text(labs: bool, run_files: bool) -> str:
@@ -186,16 +189,6 @@ def privacy_text(labs: bool, run_files: bool) -> str:
     return PRIVACY.replace("{runs}", RUNS_SHARED_WITH_FILES if run_files else RUNS_SHARED) \
         .replace("{files}", "" if run_files else "runs' data files (run.h5, plots, reports); ") \
         .replace("{who}", WHO_SEES_LABS if labs else WHO_SEES)
-
-
-def what_changed(agreed: str, hub: Hub) -> str:
-    """What changed since the terms a person agreed to, shown before they agree again (empty when nothing we can
-    name). Sharing by default came with CONSENT_VERSION."""
-    if not (hub.sharing and agreed and agreed < CONSENT_VERSION <= hub.consent_version):
-        return ""
-    return ("Kelvin now shares your chats and the records of your runs with the Kelvin team, unless you switch it off "
-            "in Kelvin's Settings → Account.%s Incognito chats and unpublished, confidential or model-limited projects "
-            "are never sent." % ("" if hub.run_files else " Runs' data files stay on your computer."))
 
 
 TERMS_ACCOUNTS = """<p class="note"><b>Draft.</b> The Kelvin team must review these terms before the hub opens to the
@@ -669,14 +662,12 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             '<label>ORCID iD <span class="muted">(optional)</span><input type="text" name="orcid" '
             'placeholder="0000-0002-1825-0097" value="%s"></label>'
             '<label>Password <span class="muted">(8 characters or more)</span><input type="password" '
-            'name="password" autocomplete="new-password" required minlength="8"></label>%s'
+            'name="password" autocomplete="new-password" required minlength="8"></label>'
             '<label class="check"><input type="checkbox" name="consent" value="yes" required><span>I agree to the '
             '<a href="/terms">terms</a> and the <a href="/privacy">privacy notice</a>.</span></label>'
             '<button>Create account</button></form>'
             '<p class="muted">Already have one? <a href="/signin">Sign in</a>.</p>'
-            % (e(values.get("next", "")), e(values.get("name")), e(values.get("email")), e(values.get("orcid")),
-               '<p class="note">Unless you switch it off in Kelvin\'s Settings → Account, Kelvin shares with the Kelvin '
-               'team here: %s.</p>' % e(what_goes()) if hub.sharing else "")),
+            % (e(values.get("next", "")), e(values.get("name")), e(values.get("email")), e(values.get("orcid")))),
             error=error, status=400 if error else 200)
 
     async def register(request: Request) -> Response:
@@ -744,16 +735,14 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             if f.get("consent") == "yes":
                 await call(hub.give_consent, sess["user"]["id"], ip_of(request))
                 return RedirectResponse(safe_next(f.get("next")), 303)
-        changed = what_changed(str(sess["user"].get("consent_version") or ""), hub)
         return page("The terms have changed", (
-            '%s<p>Please read the <a href="/terms">terms</a> and the <a href="/privacy">privacy notice</a> '
+            '<p>Please read the <a href="/terms">terms</a> and the <a href="/privacy">privacy notice</a> '
             '(version %s), then agree to keep using the hub. If you don\'t agree, you can '
             '<a href="/account/export">export your data</a> and <a href="/account/delete">delete your account</a>.</p>'
             '<form class="stack" method="post" action="/consent">%s<input type="hidden" name="next" value="%s">'
             '<label class="check"><input type="checkbox" name="consent" value="yes" required><span>I agree.</span>'
             '</label><button>Continue</button></form>'
-            % ('<div class="note"><b>What changed:</b> %s</div>' % e(changed) if changed else "",
-               e(hub.consent_version), csrf_field(sess), e(target))), sess)
+            % (e(hub.consent_version), csrf_field(sess), e(target))), sess)
 
     async def confirm(request: Request) -> Response:
         sess = await session_of(request)
@@ -1223,7 +1212,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         services, usage = await asyncio.gather(call(gateway.offered, app["user"]),
                                                call(gateway.usage_of, app["user"]["id"], app.get("lab_id")))
         return JSONResponse(dict(usage, services=services, needs_consent=hub.needs_consent(app["user"]),
-                                 consent_url=hub.base_url + "/consent", **terms_for(app["user"])))
+                                 consent_url=hub.base_url + "/consent", **terms_in_force()))
 
     async def pdf_pages(request: Request) -> Response:
         """A signed-in Kelvin's PDF pages (only those a model needs) drawn as pictures, for a model that sees pictures
@@ -1320,7 +1309,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return api_error(str(err), 403 if "disabled" in str(err) or "Confirm" in str(err) else 400)
         signin_tries.clear(keys[0])
         if result.get("needs_consent"):   # agreed to on Kelvin's own sign-in screen (POST /api/consent)
-            result.update(terms_for(result["user"]))
+            result.update(terms_in_force())
         return JSONResponse(result)
 
     async def api_register(request: Request) -> Response:
@@ -1373,7 +1362,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         user = app["user"]
         if str(body.get("version") or "") != hub.consent_version:
             return api_error("The terms changed again since Kelvin showed them: read the version of %s first."
-                             % hub.consent_version, 409, **terms_for(user))
+                             % hub.consent_version, 409, **terms_in_force())
         if hub.needs_consent(user):
             await call(hub.give_consent, user["id"], ip_of(request), "kelvin")
         return JSONResponse({"agreed": hub.consent_version, "needs_consent": False})
@@ -1443,18 +1432,17 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                              "email_confirmed": bool(user["email_confirmed_at"]), "shares_into": lab,
                              "labs": [lab["name"] for lab in labs], "needs_consent": hub.needs_consent(user),
                              "consent_url": hub.base_url + "/consent", "account_url": hub.base_url + "/account",
-                             "run_files": hub.run_files, **terms_for(user)})
+                             "run_files": hub.run_files, **terms_in_force()})
 
-    def terms_for(user: Dict[str, Any]) -> Dict[str, Any]:
+    def terms_in_force() -> Dict[str, Any]:
         """What Kelvin shows its person before they agree to the terms in force, in Kelvin itself (POST /api/consent):
-        their version, what changed since the version they agreed to, and where to read the terms and the privacy
-        notice (pages anyone reads, signed in or not)."""
-        return {"consent_version": hub.consent_version,
-                "terms_changed": what_changed(str(user.get("consent_version") or ""), hub),
-                "terms_url": hub.base_url + "/terms", "privacy_url": hub.base_url + "/privacy"}
+        their version, and where to read the terms and the privacy notice (pages anyone reads, signed in or not),
+        which say what changed."""
+        return {"consent_version": hub.consent_version, "terms_url": hub.base_url + "/terms",
+                "privacy_url": hub.base_url + "/privacy"}
 
-    def new_terms(user: Dict[str, Any]) -> JSONResponse:
-        return api_error(NEW_TERMS, 403, consent_url=hub.base_url + "/consent", needs_consent=True, **terms_for(user))
+    def new_terms() -> JSONResponse:
+        return api_error(NEW_TERMS, 403, consent_url=hub.base_url + "/consent", needs_consent=True, **terms_in_force())
 
     async def sync(request: Request) -> Response:
         """What a Kelvin shares (db.Hub.sync). Before the person agrees to new terms, only a sync that removes is
@@ -1464,7 +1452,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return api_error("not connected", 401)
         declared = request.headers.get("content-length", "")
         if hub.needs_consent(app["user"]) and declared.isdigit() and int(declared) > REMOVALS_ONLY:
-            return new_terms(app["user"])
+            return new_terms()
         uid = app["user"]["id"]
         if not take_turn(uid):
             return api_error("The hub is still busy with your other requests; try again in a moment.", 429)
@@ -1472,7 +1460,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             body = await read_body(request, MAX_SYNC)
             return JSONResponse(await heavy(hub.sync, app, await heavy(json.loads, body or b"{}")))
         except NeedsConsent:
-            return new_terms(app["user"])
+            return new_terms()
         except HubError as err:
             return api_error(str(err), err.status)
         except ValueError as err:
