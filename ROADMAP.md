@@ -501,7 +501,7 @@ Also asked for (2026-11-08): "so right now, is Kelvin able to collect the user's
 - Checked in a browser against a local hub: an account made in Kelvin shared a chat and a run (not the chat of a confidential project); the owner console showed the chat with its markup as text and the run's fit and assessment; switching off took both back; new terms held the next change back with the bar, and agreeing let it go.
 - Not yet: the live hub (run this code there, and set `"sharing": true` in its hub.json, which an older hub wrote as false).
 
-Reported (2026-11-09): Kelvin couldn't be installed on Windows 11 with Defender on; most likely Smart App Control, which blocks unsigned apps. Status: built, not released.
+Reported (2026-11-09): Kelvin couldn't be installed on Windows 11 with Defender on; most likely Smart App Control, which blocks unsigned apps. Status: released in Kelvin 0.3.48.
 - **Signed Windows builds** (Houchen181/kelvin-dev#20, from Richen-X): every tag build signs Kelvin.exe, each unsigned .exe, .dll and .pyd in the app, the installer and its uninstaller with Microsoft's Artifact Signing (certificate profile kelvinpublic, issued to Richen Xiong). It signs in to Azure with GitHub's own token from this repository's tag builds, with no stored secret, and fails the build if anything installed is unsigned. Builds run by hand stay unsigned.
 - **Only what changed is signed** (Houchen181/kelvin-dev#21): a build reuses the last build's signed copy of each file that hasn't changed (kept in the pre-release `signing-store`, which is never an update), so it signs 2 to 4 files instead of about 90.
-- Not yet: a signed build from GitHub Actions. The next release tag is the first; if its signing fails, nothing is published. SmartScreen may still warn until the signature has a reputation.
+- Not yet: SmartScreen may still warn until the signature has a reputation.
