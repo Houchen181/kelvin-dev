@@ -164,7 +164,7 @@ def test_a_glow_a_fill_or_a_tip_for_the_focus_is_drawn_for_the_keyboard_only():
 def test_every_list_rings_for_the_keyboard_and_keeps_its_border_for_the_mouse():
     css = _read("app.css")
     for sel in (":where(html:not(.k-pointer)) :is(.field select, .add-row select, .mount-select):focus-visible",
-                ":where(html:not(.k-pointer)) .an-body select:focus-visible",
+                ":where(html:not(.k-pointer)) .pane-bar select:focus-visible",
                 ":where(html:not(.k-pointer) select).ed-in:focus-visible",
                 ":where(html:not(.k-pointer) select).kfield:focus-visible"):
         assert sel in css, sel
