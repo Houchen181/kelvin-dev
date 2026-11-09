@@ -1375,7 +1375,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         sentence, and the body in Markdown: what was done, what was seen, what it means, citing each run as
         [run:<its id>] where it is used. Every number must be one the cited records hold, as they give it: code
         checks each and says which it can't find. day: the day it is about (default today). A person signs it in
-        the Notebook panel; a version after a signed one is an amendment."""
+        the Analysis pane's Notebook; a version after a signed one is an amendment."""
         return rt.write_entry(title, body, aim, runs, samples, procedure, day, entry)
 
     @server.tool(annotations=READ, structured_output=False)

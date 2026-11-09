@@ -1332,8 +1332,11 @@ body.resizing .plot-svg { pointer-events: none; }
 #app.full:not(.full-term) .full-on > :is(.ed-foot, .team-form, .team-name-form) { margin-inline: 0;
   padding-inline: max(var(--foot-x), calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2 + var(--foot-x))); }
 /* a region keeps the whole width and holds the column in its padding, so the wheel scrolls it from the side space too:
-   the Analysis, the scan editor and Team chat's messages, the panel's own body */
-#app.full:not(.full-term) .full-on > :is(#an-body, #ed-body) { margin-inline: 0;
+   the Analysis pane's two views (each its bar and its body), the scan editor and Team chat's messages, the panel's
+   own body */
+#app.full:not(.full-term) .full-on > .pane-view { margin-inline: 0; }
+#app.full:not(.full-term) .full-on > .pane-view > :is(.pane-bar, .pane-body),
+#app.full:not(.full-term) .full-on > #ed-body { margin-inline: 0;
   padding-inline: max(14px, calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2 + 14px)); }
 #app.full:not(.full-term) #teampanel > .team-list { margin-inline: 0;
   padding-inline: max(var(--sp-3, 12px), calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2 + var(--sp-3, 12px))); }
@@ -1491,16 +1494,15 @@ body.resizing .plot-svg { pointer-events: none; }
 .dev-pic.big { width: auto; height: auto; max-width: 100%; max-height: calc(60 * var(--vh)); object-fit: contain; cursor: zoom-out; }
 .dev-pic-name { font-size: 12px; color: var(--muted); }
 
-/* ---------- the Notebook: a day's entries and record (notebook.py) ---------- */
-.nb-day { position: relative; display: inline-flex; align-items: center; gap: 0; margin-left: 4px; }
+/* ---------- the Notebook, the Analysis pane's other view: a day's entries, reports and record (notebook.py) ---------- */
+.nb-day { position: relative; display: inline-flex; align-items: center; gap: 0; margin-left: -6px; }
 .nb-day-label { border: 0; background: none; color: var(--text-2); font: inherit; font-size: 13px; font-weight: 600;
   padding: 4px 6px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
 .nb-day-label:hover { background: var(--hover); }
 .nb-date-picker { position: absolute; left: 50%; bottom: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none;
   border: 0; padding: 0; }
 .nb-cite { cursor: pointer; font-size: 12px; padding: 0 7px; vertical-align: baseline; }
-.nb-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--sp-2, 8px) var(--sp-3, 12px) var(--sp-3, 12px);
-  display: flex; flex-direction: column; gap: 10px; }
+.nb-body { padding: 6px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
 .nb-empty { margin: auto; color: var(--muted); font-size: 13px; }
 .nb-entry { padding: 10px 12px; }
 .nb-entry h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
@@ -1522,13 +1524,19 @@ body.resizing .plot-svg { pointer-events: none; }
 
 /* ---------- the Analysis pane: a dataset, as Kelvin's analysis subagent sees it (web/analyst.py) ---------- */
 .pane-title { font-size: 15px; font-weight: 600; margin: 0; white-space: nowrap; }
-.an-body { padding: 12px 14px 20px; display: flex; flex-direction: column; gap: 10px; }
+/* its two views, Analysis | Notebook at its top: each a bar (what it shows, what it does) over its own scrolling body;
+   short of room the bar's buttons go under what it shows */
+.pane-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pane-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 10px 14px 4px; flex: none; }
+.pane-bar .btn { white-space: nowrap; flex: none; }
+.pane-bar .icon-btn + .icon-btn { margin-left: -4px; }
+.an-body { padding: 6px 14px 20px; display: flex; flex-direction: column; gap: 10px; }
 .an-body > * { flex-shrink: 0; }   /* in half a column the pane scrolls; a figure never squeezes */
-.an-run { min-width: 0; width: 100%; }
-.an-body select { border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 6px 8px; background: var(--raised);
+.an-run { flex: 1 1 140px; min-width: 0; }
+.pane-bar select { border: 1px solid var(--line-strong); border-radius: var(--radius-s); padding: 6px 8px; background: var(--raised);
   color: var(--text); font: inherit; font-size: 13.5px; min-width: 0; }
-.an-body select:focus { outline: none; }
-:where(html:not(.k-pointer)) .an-body select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.pane-bar select:focus { outline: none; }
+:where(html:not(.k-pointer)) .pane-bar select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 /* the subagent at work: what it does now */
 .an-status { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 13px; }
 .an-note { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
@@ -1686,14 +1694,17 @@ button.link:disabled { opacity: .5; cursor: default; }   /* waiting, as a .btn d
 .topbar { border-bottom: 1px solid var(--line); }
 .thread > :is(.msg.assistant, .turn-live, .compare) + .msg.user { margin-top: 30px; padding-top: 26px; border-top: 1px solid var(--line); }
 .composer-row { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
-/* the Runs pane: Scan | Sequence, drawn as the Chat | Home switch is (a grey track, the one shown raised white); the
-   queue's count on Sequence and on the Runs button (whose live dot it stands in for); Scan's dot: a run running */
-#runs-seg { gap: 2px; padding: 3px; border-radius: 999px; background: var(--seg-track); border: 1px solid var(--line); overflow: visible; }
-#runs-seg button { position: relative; border: 1px solid transparent; background: none; border-radius: 999px; padding: 4px 14px;
+/* the Runs pane: Scan | Sequence, and the Analysis pane: Analysis | Notebook, drawn as the Chat | Home switch is (a grey
+   track, the one shown raised white); the queue's count on Sequence and on the Runs button (whose live dot it stands in
+   for); Scan's dot: a run running */
+:is(#runs-seg, #an-seg) { gap: 2px; padding: 3px; border-radius: 999px; background: var(--seg-track); border: 1px solid var(--line); overflow: visible; }
+:is(#runs-seg, #an-seg) button { position: relative; border: 1px solid transparent; background: none; border-radius: 999px; padding: 4px 14px;
   font-size: 13.5px; font-weight: 550; color: var(--muted); cursor: pointer; }
-#runs-seg button:hover { color: var(--text); }
-#runs-seg button.on { background: var(--panel); color: var(--text); border-color: var(--muted); box-shadow: 0 1px 2px rgba(20, 32, 44, 0.10); }
+:is(#runs-seg, #an-seg) button:hover { color: var(--text); }
+:is(#runs-seg, #an-seg) button.on { background: var(--panel); color: var(--text); border-color: var(--muted); box-shadow: 0 1px 2px rgba(20, 32, 44, 0.10); }
 #runs-seg button.on .q-badge { background: var(--accent-soft); color: var(--accent); }
+#an-seg button { padding-inline: 12px; }   /* Analysis | Notebook, ⤢ and × whole at the pane's least width, 292, with
+   a touch screen's 40 px buttons too */
 #open-scan.live::after { content: ""; position: absolute; top: 4px; right: 5px; width: 6px; height: 6px; border-radius: 50%;
   background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
 #open-scan.live.on::after { display: none; }
@@ -2164,7 +2175,7 @@ dialog[open]::backdrop { animation: k-fade .15s ease; }
   #runpane .spinner { animation: none; }   /* a run's mark stands still: its tab and its state say it runs */
 }
 @media (pointer: coarse) {   /* a touch screen: every target 40 px or more */
-  #runs-seg button, .rv-fold, .rv-files > .btn { min-height: 40px; }
+  #runs-seg button, #an-seg button, .rv-fold, .rv-files > .btn { min-height: 40px; }
   .rv-files > .rv-files-more { min-width: 40px; }
   .assess-more { top: 2px; right: 2px; width: 40px; height: 40px; }
   .run-view .assess { padding-right: 46px; }
@@ -2432,12 +2443,14 @@ body.incognito .composer { background: color-mix(in srgb, var(--text) 4%, var(--
 /* the terminal's input is the row's target itself: 28 px, its row 34 px */
 .term-in { padding-block: 1px 5px; }
 .term-in input { min-height: var(--target); }
-/* a touch screen: a pane head's own buttons (full screen, close, the terminal's clear, Analyze again) 40 px, as every
-   target; the Lab's and Team chat's heads have theirs ("fit D"). So are the Analysis pane's dataset picker and the
-   terminal's input itself, its row as tall as it */
+/* a touch screen: a pane head's own buttons (full screen, close, the terminal's clear) and the Analysis pane's bars'
+   (Analyze again, the Notebook's day and its buttons) 40 px, as every target; the Lab's and Team chat's heads have
+   theirs ("fit D"). So are the Analysis pane's dataset picker and the terminal's input itself, its row as tall as it */
 @media (pointer: coarse) {
   :is(.pane-head, .term-head) > .icon-btn { min-width: 40px; min-height: 40px; }
-  #anpane .an-body select { min-height: 40px; }
+  .pane-bar .icon-btn { min-width: 40px; min-height: 40px; }
+  #an-seg button { padding-inline: 10px; }   /* with ⤢ and × at 40 px, the head still whole at 292 */
+  #anpane .pane-bar select { min-height: 40px; }
   .term-in { padding-block: 0 2px; }
   .term-in input { min-height: 40px; }
 }

@@ -1557,7 +1557,7 @@
 
   // The side panels each open and close on their own, and each keeps the width it was left at (drag its left edge).
   // Beside the main column (the chat or Home), which keeps at least CHAT_MIN pixels, they stand side by side in the
-  // order of the top bar's buttons: Team chat, Notebook, Analysis, Runs with the scan editor beside it, then Lab. Short of room,
+  // order of the top bar's buttons: Team chat, Analysis, Runs with the scan editor beside it, then Lab. Short of room,
   // they shrink alike down to their least widths; when one more will not fit even so, the pane looked at least
   // recently (opened, pressed or focused: LOOK) is put away, its button flat and what it showed kept for next time.
   // A pane that cannot stand beside the main column even alone takes the content area by itself (.solo), and the main
@@ -1575,7 +1575,6 @@
   const CHAT_MIN = 520, SIDEBAR_W = 264;
   const PANES = {   // id: [open?, its column, its least width, where its width is kept, its least on a touch screen]
     teampanel: [() => TEAM.open, "workcol", 280, "lh.teamWidth"],
-    nbpanel: [() => NB.open, "workcol", 340, "lh.nbWidth"],
     anpane: [() => ANA.open, "workcol", 292, "lh.anWidth"],
     runpane: [() => RUNS.open, "workcol", 346, "lh.runsWidth", 362],
     edpane: [() => ED.open, "workcol", 360, "lh.edWidth", 800],
@@ -1722,10 +1721,10 @@
   const FULL = [];   // the panel in full screen: one at most
   const isOpen = (id) => (id === "termpane" ? TERM.open : PANES[id][0]());
   // the panels' top-bar buttons, each raised exactly when its panel is on the screen; and how each panel opens or closes
-  const PILLS = { termpane: "toggle-term", teampanel: "toggle-team", nbpanel: "toggle-notebook", anpane: "toggle-analysis",
+  const PILLS = { termpane: "toggle-term", teampanel: "toggle-team", anpane: "toggle-analysis",
                   runpane: "toggle-runs",
                   labpanel: "toggle-lab" };
-  const TOGGLE = { termpane: toggleTerm, teampanel: toggleTeam, nbpanel: toggleNotebook, anpane: toggleAnalysis,
+  const TOGGLE = { termpane: toggleTerm, teampanel: toggleTeam, anpane: toggleAnalysis,
                    runpane: toggleRuns,
                    edpane: toggleEditor, labpanel: toggleLab };
   // a panel on the screen now: open, and not out of sight: in full screen the one shown; else not under the sidebar
@@ -1877,7 +1876,6 @@
     PANE_W.edpane = kept("lh.edWidth") || 460;
     PANE_W.labpanel = kept("lh.labWidth") || 380;
     PANE_W.teampanel = kept("lh.teamWidth") || PANE_W.labpanel;
-    PANE_W.nbpanel = kept("lh.nbWidth") || Math.max(PANE_W.labpanel, 440);
     if (sideNarrow()) SIDE.hidden = true;   // a narrow window opens on the chat or Home, never on the list (not kept)
     for (const id of Object.keys(PANES)) {
       // kept: the widths of the panes open (the one dragged, and those it read back), never a closed one's first width
@@ -2135,7 +2133,6 @@
     sel.replaceChildren(...opts.map(([v, label]) => new Option(label, v)));
     $("report-files").hidden = true;
     $("report-msg").textContent = "";
-    if (!$("eln-day").value) { const d = new Date(); $("eln-day").value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
     $("report-dialog").showModal();
     loadLibrary();
   }
@@ -9970,25 +9967,23 @@
     } catch (e) { /* the dot still says */ }
   }
   // ------------------------------------------------------------------ the Notebook (notebook.py, web/notebook.py)
-  // a day's entries, newest last: Kelvin's drafts (its model named, its numbers checked against the runs they cite)
-  // and people's; Sign and Witness are people's alone; Draft asks the notebook subagent (the message box's model)
-  const NB = { open: false, day: "", data: null, edit: null, drafting: null };
+  // the Analysis pane's other view (showAnView): a day's entries, newest last: Kelvin's drafts (its model named, its
+  // numbers checked against the runs they cite) and people's; Sign and Witness are people's alone; Draft asks the
+  // notebook subagent (the message box's model); then the reports made that day and the day's record, as the person
+  // in this chat sees the lab; the download gives the day to another lab notebook (eln.py)
+  const NB = { day: "", data: null, edit: null, drafting: null };
   const nbToday = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-  function toggleNotebook(open) {
-    NB.open = open === undefined ? !NB.open : open;
-    $("nbpanel").hidden = !NB.open;
-    $("toggle-notebook").setAttribute("aria-pressed", String(NB.open));
-    $("toggle-notebook").classList.toggle("on", NB.open);
-    fitLayout();
-    if (NB.open) loadNotebook(NB.day || nbToday());
-  }
+  const nbChat = () => "&chat=" + encodeURIComponent(S.chatId || "");   // this chat's view: never another project's unshared work
   async function loadNotebook(day) {
     NB.day = day;
     $("nb-date").value = day;
     $("nb-day-label").textContent = day === nbToday() ? "Today"
       : new Date(day + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
-    try { NB.data = await api("/api/notebook?day=" + encodeURIComponent(day)); }
-    catch (e) { NB.data = { error: e.message, entries: [], record: [], days: [] }; }
+    let data;
+    try { data = await api("/api/notebook?day=" + encodeURIComponent(day) + nbChat()); }
+    catch (e) { data = { error: e.message, entries: [], reports: [], record: [], days: [] }; }
+    if (NB.day !== day) return;   // another day was asked for meanwhile: its own answer draws it
+    NB.data = data;
     drawNotebook();
   }
   function nbStep(dir) {   // the next day that has something, else the next day
@@ -10019,12 +10014,12 @@
     const text = md(e.body || "").replace(/\[run:([\w.-]+)\]/g, (m, r) => {
       cited.add(r);
       const t = /^\d{8}-(\d\d)(\d\d)\d\d-(.*)$/.exec(r);
-      return '<button type="button" class="chip line nb-cite" data-run="' + r + '" title="Open run ' + r + '">' +
+      return '<button type="button" class="chip line nb-cite" data-run="' + r + '" title="Open run ' + r + ' in Analysis">' +
         (t ? t[1] + ":" + t[2] + " " + t[3] : r) + "</button>";
     });
     const rest = (e.runs || []).filter((r) => !cited.has(r));
     const runs = rest.length ? h("div", { class: "nb-runs" }, ...rest.map((r) =>
-      h("button", { class: "chip line", type: "button", title: "Open run " + r, onclick: () => openRun(r) }, r))) : null;
+      h("button", { class: "chip line", type: "button", title: "Open run " + r + " in Analysis", onclick: () => nbOpenRun(r) }, r))) : null;
     const can = (role) => !!me && !mine.some((s) => s.role === role && s.version === e.version);
     const acts = h("div", { class: "nb-actions" },
       h("button", { class: "btn small", type: "button", onclick: () => { NB.edit = e; drawNotebook(); } }, "Edit"),
@@ -10063,6 +10058,7 @@
     for (const e of d.entries) box.append(NB.edit && NB.edit.id === e.id ? nbEditor(e) : nbEntryEl(e));
     if (NB.drafting) box.append(h("p", { class: "nb-steps", role: "status" }, NB.drafting));
     if (!d.entries.length && !NB.edit && !NB.drafting) box.append(h("p", { class: "nb-empty" }, "No entries."));
+    if ((d.reports || []).length) box.append(reportFiles(d.reports));   // the reports made that day: Open, Download
     if ((d.record || []).length) {
       box.append(h("details", { class: "nb-record" }, h("summary", null, "Record · " + d.record.length),
         h("ol", null, ...d.record.map((line) => h("li", null, line)))));
@@ -10089,9 +10085,9 @@
     NB.drafting = null;
     loadNotebook(NB.day);
   }
+  // a run an entry cites, in the Analysis view: what its analysis found, or Kelvin's analysis subagent at work on it
+  const nbOpenRun = (id) => openAnalysis({ run: id, asked: true });
   function initNotebook() {
-    $("toggle-notebook").addEventListener("click", () => pillClick("nbpanel", toggleNotebook));
-    $("close-notebook").addEventListener("click", () => toggleNotebook(false));
     $("nb-prev").addEventListener("click", () => nbStep(-1));
     $("nb-next").addEventListener("click", () => nbStep(1));
     $("nb-date").addEventListener("change", () => { if ($("nb-date").value) loadNotebook($("nb-date").value); });
@@ -10100,10 +10096,14 @@
     });
     $("nb-body").addEventListener("click", (ev) => {
       const cite = ev.target.closest(".nb-cite");
-      if (cite) openRun(cite.dataset.run);
+      if (cite) nbOpenRun(cite.dataset.run);
     });
     $("nb-new").addEventListener("click", () => { NB.edit = {}; drawNotebook(); });
     $("nb-draft").addEventListener("click", nbDraft);
+    $("nb-download").addEventListener("click", () => {   // the day as Markdown with its plots, for another notebook
+      const day = NB.day || nbToday();
+      fetchDownload("/api/eln?day=" + encodeURIComponent(day) + nbChat(), day + "-lab-record.zip", "day's lab notebook record");
+    });
   }
   function initTeam() {
     $("toggle-team").addEventListener("click", () => pillClick("teampanel", toggleTeam));
@@ -10128,7 +10128,7 @@
   // again asks anew). Until the person picks one, the pane follows the newest run (or the one the Runs pane shows), and
   // a run still measuring waits for its end. Kelvin's analyze tool in the chat shows its own analysis here the same way.
   // (The routes that work out a spec by hand, /api/analysis with its columns, Keep and CSV, stay for the phones.)
-  const ANA = { open: false, run: "", runs: [], follow: false, done: new Map(), job: null, ctl: null };
+  const ANA = { open: false, view: "analysis", run: "", runs: [], follow: false, done: new Map(), job: null, ctl: null };
   const anWhen = (r) => r.run_id.slice(9, 11) + ":" + r.run_id.slice(11, 13) + " " + r.run_id.slice(4, 6) + "/" + r.run_id.slice(6, 8);
   const anRunLabel = (r) => r.plan + " · " + anWhen(r) + (r.status && r.status !== "done" ? " · " + r.status : "")
     + (r.unshared ? " · unshared" : "");
@@ -10147,6 +10147,39 @@
       }
       return;
     }
+    anViewShown();
+  }
+  // the pane's two views at its top: "analysis" (a dataset, as Kelvin's analysis subagent sees it) or "notebook" (a
+  // day's entries, reports and record), kept per browser: the pane opens on the one it showed last
+  const AN_VIEWS = { analysis: ["open-an-view", "an-view"], notebook: ["open-nb-view", "nb-view"] };
+  function showAnView(view, quiet) {   // quiet: the caller shows what the view holds
+    if (!AN_VIEWS[view]) view = "analysis";
+    const changed = ANA.view !== view;
+    ANA.view = view;
+    store("lh.anView", view);
+    for (const [v, [tab, panel]] of Object.entries(AN_VIEWS)) {
+      const on = v === view;
+      $(tab).classList.toggle("on", on);
+      $(tab).setAttribute("aria-selected", String(on));
+      $(tab).tabIndex = on ? 0 : -1;
+      $(panel).hidden = !on;
+    }
+    if (changed && !quiet && ANA.open) anViewShown();
+  }
+  function anSegKeys(e) {
+    const order = Object.keys(AN_VIEWS), i = order.indexOf(ANA.view);
+    const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: order.length - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    const view = order[(next + order.length) % order.length];
+    showAnView(view);
+    $(AN_VIEWS[view][0]).focus();
+  }
+  // the view on the screen, as the pane opens or the view is chosen. The Notebook: the day as it is now (an entry
+  // being written stays as it is). Analysis: the newest run while it follows the newest, a dataset cut short as the
+  // pane closed anew, else the runs measured since it was last shown
+  function anViewShown() {
+    if (ANA.view === "notebook") { if (!NB.edit) loadNotebook(NB.day || nbToday()); return; }
     if (!ANA.run || ANA.follow) startAnalysis();   // the newest run
     else if (ANA.job && ANA.job.cut && ANA.job.run === ANA.run) analyzeRun(ANA.run);   // cut short as it closed: anew
     else loadAnalysisRuns();   // runs measured since it was last open
@@ -10165,6 +10198,10 @@
   // opened. A pane that follows the newest run analyzes it; one showing the dataset the person picked keeps it
   async function refreshAnalysisRuns() {
     if (!ANA.open) return;
+    if (ANA.view === "notebook") {   // the day's record as it is now, as this chat sees it; Analysis catches up when shown
+      if (!NB.edit && !NB.drafting) loadNotebook(NB.day || nbToday());
+      return;
+    }
     if (!ANA.run || ANA.follow) return startAnalysis();
     await loadAnalysisRuns();
   }
@@ -10309,6 +10346,9 @@
   async function openAnalysis(ev) {
     ev = ev || {};
     ANA.follow = false;   // the dataset asked for, not the newest
+    // to the Analysis view, unless the person is writing a notebook entry and did not ask for it: Kelvin's analysis
+    // then waits in its view, as it never puts away a panel the person is typing in
+    if (ev.asked || !(ANA.open && ANA.view === "notebook" && NB.edit)) showAnView("analysis", true);
     const seen = paneVisible("anpane");
     if (!ANA.open) {
       ANA.open = true;   // shown without starting the pane's own default
@@ -10335,6 +10375,10 @@
   function initAnalysis() {
     $("toggle-analysis").addEventListener("click", () => pillClick("anpane", toggleAnalysis));
     $("close-analysis").addEventListener("click", () => toggleAnalysis(false));
+    $("open-an-view").addEventListener("click", () => showAnView("analysis"));
+    $("open-nb-view").addEventListener("click", () => showAnView("notebook"));
+    $("an-seg").addEventListener("keydown", anSegKeys);
+    showAnView(store("lh.anView") === "notebook" ? "notebook" : "analysis", true);   // as this browser left it
     $("an-run").addEventListener("change", () => {
       ANA.follow = false;   // the person's pick
       analyzeRun($("an-run").value);
@@ -10670,9 +10714,6 @@
 
     $("help-go").addEventListener("click", helpSearch);
     $("help-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); helpSearch(); } });
-    $("eln-day-go").addEventListener("click", () => fetchDownload("/api/eln?day=" + encodeURIComponent($("eln-day").value || "today")
-      + "&chat=" + encodeURIComponent(S.chatId || ""),   // this chat's view: never another project's unshared work
-      ($("eln-day").value || "today") + "-lab-record.zip", "day's lab notebook record"));
     $("owner-pin-set").addEventListener("click", () => ownerPinChange(false));
     $("owner-pin-remove").addEventListener("click", () => ownerPinChange(true));
     $("owner-notify-mine").addEventListener("click", () => ownerNotify("mine"));

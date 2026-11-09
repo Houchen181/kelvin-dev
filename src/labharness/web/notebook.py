@@ -1,11 +1,11 @@
-"""The Notebook panel's subagent: a model that reads a day of the lab's record and drafts the day's notebook entry
+"""The Notebook's subagent: a model that reads a day of the lab's record and drafts the day's notebook entry
 (asked for 2026-11-07: an ELN that is AI-native; the plan's third layer, after Kelvin's code that keeps the record
 and the chat agent that records what only the conversation knows).
 
 It only reads, through the lab's read-only tools (READS), as a viewer who sees shared work only (no chat: never
 another project's unshared work, never a model-limited project's). Its draft cites every run it rests on as
 [run:<id>]; Kelvin's code then checks every number in it against those records (numbercheck.py) before it is kept,
-marked as Kelvin's, with its model. A person reads it in the Notebook panel, edits it if they like, and signs it."""
+marked as Kelvin's, with its model. A person reads it in the Analysis pane's Notebook, edits it if they like, and signs it."""
 from __future__ import annotations
 
 import json

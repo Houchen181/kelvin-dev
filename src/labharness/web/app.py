@@ -2671,9 +2671,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                         headers={"Cache-Control": "private, max-age=31536000, immutable"})   # never changed
 
     async def notebook_view(request: Request) -> Response:
-        """GET ?day=YYYY-MM-DD: the Notebook panel: the days that have entries or a record (newest first), the day's
-        entries (latest version, status, number check, signatures) and the day's record in lines. POST {title,
-        body, aim, day, entry}: a person's entry, or their new version of one."""
+        """GET ?day=YYYY-MM-DD&chat=<id>: the Analysis pane's Notebook, as the person in that chat sees the lab (no
+        chat named: everything): the days that have entries or a record (newest first), the day's entries (latest
+        version, status, number check, signatures), the reports made that day that are still in the reports folder
+        (their names there) and the day's record in lines. POST {title, body, aim, day, entry}: a person's entry,
+        or their new version of one."""
         from datetime import datetime
         from .. import notebook as nb
         from ..agent.runtime import event_line
@@ -2688,9 +2690,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 return error(400, said)
             return JSONResponse({"said": said})
         day = str(request.query_params.get("day") or "")[:10] or datetime.now().date().isoformat()
+        seen = chat_viewer(request.query_params.get("chat"), person=True) if "chat" in request.query_params else None
 
         def look() -> Dict[str, Any]:
-            entries = nb.read(runtime.data_dir)
+            entries = {k: e for k, e in nb.read(runtime.data_dir).items()   # never another project's unshared work
+                       if runtime.may_see(nb.latest(e).get("whose") or {})}
             events = runtime.seen_events(runtime.gate.log.events())
             from ..eln import DAY_TYPES
             days = sorted({str(nb.latest(e).get("day")) for e in entries.values()} |
@@ -2699,11 +2703,18 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                       **{x: nb.latest(e).get(x) for x in ("title", "aim", "body", "day", "by", "account", "ai", "check",
                                                           "runs", "samples", "amends", "at", "version")}}
                      for k, e in entries.items() if nb.latest(e).get("day") == day]
-            record = [event_line(e) for e in events if str(e.get("wall", "")).startswith(day)
-                      and e.get("type") in DAY_TYPES]
-            return {"day": day, "days": [d for d in days if d][:60], "entries": today, "record": record,
-                    "me": runtime.user}
-        return JSONResponse(await asyncio.to_thread(look))
+            on_day = [e for e in events if str(e.get("wall", "")).startswith(day)]
+            record = [event_line(e) for e in on_day if e.get("type") in DAY_TYPES]
+            reports: List[str] = []   # the reports made that day, still in the reports folder: Open, Download
+            for e in on_day:
+                name = str(e.get("name") or "") if e.get("type") == "report" else ""
+                if name and name not in reports and ".." not in Path(name).parts \
+                        and (runtime.reports_dir / name).is_file():
+                    reports.append(name)
+            return {"day": day, "days": [d for d in days if d][:60], "entries": today, "reports": reports,
+                    "record": record, "me": runtime.user}
+        with runtime.viewing(seen):
+            return JSONResponse(await asyncio.to_thread(look))
 
     async def notebook_sign(request: Request) -> Response:
         """POST {entry, role}: the person signed in signs an entry (author) or witnesses it (another person)."""
@@ -2720,7 +2731,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse({"signed": sig})
 
     async def notebook_draft(request: Request) -> Response:
-        """POST {day, model}: the Notebook panel's subagent drafts the day's entry (web/notebook.py), streamed as
+        """POST {day, model}: the Notebook's subagent drafts the day's entry (web/notebook.py), streamed as
         NDJSON: each lookup, then done {entry, said}."""
         try:
             body = await request.json()
