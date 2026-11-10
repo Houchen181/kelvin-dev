@@ -1,6 +1,6 @@
 """The lab notebook's entries (phases 3 and 6 of the ELN plan, 2026-11-07): an entry says what was done and found,
 citing its runs; code checks every number against the records it cites; a person signs it and another may witness
-it, and a later version is an amendment. The Notebook panel's subagent drafts a day's entry reading only, as a viewer
+it, and a later version is an amendment. The Notebook's subagent drafts a day's entry reading only, as a viewer
 who sees shared work only, its model kept on the entry."""
 import asyncio
 import json
@@ -145,6 +145,32 @@ def test_without_a_model_the_subagent_says_so(rt, tmp_path):
     assert events[-1]["type"] == "error" and "No model to draft with" in events[-1]["message"]
 
 
+def test_a_model_that_fails_is_said_never_silent(rt, tmp_path):
+    from test_web import Scripted
+    from labharness.agent.server import build_server
+    from labharness.web.agent import ChatAgent
+    from labharness.web.store import ChatStore
+
+    class Refused(Scripted):
+        async def stream(self, model, system, history, tools, emit):
+            raise RuntimeError("the API key was refused")
+    agent = ChatAgent(rt, ChatStore(tmp_path / "chats"), build_server(rt), {"scripted": Refused([])})
+    events = []
+
+    async def emit(e):
+        events.append(e)
+
+    async def go():
+        await agent.start()
+        try:
+            await agent.draft_entry("2026-11-07", "scripted:m1", emit)
+        finally:
+            await agent.close()
+    asyncio.run(go())
+    assert events[-1] == {"type": "error", "message": "The draft stopped: the API key was refused"}, events
+    assert notebook.read(rt.data_dir) == {}   # nothing kept
+
+
 def test_the_notebook_panel_reads_a_day_writes_a_persons_entry_and_signs_only_for_a_person(rt, tmp_path):
     pytest.importorskip("starlette")
     from starlette.testclient import TestClient
@@ -166,5 +192,6 @@ def test_the_notebook_panel_reads_a_day_writes_a_persons_entry_and_signs_only_fo
     assert r.status_code == 400 and "Sign in to Kelvin" in r.json()["error"]
     assert client.post("/api/notebook", json={"title": "x"}, headers=h).status_code == 400
     page, js = (STATIC / "index.html").read_text(encoding="utf-8"), (STATIC / "app.js").read_text(encoding="utf-8")
-    assert 'id="toggle-notebook"' in page and 'id="nbpanel"' in page and 'aria-label="Draft this day\'s entry"' in page
-    assert 'nbpanel: [() => NB.open, "workcol"' in js and "/api/notebook/draft" in js
+    pane = page[page.index('<section id="anpane"'):page.index("</section>", page.index('<section id="anpane"'))]
+    assert 'id="nb-view"' in pane and 'aria-label="Draft this day\'s entry"' in pane and "/api/notebook/draft" in js
+    assert 'id="toggle-notebook"' not in page and 'id="nbpanel"' not in page and "nbpanel" not in js

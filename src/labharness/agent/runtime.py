@@ -2948,7 +2948,7 @@ class LabRuntime:
         """Keep a notebook entry (notebook.py), or a new version of one: its title, aim and Markdown body citing each
         run it rests on as [run:<id>], its runs, samples and procedure, and its day. Every number in it is checked
         against the records it cites (numbercheck.py); the check is kept with it. A version after a signed one is an
-        amendment. Drives nothing, so nobody is asked; a person signs it in the Notebook panel."""
+        amendment. Drives nothing, so nobody is asked; a person signs it in the Analysis pane's Notebook."""
         from .. import notebook, numbercheck
         by = by or ("agent" if self._actor_now() else "human")
         as_list = lambda v: [x.strip() for x in v.split(",")] if isinstance(v, str) else list(v or [])  # noqa: E731
@@ -2975,7 +2975,7 @@ class LabRuntime:
         return "kept %s %s v%d, %s: %s. Numbers: %s.%s" % (
             "an amendment of" if v.get("amends") else "entry", v["entry"], v["version"], v["day"], v["title"],
             numbercheck.said(check), " Say where each one not found comes from, or take it out." if check["missing"]
-            else " A person signs it in the Notebook panel.")
+            else " A person signs it in the Analysis pane's Notebook.")
 
     def notebook(self, day: str = "", entry: str = "") -> str:
         """The notebook: one entry (its latest version, its number check, signatures and versions), or the entries
@@ -3006,11 +3006,11 @@ class LabRuntime:
         return "\n".join(notebook.summary(k, e) for k, e in rows[-20:])
 
     def sign_entry(self, entry: str, role: str = "author") -> Dict[str, Any]:
-        """A person signs an entry in the Notebook panel (author), or witnesses it (another person): never Kelvin's
+        """A person signs an entry in the Analysis pane's Notebook (author), or witnesses it (another person): never Kelvin's
         AI, so this is no tool. ValueError says why not."""
         from .. import notebook
         if _VIEWER.get() is not None and getattr(_VIEWER.get(), "model", None):
-            raise ValueError("only a person signs an entry, in the Notebook panel")
+            raise ValueError("only a person signs an entry, in the Analysis pane's Notebook")
         sig = notebook.sign(self.data_dir, entry, self.user or "", role)
         self.gate.log.write("entry_signed", by="human", entry=entry, version=sig["version"], role=role,
                             sha256=sig["sha256"])

@@ -317,7 +317,8 @@ def test_the_pane_has_a_dataset_picker_and_what_the_subagent_made_of_it():
     for gone in ("an-y", "an-x", "an-where", "an-group", "an-steps", "an-add-step", "an-model", "an-expr", "an-lo",
                  "an-hi", "an-fitparams", "an-keep", "an-csv", "an-ask", "an-more-run", "an-chips", "an-cols"):
         assert 'id="%s"' % gone not in PAGE and '$("%s")' % gone not in JS, gone
-    assert len(re.findall(r"<(input|textarea)\b", pane)) == 0 and pane.count("<select") == 1
+    view = pane[pane.index('<div id="an-view"'):pane.index('<div id="nb-view"')]   # the Notebook: the other view
+    assert len(re.findall(r"<(input|textarea)\b", view)) == 0 and pane.count("<select") == 1
     # a pick asks the subagent (the chat's model, as that chat may see the run); picked again, what it found shows
     run = _js("analyzeRun")
     assert 'fetch("/api/analysis/auto"' in run and 'model: $("model").value || ""' in run and 'chat: S.chatId || ""' in run

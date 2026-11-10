@@ -279,8 +279,10 @@ def test_a_kept_fit_records_linear_power_its_start_values_and_its_row(rt):
 
 def test_the_pane_has_no_fields_to_hint_and_a_disabled_button_looks_disabled():
     # the pane's where and per fields went (2026-11-03): its subagent decides which points and curves to draw
+    # (the Analysis view: the pane's other view, the Notebook, has its day's calendar and the entry editor)
     pane = PAGE[PAGE.index('<section id="anpane"'):PAGE.index("</section>", PAGE.index('<section id="anpane"'))]
-    assert not re.search(r"<input\b|placeholder=", pane) and '$("an-where")' not in JS
+    view = pane[pane.index('<div id="an-view"'):pane.index('<div id="nb-view"')]
+    assert not re.search(r"<input\b|placeholder=", view) and '$("an-where")' not in JS
     css = (STATIC / "app.css").read_text(encoding="utf-8")
     assert ".an-body input::placeholder" not in css
     dark = re.search(r"@media \(prefers-color-scheme: dark\) \{[^{}]*\{ opacity: \.35; \}", css)

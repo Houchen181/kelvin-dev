@@ -2,7 +2,7 @@
 experimental procedure recording should follow the practice of modern ELN/LIMS system, and be ai-native").
 
 An entry says what was done and found, for people: its aim, the samples and procedure, the runs it rests on, what was
-seen, what it means. Kelvin drafts one from its records (the chat's model with write_entry, or the Notebook panel's
+seen, what it means. Kelvin drafts one from its records (the chat's model with write_entry, or the Notebook's
 subagent: web/notebook.py), citing each run as [run:<id>], and code checks every number in it against the records it
 cites (numbercheck.py); a person writes or edits one in the panel. A person then signs it, and another may witness
 it: a signed version is never changed, a later version is an amendment and says so.

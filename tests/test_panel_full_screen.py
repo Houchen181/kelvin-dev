@@ -18,8 +18,7 @@ PAGE = (STATIC / "index.html").read_text(encoding="utf-8")
 JS = (STATIC / "app.js").read_text(encoding="utf-8")
 CSS = (STATIC / "app.css").read_text(encoding="utf-8")
 PANELS = {"termpane": "close-term", "runpane": "close-runs", "edpane": "close-editor",
-          "anpane": "close-analysis", "labpanel": "close-lab", "teampanel": "close-team",
-          "nbpanel": "close-notebook"}
+          "anpane": "close-analysis", "labpanel": "close-lab", "teampanel": "close-team"}
 
 
 def _js(name):
@@ -220,17 +219,20 @@ def test_a_panel_in_full_screen_keeps_its_content_in_homes_column():
 
 def test_a_full_screen_panels_regions_reach_across_the_side_space():
     """The column is held inside what scrolls, not around it, so the wheel scrolls a panel from the side space too: a
-    region that is the panel's body (the Analysis, the scan editor, Team chat's messages) keeps the whole width with
-    the column in its padding; the Lab's body holds the column in its padding and its outer parts reach out over the
+    region that is the panel's body (the Analysis pane's two views, each its bar and its body; the scan editor; Team
+    chat's messages) keeps the whole width with the column in its padding; the Lab's body holds the column in its padding and its outer parts reach out over the
     side space (--full-side, measured on the Lab with cqw); the Runs pane's body keeps the whole width, the Scan's
     measurement keeps the column and its list holds it in its padding."""
     css = re.sub(r"/\*.*?\*/", "", CSS, flags=re.S)
     side = "calc((100% - 1440px - 2 * var(--pad-page, 24px)) / 2"
-    assert ("#app.full:not(.full-term) .full-on > :is(#an-body, #ed-body) { margin-inline: 0;\n"
+    assert "#app.full:not(.full-term) .full-on > .pane-view { margin-inline: 0; }" in css
+    assert ("#app.full:not(.full-term) .full-on > .pane-view > :is(.pane-bar, .pane-body),\n"
+            "#app.full:not(.full-term) .full-on > #ed-body { margin-inline: 0;\n"
             "  padding-inline: max(14px, %s + 14px)); }" % side) in css
     assert ("#app.full:not(.full-term) #teampanel > .team-list { margin-inline: 0;\n"
             "  padding-inline: max(var(--sp-3, 12px), %s + var(--sp-3, 12px))); }" % side) in css
-    assert re.search(r"\n\.an-body \{ padding: 12px 14px 20px;", css) and re.search(r"\n\.ed-body \{[^}]*padding: 10px 14px 12px;", css)
+    assert re.search(r"\n\.an-body \{ padding: 6px 14px 20px;", css)
+    assert re.search(r"\n\.pane-bar \{[^}]*padding: 10px 14px 4px;", css) and re.search(r"\n\.ed-body \{[^}]*padding: 10px 14px 12px;", css)
     assert "#teampanel .team-list { padding: var(--sp-1, 4px) var(--sp-3, 12px) var(--sp-3, 12px); }" in css
     assert "--full-side: max(0px, calc((100cqw - 1440px - 2 * var(--pad-page, 24px)) / 2));" in css
     assert "#labpanel { container: lab / inline-size;" in css   # cqw is the Lab's width

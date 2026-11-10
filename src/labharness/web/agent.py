@@ -928,10 +928,10 @@ class ChatAgent:
         await emit({"type": "analysis", "spec": spec, "result": result, "steps": analyst.steps(spec, result)})
         return workbench.describe(result) + "\n(The Analysis panel shows it, with its steps.)", False
 
-    # ------------------------------------------------------------------ the Notebook panel's subagent (notebook.py)
+    # ------------------------------------------------------------------ the Notebook's subagent (notebook.py)
 
     async def draft_entry(self, day: str, model_key: str, emit: Emit) -> None:
-        """The Notebook panel's subagent drafts a day's entry (web/notebook.py), told to the panel as it works: a step
+        """The Notebook's subagent drafts a day's entry (web/notebook.py), told to the panel as it works: a step
         at each lookup, then done {entry, said}. It reads as a viewer who sees shared work only, with its model kept
         on the entry; Kelvin's code checks its numbers as write_entry does. With no model, it says so."""
         from . import notebook as subagent
@@ -961,6 +961,9 @@ class ChatAgent:
         except asyncio.TimeoutError:
             await emit({"type": "error", "message": "The draft took more than %d minutes and was stopped."
                                                     % (subagent.DRAFT_S // 60)})
+            return
+        except Exception as e:   # the model's provider failed (its key, its limits, the network): said, never silent
+            await emit({"type": "error", "message": "The draft stopped: %s" % (str(e) or type(e).__name__)})
             return
         if found is None:
             await emit({"type": "error", "message": "The model gave no draft."})

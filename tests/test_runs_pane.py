@@ -44,7 +44,8 @@ def test_the_header_is_scan_and_sequence_and_the_scan_shows_the_measurement_now(
     assert 'id="close-runs"' in header and 'data-pane="runpane"' in header
     assert 'id="open-report"' not in header   # Report… is the Analysis pane's: the runs are there
     report = PAGE[PAGE.index('<section id="anpane"'):PAGE.index('<section id="runpane"')]
-    assert 'id="open-report"' in report[:report.index("</header>")]
+    view = report[report.index('<div id="an-view"'):report.index('<div id="nb-view"')]   # its Analysis view's bar
+    assert 'id="open-report"' in view[:view.index('<div id="an-body"')]
     for gone in ("open-runs", "open-scans", "open-queue", 'id="runs-view"', "runs-history", "runs-menu", "seqpane",
                  "toggle-seq", "close-seq", "open-history", "history-view", "run-tabs", "runs-list", "runs-filter",
                  "runs-items", "allRunsTab", "showRunList", "loadRunList", "renderRunList", "tabsRow", "← All runs"):

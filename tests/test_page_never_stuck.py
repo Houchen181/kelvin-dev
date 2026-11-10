@@ -485,8 +485,9 @@ def test_the_analysis_stream_ends_when_its_pane_closes_and_starts_again_when_it_
     toggle = js_function("toggleAnalysis")
     closing = toggle[toggle.index("if (!ANA.open) {"):toggle.index("return;", toggle.index("if (!ANA.open) {"))]
     assert "ANA.ctl.abort();" in closing and "cut: true" in closing
-    assert "if (!ANA.run || ANA.follow) startAnalysis();" in toggle
-    assert "else if (ANA.job && ANA.job.cut && ANA.job.run === ANA.run) analyzeRun(ANA.run);" in toggle
+    shown = js_function("anViewShown")   # what the Analysis view starts as it shows (the pane opened, or chosen)
+    assert "anViewShown();" in toggle and "if (!ANA.run || ANA.follow) startAnalysis();" in shown
+    assert "else if (ANA.job && ANA.job.cut && ANA.job.run === ANA.run) analyzeRun(ANA.run);" in shown
 
 
 def test_stop_says_stopping_at_once_and_a_stop_that_failed_is_said_and_tried_again():
