@@ -92,7 +92,8 @@ def test_the_hubs_models_show_while_it_offers_them(tmp_path):
                                                                       "hub-anthropic:claude-sonnet-5-5"]
     assert groups["hub-anthropic"]["label"] == "Claude · Kelvin hub" and "missing_key" not in groups["hub-anthropic"]
     assert listed["hub"] == {"month": "2026-10", "spent": 3.2, "budget": 20.0, "renews": "November 1", "lab": None,
-                             "needs_consent": None, "consent_url": None}   # an older hub doesn't say
+                             "needs_consent": None, "consent_url": None, "consent_version": None,
+                             "terms_url": None, "privacy_url": None}   # an older hub doesn't say
     assert len(asked) == 1                                                    # one asking for all four
     assert resolve_model("opus", lambda s: s in groups) == "hub-anthropic:claude-opus-5-5"
 

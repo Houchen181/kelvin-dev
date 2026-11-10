@@ -58,7 +58,7 @@ from .agent import Busy, ChatAgent, runs_in, typed_stop
 from . import browse, labops, review, rules as rulebook
 from .chatgpt import SignIn, SignInError
 from . import notices as person_notices
-from .hubsync import SYNC_EVERY as HUB_EVERY, HubLink
+from .hubsync import SYNC_EVERY as HUB_EVERY, HubLink, terms_of
 from .relay import RelayLink
 from .remote import (API as PHONE_API, Remote, addresses, allow_through_firewall, allowed, firewall_state,
                      remote_host_ok)
@@ -722,7 +722,6 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 "busy": busy, "busy_user": runtime.user if busy else None,
                 "legacy": not listed and has_legacy(home) and not accounts.legacy_taken(),
                 "central": on, "hub": hub_address(), "account_url": hub_address() + "/account" if on else None,
-                "hub_sharing": HUB_SHARING and on,   # said on Create account, before the person agrees to the terms
                 "unlinked": accounts.unlinked() if on else [],
                 "relay": dict(relay_link.view(), on=settings.get("phone_relay") != "off") if on else None,
                 "setup": setup_brief()}
@@ -1125,7 +1124,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if online and answer and answer.get("access_token"):
             settings.put_secret("account_token", answer["access_token"])   # encrypted with their password
             relay_wake()   # sign_in's wake can reach the relay before the token is kept: look again with it
-            hub.wait_for_terms(hub_address() + "/consent" if answer.get("needs_consent") else "")
+            hub.wait_for_terms(terms_of(hub_address(), answer) if answer.get("needs_consent") else None)
             hub_wake()     # sharing goes on with this token: signing in replaced the one before on the hub
             if providers is None:   # and the hub's models (hubmodels.py) come with this token, not the one before:
                 agent.providers = make_providers(settings, signin)   # signing in replaced that one on the hub
@@ -1133,6 +1132,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return {"signed_in": True, "offline": not online,
                 "keys_sealed": before is None and unreadable(accounts.dir(account), settings.cipher) > 0,
                 "needs_consent": bool((answer or {}).get("needs_consent")),
+                # the terms to agree to on the sign-in screen, here in Kelvin (POST /api/hub/terms)
+                "terms": terms_of(hub_address(), answer) if (answer or {}).get("needs_consent") else None,
                 "account_url": (answer or {}).get("account_url") or hub_address() + "/account"}
 
     async def central_call(fn: Any, *args: Any) -> Response:
@@ -2062,6 +2063,33 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """Sharing on the person's hub: whether it is on, who they are there, what of theirs is there and the last
         sync. Never the token."""
         return JSONResponse(await asyncio.to_thread(hub.status))
+
+    async def hub_terms(request: Request) -> Response:
+        """The person agrees here in Kelvin to the Kelvin hub's terms in force (the sign-in screen, the notice when they
+        change, Settings → Account), never on a page of the hub's they would sign in to: {version}, the version Kelvin
+        showed them. The hub keeps it with their account through their sign-in's token, and Kelvin shares at once.
+        409: the terms changed again ("terms": the ones in force now); 404: an older hub, which takes the agreement
+        on its own page only ("terms".consent_url)."""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        version = str(body.get("version") or "").strip() if isinstance(body, dict) else ""
+        if not version:
+            return error(400, "send {version}: the version of the terms shown")
+        token = settings.get("account_token") if central_on() else None
+        if not token:
+            return error(409, "Sign in with your Kelvin account to agree to the Kelvin hub's terms.")
+        try:
+            answer = await asyncio.to_thread(central.Central(hub_address()).agree, token, version)
+        except central.Unreachable as e:
+            return error(503, str(e))
+        except central.CentralError as e:
+            status = e.status if e.status in (401, 403, 404, 409) else 400
+            return JSONResponse({"error": str(e), "terms": terms_of(hub_address(), e.body)}, status_code=status)
+        hub.wait_for_terms(None)
+        hub_wake()   # it shares now
+        return JSONResponse({"agreed": str((answer or {}).get("agreed") or version)})
 
     async def hub_sync(request: Request) -> Response:
         """Sync now (switched off: take back now what was shared), and say how it went."""
@@ -4595,6 +4623,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/chatgpt/welcomed", chatgpt_welcomed, methods=["POST"]),
         Route("/api/hub", hub_view),
         Route("/api/hub/sync", hub_sync, methods=["POST"]),
+        Route("/api/hub/terms", hub_terms, methods=["POST"]),
         Route("/api/services", services_view, methods=["GET", "POST"]),
         Route("/api/services/{service_id}", service_view, methods=["DELETE", "PATCH"]),
         Route("/api/services/{service_id}/test", service_test, methods=["POST"]),

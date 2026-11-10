@@ -361,21 +361,22 @@
   function showCentral(session) {   // central Kelvin accounts: one account, every computer (central.py)
     const say = (text, bad) => { $("signin-msg").textContent = text || ""; $("signin-msg").classList.toggle("bad", !!bad); };
     const parts = ["signin-people", "signin-pass", "signin-new", "signin-add", "central-signin", "central-new", "central-link",
-      "central-rekey", "central-create", "signin-remove", "signin-remove-link"];
-    const view = (mode) => {   // signin | new | link | rekey | remove
+      "central-rekey", "central-create", "signin-remove", "signin-remove-link", "central-terms"];
+    const view = (mode) => {   // signin | new | link | rekey | remove | terms
       const shown = { signin: ["signin-people", "central-signin", "central-create"].concat((session.accounts || []).length ? ["signin-remove-link"] : []),
-        new: ["central-new"], link: ["central-link"], rekey: ["central-rekey"], remove: ["signin-remove"] }[mode];
+        new: ["central-new"], link: ["central-link"], rekey: ["central-rekey"], remove: ["signin-remove"],
+        terms: ["central-terms"] }[mode];
       for (const id of parts) $(id).hidden = !shown.includes(id);
       $("signin-title").textContent = { signin: "Sign in to Kelvin", new: "Create a Kelvin account", link: "Welcome to this computer",
-        rekey: "Keep your API keys?", remove: "Remove someone from this computer" }[mode];
+        rekey: "Keep your API keys?", remove: "Remove someone from this computer", terms: "The Kelvin hub's terms changed" }[mode];
       $("signin-sub").textContent = "";
       if (mode === "signin") (($("c-email").value ? $("c-password") : $("c-email"))).focus();
       if (mode === "new") $("cn-name").focus();
       if (mode === "rekey") $("rekey-old").focus();
+      if (mode === "terms") $("ct-consent").focus();
     };
     $("cn-terms").href = session.hub + "/terms";
     $("cn-privacy").href = session.hub + "/privacy";
-    $("cn-sharing").hidden = !session.hub_sharing;   // what Kelvin shares with the Kelvin team, said before agreeing
     const known = (session.accounts || []).filter((a) => a.email);
     $("signin-people").replaceChildren(...known.map((p) => {
       const name = p.display || p.name;
@@ -391,8 +392,35 @@
         return;
       }
       if (r.registered) { say(r.message || "Check your email to confirm your address, then sign in.", false); view("signin"); return; }
+      if (r.needs_consent && r.terms && r.terms.consent_version) { showTerms(r); return; }   // agreed to here, signing in
       if (r.keys_sealed) { view("rekey"); return; }
       location.reload();
+    };
+    // the hub's terms in force, when the person's agreement is to older ones: agreed to here, as part of signing in,
+    // never on a page of the hub's (POST /api/hub/terms); Not now goes on, and the notice at the top waits for it.
+    // An older hub says no version: the notice at the top sends them to its page as before
+    const showTerms = (r) => {
+      const t = r.terms, next = () => after(Object.assign({}, r, { needs_consent: false }));
+      $("ct-terms").href = t.terms_url;
+      $("ct-privacy").href = t.privacy_url;
+      $("ct-consent").checked = false;
+      $("ct-agree").disabled = true;
+      $("ct-consent").onchange = () => { $("ct-agree").disabled = !$("ct-consent").checked; };
+      $("central-terms").onsubmit = async (e) => {
+        e.preventDefault();
+        say("Agreeing…");
+        try { await api("/api/hub/terms", { body: { version: t.consent_version } }); }
+        catch (err) {   // changed again meanwhile: the ones in force now, to read first
+          if (err.status === 409 && err.data && err.data.terms) showTerms(Object.assign({}, r, { terms: err.data.terms }));
+          say(err.message, true);
+          return;
+        }
+        say("");
+        next();
+      };
+      $("ct-later").onclick = () => { say(""); next(); };
+      say("");
+      view("terms");
     };
     const send = async (extra) => {
       say(pending.path === "/api/accounts" ? "Making your account…" : "Signing in…");
@@ -4592,7 +4620,7 @@
   // ------------------------------------------------------------------ sharing with the Kelvin team (hubsync.py)
   // over the person's Kelvin account sign-in: on unless switched off (Settings → Account), once they agreed to the
   // hub's terms. Only chats and run records go, never data files
-  const HUB = { st: null, on: false, timer: 0 };
+  const HUB = { st: null, on: false, timer: 0, terms: null };   // terms: the hub's new terms while they wait (hubTerms)
   function hubSyncText(st) {
     const n = (k, one, many) => (k ? k + " " + (k === 1 ? one : many) : "");
     const there = st.on_hub || {};
@@ -4628,11 +4656,12 @@
     let text;
     if (!st.signed_in) text = "Sharing with the Kelvin team needs a Kelvin account: Kelvin shares nothing for this one.";
     else if (st.problem) text = st.problem;
-    else if (a) text = a.name + " (" + a.email + ")" + (a.needs_consent ? ". The hub's terms changed: agree to them there, and Kelvin goes on sharing" : "");
+    else if (a) text = a.name + " (" + a.email + ")" + (a.needs_consent ? ". The hub's terms changed: Kelvin shares again once you agree" : "");
     else text = st.url;
     $("hub-status").textContent = text;
     $("hub-actions").hidden = !st.signed_in;
-    $("hub-account").href = a ? (a.needs_consent ? a.consent_url : a.account_url) : (st.url ? st.url + "/account" : "#");
+    $("hub-account").href = a ? a.account_url : (st.url ? st.url + "/account" : "#");
+    $("hub-agree").hidden = !(a && a.needs_consent);   // agreed to here (openTerms), never on the hub's page
     $("hub-sync").textContent = st.sharing ? "Sync now" : "Take back now";
     $("hub-sync").hidden = !st.sharing && !st.taking_back;
     $("hub-sync-status").textContent = st.signed_in ? hubSyncText(st) : "";
@@ -4662,10 +4691,44 @@
     } catch (e) { $("share-status").textContent = e.message; throw e; }
   }
   // the notice row's bar while the hub waits for the person to agree to its new terms before Kelvin shares (the poll's
-  // hub_terms); it goes once they agreed (looked for after Read and agree) or switched sharing off
+  // hub_terms: hubsync.terms_of); it goes once they agreed (Read and agree: openTerms) or switched sharing off
   function hubTerms(t) {
+    HUB.terms = t || null;
     $("hub-terms-bar").hidden = !t;
-    if (t) $("hub-terms-agree").href = t.consent_url;
+  }
+  // the hub's new terms, agreed to here in Kelvin, never on a page of the hub's they would sign in to (POST
+  // /api/hub/terms): from the notice's Read and agree, Settings → Account, or Settings → Models while the hub's models
+  // wait for them. t: the terms (hubsync.terms_of), else as the hub says them now. An older hub, which says no version,
+  // takes the agreement on its own page only: there, as before
+  async function openTerms(t) {
+    if (!t || !t.consent_version) {
+      try { const st = await api("/api/hub"); if (st.account && st.account.needs_consent) t = st.account; } catch (e) { /* as known */ }
+    }
+    if (!t) return;
+    if (!t.consent_version) { if (t.consent_url) { window.open(t.consent_url, "_blank", "noopener"); watchTerms(); } return; }
+    $("terms-read").href = t.terms_url;
+    $("terms-privacy").href = t.privacy_url;
+    $("terms-consent").checked = false;
+    $("terms-agree").disabled = true;
+    $("terms-msg").textContent = "";
+    $("terms-dialog").dataset.version = t.consent_version;
+    if (!$("terms-dialog").open) $("terms-dialog").showModal();
+  }
+  async function agreeTerms() {
+    $("terms-agree").disabled = true;
+    $("terms-msg").textContent = "Agreeing…";
+    try { await api("/api/hub/terms", { body: { version: $("terms-dialog").dataset.version } }); }
+    catch (e) {   // changed again meanwhile: the ones in force now, to read first
+      if (e.status === 409 && e.data && e.data.terms) await openTerms(e.data.terms);
+      else $("terms-agree").disabled = !$("terms-consent").checked;
+      $("terms-msg").textContent = e.message;
+      return;
+    }
+    $("terms-dialog").close();
+    hubTerms(null);
+    if ($("settings-dialog").open) loadHub();   // Settings → Account says so
+    try { const b = await api("/api/bootstrap"); applyModels(b.models.groups, b.default_model, b.auto_model, b.models.hub); }
+    catch (e) { /* the hub's models come back on the next look */ }
   }
   function watchTerms() {
     clearInterval(HUB.timer);
@@ -9022,9 +9085,9 @@
     if (!el) return;
     el.hidden = !hub;
     if (!hub) return;
-    if (hub.needs_consent) {   // the hub's terms changed: its models wait until the person agrees (hub/llm.py)
+    if (hub.needs_consent) {   // the hub's terms changed: its models wait until the person agrees, here (openTerms)
       el.replaceChildren("Kelvin hub models wait until you ",
-        h("a", { href: hub.consent_url, target: "_blank", rel: "noopener noreferrer" }, "agree to the hub's new terms"), ".");
+        h("button", { class: "link", type: "button", onclick: () => openTerms(hub) }, "agree to the hub's new terms"), ".");
       return;
     }
     el.textContent = "Kelvin hub models: $" + Number(hub.spent || 0).toFixed(2) + " of $" + Number(hub.budget).toFixed(2) +
@@ -10744,7 +10807,10 @@
     $("chatgpt-signout").addEventListener("click", signOutChatGPT);
     $("hub-sync").addEventListener("click", syncHub);
     swFlip($("hub-share"), setHubShare);
-    $("hub-terms-agree").addEventListener("click", watchTerms);
+    $("hub-terms-agree").addEventListener("click", () => openTerms(HUB.terms));
+    $("hub-agree").addEventListener("click", () => openTerms(HUB.st && HUB.st.account));
+    $("terms-consent").addEventListener("change", () => { $("terms-agree").disabled = !$("terms-consent").checked; });
+    $("terms-agree").addEventListener("click", agreeTerms);
     $("hub-terms-off").addEventListener("click", () => { openSettings(); settingsPage("account"); });
     $("collection-sync").addEventListener("click", () => loadCollection(true));
     $("svc-add").addEventListener("click", addService);

@@ -369,20 +369,31 @@ def test_nothing_is_shared_before_the_hubs_new_terms_are_agreed_to(tmp_path, mon
     s = k.link.sync_once()
     assert not s["ok"] and s["consent"] and "terms changed" in s["error"]
     assert hub.shared_with(1)["chats"] == [] and "Waiting" not in on_the_hub(hub)   # nothing went
-    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == {"consent_url": HUB + "/consent"}
+    waiting = {"consent_url": HUB + "/consent", "consent_version": "2099-01-01", "terms_url": HUB + "/terms",
+               "privacy_url": HUB + "/privacy"}   # agreed to here, in Kelvin
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == waiting
 
     k.client.delete("/api/session", headers=k.h)
-    assert sign_in(k)["needs_consent"] is True                         # the sign-in says so too, before any sync
-    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == {"consent_url": HUB + "/consent"}
+    signed = sign_in(k)
+    assert signed["needs_consent"] is True and signed["terms"] == waiting   # the sign-in screen asks, before any sync
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == waiting
     k.client.post("/api/settings", headers=k.h, json={"hub_share": "off"})
     assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] is None   # off: nothing waits for them
     k.client.post("/api/settings", headers=k.h, json={"hub_share": "on"})
     assert k.client.get("/api/state", headers=k.h).json()["hub_terms"]
 
-    hub.give_consent(1)                                                # agreed on the hub's page
-    st = k.client.get("/api/hub", headers=k.h).json()                  # Kelvin looks again (after Read and agree)
+    st = k.client.get("/api/hub", headers=k.h).json()
+    assert st["account"]["needs_consent"] is True and st["account"]["consent_version"] == "2099-01-01"
+    r = k.client.post("/api/hub/terms", headers=k.h, json={"version": "2026-11-08"})   # not the terms in force
+    assert r.status_code == 409 and r.json()["terms"] == waiting
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] == waiting   # still waiting for them
+    assert k.client.post("/api/hub/terms", headers=k.h, json={}).status_code == 400
+    r = k.client.post("/api/hub/terms", headers=k.h, json={"version": "2099-01-01"})   # agreed here, in Kelvin
+    assert r.status_code == 200 and r.json() == {"agreed": "2099-01-01"}
+    assert hub.user(1)["consent_version"] == "2099-01-01"
+    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] is None   # the bar goes at once
+    st = k.client.get("/api/hub", headers=k.h).json()
     assert st["account"]["needs_consent"] is False
-    assert k.client.get("/api/state", headers=k.h).json()["hub_terms"] is None
     s = k.link.sync_once()
     assert s["ok"] and s["sent"]["chats"] == 1
 
@@ -459,20 +470,24 @@ def test_without_a_kelvin_account_nothing_is_shared(tmp_path, monkeypatch):
     assert solo.link.sync_once() is None and "Solo" not in on_the_hub(hub)
 
 
-def test_create_account_says_what_kelvin_shares_before_anyone_agrees(tmp_path, monkeypatch):
-    """Kelvin's own Create account says what goes to the Kelvin team, by the box that agrees to the hub's terms; a
-    computer whose people sign in to no hub says nothing of it."""
+def test_create_account_leaves_what_kelvin_shares_to_the_terms(tmp_path, monkeypatch):
+    """Asked for 2026-11-09 ("fold all these into the terms or privacy"): Kelvin's own Create account has the box
+    that agrees to the hub's terms and privacy notice, and nothing beside it; what goes to the Kelvin team, how to
+    switch it off and what never goes are said on the hub's pages the box links to."""
     hub, browser = the_hub(tmp_path, monkeypatch)
     k = portal(tmp_path, monkeypatch, browser)
-    assert k.client.get("/api/session", headers=k.h).json()["hub_sharing"] is True
+    assert "hub_sharing" not in k.client.get("/api/session", headers=k.h).json()
     static = Path(web_app.__file__).parent / "static"
     page = (static / "index.html").read_text(encoding="utf-8")
-    note = page[page.index('id="cn-sharing"'):page.index('id="cn-consent"')]
-    assert "Kelvin shares your chats and the records of your runs with the Kelvin team" in note
-    assert "Settings → Account" in note and "data files never go" in note
-    assert '$("cn-sharing").hidden = !session.hub_sharing' in (static / "app.js").read_text(encoding="utf-8")
-    local = portal(tmp_path / "local", monkeypatch, browser, hub_address="")
-    assert local.client.get("/api/session", headers=local.h).json()["hub_sharing"] is False
+    start = page.index('<form id="central-new"')
+    form = page[start:page.index("</form>", start)]
+    assert 'id="cn-consent" type="checkbox"' in form and "<p " not in form and "Kelvin shares" not in form
+    assert "cn-sharing" not in (static / "app.js").read_text(encoding="utf-8")
+    terms, privacy = browser.get("/terms").text, browser.get("/privacy").text
+    assert "Kelvin shares your work here unless you switch it off" in terms and "Settings → Account" in terms
+    never = privacy[privacy.index("What never reaches it"):]
+    for gone in ("incognito chats", "model-limited projects", "runs' data files"):
+        assert gone in never[:400], gone
 
 
 def test_a_connection_of_its_own_from_before_is_dropped(tmp_path, monkeypatch):

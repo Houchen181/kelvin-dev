@@ -724,7 +724,7 @@ def test_a_sync_that_only_removes_needs_no_new_terms(tmp_path):
     hub.config["consent_version"] = "2099-01-01"
     with pytest.raises(hubdb.NeedsConsent) as asked:
         hub.sync(app, {"chats": [{"id": "bbbbbbbbbbbb", "title": "new", "messages": []}]})
-    assert asked.value.status == 403 and "/consent" in str(asked.value)
+    assert asked.value.status == 403 and "Agree to them in Kelvin" in str(asked.value)   # never a page of the hub's
     hub.sync(app, {"chats": []})                               # nothing to take: fine
     done = hub.sync(app, {"removed": {"chats": ["aaaaaaaaaaaa"], "runs": ["run1"]}})
     assert done["removed"] == 2 and hub.shared_with(ada["id"]) == {"projects": [], "chats": [], "runs": []}

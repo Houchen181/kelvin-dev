@@ -147,6 +147,13 @@ class Central:
         return self._post("/api/register", {"name": name, "email": email, "password": password,
                                             "consent": bool(consent), "installation": kelvin(installation)})
 
+    def agree(self, token: str, version: str) -> Dict[str, Any]:
+        """The person agrees here in Kelvin to the hub's terms of this version (the one Kelvin showed them), and the
+        hub keeps it with their account. CentralError 409: the terms changed again (its body has them); 404: an older
+        hub that takes the agreement on its own page only."""
+        return self._post("/api/consent", {"version": version}, token,
+                          missing="This Kelvin hub takes the agreement on its own page only: %s/consent" % self.base_url)
+
     def reset(self, email: str) -> None:
         self._post("/api/reset", {"email": email})
 
