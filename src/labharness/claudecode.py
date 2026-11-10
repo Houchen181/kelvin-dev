@@ -5,11 +5,10 @@ Two uses:
 - operate_computer: Claude Code works the screen, mouse and keyboard through Kelvin's screen tools (screen.py), for
   programs without an API (vendor software, web pages, dialogs).
 
-Anthropic does not let third-party apps route requests through people's Claude plans, so this exists only on the
-developer's own computer: when Kelvin runs from source, or in a private build that has _private_bridge.py (made by
-packaging/private_build.md, never published). Kelvin starts the unmodified `claude` program and never reads, stores
-or passes on Claude credentials. Removing it: delete this file, screen.py, the provider, and the code marked
-"Claude Code bridge" (web/app.py, web/agent.py, web/settings.py, the Settings section, packaging/kelvin_app.py)."""
+Every Kelvin has it since 0.3.50: from source, the private build and the published app. Kelvin starts the unmodified
+`claude` program the person installed and signed in to themselves, and never reads, stores or passes on Claude
+credentials. Removing it: delete this file, screen.py, the provider, and the code marked "Claude Code bridge"
+(web/app.py, web/agent.py, web/settings.py, the Settings section, packaging/kelvin_app.py)."""
 from __future__ import annotations
 
 import asyncio
@@ -26,25 +25,35 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 
 def enabled() -> bool:
-    """Is the bridge part of this copy of Kelvin? From source yes; frozen only in the private build."""
-    from .edition import private
-    return private()
+    """Is the bridge part of this copy of Kelvin? Yes, in every build; published builds have it since 0.3.50."""
+    return True
+
+
+MAC_BIN = ("/opt/homebrew/bin", "/usr/local/bin")   # where Homebrew (Apple silicon, Intel) and npm put programs
 
 
 def find_cli(configured: str = "") -> Optional[str]:
-    """The `claude` program: the path chosen in Settings, else on PATH, else where the native installer puts it."""
+    """The `claude` program: the path chosen in Settings, else on PATH, else where the native installer puts it, and
+    on a Mac where Homebrew and npm put it (an app there starts with a short PATH)."""
     exe = "claude.exe" if sys.platform.startswith("win") else "claude"
-    for c in (configured.strip(), shutil.which("claude"), str(Path.home() / ".local" / "bin" / exe)):
+    places = [configured.strip(), shutil.which("claude"), str(Path.home() / ".local" / "bin" / exe)]
+    if sys.platform == "darwin":
+        places += [d + "/claude" for d in MAC_BIN]
+    for c in places:
         if c and Path(c).is_file():
             return c
     return None
 
 
 def child_env() -> Dict[str, str]:
-    """The person's own sign-in, not an API key that happens to be in Kelvin's environment."""
+    """The person's own sign-in, not an API key that happens to be in Kelvin's environment. On a Mac, Homebrew's and
+    npm's places join PATH: an npm install's `claude` runs `node` from there."""
     env = dict(os.environ)
     for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         env.pop(k, None)
+    if sys.platform == "darwin":
+        have = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+        env["PATH"] = os.pathsep.join(have + [d for d in MAC_BIN if d not in have])
     return env
 
 

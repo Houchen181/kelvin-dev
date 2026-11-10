@@ -1,6 +1,7 @@
 """The temporary Claude Code bridge: chats through the person's own `claude`, and Claude operating the screen."""
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -412,7 +413,7 @@ def test_claude_code_errors_are_reported(tmp_path, monkeypatch):
     assert claudecode.status(FAKE) == {"signed_in": True, "method": "claude.ai"}
 
 
-def test_only_on_the_developers_computer(tmp_path, monkeypatch):
+def test_in_every_build_and_each_person_can_switch_it_off(tmp_path, monkeypatch):
     fake_cli = tmp_path / "claude.exe"
     fake_cli.write_text("x")
     settings = Settings(tmp_path / "settings.json")
@@ -422,7 +423,17 @@ def test_only_on_the_developers_computer(tmp_path, monkeypatch):
     assert "claudecode" not in make_providers(settings)             # ...and the person can switch it off
     settings.update({"claude_code": "on"})
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    assert not claudecode.enabled() and "claudecode" not in make_providers(settings)   # a published build: never
+    assert claudecode.enabled() and "claudecode" in make_providers(settings)   # a published build too (0.3.50)
+
+
+def test_a_mac_app_finds_claude_where_homebrew_and_npm_put_it(monkeypatch):
+    monkeypatch.setattr(claudecode.sys, "platform", "darwin")
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
+    path = claudecode.child_env()["PATH"].split(os.pathsep)   # an app there starts with a short PATH
+    assert path == ["/usr/bin", "/bin", "/opt/homebrew/bin", "/usr/local/bin"]   # npm's claude runs node from there
+    monkeypatch.setattr(claudecode.shutil, "which", lambda name: None)
+    monkeypatch.setattr(claudecode.Path, "is_file", lambda self: self.as_posix() == "/opt/homebrew/bin/claude")
+    assert claudecode.find_cli("") == "/opt/homebrew/bin/claude"
 
 
 def operate(runtime, store, steps, slow=False, answers=(True,)):

@@ -150,12 +150,10 @@ def test_the_app_takes_no_keys_of_its_own(tmp_path, monkeypatch):
                                              "hub-opencode-go", "local"}
 
 
-def test_the_private_build_keeps_the_bridge_but_not_keys(monkeypatch):
-    import sys
-    import types
+def test_every_build_has_the_bridge_but_takes_no_keys(monkeypatch):
+    from labharness import claudecode
     monkeypatch.setattr(edition.sys, "frozen", True, raising=False)
-    monkeypatch.setitem(sys.modules, "labharness._private_bridge", types.ModuleType("labharness._private_bridge"))
-    assert edition.private() and not edition.own_keys()
+    assert claudecode.enabled() and not edition.own_keys()
 
 
 def test_the_user_versions_settings_refuse_keys(parts, monkeypatch):

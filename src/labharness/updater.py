@@ -4,8 +4,8 @@
   collection, no source); private builds from the source repository, kelvin-dev, public too: no sign-in is needed.
   If GitHub refuses an anonymous look, Kelvin asks through the GitHub CLI (`gh`) signed in on this computer;
   Kelvin never sees its token.
-- Which: published builds follow published releases (vX.Y.Z); the private build follows private-vX.Y.Z
-  pre-releases (see claudecode.py). Only a newer version is taken.
+- Which: published builds follow published releases (vX.Y.Z); the private build, which has _private_build.py
+  (release.yml writes it for private-v tags), follows private-vX.Y.Z pre-releases. Only a newer version is taken.
 - Checked: the download's SHA-256 must match the digest GitHub reports for that file, or it is thrown away.
 - Installed: on Windows by the installer, silently, into the same folder with the same app id, so it replaces the
   copy that is there and never adds a second one. It runs after Kelvin closes: when the person quits (automatic
@@ -59,7 +59,7 @@ def version(text: str) -> Tuple[int, ...]:
 
 def channel() -> str:
     try:
-        from . import _private_bridge  # noqa: F401  (only in the private build)
+        from . import _private_build  # noqa: F401  (only in the private build: release.yml writes it)
         return "private"
     except ImportError:
         return "stable"

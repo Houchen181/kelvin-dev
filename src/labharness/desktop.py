@@ -172,7 +172,7 @@ def _self_test(port: int, key: str) -> int:
             ok, extra = False, " (instrument environments FAILED: %s)" % (str(e).splitlines()[0][:300] if str(e)
                                                                            else type(e).__name__)
     message = "Kelvin self-test: %s (lab %r)%s" % ("ok" if ok else "FAILED", boot.get("lab"), extra)
-    if boot.get("claude_code"):   # Claude Code bridge: only in a private build, never in a published one
+    if boot.get("claude_code"):   # Claude Code bridge: in every build
         message += " (Claude Code bridge on)"
     log.info(message)
     print(message, flush=True)

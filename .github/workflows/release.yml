@@ -4,8 +4,8 @@ name: release
 # Houchen181/Kelvin (it holds the releases and the instrument collection; the source stays here). That needs the
 # secret PUBLIC_RELEASES_TOKEN: a fine-grained token with Contents read and write on Houchen181/Kelvin only.
 # Run it by hand (Actions > release > Run workflow) to only build and test.
-# A tag like private-v0.3.6 makes the private Windows build (the temporary Claude Code bridge, see
-# claudecode.py) as a pre-release, never "latest"; installed Kelvins with the bridge update from those.
+# A tag like private-v0.3.6 makes the private Windows build as a pre-release, never "latest": private Kelvins update
+# from those, published ones from v releases. Both have the Claude Code bridge (claudecode.py).
 on:
   push:
     tags: ["v*", "private-v*"]
@@ -37,7 +37,7 @@ jobs:
       - name: Mark the private build
         if: startsWith(github.ref, 'refs/tags/private-v')
         run: |
-          python -c "open('src/labharness/_private_bridge.py', 'w').write('# private build, the Claude Code bridge is in')"
+          python -c "open('src/labharness/_private_build.py', 'w').write('# the private build: it updates from private-v pre-releases')"
       - name: Build the app
         run: pyinstaller packaging/kelvin.spec --noconfirm --distpath dist --workpath build
       - name: Self-test the app
@@ -154,9 +154,8 @@ jobs:
           $log = Get-Content "$env:RUNNER_TEMP\kelvin-b\kelvin.log" -Raw
           $log
           if ($p.ExitCode -ne 0) { exit 1 }
-          # the Claude Code bridge is in the private build only, never in a published one
-          $private = "$env:GITHUB_REF" -like "refs/tags/private-v*"
-          if ($private -ne ($log -match "Claude Code bridge on")) { throw "the Claude Code bridge is in the wrong build" }
+          # the Claude Code bridge is in every build, published ones too (since 0.3.50)
+          if (-not ($log -match "Claude Code bridge on")) { throw "the Claude Code bridge is missing from the build" }
           # no build brings makers' instrument libraries: the app installs them into an environment and imports them
           if (-not ($log -match "instrument environments: ok")) { throw "instrument environments don't work in the app" }
       - name: Everything is signed, the installer and the installed app with its uninstaller
@@ -264,7 +263,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#private-v}"
-          printf '%s\n' "**Private build, not a release.** Kelvin $version for Windows with the temporary Claude Code bridge (chats on your own Claude plan, and Claude operating the computer). It installs over the Kelvin that is there, like any update, and keeps itself up to date from later private builds. Published releases never have the bridge: Anthropic's terms don't let apps route requests through other people's Claude plans." > notes.md
+          printf '%s\n' "**Private build, not a release.** Kelvin $version for Windows. It installs over the Kelvin that is there, like any update, and keeps itself up to date from later private builds." > notes.md
           gh release create "$GITHUB_REF_NAME" out/Kelvin-Setup-*-private.exe --repo "$GITHUB_REPOSITORY" \
             --prerelease --latest=false --title "Kelvin $version, private build (not a release)" --notes-file notes.md
       - name: The README's download, the newest private build under a fixed name (release private-latest)
@@ -277,7 +276,7 @@ jobs:
           # from it; they follow the numbered ones.
           version="${GITHUB_REF_NAME#private-v}"
           cp out/Kelvin-Setup-*-private.exe out/Kelvin-Setup-private.exe
-          printf '%s\n' "**The newest private build, not a release.** This is always Kelvin's newest private Windows build (now $version), with the temporary Claude Code bridge: the README's download link points here. Installed, it keeps itself up to date from the numbered private-v pre-releases. Published releases never have the bridge." > latest.md
+          printf '%s\n' "**The newest private build, not a release.** This is always Kelvin's newest private Windows build (now $version): the README's download link points here. Installed, it keeps itself up to date from the numbered private-v pre-releases." > latest.md
           title="Latest private build: Kelvin $version (not a release)"
           if gh release view private-latest --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release upload private-latest out/Kelvin-Setup-private.exe --clobber --repo "$GITHUB_REPOSITORY"
@@ -312,9 +311,8 @@ jobs:
           **macOS (Apple silicon):** download `Kelvin-…-macOS.zip`, unzip it, and move `Kelvin.app`
           to Applications. The app is not signed yet, so the first time, right-click it and choose **Open**.
 
-          Kelvin keeps its settings, API keys, chats and lab logs in `~/Kelvin` on your computer.
-          It starts with a simulated lab and a scripted demo model; add an API key under Settings
-          to talk to Claude, GPT or Gemini.
+          Kelvin keeps its settings and chats in `~/Kelvin` on your computer, and your runs, lab record
+          and reports in the data folder you choose.
           EOF
           gh release create "$GITHUB_REF_NAME" out/* --repo Houchen181/Kelvin --target main \
             --title "Kelvin ${GITHUB_REF_NAME#v}" --notes-file notes.md

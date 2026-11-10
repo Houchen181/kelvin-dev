@@ -166,6 +166,14 @@ def test_from_source_there_is_nothing_to_update(monkeypatch):
     assert updater.channel() == "stable" and updater.other_copy() is None   # not frozen
 
 
+def test_the_private_build_is_marked_where_the_updater_looks(monkeypatch):
+    import types
+    workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml").read_text("utf-8")
+    assert "open('src/labharness/_private_build.py', 'w')" in workflow   # written for private-v tags only
+    monkeypatch.setitem(sys.modules, "labharness._private_build", types.ModuleType("labharness._private_build"))
+    assert updater.channel() == "private"
+
+
 UNICODE_GH = '''
 import sys
 sys.stdout.buffer.write(%r)

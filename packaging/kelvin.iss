@@ -5,8 +5,8 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
-; /DSuffix=-private for the private build (the Claude Code bridge): same app id and folder, so it replaces the
-; installed Kelvin like any update; there is only ever one Kelvin on a computer
+; /DSuffix=-private for the private build (it updates from private-v pre-releases): same app id and folder, so it
+; replaces the installed Kelvin like any update; there is only ever one Kelvin on a computer
 #ifndef Suffix
   #define Suffix ""
 #endif
