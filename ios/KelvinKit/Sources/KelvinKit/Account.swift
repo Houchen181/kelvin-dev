@@ -21,6 +21,11 @@ public struct Account: Codable, Equatable, Sendable {
     /// update of the app when the hub moves to its permanent server.
     public static let defaultHub = URL(string: "https://kelvin.tail269ee5.ts.net")!
 
+    /// The hub's privacy notice and terms (hub/server.py), linked in the app: App Review wants the privacy policy
+    /// reachable inside the app, not only on the App Store page.
+    public static func privacyNotice(_ hub: URL) -> URL { hub.appendingPathComponent("privacy") }
+    public static func terms(_ hub: URL) -> URL { hub.appendingPathComponent("terms") }
+
     public init(hub: URL, email: String, name: String, phoneID: String) {
         self.hub = hub
         self.email = email

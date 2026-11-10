@@ -164,6 +164,9 @@ struct WelcomeView: View {
             Button("Try a demo lab") { app.startDemo() }
                 .buttonStyle(.borderless)
             Spacer()
+            Link("Privacy notice", destination: Account.privacyNotice(app.account?.hub ?? app.lastHub))
+                .font(.footnote)
+                .accessibilityIdentifier("privacy-notice")
         }
         .padding(24)
         .failure($failure)

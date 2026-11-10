@@ -29,7 +29,7 @@ jobs:
     name: App (iOS Simulator)
     needs: kit
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Use the newest Xcode (the one TestFlight uploads are built with)
@@ -92,6 +92,68 @@ jobs:
         with:
           name: ios-screenshots
           path: shots
+          if-no-files-found: ignore
+      - name: App Store screenshots (6.9-inch iPhone, 13-inch iPad)
+        # The sizes App Store Connect takes for the store page, light, with a tidy status bar: the demo lab on the
+        # newest Pro Max iPhone and a 13-inch iPad (the app runs on iPad, so the store asks for both). An asset, not a
+        # test: a runner without such a simulator warns instead of failing the build.
+        continue-on-error: true
+        run: |
+          app=io.github.houchen181.kelvin
+          xcrun simctl shutdown all || true
+          cat > "$RUNNER_TEMP/pick.py" <<'EOF'
+          import json, re, subprocess, sys
+          devices = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"]))["devices"]
+          runtimes = sorted((k for k in devices if "iOS" in k), reverse=True)
+          for pattern in sys.argv[1:]:
+              for k in runtimes:
+                  for d in devices[k]:
+                      if re.search(pattern, d["name"]):
+                          print(d["udid"], re.sub(r"[^A-Za-z0-9]+", "-", d["name"]).strip("-"))
+                          sys.exit(0)
+          sys.exit("no simulator like " + " or ".join(sys.argv[1:]))
+          EOF
+          shot() {   # simulator, file, tab, what to open, more launch arguments
+            xcrun simctl terminate "$1" "$app" 2>/dev/null || true
+            xcrun simctl launch "$1" "$app" -KelvinDemo YES -KelvinTab "$3" -KelvinOpen "$4" "${@:5}"
+            sleep 8
+            xcrun simctl io "$1" screenshot "$2"
+          }
+          hall='{"y": "lockin.y", "steps": [{"op": "antisymmetrize"}], "fit": {"model": "linear"}}'
+          for want in "^iPhone [0-9]+ Pro Max$" "^iPad Pro 13-inch|^iPad Air 13-inch|12[.]9-inch"; do
+            read -r udid name < <(python3 "$RUNNER_TEMP/pick.py" "$want") || exit 1
+            out="store/$name"
+            mkdir -p "$out"
+            xcrun simctl boot "$udid" 2>/dev/null || true
+            xcrun simctl bootstatus "$udid" -b
+            xcrun simctl install "$udid" build/dd/Build/Products/Debug-iphonesimulator/Kelvin.app
+            xcrun simctl ui "$udid" appearance light
+            xcrun simctl status_bar "$udid" override --time 9:41 --dataNetwork wifi --wifiMode active --wifiBars 3 \
+              --cellularMode active --cellularBars 4 --batteryState charged --batteryLevel 100 || true
+            shot "$udid" "$out/1-lab.png" lab ""
+            shot "$udid" "$out/2-chat.png" chat demo-chat
+            shot "$udid" "$out/3-run.png" runs field-sweep-D3
+            shot "$udid" "$out/4-analysis.png" runs field-sweep-D3 -KelvinAnalysis "$hall"
+            shot "$udid" "$out/5-team.png" team ""
+            xcrun simctl shutdown "$udid" || true
+          done
+          # App Store Connect takes these sizes (portrait) and no transparency: anything else fails here, not there
+          sizes=" 1320x2868 1290x2796 1260x2736 2064x2752 2048x2732 "
+          for f in store/*/*.png; do
+            w=$(sips -g pixelWidth "$f" | awk '/pixelWidth/ {print $2}')
+            h=$(sips -g pixelHeight "$f" | awk '/pixelHeight/ {print $2}')
+            alpha=$(sips -g hasAlpha "$f" | awk '/hasAlpha/ {print $2}')
+            echo "$f: ${w}x${h}, alpha $alpha"
+            case "$sizes" in *" ${w}x${h} "*) ;; *) echo "::error::$f is ${w}x${h}: not a size App Store Connect takes"; exit 1;; esac
+            if [ "$alpha" = "yes" ]; then
+              sips -s format jpeg -s formatOptions best "$f" --out "${f%.png}.jpg" >/dev/null && rm "$f"
+            fi
+          done
+          echo "App Store screenshots: the app-store-screenshots artifact, one folder per device." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-store-screenshots
+          path: store
           if-no-files-found: ignore
       - if: failure()
         uses: actions/upload-artifact@v4
