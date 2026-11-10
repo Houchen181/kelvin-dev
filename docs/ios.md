@@ -148,7 +148,7 @@ The App Store takes the same build as TestFlight: a tag `ios-v*` uploads it, and
   • The lab's team chat
   • Past runs, their reports, and analysis with fits
 
-  You need Kelvin on a lab computer (Windows) and a Kelvin account. No lab yet? Try the demo lab on the first screen.
+  You need Kelvin on a lab computer (Windows or Mac) and a Kelvin account. No lab yet? Try the demo lab on the first screen.
 
   Kelvin's answers come from the AI model chosen on the lab computer. Before a chat first goes to an AI company, the app asks.
   ```
