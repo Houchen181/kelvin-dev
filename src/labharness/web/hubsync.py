@@ -2,7 +2,7 @@
 
 Sharing goes over the person's Kelvin account sign-in (central.py): the hub they sign in to, and the token it gave this
 computer for them (account_token in their settings, encrypted with their password). It has no connecting of its own,
-and it is on unless the person switches it off (Settings → Account: hub_share). Nothing goes before they agree to the
+and it is off unless the person switches it on (Settings → Account: hub_share). Nothing goes before they agree to the
 hub's terms: the hub refuses a sync until then, and the portal says so (brief()).
 
 While it is on, Kelvin sends what changed (docs/hub.md), and what was removed since:
@@ -16,7 +16,8 @@ projects with their chats and runs, incognito chats and the runs they started, a
 and Claude Code sign-ins.
 
 Switched off, Kelvin takes back from the hub what it shared there, then sends nothing. Switched on again, it shares
-everything once more.
+everything once more. Before Kelvin 0.3.51 it was on unless switched off, which kept nothing in the settings: for a
+person who never chose, Kelvin now takes back what it shared then, the same way.
 
 What was sent is remembered per person in hub-sync.json (ids and fingerprints, never content), with the hub account
 and computer it went to: only what changed goes again, also after the next sign-in, which brings a new token."""
@@ -279,8 +280,8 @@ class HubLink:
 
     @property
     def sharing(self) -> bool:
-        """The person's choice (Settings → Account): on unless switched off."""
-        return self.settings.get("hub_share") != "off"
+        """The person's choice (Settings → Account): off unless switched on."""
+        return self.settings.get("hub_share") == "on"
 
     def poke(self) -> None:
         """Sync soon (from the event loop)."""

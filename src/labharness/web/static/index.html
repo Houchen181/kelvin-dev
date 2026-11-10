@@ -135,7 +135,7 @@
       <!-- the Kelvin hub's new terms: Kelvin shares nothing until the person agrees here (Read and agree: the terms
            dialog), or switches sharing off (hubsync.py) -->
       <div id="hub-terms-bar" class="update-bar" role="status" hidden>
-        <span>The Kelvin hub's terms changed: Kelvin now shares your work with the Kelvin team.</span>
+        <span>The Kelvin hub's terms changed: Kelvin shares once you agree.</span>
         <button id="hub-terms-agree" class="link soft" type="button">Read and agree</button>
         <button id="hub-terms-off" class="link soft" type="button">Switch it off</button>
       </div>
@@ -681,7 +681,7 @@
             <div class="sw-row"><span id="relay-on-label">Let my phone reach this Kelvin through the hub while I'm signed in here</span>
               <button id="relay-on" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="relay-on-label"><span></span></button></div>
             <span class="hint">Sign in to the iPhone app with this account. Unshared work never goes through the hub.</span>
-            <!-- sharing with the Kelvin team (hubsync.py), in the same card: on unless switched off, acting at once; off
+            <!-- sharing with the Kelvin team (hubsync.py), in the same card: off unless switched on, acting at once; off
                  takes back what was shared -->
             <div id="share-row" class="share-row" hidden>
               <div class="field-row"><span class="field-label">Sharing with the Kelvin team</span><span id="share-status" class="hint"></span></div>
@@ -1322,7 +1322,7 @@
     <div id="project-sharing-field" class="field">
       <label class="field-label" for="project-sharing">On the Kelvin hub</label>
       <select id="project-sharing">
-        <option value="">Shared with the Kelvin team, with its chats and run records</option>
+        <option value="">Shared with the Kelvin team while sharing is on</option>
         <option value="unpublished">Unpublished: not shared</option>
         <option value="confidential">Confidential: not shared</option>
       </select>

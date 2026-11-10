@@ -1,5 +1,5 @@
-"""Sharing with the Kelvin team in the portal (hubsync.py): over the person's Kelvin account sign-in, on unless they
-switch it off (which takes back what was shared), run records without their files, nothing before the hub's terms
+"""Sharing with the Kelvin team in the portal (hubsync.py): over the person's Kelvin account sign-in, off unless they
+switch it on (switched off, it takes back what was shared), run records without their files, nothing before the hub's terms
 are agreed to, and never what is unpublished, confidential, model-limited or incognito."""
 import json
 import logging
@@ -91,9 +91,18 @@ def portal(tmp_path, monkeypatch, browser, calls=None, providers=None, accounts=
                            settings=settings, store=store, link=link, home=tmp_path)
 
 
-def sign_in(k, who=ADA):
+def share(k, on=True):
+    """The person's switch in Settings → Account: off unless they switch it on."""
+    r = k.client.post("/api/settings", headers=k.h, json={"hub_share": "on" if on else "off"})
+    assert r.status_code == 200, r.text
+
+
+def sign_in(k, who=ADA, sharing=True):
+    """Sign who in, and switch sharing on for them (sharing=False: leave it as it is)."""
     r = k.client.post("/api/session", headers=k.h, json=who)
     assert r.status_code == 200, r.text
+    if sharing:
+        share(k)
     return r.json()
 
 
@@ -141,9 +150,9 @@ def test_sharing_goes_over_the_sign_in_and_never_sends_unshared_work(tmp_path, m
     calls = []
     k = portal(tmp_path, monkeypatch, browser, calls=calls)
     assert k.client.get("/api/hub", headers=k.h).status_code == 401      # nobody signed in yet
-    sign_in(k)                                                          # and nothing else to do: no connecting
+    sign_in(k, sharing=False)                                           # and nothing else to do: no connecting
     st = k.client.get("/api/hub", headers=k.h).json()
-    assert st["signed_in"] and st["sharing"] and st["url"] == HUB
+    assert st["signed_in"] and st["sharing"] is False and st["url"] == HUB   # off until the person switches it on
     assert st["account"]["email"] == ADA["email"] and st["account"]["needs_consent"] is False
     assert st["account"]["account_url"] == HUB + "/account"
     token = k.settings.get("account_token")
@@ -152,7 +161,7 @@ def test_sharing_goes_over_the_sign_in_and_never_sends_unshared_work(tmp_path, m
         assert token not in k.client.get(path, headers=k.h).text              # the token never goes to the browser
     assert k.client.post("/api/hub/connect", headers=k.h, json={"url": HUB}).status_code != 200   # no connecting
     assert k.client.get("/hub/callback?state=x").status_code != 200
-    assert k.client.get("/api/settings", headers=k.h).json()["settings"]["hub_share"] is True   # on by default
+    assert k.client.get("/api/settings", headers=k.h).json()["settings"]["hub_share"] is False   # off by default
 
     store, rt, me = k.store, k.runtime, k.runtime.user
     crsbr = store.create_project("CrSBr")
@@ -175,6 +184,9 @@ def test_sharing_goes_over_the_sign_in_and_never_sends_unshared_work(tmp_path, m
     (rt.data_dir / "runs" / "20261020-100500-running").mkdir()        # not finished yet
 
     calls.clear()
+    assert k.link.sync_once() is None and calls == []                  # off: not a single request
+    share(k)
+    assert k.client.get("/api/settings", headers=k.h).json()["settings"]["hub_share"] is True
     st = k.client.post("/api/hub/sync", headers=k.h).json()
     s = st["sync"]
     assert s["ok"] and s["error"] is None and st["synced_at"] and s["sharing"] is True
@@ -248,6 +260,23 @@ def test_switching_sharing_off_takes_back_what_was_shared(tmp_path, monkeypatch)
     s = k.link.sync_once()                                             # on again: everything once more
     assert s["ok"] and s["sent"] == {"projects": 1, "chats": 3, "runs": 1}
     assert sorted(c["title"] for c in hub.shared_with(1)["chats"]) == ["Gate sweep", "Unfiled", "Written while it is off"]
+
+
+def test_what_the_old_default_shared_goes_back_from_the_hub(tmp_path, monkeypatch):
+    """Asked for 2026-11-10 ("for the latest version, by default, turn off the 'sharing with kelvin team' toggle").
+    Before 0.3.51 sharing was on unless switched off, which kept nothing in the settings: a person who never chose
+    finds it off after the update, and Kelvin takes back what it shared for them, as switching it off does."""
+    hub, browser = the_hub(tmp_path, monkeypatch)
+    k = portal(tmp_path, monkeypatch, browser)
+    sign_in(k)
+    chat(k.store, "Gate sweep")
+    assert k.link.sync_once()["ok"] and "Gate sweep" in on_the_hub(hub)
+    k.client.post("/api/settings", headers=k.h, json={"hub_share": ""})   # what Kelvin 0.3.50 kept for on: nothing
+    st = k.client.get("/api/hub", headers=k.h).json()
+    assert st["sharing"] is False and st["taking_back"]
+    s = k.link.sync_once()
+    assert s["ok"] and s["sharing"] is False and "Gate sweep" not in on_the_hub(hub)
+    assert k.link.sync_once() is None                                  # nothing there any more: no request at all
 
 
 def test_a_run_goes_with_its_card_and_again_when_the_card_changes(tmp_path, monkeypatch):
@@ -484,7 +513,7 @@ def test_create_account_leaves_what_kelvin_shares_to_the_terms(tmp_path, monkeyp
     assert 'id="cn-consent" type="checkbox"' in form and "<p " not in form and "Kelvin shares" not in form
     assert "cn-sharing" not in (static / "app.js").read_text(encoding="utf-8")
     terms, privacy = browser.get("/terms").text, browser.get("/privacy").text
-    assert "Kelvin shares your work here unless you switch it off" in terms and "Settings → Account" in terms
+    assert "Kelvin shares your work here only if you switch sharing on" in terms and "Settings → Account" in terms
     never = privacy[privacy.index("What never reaches it"):]
     for gone in ("incognito chats", "model-limited projects", "runs' data files"):
         assert gone in never[:400], gone

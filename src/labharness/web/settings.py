@@ -373,8 +373,8 @@ class Settings:
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "phone_relay":  # phones through the Kelvin hub (relay.py): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
-            if name == "hub_share":  # share chats and run records with the Kelvin team (hubsync.py): on unless off
-                value = "off" if value.lower() in ("off", "false", "0", "no") else ""
+            if name == "hub_share":  # share chats and run records with the Kelvin team (hubsync.py): off unless on
+                value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "hub_old_runs":  # also share runs from before Kelvin noted who made them: off unless on
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "answer_words":  # how long the model is asked to keep answers (brevity.py)
@@ -498,7 +498,7 @@ class Settings:
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "own_keys": _own_keys(),   # Kelvin from source: the person's own API keys and services (edition.py)
             "claude_code_path": self._user.get("claude_code_path", ""),
-            "hub_share": self._user.get("hub_share") != "off",
+            "hub_share": self._user.get("hub_share") == "on",
             "hub_old_runs": self._user.get("hub_old_runs") == "on",
             "idle_off": self.idle_off_minutes,
             "idle_off_all": self._lab.get("idle_off_all") == "on",

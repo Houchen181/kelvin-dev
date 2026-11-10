@@ -4,8 +4,8 @@ API that Kelvins use, and the owner console, where the Kelvin team also reads wh
     kelvin-hub --home <folder>                  # serve on http://127.0.0.1:8780
     kelvin-hub backup | operator-key | stats --home <folder>
 
-Kelvin shares over the person's own sign-in token (POST /api/signin): its chats and run records, unless they switch
-it off. Older Kelvins connect through the browser instead, like Kelvin's Sign in with ChatGPT: Kelvin opens
+Kelvin shares over the person's own sign-in token (POST /api/signin): its chats and run records, once they switch
+it on. Older Kelvins connect through the browser instead, like Kelvin's Sign in with ChatGPT: Kelvin opens
 <hub>/connect with a PKCE challenge and its loopback callback (http://127.0.0.1:<port>/...); the person signs in and
 says yes; the hub sends the browser back with a one-use code; Kelvin trades the code and its verifier for a token at
 POST /api/token, and keeps the token in the person's own (encrypted) settings.
@@ -122,14 +122,15 @@ ul.plain{padding-left:1.1rem}
 # hub's other switches (labs, run_files): terms_text() and privacy_text() put them together. Changing those switches
 # changes what people agreed to, so raise consent_version with them. Beside the box that agrees (Kelvin's screens,
 # the hub's own Create account and consent page) nothing more: these say it all, the terms what changed and when
-# ({changed}: CONSENT_VERSION, when sharing by default came).
+# ({changed}: CONSENT_VERSION, when sharing came; since Kelvin 0.3.51 it is off unless switched on, which shares less
+# than the terms of that version said, so nobody had to agree again).
 TERMS = """<p class="note"><b>Draft.</b> The Kelvin team must review these terms before the hub opens to the public.</p>
-<p><b>Changed on {changed}:</b> Kelvin now shares your work here unless you switch it off.</p>
+<p><b>Changed on {changed}:</b> Kelvin can share your work here, if you switch sharing on.</p>
 <ul class="plain">
 <li>The hub keeps your Kelvin account, so the same email and password sign you in to Kelvin on any computer.</li>
-<li><b>Kelvin shares your work here unless you switch it off:</b> your normal projects, your unfiled chats with their
-whole conversations, and {runs}. The Kelvin team, who run the hub, can read what is shared, to help you and to
-improve Kelvin.</li>
+<li><b>Kelvin shares your work here only if you switch sharing on,</b> in Kelvin's Settings → Account: your normal
+projects, your unfiled chats with their whole conversations, and {runs}.
+The Kelvin team, who run the hub, can read what is shared, to help you and to improve Kelvin.</li>
 <li><b>Switching it off:</b> in Kelvin, Settings → Account. Kelvin then stops sending, and removes from the hub what
 it shared.</li>
 <li>Share only work you are allowed to share. Mark unpublished or confidential projects as such in Kelvin, or use an
@@ -145,7 +146,7 @@ PRIVACY = """<p class="note"><b>Draft.</b> The Kelvin team must review this noti
 <ul class="plain">
 <li><b>What the hub keeps:</b> your name, email, optional ORCID iD, a hash of your password (never the password), the
 computers you sign in to Kelvin on (their name, operating system and Kelvin version, and when), and what your Kelvin
-shares unless you switch it off: normal projects, unfiled chats with their whole conversations, and {runs}.</li>
+shares if you switch sharing on: normal projects, unfiled chats with their whole conversations, and {runs}.</li>
 <li><b>What never reaches it:</b> incognito chats; unpublished, confidential or model-limited projects, with their
 chats and runs; {files}API keys; and ChatGPT or Claude Code sign-ins.</li>
 <li><b>Who sees your shared work:</b> {who}</li>
@@ -628,12 +629,12 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return page("Your Kelvin account", (
                 '<p>One email and password sign you in to Kelvin on every computer. You can make your account in '
                 'Kelvin itself, on its sign-in screen.</p>'
-                '<p>Unless you switch it off in Kelvin\'s Settings → Account, Kelvin shares with the Kelvin team here: '
+                '<p>If you switch sharing on in Kelvin\'s Settings → Account, Kelvin shares with the Kelvin team here: '
                 '%s. Incognito chats, unpublished and confidential projects, API keys and sign-ins never leave '
                 'your computer.</p><p class="row"><a class="button" href="/signin">Sign in</a>'
                 '<a class="button plain" href="/register">Create account</a></p>' % e(what_goes())) + links)
         return page("One account for Kelvin, in every lab", (
-            '<p>Make one account and join your lab. Unless you switch it off in Kelvin\'s Settings → Account, Kelvin '
+            '<p>Make one account and join your lab. If you switch sharing on in Kelvin\'s Settings → Account, Kelvin '
             'then shares with your labmates and the Kelvin team here: %s.</p>'
             '<p>Unpublished and confidential projects, incognito chats, API keys and sign-ins never leave your '
             'computer.</p><p class="row"><a class="button" href="/register">Create account</a>'
@@ -908,7 +909,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         """The account page while labs are off: what this person's Kelvins shared, which only they and the Kelvin
         team see, and the Kelvins they sign in to."""
         connections, shared = await asyncio.gather(call(hub.connections, uid), call(hub.shared_with, uid))
-        parts.append('<h2>Shared with the Kelvin team</h2><p class="muted">Unless you switch it off in Kelvin\'s '
+        parts.append('<h2>Shared with the Kelvin team</h2><p class="muted">If you switch sharing on in Kelvin\'s '
                      'Settings → Account, Kelvin shares here: %s. Only you and the Kelvin team, who run the hub, see '
                      'it.</p>' % e(what_goes()))
         if shared["projects"]:

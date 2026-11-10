@@ -4618,7 +4618,7 @@
     } catch (e) { $("chatgpt-status").textContent = e.message; }
   }
   // ------------------------------------------------------------------ sharing with the Kelvin team (hubsync.py)
-  // over the person's Kelvin account sign-in: on unless switched off (Settings → Account), once they agreed to the
+  // over the person's Kelvin account sign-in: off unless switched on (Settings → Account), once they agreed to the
   // hub's terms. Only chats and run records go, never data files
   const HUB = { st: null, on: false, timer: 0, terms: null };   // terms: the hub's new terms while they wait (hubTerms)
   function hubSyncText(st) {
@@ -4656,7 +4656,7 @@
     let text;
     if (!st.signed_in) text = "Sharing with the Kelvin team needs a Kelvin account: Kelvin shares nothing for this one.";
     else if (st.problem) text = st.problem;
-    else if (a) text = a.name + " (" + a.email + ")" + (a.needs_consent ? ". The hub's terms changed: Kelvin shares again once you agree" : "");
+    else if (a) text = a.name + " (" + a.email + ")" + (a.needs_consent ? ". The hub's terms changed: Kelvin shares once you agree" : "");
     else text = st.url;
     $("hub-status").textContent = text;
     $("hub-actions").hidden = !st.signed_in;

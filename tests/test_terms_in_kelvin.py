@@ -53,7 +53,7 @@ def test_the_notice_settings_and_models_agree_here_in_a_dialog():
     bar = _part('<div id="hub-terms-bar"', "</div>")
     assert '<button id="hub-terms-agree" class="link soft" type="button">Read and agree</button>' in bar
     assert "target=" not in bar and "href" not in bar                    # nothing sends the person to the hub to agree
-    assert "<span>The Kelvin hub's terms changed: Kelvin now shares your work with the Kelvin team.</span>" in bar
+    assert "<span>The Kelvin hub's terms changed: Kelvin shares once you agree.</span>" in bar
     dialog = _part('<dialog id="terms-dialog"', "</dialog>")
     for part in ('id="terms-consent" type="checkbox"', 'id="terms-read"', 'id="terms-privacy"', 'id="terms-msg"',
                  'id="terms-agree" class="btn primary" type="button" disabled>Agree'):
@@ -92,9 +92,10 @@ def test_the_terms_say_what_changed_and_the_privacy_notice_what_never_goes():
     for labs in (False, True):
         for files in (False, True):
             terms = terms_text(labs, files)
-            assert "<b>Changed on %s:</b> Kelvin now shares your work here unless you switch it off." % CONSENT_VERSION \
-                in terms and "{changed}" not in terms
-            assert "Kelvin shares your work here unless you switch it off:" in terms and "Settings → Account" in terms
+            assert "<b>Changed on %s:</b> Kelvin can share your work here, if you switch sharing on." \
+                % CONSENT_VERSION in terms and "{changed}" not in terms
+            assert "Kelvin shares your work here only if you switch sharing on,</b> in Kelvin's Settings → Account" \
+                in terms
             never = privacy_text(labs, files)
             never = never[never.index("What never reaches it"):]
             assert "incognito chats" in never and "model-limited projects" in never[:300]

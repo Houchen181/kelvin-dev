@@ -2,9 +2,10 @@
 
 Kelvin itself keeps accounts per computer (accounts.py). The hub is one server that many Kelvins sign in to:
 people register once (with their consent to the terms and privacy notice), and each Kelvin they sign in to sends
-the hub what its person shares, unless they switch it off in Kelvin (hub.json "sharing", on by default):
+the hub what its person shares, once they switch sharing on in Kelvin (and while hub.json "sharing", on by
+default, lets the hub take it):
 
-- **Shared by default:** normal projects, unfiled chats with their whole conversations, and the records of
+- **Shared once switched on:** normal projects, unfiled chats with their whole conversations, and the records of
   finished runs. Runs' data files only while hub.json "run_files" is on (off by default).
 - **Never sent:** projects marked unpublished or confidential (or limited to some models), incognito chats,
   API keys, and ChatGPT or Claude Code sign-ins. The hub refuses them even if a Kelvin sends them.

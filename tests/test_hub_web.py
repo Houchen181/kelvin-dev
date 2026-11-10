@@ -751,7 +751,7 @@ def test_new_terms_say_what_changed_and_sharing_waits_for_them(tmp_path):
     assert client.get("/account", follow_redirects=False).headers["location"].startswith("/consent")
     page = client.get("/consent")
     assert "2026-11-08" in page.text and "What changed" not in page.text   # the terms say it, at their top
-    assert "<b>Changed on 2026-11-08:</b> Kelvin now shares your work here" in client.get("/terms").text
+    assert "<b>Changed on 2026-11-08:</b> Kelvin can share your work here" in client.get("/terms").text
     assert client.get("/api/me", headers=auth).json()["needs_consent"] is True
     one = {"chats": [{"id": "aaaaaaaaaaaa", "title": "t", "messages": []}]}
     r = client.post("/api/sync", headers=auth, json=one)

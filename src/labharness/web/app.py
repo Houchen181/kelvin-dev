@@ -79,7 +79,7 @@ TEXT_TAIL = 256 * 1024      # of a script run's own text files, the last part a 
 # what works while nobody is signed in: signing in, a new account, and stopping whatever runs
 SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/accounts", "/api/accounts/remove",
               "/api/stop", "/api/runs/stop", "/api/app/show"}
-# sharing work with the Kelvin hub (hubsync.py): over each person's Kelvin account sign-in, on unless they switch it off
+# sharing work with the Kelvin hub (hubsync.py): over each person's Kelvin account sign-in, off unless they switch it on
 # (Settings -> Account), once they agreed to the hub's terms. False: Kelvin shares nothing and shows nothing of it
 HUB_SHARING = True
 # Claude Code bridge: while Claude works the screen, this computer's browser only reads and stops, so its clicks never
