@@ -32,7 +32,8 @@ from ..folderfiles import MAX_PDF_PAGES
 from ..gate import ApprovalRequest
 from ..protection import summary as protection_summary
 from .hubmodels import through_hub
-from .providers.base import SESSION, Emit, ModelInfo, Provider, TurnResult, sees_images, text_of
+from .providers.base import (EFFORT, SESSION, Emit, ModelInfo, Provider, TurnResult, sees_images, sent_line,
+                             text_of)
 from . import analyst, brevity, compaction, memory, review, rules as rulebook
 from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, READ_SKILL_FILE, SAVE_RECIPE, SAVE_SKILL, USE_SKILL, Know
 from .wakeups import WAKE_ME, Waker
@@ -59,14 +60,16 @@ longer holds (home_remove). Not for lookups, failed or refused calls, or dry run
 When you cite a paper, link it: [Author Year](url), using only papers you found with search_papers or the
 project's reading list; never invent a reference. Queries to search_papers leave the computer: describe the
 physics, not confidential sample or project details.
-A user message may begin with a <lab_events> block: what the person did meanwhile to the sequence or to Home in
-the portal (skipped, stopped, reordered or changed a block; took a block off Home...), written by Kelvin, not by the
-person. Take it into account where it bears on your work; don't repeat it back.
-A user message may begin with a <second_opinion> block: another model's review of your previous answer, asked for by
-the user. Weigh it on its merits and say briefly where you agree or not. A run_plan result may start with a second
-opinion on the plan; mention its concerns if they matter.
+Each of the person's messages starts with <sent>: when they sent it, in the lab's local time, and how long after their
+message before; Kelvin adds it, not the person. Use it for "today", "this morning", how long a cool-down has run.
+After it, a user message may begin with a <lab_events> block: what the person did meanwhile to the sequence or to
+Home in the portal (skipped, stopped, reordered or changed a block; took a block off Home...), written by Kelvin, not
+by the person. Take it into account where it bears on your work; don't repeat it back.
+Or with a <second_opinion> block: another model's review of your previous answer, asked for by the user. Weigh it on
+its merits and say briefly where you agree or not. A run_plan result may start with a second opinion on the plan;
+mention its concerns if they matter.
 
-""" + guide.portal_map()   # where things are in the portal, so the model never guesses at a menu
+""" + guide.portal_index()   # where things are in the portal (kelvin_help has each place's steps): never a guessed menu
 COMPARE = """# Comparing models
 The user is asking several models this same message and will compare the answers side by side. In this answer you
 may read the lab (status, values, runs, dry runs) but not change it. If something should be set or run, say exactly
@@ -149,8 +152,35 @@ def remember_tool(in_project: bool, everywhere: bool = True) -> Dict[str, Any]:
                             "description": "lab: the instruments it concerns (it is shown when one is used)"},
             "replaces": {"type": "string", "description": "id of an outdated note this one corrects (optional)"}}},
     }
-MAX_STEPS = 25
+# Steps (a model response and its tool calls) in one answer before Kelvin pauses and asks to go on. Setting up an
+# instrument from its manual, or a staged measurement, takes dozens; what keeps an answer from going round in circles
+# is below (REPEATS, REFUSALS) and the person's Stop, not a short count.
+MAX_STEPS = 100
+REPEATS = 3               # the same call with the same arguments this often in one answer: the model is told so
+REFUSALS = 3              # calls refused, declined or stopped by a guard in one answer: the model is told to stop...
+REFUSALS_END = 5          # ...and at this many the answer ends, for the person to say how to go on
+REPEATED = ("(Kelvin: you have made this exact call, with these arguments, %d times in this answer. Read the results "
+            "above before calling it again; if it isn't giving what you need, say so.)")
+REFUSED_AGAIN = ("(Kelvin: %d calls in this answer were refused, declined or stopped by a guard. A refusal covers the "
+                 "outcome, not only the command: don't reach it another way. Stop here, tell the person what was "
+                 "refused and why, and what you suggest.)")
+REFUSALS_NOTE = ("Kelvin ended this answer after %d calls were refused, declined or stopped by a guard: say how to go "
+                 "on.")
+INTERRUPTED = ("interrupted: this call never gave its result (Kelvin was closed or restarted while it ran, or an error "
+               "ended the answer), so its outcome is unknown. If it could have changed the lab (a drive, a ramp, a "
+               "run), read the instruments' state before acting on them; never repeat a drive or a run that may have "
+               "gone ahead (find_runs shows runs that started).")
+# Words in a message that ask for the deepest thinking for its answer (Thinking in Settings sets the rest)
+THINK_HARD = re.compile(r"\bultrathink\b|\bthink\s+(?:it\s+through\s+)?(?:really\s+|very\s+)?"
+                        r"(?:hard(?:er)?|deeply|carefully)"   # not "I think hard drives fail": only before these
+                        r"(?=\s*(?:$|[.,;:!?)]|(?:about|on|over|before|first|here|this|it|and|then|please)\b))",
+                        re.I)
 MAX_PICTURES = 8          # the latest pictures a model sees again at each step; older ones by their captions
+# A model whose history must stay as it was sent (Claude: its thinking is bound to the conversation before it, and the
+# cache to every byte) keeps every picture where it came, up to this many; past it the earlier turns are summarised
+# (compaction) rather than a picture taken out of an earlier turn. Claude takes a request of more than 20 pictures
+# only if each is at most 2000 px a side, and a photo the person reads with read_file can be larger: so 20.
+MAX_KEPT_PICTURES = 20
 MAX_DOCUMENTS = 2         # and the latest PDFs it reads whole (read_file's pages, PDFs the person attached)
 REVIEW_S = 300            # a second opinion with its lookups
 MAX_ATTACHED_CHARS = 60000   # of an attached PDF's or text file's text, in the message
@@ -213,6 +243,8 @@ class _Turn:
         self.stream_task: Optional[asyncio.Future] = None
         self.lanes: List[asyncio.Future] = []
         self.cards: Set[str] = set()   # the approval requests its chat shows now, still open (_Cards)
+        self.calls: Dict[str, int] = {}   # each call (name and arguments) made in this answer, how often (_guard)
+        self.refused = 0                  # lab calls refused, declined or tripped in this answer (_guard)
 
 
 _TURN: "contextvars.ContextVar[Optional[_Turn]]" = contextvars.ContextVar("kelvin_turn", default=None)   # this task's
@@ -355,6 +387,53 @@ def runs_named(tool: str, text: str) -> List[str]:
     return ids
 
 
+# what the gate, the runs and the scripts say when they stop something (gate.py, engine.py, runtime.py): "refused: ...",
+# "declined: ...", "script not run: refused: ...", "plan X refused: ...", "smu.V tripped at 5 V: ...", "run X aborted
+# after 3/50 points: ..."; at a line's start or after "...: ", so "will be refused: ..." (what a check foresees) isn't
+_REFUSAL = re.compile(r"(?:^|\n|: )[ \t]*(?:refused|declined)\b"
+                      r"|(?:^|\n)[ \t]*(?:plan|run)\s+\S+\s+(?:refused|declined|aborted\s+after)\b"
+                      r"|(?:^|\n)[ \t]*\S+\s+tripped\s+at\b", re.I)
+
+
+def refusal(text: str) -> bool:
+    """A call's result that says the gate refused it, a person declined it, a guard tripped or a run was stopped:
+    final for what it stopped, not a failure the model may work around."""
+    return bool(_REFUSAL.search(text or ""))
+
+
+def with_notes(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The history as the model gets it: Kelvin's notes on calls (_guard) after their results. The chat keeps them
+    apart ("note"), so the result shown and kept is the tool's own; added the same at every step, the request's
+    earlier part stays as it was sent."""
+    if not any(m.get("role") == "tool" and any(r.get("note") for r in m.get("results") or []) for m in history):
+        return history
+    out = []
+    for m in history:
+        if m.get("role") == "tool" and any(r.get("note") for r in m.get("results") or []):
+            m = dict(m, results=[dict(r, content="%s\n%s" % (r.get("content") or "", r["note"])) if r.get("note")
+                                 else r for r in m["results"]])
+        out.append(m)
+    return out
+
+
+def keeps_history(provider: Any) -> bool:
+    """Does this model's service need every earlier part of the conversation sent as it was (Claude: its thinking is
+    bound to what came before it)? Then a picture is never taken out of an earlier turn (_pictures)."""
+    return bool(getattr(provider, "keeps_history", False))
+
+
+def pictures_in(history: List[Dict[str, Any]]) -> int:
+    """The pictures in a history as the chat keeps it: the tools' (look_at's plots and frames) and the person's."""
+    n = 0
+    for m in history:
+        if m.get("role") == "tool":
+            n += sum(len(r.get("images") or []) for r in m.get("results") or [])
+        elif m.get("role") == "user":
+            n += sum(1 for a in m.get("attachments") or [] if str(a.get("mime", "")).startswith("image/"))
+            n += sum(len(a.get("drawn") or []) for a in m.get("attachments") or [])
+    return n
+
+
 def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
     """Run ids that these chats' run tools made (plans, scripts, recipes' stages), in the order they ran."""
     ids: List[str] = []
@@ -418,6 +497,8 @@ HOME_TOOLS = {"home_add", "home_update", "home_remove", "home_list"}
 # readings: beside another chat's change to the lab, as an instrument that change uses isn't asked (its latest values
 # instead: LabRuntime._reading)
 READINGS = {"lab_status", "get_value", "health_check", "show_sequence"}
+# calls made again on purpose (a reading during a cool-down, a wait): never pointed out as repeated (_guard)
+POLLED = READINGS | {"wait", "queue_show", "recent_events", "watches", "activity"}
 # the queue, watches and stop: kept apart from the instruments, so they work from any chat while a scan runs
 BESIDE_THE_LAB = {"queue_add", "queue_edit", "queue_change", "queue_pause", "queue_save", "queue_load", "watch",
                   "unwatch", "stop_run"}
@@ -828,13 +909,14 @@ class ChatAgent:
         return [t for t in self.tools if t["name"] not in DEFERRED_NAMES or t["name"] in loaded]
 
     def _more_tools(self, chat: Dict[str, Any]) -> str:
-        """The rarer tools, by what they are for, that this chat hasn't loaded yet."""
+        """The rarer tools, by what they are for: the same list for the whole chat, the ones it loaded too, so loading
+        one never changes the system prompt (an earlier part of the conversation, to the cache and to Claude's
+        thinking). The tools a chat has loaded are in its tools."""
         have = {t["name"] for t in self.tools}
-        loaded = set(chat.get("tools") or [])
-        lines = ["- %s: %s" % (what, ", ".join(n for n in names if n in have and n not in loaded))
-                 for what, names in DEFERRED.items() if any(n in have and n not in loaded for n in names)]
+        lines = ["- %s: %s" % (what, ", ".join(n for n in names if n in have))
+                 for what, names in DEFERRED.items() if any(n in have for n in names)]
         return ("# More tools\nKelvin has these too; find_tools loads them when a task needs them (one call for "
-                "several):\n" + "\n".join(lines)) if lines else ""
+                "several; one already among your tools is loaded):\n" + "\n".join(lines)) if lines else ""
 
     def _find_tools(self, chat: Dict[str, Any], context: Dict[str, Any], args: Any) -> Tuple[str, bool]:
         """Load the rarer tools a task needs: by name, else by the words of their names, purposes and descriptions."""
@@ -1113,7 +1195,9 @@ class ChatAgent:
         if not waiting:
             return
         for text in waiting:
-            chat["messages"].append({"role": "user", "text": text, "steer": True})
+            message = {"role": "user", "text": text, "steer": True}
+            self._sent(chat, message)
+            chat["messages"].append(message)
         # the person wrote: what the chat read before no longer pauses auto mode (its next lab call sets the gate's
         # mark from the chat; the gate's mark now may be another chat's, working the lab meanwhile)
         chat.pop("outside", None)
@@ -1516,14 +1600,17 @@ class ChatAgent:
         turn = self.turns.setdefault(chat_id, _Turn({"chat_id": chat_id, "model": model_key}))   # claim() made it
         held = _TURN.set(turn)   # this task's turn, and the tasks it starts
         session = SESSION.set(chat_id)   # the conversation its model requests belong to
+        effort = EFFORT.set(self._effort(text if not wake else ""))   # how hard its model thinks
         try:
             chat = await self._load(chat_id)
+            self._finish_interrupted(chat)
             message: Dict[str, Any] = {"role": "user", "text": text}
             if wake:
                 message["wake"] = wake
                 turn.info["wake"] = True
             if attachments:
                 message["attachments"] = attachments
+            self._sent(chat, message)
             if not wake:   # the person is writing: what the chat read from the web before no longer pauses auto mode
                 chat.pop("outside", None)
                 self._slash(chat, message)
@@ -1559,7 +1646,62 @@ class ChatAgent:
                 self.notices.after_turn(chat_id)   # a change told after its last step: into its thread
             _TURN.reset(held)
             SESSION.reset(session)
+            EFFORT.reset(effort)
             self._steer.pop(chat_id, None)   # not read in time: the portal sends it as the next message
+
+    def _effort(self, text: str) -> str:
+        """How hard the model thinks in this answer: Settings → Models → Thinking, or the deepest (xhigh) when the
+        person's message asks Kelvin to think hard ("think hard", "think carefully", "ultrathink")."""
+        chosen = self.settings.thinking if self.settings else "high"
+        return "xhigh" if THINK_HARD.search(text or "") else chosen
+
+    @staticmethod
+    def _sent(chat: Dict[str, Any], message: Dict[str, Any]) -> None:
+        """When a message of the person's is sent, kept with it for the model (base.sent_line, as <sent>): the time,
+        and how long after their message before (the last one with its time; Kelvin's own notes don't count)."""
+        now = time.time()
+        before = next((m.get("sent_at") for m in reversed(chat.get("messages") or [])
+                       if m.get("role") == "user" and m.get("sent_at")), None)
+        if message.get("wake"):   # Kelvin continuing the chat itself: not a message of the person's to count from
+            message["sent"] = sent_line(now, before, woke=True)
+        else:
+            message["sent"], message["sent_at"] = sent_line(now, before), now
+
+    @staticmethod
+    def _finish_interrupted(chat: Dict[str, Any]) -> int:
+        """Calls that never got their results (Kelvin closed or crashed while they ran, a run or a ramp among them,
+        or an error ended the answer between a step and its calls): each gets one, right after its step, saying its
+        outcome is unknown, so the model reads the lab before acting on it, and so the conversation can go on at all
+        (a model service refuses a call without its result). How many it gave."""
+        messages = chat.get("messages") or []
+        given, i = 0, 0
+        while i < len(messages):
+            m = messages[i]
+            calls = [b for b in m.get("blocks") or [] if b.get("type") == "tool_call"] \
+                if m.get("role") == "assistant" else []
+            if calls:
+                j = i + 1
+                while j < len(messages) and messages[j].get("role") == "event":   # Kelvin's own lines in the thread
+                    j += 1
+                answered = {str(r.get("id")) for r in (messages[j].get("results") or [])} \
+                    if j < len(messages) and messages[j].get("role") == "tool" else set()
+                missing = [b for b in calls if str(b.get("id")) not in answered]
+                if missing and not answered:
+                    messages.insert(i + 1, {"role": "tool", "interrupted": True, "results": [
+                        {"id": b.get("id"), "name": b.get("name"), "content": INTERRUPTED, "is_error": True}
+                        for b in missing]})
+                    given += len(missing)
+                    held = chat.get("compact") or {}   # a summary's place in the chat moves with what came before it
+                    for k in ("upto", "made"):
+                        if isinstance(held.get(k), int) and held[k] > i:
+                            held[k] += 1
+                elif missing:   # some answered: the rest join that step's results
+                    messages[j]["results"] = list(messages[j]["results"]) + [
+                        {"id": b.get("id"), "name": b.get("name"), "content": INTERRUPTED, "is_error": True}
+                        for b in missing]
+                    given += len(missing)
+            i += 1
+        return given
 
     def _attribution(self, chat: Dict[str, Any]) -> Dict[str, Any]:
         """What a run this chat starts is filed under, and whose work it is: its project (not an incognito chat's,
@@ -1661,8 +1803,12 @@ class ChatAgent:
             return False
 
         history = compaction.view(chat)
-        if compaction.size(context["system"], context["tools"], history) > \
-                compaction.limit(provider, model_id):   # a long day: earlier turns, summarised
+        stored = pictures_in(history)
+        shown = min(stored, MAX_KEPT_PICTURES if keeps_history(provider) else MAX_PICTURES) \
+            if sees_images(provider, model_id) else 0   # the pictures this model is sent (_pictures)
+        if compaction.size(context["system"], context["tools"], history, shown) > \
+                compaction.limit(provider, model_id) or \
+                (keeps_history(provider) and stored > MAX_KEPT_PICTURES):   # a long day: earlier turns, summarised
             self._stream_task = asyncio.ensure_future(compaction.compact(chat, provider, model_id))
             try:
                 folded = await self._stream_task
@@ -1680,7 +1826,8 @@ class ChatAgent:
                                                     "stays here, and Kelvin can still search it."})
         self._stream_task = asyncio.ensure_future(
             provider.stream(model_id, context["system"],
-                            self._pictures(chat, brevity.with_reminder(history, self._budget()), provider, model_id),
+                            self._pictures(chat, with_notes(brevity.with_reminder(history, self._budget())), provider,
+                                           model_id),
                             context["tools"], relay))
         try:
             result = await _answer(self._stream_task, heard, emit)
@@ -1711,12 +1858,48 @@ class ChatAgent:
             results += await asyncio.gather(*(self._run_call(chat, provider, context, call, emit)
                                               for call in calls[i:i + n]))
             i += n
+        ended = self._guard(calls, results)
         chat["messages"].append({"role": "tool", "results": results})
         await self._save(chat)
         if self._stop:
             await emit({"type": "turn_end", "reason": "stopped"})
             return False
+        if ended:
+            await emit({"type": "note", "text": REFUSALS_NOTE % ended})
+            await emit({"type": "turn_end", "reason": "refusals"})
+            return False
         return True
+
+    @staticmethod
+    def _guard(calls: List[Dict[str, Any]], results: List[Dict[str, Any]]) -> int:
+        """What keeps an answer from going round in circles, now that it may take many steps: the same call with the
+        same arguments made REPEATS times is pointed out with its result (not a reading or a wait, which are polled
+        on purpose); after REFUSALS calls in the answer were refused, declined or stopped by a guard, the model is told
+        to stop and explain (a refusal covers the outcome, not the command: a read between two tries doesn't make the
+        second a new question); at REFUSALS_END the answer ends. The notes go with the results as the model reads
+        them ("note", with_notes); the result kept and shown is the tool's own. Returns that count when the answer
+        must end, else 0."""
+        turn = _TURN.get()
+        if turn is None:
+            return 0
+        for call, r in zip(calls, results):
+            notes = []
+            if call.get("name") not in POLLED:
+                key = "%s %s" % (call.get("name"), json.dumps(call.get("input"), sort_keys=True, default=str))
+                turn.calls[key] = turn.calls.get(key, 0) + 1
+                if turn.calls[key] >= REPEATS:
+                    notes.append(REPEATED % turn.calls[key])
+            # only a call that changes the lab counts: a reading or a lookup may quote an earlier refusal (the queue's
+            # "[declined] plan ...", a manual's "refused:"), which is no new try
+            if call.get("name") not in OFF_LAB and refusal(str(r.get("content") or "")):
+                turn.refused += 1
+                if turn.refused >= REFUSALS_END:
+                    return turn.refused
+                if turn.refused >= REFUSALS:
+                    notes.append(REFUSED_AGAIN % turn.refused)
+            if notes:
+                r["note"] = " ".join(notes)
+        return 0
 
     async def _run_call(self, chat: Dict[str, Any], provider: Provider, context: Dict[str, Any],
                         call: Dict[str, Any], emit: Emit) -> Dict[str, Any]:
@@ -2178,12 +2361,15 @@ class ChatAgent:
         turn = self.turns.setdefault(chat_id, _Turn({"chat_id": chat_id, "model": keys[0], "compare": keys}))
         held = _TURN.set(turn)
         session = SESSION.set(chat_id)
+        effort = EFFORT.set(self._effort(text))
         try:
             chat = await self._load(chat_id)
+            self._finish_interrupted(chat)
             message: Dict[str, Any] = {"role": "user", "text": text,
                                        "compare": {"models": keys, "lanes": [], "chosen": 0}}
             if attachments:
                 message["attachments"] = attachments
+            self._sent(chat, message)
             chat.pop("outside", None)
             self.recall(chat, message)
             self._attach_review(chat, message)
@@ -2233,6 +2419,7 @@ class ChatAgent:
                 self.notices.after_turn(chat_id)   # a change told while the lanes answered: into its thread
             _TURN.reset(held)
             SESSION.reset(session)
+            EFFORT.reset(effort)
 
     async def _lane(self, i: int, key: str, provider: Provider, model_id: str, system: str,
                     base: List[Dict[str, Any]], tools: List[Dict[str, Any]], emit: Emit,
@@ -2867,7 +3054,9 @@ class ChatAgent:
                                                                          for r in m["results"])) for m in history):
             return history
         sees = sees_images(provider, model)
-        left = MAX_PICTURES if sees else 0
+        # a model that needs its history as it was sent keeps every picture (up to MAX_KEPT_PICTURES, past which _step
+        # summarises the earlier turns); another sees the latest MAX_PICTURES again at each step
+        left = (MAX_KEPT_PICTURES if keeps_history(provider) else MAX_PICTURES) if sees else 0
         whole = MAX_DOCUMENTS if getattr(provider, "sees_pdfs", False) else 0
         out: List[Dict[str, Any]] = []
         for m in reversed(history):   # the newest pictures are the ones still shown

@@ -126,7 +126,7 @@ def test_attached_photos_and_pdfs(tmp_path):
     assert sent["attached_text"].startswith('<outside_text from="sheet.pdf, a PDF the person attached')
     assert "Settling line 3 of a datasheet" in sent["attached_text"]
     from labharness.web.providers.base import user_text
-    assert user_text(sent).startswith("is this wired right?\n\n<outside_text")
+    assert user_text(sent).startswith(sent["sent"] + "\nis this wired right?\n\n<outside_text")   # after its time
     with pytest.raises(KeyError):                                       # only this chat's files
         agent.check_attachments(chat["id"], [{"file": "0" * 24 + ".png", "name": "x"}])
 

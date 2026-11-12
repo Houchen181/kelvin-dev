@@ -795,6 +795,14 @@
             </select>
           </div>
           <div class="field">
+            <label for="thinking" title="How long the model thinks before it answers and between its steps (Claude, and GPT on the ChatGPT plan). Writing &quot;think hard&quot; in a message gets the deepest for that answer.">Thinking</label>
+            <select id="thinking" name="thinking">
+              <option value="medium">Standard: faster, costs less</option>
+              <option value="high">Deep</option>
+              <option value="xhigh">Deepest: slower, for hard problems</option>
+            </select>
+          </div>
+          <div class="field">
             <label for="reviewer" title="Another model reviews every plan before it runs">Second opinion on plans</label>
             <select id="reviewer" name="reviewer"></select>
           </div>

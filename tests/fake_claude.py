@@ -1,7 +1,8 @@
 """A stand-in for the `claude` program (Claude Code bridge tests): prints stream-json the way `claude -p` does.
 
 FAKE_CLAUDE_LOG: a file to record what it was given (args, stdin, the system prompt file's text).
-FAKE_CLAUDE_FAIL: answer with an error result.  FAKE_CLAUDE_SLOW: keep working until killed."""
+FAKE_CLAUDE_FAIL: answer with an error result.  FAKE_CLAUDE_SLOW: keep working until killed.
+FAKE_CLAUDE_OLD: refuse --effort, as a `claude` from before it does."""
 import json
 import os
 import sys
@@ -26,6 +27,9 @@ def main():
                 system = f.read()
         with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps({"args": args, "stdin": stdin, "system": system}) + "\n")
+    if os.environ.get("FAKE_CLAUDE_OLD") and "--effort" in args:   # a `claude` from before --effort
+        print("error: unknown option '--effort'", file=sys.stderr, flush=True)
+        return 1
     out({"type": "system", "subtype": "init", "model": "claude-opus-5-5", "tools": []})
     if os.environ.get("FAKE_CLAUDE_FAIL"):
         out({"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in · Please run /login"})

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ... import claudecode
-from .base import Emit, ModelInfo, Provider, TurnResult, user_text
+from .base import EFFORT, EFFORTS, Emit, ModelInfo, Provider, TurnResult, user_text
 
 log = logging.getLogger("kelvin")
 
@@ -387,6 +387,7 @@ class ClaudeCodeProvider(Provider):
         self.cmd = cmd
         self.cwd = cwd or claudecode.workdir()
         self.timeout = timeout
+        self.effort = True   # passes the turn's thinking effort (--effort); off for good with a `claude` without it
 
     async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
         """Claude Code's WebSearch on the person's plan: one `claude -p` run with only that tool allowed."""
@@ -423,6 +424,9 @@ class ClaudeCodeProvider(Provider):
             f.write(prompt)
         common = ["--output-format", "stream-json", "--verbose", "--include-partial-messages", "--system-prompt-file",
                   path, "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--model", model]
+        effort = EFFORT.get()
+        if self.effort and effort in EFFORTS:   # Settings → Models → Thinking, and "think hard" (agent.py)
+            common += ["--effort", effort]
         pictures = has_pictures(history)
         if pictures:   # the conversation, pictures and all, as one message on standard input; the request ends it
             args = ["-p", "--input-format", "stream-json"] + common
@@ -437,7 +441,16 @@ class ClaudeCodeProvider(Provider):
             def stdin(extra: str = "") -> str:
                 return said_text + ("\n" + extra if extra else "")
         try:
-            reading = await self._turn(args, stdin(), schemas, emit)
+            try:
+                reading = await self._turn(args, stdin(), schemas, emit)
+            except RuntimeError as e:   # a `claude` from before --effort: without it, from now on
+                said = str(e).lower()
+                if "--effort" not in args or not ("--effort" in said or "unknown option" in said and "effort" in said):
+                    raise
+                self.effort = False
+                at = args.index("--effort")
+                args = args[:at] + args[at + 2:]
+                reading = await self._turn(args, stdin(), schemas, emit)
             if tools and reading.markup and not reading.run:   # nothing Kelvin can run: once more, told why
                 why = ("a tool result you wrote yourself" if reading.made_up else
                        "tool-call markup Kelvin could not read")

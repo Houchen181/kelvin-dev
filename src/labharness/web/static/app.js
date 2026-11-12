@@ -9210,6 +9210,7 @@
     const words = S.settings ? S.settings.answer_words : 200, length = $("answer-words"), chosen = words ? String(words) : "off";
     if (![...length.options].some((o) => o.value === chosen)) length.append(h("option", { value: chosen }, "Up to " + words + " words"));
     length.value = chosen;
+    $("thinking").value = (S.settings && S.settings.thinking) || "high";
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
     $("card-language").value = (S.settings && S.settings.card_language) || "";
@@ -9465,6 +9466,7 @@
     body.default_model = $("default-model").value;
     body.reviewer = $("reviewer").value;
     body.answer_words = $("answer-words").value;
+    body.thinking = $("thinking").value;
     body.instructions = $("global-instructions").value;
     body.card_language = $("card-language").value;
     body.learn = $("learn").checked ? "on" : "off";

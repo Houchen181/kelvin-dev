@@ -24,6 +24,11 @@ Emit = Callable[[Dict[str, Any]], Awaitable[None]]
 # the chat a model request belongs to (agent.py sets it for each turn), for services that route and cache by
 # conversation (OpenCode's x-opencode-session)
 SESSION: contextvars.ContextVar = contextvars.ContextVar("kelvin_session", default="")
+# how hard the model thinks in this turn: low, medium, high, xhigh or max ("": the provider's own default). agent.py
+# sets it for each turn from Settings (Thinking), and raises it to xhigh for a message that asks Kelvin to think hard;
+# the providers that take an effort (Claude, the ChatGPT plan) send it, the others ignore it.
+EFFORT: contextvars.ContextVar = contextvars.ContextVar("kelvin_effort", default="")
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def session_key(outside: str = "") -> str:
@@ -129,7 +134,38 @@ def user_text(message: Dict[str, Any]) -> str:
     if review:   # a second opinion on the previous answer, asked for by the user
         text = '<second_opinion model="%s" verdict="%s">\n%s\n</second_opinion>\n\n%s' % (
             review.get("label") or review.get("model"), review.get("verdict"), review.get("text", ""), text)
+    if message.get("sent"):   # when the person sent it (agent.py, sent_line): kept with it, so it replays the same
+        text = "%s\n%s" % (message["sent"], text)
     return text
+
+
+def sent_line(at: float, before: Optional[float] = None, woke: bool = False) -> str:
+    """When a message was sent, as the model reads it with the message (<sent>): the local date and time, and how
+    long after the person's message before it. A model knows no clock of its own: without it "this morning's run" or
+    "how long since the cool-down started" are guesses. woke: Kelvin continuing the chat itself (wakeups.py)."""
+    import time
+    stamp = time.strftime("%a %d %b %Y, %H:%M", time.localtime(at)) + " (local time)"
+    if woke:
+        stamp += ": Kelvin continued the chat"
+    if before is None or at < before:
+        return "<sent>%s</sent>" % stamp
+    return "<sent>%s, %s after the person's %smessage before</sent>" % (stamp, _span(at - before),
+                                                                     "last " if woke else "")
+
+
+def _span(seconds: float) -> str:
+    """A time span in a person's words: 40 s, 12 min, 3 h 5 min, 2 days 4 h."""
+    s = int(round(seconds))
+    if s < 60:
+        return "%d s" % s
+    m = s // 60
+    if m < 60:
+        return "%d min" % m
+    h, m = divmod(m, 60)
+    if h < 48:
+        return "%d h %d min" % (h, m) if m else "%d h" % h
+    d, h = divmod(h, 24)
+    return "%d days %d h" % (d, h) if h else "%d days" % d
 
 
 def text_of(blocks: List[Dict[str, Any]]) -> str:

@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import anthropic
 
-from .base import DOCUMENTS_NOTE, Emit, ModelInfo, Provider, TurnResult, safe_id, user_text
+from .base import DOCUMENTS_NOTE, EFFORT, EFFORTS, Emit, ModelInfo, Provider, TurnResult, safe_id, user_text
 
 MODELS = [
     ("claude-opus-5-5", "Claude Opus 5.5"),
@@ -17,6 +17,15 @@ MODELS = [
 FALLBACK_MODELS = {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"}
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_JSON_RETRIES = 2
+# How hard Claude thinks when the turn doesn't say (base.EFFORT; Settings → Models → Thinking). "high": a lab's work is
+# multi-step tool use with physics in it, where Claude does better thinking more; Opus 5.5's own default is medium.
+DEFAULT_EFFORT = "high"
+# A thinking block is valid only in the conversation that wrote it: when an earlier part of the conversation changed
+# (a summary of the day, a tool loaded mid-chat), Claude 5.5's newer accounts and Fable 5.2's every account refuse the
+# request (400) rather than read a block it can't vouch for. Asked to, the API drops those blocks instead, and the turn
+# goes on without that earlier reasoning (Kelvin keeps its history append-only, so this is rare).
+BINDING_BETA = "thinking-binding-controls-2026-08-01"
+DROP_UNBOUND = {"prefix_mismatch_behavior": "drop_block"}
 # Every request sends the whole prompt again (the tools, the system prompt, the conversation), and the part sent before
 # is read from Claude's cache at a tenth of the price or less. A cache entry lives 5 minutes unless asked for an
 # hour, and in a lab the person comes back after 5 to 60 minutes: then the 5-minute one is gone, and the whole prompt is
@@ -43,6 +52,21 @@ def sanitize(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     last = max((i for i, b in enumerate(raw) if b.get("type") == "fallback"), default=-1)
     return [b for i, b in enumerate(raw)
             if b.get("type") != "fallback" and (i > last or b.get("type") == "text")]
+
+
+def without_thinking(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The messages with no thinking blocks in Claude's turns (their words and calls stay): how a conversation goes on
+    when Claude refuses its earlier thinking, the model then answering without that reasoning."""
+    out = []
+    for m in messages:
+        if m.get("role") == "assistant" and isinstance(m.get("content"), list):
+            kept = [b for b in m["content"] if not (isinstance(b, dict) and b.get("type") in
+                                                    ("thinking", "redacted_thinking"))]
+            if not kept:   # a turn that was only thinking: nothing of it left to send
+                continue
+            m = dict(m, content=kept)
+        out.append(m)
+    return out
 
 
 def without_calls(raw: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
@@ -105,11 +129,13 @@ class AnthropicProvider(Provider):
     sees_images = True
     sees_pdfs = True
     can_search = True
+    keeps_history = True   # each earlier turn sent as it was: Claude's thinking is bound to it (agent.keeps_history)
 
     def __init__(self, api_key: Optional[str], base_url: Optional[str] = None, name: str = "", label: str = ""):
         """base_url, name, label: Claude through the Kelvin hub (hubmodels.py), with the hub token as the key."""
         self.name, self.label = name or self.name, label or self.label
         self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url) if api_key else None
+        self.binding = True   # asks the API to drop unbound thinking blocks; off for good where a route refuses it
 
     async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
         """Claude's web search (a server tool: Anthropic runs the searches). The results it found, with Claude's
@@ -139,6 +165,7 @@ class AnthropicProvider(Provider):
 
     async def stream(self, model: str, system: str, history: List[Dict[str, Any]],
                      tools: List[Dict[str, Any]], emit: Emit) -> TurnResult:
+        effort = EFFORT.get()
         kwargs: Dict[str, Any] = dict(
             model=model,
             max_tokens=64000,
@@ -146,13 +173,23 @@ class AnthropicProvider(Provider):
             tools=[{"name": t["name"], "description": t["description"], "input_schema": t["schema"],
                     "eager_input_streaming": True} for t in tools],
             thinking={"type": "adaptive", "display": "summarized"},
-            output_config={"effort": "medium"},
+            output_config={"effort": effort if effort in EFFORTS else DEFAULT_EFFORT},
             **cached(system, tools),
         )
+        betas = [FALLBACK_BETA] if model in FALLBACK_MODELS else []
         if model in FALLBACK_MODELS:
-            kwargs.update(betas=[FALLBACK_BETA], fallbacks="default")
-        retries = 0
+            kwargs.update(fallbacks="default")
+        retries, stripped = 0, False
         while True:
+            if self.binding:
+                kwargs["thinking"] = dict(kwargs["thinking"], block_binding=DROP_UNBOUND)
+                kwargs["betas"] = betas + [BINDING_BETA]
+            else:
+                kwargs["thinking"] = {k: v for k, v in kwargs["thinking"].items() if k != "block_binding"}
+                if betas:
+                    kwargs["betas"] = betas
+                else:
+                    kwargs.pop("betas", None)
             try:
                 async with self.client.beta.messages.stream(**kwargs) as stream:
                     async for event in stream:
@@ -163,6 +200,21 @@ class AnthropicProvider(Provider):
                                 await emit({"type": "thinking", "delta": event.delta.thinking})
                     message = await stream.get_final_message()
                 break
+            except anthropic.BadRequestError as e:
+                said = str(e).lower()
+                if not stripped and ("different conversation" in said or "invalid `signature`" in said
+                                     or "invalid signature" in said):
+                    # earlier thinking Claude no longer vouches for (a route without the control below, an edited
+                    # turn): the documented recovery, once: this request without any earlier thinking. (Only on a
+                    # route that refused the control: there each later step of that chat pays one refused request.)
+                    kwargs["messages"] = without_thinking(kwargs["messages"])
+                    stripped = True
+                elif self.binding and "binding" in said:
+                    # a route (a gateway, an older API) that doesn't take the binding control: without it from now on
+                    self.binding = False
+                else:
+                    raise
+                await emit({"type": "reset"})
             except ValueError:
                 # Tool-call JSON the SDK could not parse at all: re-issue the turn (bounded).
                 retries += 1

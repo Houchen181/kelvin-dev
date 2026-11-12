@@ -4,7 +4,13 @@ Requests go to the public Responses API with the account's access token, store=f
 whole conversation in `input` each time (the route keeps no server-side history). The system prompt goes in
 `instructions`; parameters the route refuses (temperature, max_output_tokens, previous_response_id...) are never sent.
 Function tools are offered grouped in a namespace, as the route asks; if it refuses that form, plain function tools are
-tried instead and the form that works is remembered."""
+tried instead and the form that works is remembered.
+
+The model's reasoning goes with the conversation, as Codex sends it: each answer's reasoning comes back encrypted
+(include reasoning.encrypted_content, since nothing is stored) and is sent again with the turns after it, so a step
+that follows a tool call builds on what the model thought before the call instead of starting over. The turn's
+effort (Settings → Models → Thinking) goes as the reasoning effort. Either one the route refuses is dropped, and
+remembered."""
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +21,8 @@ from typing import Any, Dict, List, Optional
 import openai
 
 from ..chatgpt import MANAGE_USAGE, RESOURCE, NotSignedIn, SignIn
-from .base import PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url, safe_id, text_of, user_text
+from .base import (EFFORT, PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url, safe_id, text_of,
+                   user_text)
 
 NAMESPACE = "kelvin"
 LIMITS = {"subscription_sharing_usage_limit_exceeded": "Your ChatGPT plan's usage limit is reached for now.",
@@ -29,7 +36,8 @@ def _plain(item: Any) -> Dict[str, Any]:
     return dump(exclude_none=True) if dump else dict(vars(item))
 
 
-def to_input(history: List[Dict[str, Any]], provider: str) -> List[Dict[str, Any]]:
+def to_input(history: List[Dict[str, Any]], provider: str, model: Optional[str] = None) -> List[Dict[str, Any]]:
+    """model: the model answering now; reasoning goes back only to the model that wrote it (another can't read it)."""
     out: List[Dict[str, Any]] = []
     for m in history:
         if m["role"] == "user":
@@ -39,7 +47,10 @@ def to_input(history: List[Dict[str, Any]], provider: str) -> List[Dict[str, Any
         elif m["role"] == "assistant":
             if m.get("provider") == provider and isinstance(m.get("raw"), list):
                 for item in m["raw"]:   # our own earlier output, replayed as it was (without server ids)
-                    out.append({k: v for k, v in item.items() if k not in ("id", "status")})
+                    if item.get("type") == "reasoning" and model and item.get("for_model") not in (None, model):
+                        continue   # another model's reasoning (for_model: the model Kelvin asked, as the route names
+                        # its answering model as it likes, a dated name say)
+                    out.append({k: v for k, v in item.items() if k not in ("id", "status", "for_model")})
                 continue
             text = text_of(m["blocks"])
             if text:
@@ -76,6 +87,8 @@ class ChatGPTProvider(Provider):
     def __init__(self, signin: SignIn, client_factory: Any = None, http_get: Any = None):
         self.signin = signin
         self.tool_style = "namespace"
+        self.no_include: set = set()   # the models the route gives no encrypted reasoning for
+        self.no_effort: set = set()    # the models that refused any reasoning effort (one refusing xhigh takes high)
         self._client = client_factory or (lambda token: openai.AsyncOpenAI(api_key=token, base_url=RESOURCE,
                                                                            max_retries=0))
         self._get = http_get or self._get_json
@@ -109,18 +122,43 @@ class ChatGPTProvider(Provider):
         except NotSignedIn as e:
             raise RuntimeError(str(e))
         client = self._client(token)
-        body: Dict[str, Any] = {"model": model, "instructions": system, "input": to_input(history, self.name),
+        body: Dict[str, Any] = {"model": model, "instructions": system, "input": to_input(history, self.name, model),
                                 "store": False, "stream": True}
         if tools:
             body["tools"] = tool_list(tools, self.tool_style)
-        try:
-            events = await client.responses.create(**body)
-        except openai.BadRequestError as e:
-            if not tools or self.tool_style != "namespace" or "tool" not in str(e).lower():
-                raise
-            self.tool_style = "function"   # this route takes plain function tools after all
-            body["tools"] = tool_list(tools, self.tool_style)
-            events = await client.responses.create(**body)
+        if model not in self.no_include:
+            body["include"] = ["reasoning.encrypted_content"]
+        effort = EFFORT.get()
+        if model not in self.no_effort and effort in ("low", "medium", "high", "xhigh"):
+            body["reasoning"] = {"effort": effort}
+        for _ in range(6):   # each refusal below takes one thing away, once
+            try:
+                events = await client.responses.create(**body)
+                break
+            except openai.BadRequestError as e:
+                said = str(e).lower()
+                param = str(getattr(e, "param", None) or "").lower()
+                sent_back = any(i.get("type") == "reasoning" for i in body["input"])
+                if sent_back and (param.startswith("input") or "encrypted" in said and not param.startswith("include")):
+                    # earlier reasoning the route can't read now (another sign-in): this request without it; the turns
+                    # after it carry their own
+                    body["input"] = [i for i in body["input"] if i.get("type") != "reasoning"]
+                elif "reasoning" in body and ("effort" in param or "effort" in said):
+                    if body["reasoning"].get("effort") == "xhigh":
+                        body["reasoning"] = {"effort": "high"}   # the deepest this model takes, for this request
+                    else:
+                        self.no_effort.add(model)   # this model takes no effort at all
+                        del body["reasoning"]
+                elif "include" in body and ("include" in param or "include" in said or "encrypted" in said):
+                    self.no_include.add(model)   # the route gives this model's reasoning back to nobody
+                    del body["include"]
+                elif tools and self.tool_style == "namespace" and "tool" in said:
+                    self.tool_style = "function"   # this route takes plain function tools after all
+                    body["tools"] = tool_list(tools, self.tool_style)
+                else:
+                    raise
+        else:
+            raise RuntimeError("ChatGPT refused the request in every form Kelvin knows.")
         final = None
         incomplete = False
         async for ev in events:
@@ -161,12 +199,18 @@ class ChatGPTProvider(Provider):
                     args = None
                 blocks.append({"type": "tool_call", "id": item.get("call_id") or item.get("id"), "name": name, "input": args})
                 raw.append({k: v for k, v in item.items() if k in ("type", "call_id", "name", "arguments", "namespace")})
+            elif kind == "reasoning" and item.get("encrypted_content"):   # sent again with the turns after it
+                raw.append({"type": "reasoning", "summary": item.get("summary") or [],
+                            "encrypted_content": item["encrypted_content"], "for_model": model})
+        while raw and raw[-1]["type"] == "reasoning":   # reasoning goes back only with the item it led to
+            raw.pop()
         result = TurnResult(blocks, raw, model=getattr(final, "model", None) or model)
         if incomplete:
             result.stop_reason, result.note = "max_tokens", "The answer was cut short."
             result.blocks = [b for b in blocks if b["type"] != "tool_call"]
-            # nor sent again: a call that never ran has no output to follow it, which the route refuses
-            result.raw = [i for i in raw if i["type"] != "function_call"]
+            # nor sent again: a call that never ran has no output to follow it, which the route refuses; nor the
+            # reasoning that led to it
+            result.raw = [i for i in raw if i["type"] not in ("function_call", "reasoning")]
         elif result.tool_calls:
             result.stop_reason = "tool_calls"
         return result
