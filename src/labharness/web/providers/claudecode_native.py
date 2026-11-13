@@ -13,7 +13,8 @@ Between answers the conversation is a Claude Code session, which Claude Code kee
 incognito chat: base.RESUMABLE). The chat's next answer goes on in it (--resume) when the chat is as that session left
 it, with what the session hasn't taken in since (the person's message; Kelvin's results for calls an answer that ended
 early left waiting; never what it took in already: Record); otherwise (another model answered meanwhile, earlier
-turns were summarised, another Claude model) it starts a session with the conversation so far as its first message.
+turns were summarised, the chat's prompt was written again after an update of Kelvin's own, another Claude model) it
+starts a session with the conversation so far as its first message.
 
 Claude Code needs a few things said (claude 2.1.304, 2026-11-12): a resumed session keeps the system prompt it began
 with unless told not to (--system-prompt-snapshot off); an MCP server's tools wait behind Claude Code's own tool search
@@ -87,11 +88,24 @@ class NoStart(RuntimeError):
         self.unable = unable or bool(self.option and self.option not in TUNABLE)
 
 
-def first_mark(history: List[Dict[str, Any]]) -> str:
-    """The conversation's first message, as a mark: a summary of earlier turns (compaction) puts another there."""
+def first_mark(history: List[Dict[str, Any]], system: str = "") -> str:
+    """The conversation's first message and the prompt it goes under, as a mark: a summary of earlier turns
+    (compaction) puts another message first, and a chat's prompt written again (agent.py, _frame: Kelvin's own
+    instructions or tools changed) is another prompt. A session goes on only under the prompt it began with: resumed
+    under a new one, it would read the changes to the chat's setup its messages told after that prompt (told_mark),
+    and a `claude` without --system-prompt-snapshot would never read the new prompt at all."""
     m = history[0] if history else {}
-    seed = json.dumps([m.get("role"), m.get("text"), m.get("sent"), m.get("handoff")], ensure_ascii=False, default=str)
+    seed = json.dumps([m.get("role"), m.get("text"), m.get("sent"), m.get("handoff"), system], ensure_ascii=False,
+                      default=str)
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def told_mark(history: List[Dict[str, Any]]) -> str:
+    """The changes to the chat's setup its messages carried (agent.py, _frame: a message's "update"), as a mark. Where
+    Kelvin writes a chat's prompt again, the messages before it lose theirs (compaction.view: the new prompt holds the
+    setup as it is), so a session that read them would go on believing them: it goes on only while they stand."""
+    told = [m.get("update") for m in history if m.get("role") == "user" and m.get("update")]
+    return hashlib.sha256(json.dumps(told, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()[:16]
 
 
 def entry_key(m: Dict[str, Any]) -> str:
@@ -111,11 +125,12 @@ def stopped(m: Dict[str, Any]) -> bool:
         text_of(m.get("blocks") or []).endswith("(stopped)")
 
 
-def resumable(history: List[Dict[str, Any]], model: str) -> Optional[Tuple[str, int]]:
+def resumable(history: List[Dict[str, Any]], model: str, system: str = "") -> Optional[Tuple[str, int]]:
     """The Claude Code session this conversation goes on in, and where in it that session's last message is: the
     latest answer the bridge gave natively, when nothing but the person's messages, Kelvin's results and a stopped
-    answer came after it, with the same model (thinking is the model's own), and no summary of earlier turns put in
-    meanwhile."""
+    answer came after it, with the same model (thinking is the model's own), under the same prompt, with no summary of
+    earlier turns put in meanwhile and the changes to the chat's setup the session read still standing (first_mark,
+    told_mark)."""
     for i in range(len(history) - 1, -1, -1):
         m = history[i]
         if m.get("role") != "assistant":
@@ -123,7 +138,7 @@ def resumable(history: List[Dict[str, Any]], model: str) -> Optional[Tuple[str, 
         raw = m.get("raw")
         if isinstance(raw, dict) and raw.get("bridge") == "native":
             ok = raw.get("kept") and raw.get("session") and raw.get("model") == model and \
-                raw.get("first") == first_mark(history)
+                raw.get("first") == first_mark(history, system) and raw.get("told") == told_mark(history[:i])
             return (str(raw["session"]), i) if ok else None
         if not stopped(m):   # another model's answer, or the text protocol's
             return None
@@ -383,9 +398,10 @@ class Live:
     `calls` until the answer's next step brings their results (answer)."""
 
     def __init__(self, cmd: List[str], args: List[str], cwd: Path, system: str, tools: List[Dict[str, Any]],
-                 key: str, model: str, first: str, kept: bool, owned: bool, resumed: str = ""):
+                 key: str, model: str, first: str, kept: bool, owned: bool, resumed: str = "", told: str = ""):
         self.tools = list(tools)
         self.key, self.model, self.first, self.kept, self.resumed = key, model, first, kept, resumed
+        self.told = told         # the changes to the chat's setup its conversation told (told_mark)
         self.owned = owned       # a chat's answer's: ended when that answer ends (end_answer)
         self.session = resumed or ""
         self.whole = RESULT_CHARS   # how long a result it takes whole: by its version (whole_chars)
@@ -678,7 +694,7 @@ class Live:
     def raw(self) -> Dict[str, Any]:
         """What the chat keeps of the run with each answer of it, so its next answer can go on in the session."""
         return {"bridge": "native", "session": self.session, "model": self.model, "kept": self.kept,
-                "first": self.first}
+                "first": self.first, "told": self.told}
 
     def what_it_took(self) -> Set[str]:
         with self.lock:

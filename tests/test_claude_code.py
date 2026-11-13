@@ -773,6 +773,27 @@ def test_the_next_answer_goes_on_in_the_same_session(parts, tmp_path, monkeypatc
     assert chat["messages"][-1]["blocks"][0]["text"] == "Still here; I thought: Gate first."
 
 
+def test_a_new_session_once_kelvin_writes_the_chats_prompt_again(parts, tmp_path, monkeypatch):
+    """An update of Kelvin's own instructions writes each chat's prompt again, and sets aside the changes to the chat's
+    setup that earlier messages told (the new prompt holds the setup as it is now). A session that read those would
+    read them after the new prompt and go on believing them, so the next answer starts a new session, with the
+    conversation so far."""
+    from labharness.web import agent as agent_module
+    log = script(tmp_path, monkeypatch, [{"text": "One."}], [{"text": "Two."}])
+    rule = "A rule of the updated Kelvin's."
+
+    def updated(agent, chat_id, event):   # Kelvin updated between the two answers
+        if event["type"] == "turn_end" and rule not in agent_module.SYSTEM:
+            monkeypatch.setattr(agent_module, "SYSTEM", agent_module.SYSTEM + "\n\n" + rule)
+    _, _, chat = bridge_chat(parts, ["first", "second"], on_event=updated)
+    runs = entries(log, "session")
+    assert len(runs) == 2 and runs[0]["session"] and not runs[1]["resumed"]
+    second = first_messages(log)[1]
+    assert second.startswith("<earlier_conversation>") and "first" in second and "One." in second
+    assert rule in entries(log, "args")[1]["system"] and rule not in entries(log, "args")[0]["system"]
+    assert chat["messages"][-1]["blocks"][0]["text"] == "Two."
+
+
 def test_an_incognito_chat_keeps_no_session(parts, tmp_path, monkeypatch):
     log = script(tmp_path, monkeypatch, [{"text": "Hello."}], [{"text": "Again."}])
     bridge_chat(parts, ["hi", "and again"], incognito=True)
@@ -1108,23 +1129,32 @@ def test_compare_lanes_going_on_from_one_session_each_get_their_own(tmp_path, mo
 
 def test_resumable_only_when_the_chat_is_as_the_session_left_it():
     raw = {"bridge": "native", "session": "s1", "model": "opus", "kept": True}
-    history = [{"role": "user", "text": "hi", "sent": "<sent>1</sent>"}]
-    raw["first"] = native.first_mark(history)
+    history = [{"role": "user", "text": "hi", "sent": "<sent>1</sent>", "update": "The chat's folder is now C:/one."}]
+    raw["first"], raw["told"] = native.first_mark(history, "P"), native.told_mark(history)
     said = {"role": "assistant", "provider": "claudecode", "model": "opus", "blocks": [], "raw": raw}
     nxt = {"role": "user", "text": "next"}
-    assert native.resumable(history + [said, nxt], "opus") == ("s1", 1)
+    assert native.resumable(history + [said, nxt], "opus", "P") == ("s1", 1)
+    moved = dict(nxt, update="The chat's folder is now C:/two.")
+    assert native.resumable(history + [said, moved], "opus", "P") == ("s1", 1)   # a change since: with the message
     halted = {"role": "assistant", "provider": "claudecode", "raw": None,
               "blocks": [{"type": "text", "text": "Ramping … (stopped)"}]}
-    assert native.resumable(history + [said, halted, nxt], "opus") == ("s1", 1)   # a stopped answer: said with it
+    assert native.resumable(history + [said, halted, nxt], "opus", "P") == ("s1", 1)   # a stopped answer: said too
     parts, keys = native.since(history + [said, halted, nxt], 1, set())
     assert parts[0] == native.STOPPED % "after writing: “Ramping”" and keys == [native.entry_key(nxt)]
     assert native.since(history + [said, halted, nxt], 1, {native.entry_key(nxt)})[1] == []   # taken in already
     other = {"role": "assistant", "provider": "anthropic", "raw": [], "blocks": [{"type": "text", "text": "x"}]}
-    assert native.resumable(history + [said, nxt, other, nxt], "opus") is None     # another model answered since
-    assert native.resumable(history + [said, nxt], "sonnet") is None                # another model now
+    assert native.resumable(history + [said, nxt, other, nxt], "opus", "P") is None   # another model answered since
+    assert native.resumable(history + [said, nxt], "sonnet", "P") is None              # another model now
     summed = [dict(history[0], handoff="earlier turns, summarised")]
-    assert native.resumable(summed + [said, nxt], "opus") is None                   # earlier turns summarised since
-    assert native.resumable(history + [dict(said, raw=dict(raw, kept=False)), nxt], "opus") is None   # incognito
+    assert native.resumable(summed + [said, nxt], "opus", "P") is None                 # earlier turns summarised since
+    assert native.resumable(history + [dict(said, raw=dict(raw, kept=False)), nxt], "opus", "P") is None  # incognito
+    # Kelvin wrote the chat's prompt again (its own instructions or tools changed: agent.py, _frame), and the changes
+    # to the chat's setup the session read are set aside (the new prompt holds the setup as it is): a new session
+    assert native.resumable(history + [said, nxt], "opus", "P2") is None
+    bare = [{k: v for k, v in history[0].items() if k != "update"}]
+    assert native.resumable(bare + [said, nxt], "opus", "P") is None
+    assert native.resumable(history + [dict(said, raw={k: v for k, v in raw.items() if k != "told"}), nxt], "opus",
+                            "P") is None   # a session from before the mark
 
 
 def test_results_claude_code_would_put_in_a_file_are_cut_by_kelvin():

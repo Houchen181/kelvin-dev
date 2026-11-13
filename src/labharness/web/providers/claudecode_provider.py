@@ -473,14 +473,14 @@ class ClaudeCodeProvider(Provider):
         else a new session with the conversation so far in its first message. A flag this `claude` doesn't know is left
         out and the run started again; a session that can't go on gives way to a new one."""
         kept = bool(RESUMABLE.get())   # not for an incognito chat, nor for a second opinion, a summary, an analysis
-        found = native.resumable(history, model) if kept else None
-        first = native.first_mark(history)
+        found = native.resumable(history, model, system) if kept else None
+        first, told = native.first_mark(history, system), native.told_mark(history)
         while True:
             resume = found[0] if found else ""
             fork = bool(resume) and resume in native.CLAIMED   # another run goes on in it now: it gets a copy
             live = native.Live(self.cmd, self._native_args(model, kept, resume, fork), self.cwd, system, tools,
                                SESSION.get(), model, first, kept, bool(ANSWER.get()),
-                               resumed=resume if resume and not fork else "")
+                               resumed=resume if resume and not fork else "", told=told)
             live.owner = self
             native.RUNS.append(live)
             if live.resumed:
