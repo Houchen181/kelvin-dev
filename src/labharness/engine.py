@@ -6,6 +6,7 @@ interlocks apply inside plans exactly as they do for direct commands.
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -14,12 +15,14 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from . import expr, frames, pulses, techniques
 from ._version import __version__
 from .analysis import analyze_run
+from .cards import num
 from .chain import derived_readings
 from .conditions import typed
 from .eventlog import EventLog, RunFolderError, RunStore
 from .forecast import Forecast, action_of, floats, runs
 from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur, applied_by, feeds_of, paces
 from .instrument import InstrumentOff, SensorError, Stopped
+from .lab import error_words
 from .monitor import Approach, rate_per_s, switch_words
 from .plans import MAX_POINTS, Axis, Plan, PlanError, Stabilize, Step, load_plan
 from .timing import Took, away as away_from_safe, settings_of, steps as timing_steps
@@ -48,6 +51,49 @@ def _transient(e: BaseException) -> bool:
 
 def _num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def canonical(lab: Any, key: str) -> str:
+    """instr.param for a key as plans, interlocks and watches write it (the lab's own name for it too)."""
+    try:
+        inst, spec = lab.resolve(str(key))
+    except KeyError:
+        return str(key)
+    return "%s.%s" % (inst.name, spec.name)
+
+
+def need(lab: Any, out: Dict[str, Dict[str, str]], key: str, why: str) -> None:
+    """A reading work needs, added to out ({instr: {reading: what for}}); the first reason given for it is kept."""
+    instr, dot, param = canonical(lab, key).partition(".")
+    if dot:
+        out.setdefault(instr, {}).setdefault(param, why)
+
+
+def reading_takes(lab: Any, key: str, why: str) -> List[Tuple[str, str]]:
+    """A reading work reads, with what asking it takes: the switch it is read only under (read_when), a trace's x
+    axis (its start and stop, origin and step, or x values) and the readings its values are worked out from (y:)."""
+    out = [(key, why)]
+    try:
+        inst, spec = lab.resolve(key)
+    except KeyError:
+        return out
+    key = "%s.%s" % (inst.name, spec.name)
+    takes = [spec.read_when] + list(spec.axis or ()) + list(spec.axis_step or ()) + [spec.x_values]
+    if spec.y:   # its own raw numbers aside, the card's readings its expression names
+        takes += [n for n in re.findall(r"[A-Za-z_]\w*", spec.y) if n in inst.card.params]
+    return out + [("%s.%s" % (inst.name, p), "reading %s takes it" % key) for p in dict.fromkeys(takes)
+                  if p and p != spec.name]
+
+
+def watch_edge(lab: Any, w: Dict[str, Any]) -> str:
+    """A lab watch's edges in words, with the reading's unit: "attodry.T above 10 K"."""
+    try:
+        show = lab.resolve(w["read"])[1].show
+    except KeyError:
+        show = num
+    edges = (["below %s" % show(w["below"])] if w.get("below") is not None else []) + (
+        ["above %s" % show(w["above"])] if w.get("above") is not None else [])
+    return "%s %s" % (w["read"], " or ".join(edges))
 
 
 @dataclass
@@ -632,9 +678,12 @@ class RunEngine:
         return [(ramp.key, v) for v in ramp.values] + [("%s.%s" % (ramp.instr, rate_param), leg.rate)
                                                         for leg in ramp.segments if leg.rate is not None and rate_param]
 
-    def preflight(self, names: Optional[List[str]] = None, fresh: bool = False):
+    def preflight(self, names: Optional[List[str]] = None, fresh: bool = False,
+                  needs: Optional[Dict[str, Dict[str, str]]] = None):
         """Health-check these instruments (all if none are named). One that passed within HEALTHY_FOR seconds is not
-        asked again unless fresh (a person's or the agent's own health check always asks)."""
+        asked again unless fresh (a person's or the agent's own health check always asks). needs: what the work it is
+        for needs of their readings (needs, drive_needs): the record says whether that work may go on (judge), and
+        names the readings that failed which it doesn't need."""
         wanted = list(names) if names else [n for n, i in self.lab.instruments.items() if i.enabled]
         now = time.monotonic()
         todo = wanted if fresh else [n for n in wanted if now - self._healthy.get(n, float("-inf")) > HEALTHY_FOR]
@@ -645,10 +694,163 @@ class RunEngine:
             else:
                 self._healthy.pop(r.instr, None)
         if todo:
-            self.gate.log.write("preflight", by=self.gate.operator, ok=all(r.ok for r in results),
+            stop, told = self.judge(results, needs) if needs is not None else ([], [])
+            self.gate.log.write("preflight", by=self.gate.operator,
+                                ok=all(r.ok for r in results) if needs is None else not stop,
                                 results=[str(r) for r in results],
-                                recent=sorted(set(wanted) - set(todo)) or None)
+                                recent=sorted(set(wanted) - set(todo)) or None, not_needed=told or None)
         return results
+
+    def judge(self, results: Iterable[Any], needs: Optional[Dict[str, Dict[str, str]]],
+              unused: str = "this run doesn't need it") -> Tuple[List[str], List[str]]:
+        """A preflight's results (HealthResult) for work that needs these of the instruments' readings ({instr:
+        {reading: what for}}: needs, drive_needs): (why it can't start, what it is told). A reading that failed while
+        its instrument answered (a sensor unplugged) stops only work that needs it; the work is told of the others
+        (unused: what such a line ends with). Anything else wrong with an instrument it uses stops it, as it always
+        has, and so does a reading it needs that the instrument can't give in the state it is in now (not_now)."""
+        results = list(results)
+        stop: List[str] = []
+        told: List[str] = []
+        for r in results:
+            s, t = r.for_work((needs or {}).get(r.instr, {}), unused)
+            stop += s
+            told += t
+        if not stop:   # a reading the card's checks keep from being asked now
+            stop = [r.not_now[p] for r in results for p in sorted((needs or {}).get(r.instr, {}))
+                    if p in getattr(r, "not_now", {})]
+        return stop, told
+
+    def needs(self, plan: Plan) -> Dict[str, Dict[str, str]]:
+        """The readings this plan can't run without, by instrument: {instr: {reading: what it needs it for}}. What it
+        measures, waits on, follows or decides by (its preconditions, until: and while:), with what asking those
+        takes (a trace's axis, the switch a reading is asked under); and what changing its settings reads, the guards,
+        interlocks and lab watches on what it drives among them (drive_needs). A reading that fails stops only a plan
+        that needs it; the preflight tells the plan of the others."""
+        lab, out = self.lab, {}   # type: Any, Dict[str, Dict[str, str]]
+
+        def read(key: str, why: str) -> None:
+            for k, w in reading_takes(lab, key, why):
+                need(lab, out, k, w)
+        for instr, param in list(plan.measure) + [m for a in plan.axes for m in a.measure]:
+            read("%s.%s" % (instr, param), "it measures it")
+        for a in plan.axes:
+            if a.stabilize is not None:
+                read(a.stabilize.key, "it waits for it to settle")
+                own = self._set_point_of(a.stabilize) if a.stabilize.near is not None else None
+                if own:
+                    need(lab, out, own, "it waits for %s to get near it" % a.stabilize.key)
+            if a.kind == "ramp":
+                followed = self.followed(a)
+                if followed:
+                    read(followed, "its ramp follows it")
+        for cond in plan.preconditions:
+            read(cond.key, "its precondition %s reads it" % cond.text)
+        for rule in plan.rules():
+            for k in rule.keys:
+                read(k, "its %r reads it" % rule.text)
+        steps = plan.all_steps()
+        settings = [s.key for s in steps if action_of(lab, s.instr, s.param) is None] \
+            + [k for k, _ in plan.swept_settings()]
+        try:
+            settings += [k for k, _ in self._ramp_values(plan)] + [k for k, _ in techniques.drive_values(lab, plan)]
+            driving = bool(techniques.driving(lab, plan))
+        except (KeyError, ValueError):   # a plan validate refuses: what it names is said there
+            driving = False
+        actions = [(s.instr, s.param) for s in steps if action_of(lab, s.instr, s.param) is not None] \
+            + list(plan.trigger)
+        for instr, readings in self.drive_needs(settings, actions, driving).items():
+            for reading, why in readings.items():
+                out.setdefault(instr, {}).setdefault(reading, why)
+        return out
+
+    def drive_needs(self, keys: Iterable[str], actions: Iterable[Tuple[str, str]] = (),
+                    driving: bool = False) -> Dict[str, Dict[str, str]]:
+        """What changing these settings reads, by instrument ({instr: {reading: what for}}): each one itself (read
+        before it moves and back after); what its card ties to it (the reading a set point takes there, the switch it
+        acts through, its rate, its range and current limit, the levels a switch applies); the guards, interlocks and
+        lab watches on it; and the interlocks whose reading it changes, with their drives (read, to know whether they
+        are up). actions: the cards' actions the work does (instr, action): the switch one drives the sample under.
+        Once anything drives the sample (a drive among keys, an action that drives, or driving), the lab watches that
+        stop runs are needed too: they are what stops it."""
+        lab, out = self.lab, {}   # type: Any, Dict[str, Dict[str, str]]
+        interlocks, watches = lab.config.interlocks, lab.config.watches
+        for raw in dict.fromkeys(keys):
+            try:
+                inst, spec = lab.resolve(raw)
+            except KeyError:
+                continue   # a plan validate refuses: said there
+            key = "%s.%s" % (inst.name, spec.name)
+            driving = driving or spec.is_drive
+            mine = inst.name + "."
+            if spec.get_cmd is not None:
+                need(lab, out, key, "it sets it, and Kelvin reads it before it moves and back after")
+            ties = [(spec.readback, "it sets %s, whose reading it is" % key),
+                    (spec.applies_when, "%s acts on the sample only while it is on" % key),
+                    (spec.rate_param, "it paces %s" % key),
+                    (spec.read_when, "%s is read only while it is on" % key),
+                    (spec.range_param, "it is %s's range, which Kelvin checks as it moves" % key),
+                    (spec.autorange_param, "it is %s's autorange, which Kelvin checks as it moves" % key),
+                    (spec.current_limit, "it is %s's current limit, which Kelvin checks as it moves" % key)]
+            ties += [(d, "switching %s on parks it at safe and applies it again" % key) for d in spec.enables]
+            applied = applied_by(inst, spec)
+            ties += [(d.name, "switching %s on takes it to the sample" % key) for d in applied]
+            for param, why in ties:
+                if param and param in inst.card.params and inst.card.params[param].get_cmd is not None:
+                    need(lab, out, mine + param, why)
+            for g in inst.guards(spec.name):
+                need(lab, out, g.key, "the guard on %s (|%s| ≤ %s) reads it" % (key, g.key, num(g.max_abs)))
+            feeds = feeds_of(inst, spec) + [mine + d.readback for d in applied]
+            for lock in interlocks:
+                if canonical(lab, lock.drive) == key:
+                    need(lab, out, lock.require.key, "the interlock on %s (%s) reads it" % (key, lock.require.text))
+                elif canonical(lab, lock.require.key) in feeds:   # what it sets changes that interlock's reading
+                    need(lab, out, lock.require.key, "the interlock on %s (%s) reads it, and %s changes it" % (
+                        lock.drive, lock.require.text, key))
+                    need(lab, out, lock.drive, "its interlock (%s) reads %s, which %s changes: Kelvin reads it to "
+                                               "know whether it is up" % (lock.require.text, lock.require.key, key))
+            for w in watches:
+                if any(canonical(lab, "%s.%s" % (i, p)) == key for i, p, _ in w["then"]):
+                    need(lab, out, w["read"], "the lab watch on it brings %s to safe" % key)
+        for instr, name in actions:
+            try:
+                action = lab.instruments[instr].card.actions[name]
+            except KeyError:
+                continue
+            driving = driving or action.drives
+            if action.drives and action.drives_when:
+                need(lab, out, "%s.%s" % (instr, action.drives_when),
+                     "its action %s.%s drives the sample only while it is on" % (instr, name))
+        if driving:
+            for w in watches:
+                if w["stop_run"]:
+                    need(lab, out, w["read"], "the lab watch on it stops the run (%s)" % watch_edge(lab, w))
+        return out
+
+    def checked(self, plan: Plan, fresh: Optional[bool] = None) -> Tuple[Optional[str], List[str]]:
+        """What refuses this plan before anything is asked or set, read now: the plan itself (validate), the
+        instruments it uses (preflight, for what it needs of them: needs), and its preconditions. (why it is refused,
+        None when it may go on; what it is told: readings that failed which it doesn't need). Only reads. fresh: ask
+        an instrument that passed lately again (by default when the plan drives the sample: it checks them now)."""
+        errors = self.validate(plan)
+        if errors:
+            return "plan invalid: " + "; ".join(errors[:5]), []
+        needs = self.needs(plan)
+        # a plan that drives the sample always checks its instruments now; one that only measures trusts a check
+        # from the last HEALTHY_FOR seconds (if one has died since, its reading fails and the scan just stops)
+        results = self.preflight(plan.requires, fresh=bool(self.drive_values(plan)) if fresh is None else fresh,
+                                 needs=needs)
+        stop, told = self.judge(results, needs)
+        if stop:
+            return "preflight failed: " + "; ".join(stop), told
+        for cond in plan.preconditions:
+            try:
+                ok, actual = cond.check(self.lab.read)
+            except Exception as e:   # a reading that failed since its instrument's check
+                return "precondition %s can't be checked: %s" % (cond.text, error_words(cond.instr, e)), told
+            if not ok:
+                _, spec = self.lab.resolve(cond.key)
+                return "precondition %s not met (now %s)" % (cond.text, spec.show(actual)), told
+        return None, told
 
     # ------------------------------------------------------------------ dry run and run
 
@@ -666,39 +868,25 @@ class RunEngine:
         return report
 
     def run(self, plan: Any, dry_run: bool = False, meta: Optional[Dict[str, Any]] = None,
-            folder: Any = None, since: Optional[Tuple[int, int]] = None, notes: Iterable[str] = ()) -> RunReport:
+            folder: Any = None, since: Optional[Tuple[int, int]] = None, notes: Iterable[str] = (),
+            checked: Optional[Tuple[Optional[str], List[str]]] = None) -> RunReport:
         """Validate, check the instruments, ask once for the drive ranges, run, log, analyse. No dry run unless asked
         (dry_run), or in auto mode for a run nobody approves: there the dry run stands in for the person's look.
         Caution for drives comes from the limits, the approval, ramps and guard readings, not a rehearsal.
         folder: where the run's folder goes (its chat's folder; else the data folder's runs/). since: (the gate's stop
         generation, the lab's stops) from when the caller began (a queue picking its item): a stop since then ends
-        it. notes: lines its card adds, if it asks (a dry run of it that just failed)."""
+        it. notes: lines its card adds, if it asks (a dry run of it that just failed). checked: what checked() said of
+        this plan just before (the queue's, which reports the item running only once that passed): not asked again."""
         # a stop while it is checked or approved ends it too
         since = since or (self.gate.stop_generation, self.lab.stops.count)
         try:
             plan = plan if isinstance(plan, Plan) else load_plan(plan, names=self.lab.config.names)
         except PlanError as e:
             return self._refuse("?", "plan invalid: %s" % e)
-        errors = self.validate(plan)
-        if errors:
-            return self._refuse(plan.name, "plan invalid: " + "; ".join(errors[:5]))
+        why, told = checked if checked is not None else self.checked(plan)
+        if why:   # the plan, its instruments (what it needs of them) or a precondition: said before anything is asked
+            return self._refuse(plan.name, why)
         drives = self.drive_values(plan)
-        # a plan that drives the sample always checks its instruments now; one that only measures trusts a check
-        # from the last HEALTHY_FOR seconds (if one has died since, its reading fails and the scan just stops)
-        checked = self.preflight(plan.requires, fresh=bool(drives))
-        bad = [r for r in checked if not r.ok]
-        if bad:
-            return self._refuse(plan.name, "preflight failed: " + "; ".join(str(r) for r in bad))
-        reads = set(plan.measure) | {(i, p) for a in plan.axes for i, p in a.measure}
-        blocked = [r.not_now[p] for r in checked for i, p in sorted(reads)
-                   if i == r.instr and p in getattr(r, "not_now", {})]
-        if blocked:   # a reading the instrument can't give in its state now (its card's checks): said before it starts
-            return self._refuse(plan.name, "preflight failed: " + "; ".join(blocked))
-        for cond in plan.preconditions:
-            ok, actual = cond.check(self.lab.read)
-            if not ok:
-                _, spec = self.lab.resolve(cond.key)
-                return self._refuse(plan.name, "precondition %s not met (now %s)" % (cond.text, spec.show(actual)))
         forecast = Forecast(self).plan(plan)   # what the run changes, how fast, how long, and what it leaves on
         techniques.account(forecast, self.lab, plan)   # its techniques' time, which the walk doesn't count
         # a technique that drives the sample runs at every point on the instrument's own clock: on this card, a
@@ -757,7 +945,7 @@ class RunEngine:
         # the time left counts from the dry run's duration, else the card's estimate (timing.py), not points alone
         expected = sim.duration_s if sim is not None and sim.ok else forecast.seconds or None
         with self.gate.log.holding():   # the record's files stay open while it measures (EventLog.holding)
-            report = self._execute(plan, grants, expected, meta, folder, since)
+            report = self._execute(plan, grants, expected, meta, folder, since, told)
         report.dry_run = sim
         if report.status != "done":   # something went wrong on them: check them again before the next run
             for name in plan.requires:
@@ -831,11 +1019,11 @@ class RunEngine:
 
     def _execute(self, plan: Plan, grants: Dict[str, Any], expected_s: Optional[float] = None,
                  meta: Optional[Dict[str, Any]] = None, folder: Any = None,
-                 since: Optional[Tuple[int, int]] = None) -> RunReport:
+                 since: Optional[Tuple[int, int]] = None, told: Iterable[str] = ()) -> RunReport:
         """expected_s: the dry run's duration (lab time), else the card's estimate, for an honest time-left estimate
         that counts ramps. A real run measures how long its readings, steps and points take (timing.py), for the
         estimates after it; a dry run's twins take what this lab's runs measured (lab.pace), so it counts what the card
-        counts."""
+        counts. told: what its preflight said it doesn't need (a reading that failed): its record's first warnings."""
         gate, lab, clock = self.gate, self.lab, self.lab.clock
         gen, stops = since if since is not None else (gate.stop_generation, lab.stops.count)
         timing, pace = getattr(lab, "timing", None), getattr(lab, "pace", None)
@@ -859,7 +1047,7 @@ class RunEngine:
         self._emit(event="start", run_id=rec.run_id, plan=plan.name, total=plan.points, **cols)
         t0, wall0 = clock.now(), time.time()
         status, reason, n = "done", None, 0
-        warnings: List[str] = [rec.moved] if getattr(rec, "moved", None) else []
+        warnings: List[str] = list(told) + ([rec.moved] if getattr(rec, "moved", None) else [])
 
         def apply(instr: str, param: str, value: Any) -> None:
             if gate.stop_generation != gen:   # a stop that came between steps (or while the run was starting)

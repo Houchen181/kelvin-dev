@@ -5904,7 +5904,10 @@
   const QUEUE = { open: false, data: null, editing: null, sel: null, dragging: false, keys: null, units: new Map() };
   const QUEUE_STEP = "step: cool to 2 K\nset: { tc.T_set: 2 }\nstabilize: { read: tc.T, within: 0.02, for: 120, timeout: 7200 }\nwait: 600";
   const Q_STATE = { idle: "Idle", running: "Running", pausing: "Pausing after this item", paused: "Paused" };
-  const Q_STATUS = { waiting: "waiting", running: "running…", done: "done", failed: "failed", stopped: "stopped", skipped: "skipped" };
+  // starting: the queue picked it and checks its instruments; it reads running only once they passed
+  const Q_STATUS = { waiting: "waiting", starting: "starting…", running: "running…", done: "done", failed: "failed", stopped: "stopped",
+    skipped: "skipped" };
+  const Q_ACTIVE = new Set(["running", "starting"]);   // picked by the queue: fixed until it ends
   const Q_KIND = { plan: "scan", step: "step", script: "script" };
   const DRAG_SCANS = "text/x-kelvin-scans", DRAG_ITEM = "text/x-kelvin-item";
 
@@ -6025,7 +6028,7 @@
   // Edit on a queue item: a scan in the scan editor, bound to it; a step in the step row; anything else as written. A
   // running item is fixed, and a restore step stays as Run again made it
   function editQueued(i) {
-    if (i.status === "running" || i.restores) return;
+    if (Q_ACTIVE.has(i.status) || i.restores) return;
     if (i.kind === "plan") openEditor(null, i.id);
     else if (i.kind === "step") editStep(i);
     else pasteOpen(true, i);
@@ -6037,10 +6040,10 @@
       b.addEventListener("click", fn);
       buttons.push(b);
     };
-    const idle = i.status !== "running";
+    const idle = !Q_ACTIVE.has(i.status);
     if (idle && i.status !== "waiting") act("Again", "Put it back in line", () => queueOp({ op: "again", item: i.id }, true));
     if (i.run_id) act("Open", "Open its run", () => openRun(i.run_id, i.name));
-    const st = i.status === "running" ? h("span", { class: "spinner" }) : i.status === "done" ? icon("check")
+    const st = Q_ACTIVE.has(i.status) ? h("span", { class: "spinner" }) : i.status === "done" ? icon("check")
       : ["failed", "stopped"].includes(i.status) ? icon("warn") : h("span", { class: "muted" }, "·");
     const sub = [h("span", { class: "q-status" }, Q_STATUS[i.status] || i.status)];
     if (i.then_pause && i.status === "waiting") sub.push(h("span", { title: "The queue pauses after this item" }, "then pauses "));
@@ -6077,7 +6080,7 @@
     const rows = [...$("queue-list").querySelectorAll("li.q-item")], k = rows.indexOf(li);
     if (e.key === "u" && n > 1) queueOp({ op: "move", item: i.id, position: n - 1 }, true);
     else if (e.key === "d" && n < count) queueOp({ op: "move", item: i.id, position: n + 1 }, true);
-    else if ((e.key === "Delete" || e.key === "Backspace") && i.status !== "running") removeItem(i);
+    else if ((e.key === "Delete" || e.key === "Backspace") && !Q_ACTIVE.has(i.status)) removeItem(i);
     else if (e.key === "Enter") editQueued(i);
     else if (e.key === " ") pickItem(QUEUE.sel === i.id ? null : i.id);
     else if (e.key === "Escape" && QUEUE.sel) pickItem(null);
@@ -6096,7 +6099,7 @@
     if (!QUEUE.open || !q) return;
     const items = q.items || [];
     if (QUEUE.sel && !items.some((i) => i.id === QUEUE.sel)) QUEUE.sel = null;   // gone: ⇒ puts at the end again
-    const pos = items.findIndex((i) => i.status === "running") + 1;
+    const pos = items.findIndex((i) => Q_ACTIVE.has(i.status)) + 1;
     $("queue-state").textContent = (Q_STATE[q.state] || q.state) + (pos ? " · item " + pos + " of " + items.length : "");
     $("queue-reason").textContent = $("queue-reason").title = q.reason && q.reason !== "finished" ? q.reason
       : q.waiting ? q.waiting + " waiting" : q.reason === "finished" ? "Finished" : "";
@@ -6116,14 +6119,14 @@
     const q = QUEUE.data || {}, items = q.items || [], i = queueSelected(), n = i ? items.indexOf(i) + 1 : 0;
     $("queue-start").disabled = q.state === "running" || q.state === "pausing" || !q.waiting || BUSY.has("start");
     $("queue-pause").disabled = q.state !== "running";
-    $("queue-edit").disabled = !i || i.status === "running" || !!i.restores;
+    $("queue-edit").disabled = !i || Q_ACTIVE.has(i.status) || !!i.restores;
     $("queue-up").disabled = n <= 1;
     $("queue-down").disabled = !n || n >= items.length;
-    $("queue-remove").disabled = !i || i.status === "running";
+    $("queue-remove").disabled = !i || Q_ACTIVE.has(i.status);
   }
   function queueBadge(q) {
     if (!q) return;
-    const n = (q.waiting || 0) + (q.running ? 1 : 0);
+    const n = (q.waiting || 0) + (q.running ? 1 : 0) + (q.starting ? 1 : 0);
     $("queue-count").textContent = String(n);
     $("queue-count").hidden = !n;
     $("open-schedule").classList.toggle("live", q.state === "running" || q.state === "pausing");
@@ -9211,6 +9214,9 @@
     if (![...length.options].some((o) => o.value === chosen)) length.append(h("option", { value: chosen }, "Up to " + words + " words"));
     length.value = chosen;
     $("thinking").value = (S.settings && S.settings.thinking) || "high";
+    const wakes = String((S.settings && S.settings.wakes_per_day) || 12), woken = $("wakes-per-day");
+    if (![...woken.options].some((o) => o.value === wakes)) woken.append(h("option", { value: wakes }, "Up to " + wakes + " times a day"));
+    woken.value = wakes;
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
     $("card-language").value = (S.settings && S.settings.card_language) || "";
@@ -9467,6 +9473,7 @@
     body.reviewer = $("reviewer").value;
     body.answer_words = $("answer-words").value;
     body.thinking = $("thinking").value;
+    body.wakes_per_day = $("wakes-per-day").value;
     body.instructions = $("global-instructions").value;
     body.card_language = $("card-language").value;
     body.learn = $("learn").checked ? "on" : "off";

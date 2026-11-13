@@ -4,9 +4,12 @@ continues it when the time comes, a reading holds a condition, or the lab's run 
 A wait inside a turn holds the lab (it has one set of instruments: one chat's call works it at a time), so a long
 wait would keep every other chat off the lab. With wake_me, the model ends its answer instead; meanwhile other chats
 use the lab. When the moment comes and the chat isn't answering, Kelvin starts a turn in that chat with a <wake>
-message saying why, and tells the person. A chat may be woken at most WAKES_PER_DAY times a day, and only while
-its owner's chats are the ones open (on a shared computer, another person may be signed in meanwhile). Wake-ups are
-kept in the person's chat folder (_wakes.json), so a restart (an update, a crash) during a long wait loses none."""
+message saying why, and tells the person. A chat may be woken at most WAKES_PER_DAY times in 24 hours (each person
+sets their own number in Settings, from 1 to MOST_WAKES: Waker.limit), and only while its owner's chats are the ones
+open (on a shared computer, another person may be signed in meanwhile). Each wake_me says how many are left, a
+continuation near the last says so, and the last one tells the person. Readings at intervals belong in a plan
+(time: every, for), which measures them without a model's turn. Wake-ups are kept in the person's chat folder
+(_wakes.json), so a restart (an update, a crash) during a long wait loses none."""
 from __future__ import annotations
 
 import asyncio
@@ -20,8 +23,16 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from ..conditions import Condition, parse_condition, typed
 
 TICK_S = 2.0
+# How often a chat may be continued by itself in 24 hours, unless its person chose another number (wakes_per_day in
+# their settings, at most MOST_WAKES). Each continuation is a model turn nobody started: it spends the person's model
+# use and works the lab with nobody watching, so no chat keeps itself going for good; the person, never the AI, decides
+# how far it may go. Readings at intervals need no continuations: a plan with time: {every, for} takes them.
 WAKES_PER_DAY = 12
+MOST_WAKES = 96
+WARN_LEFT = 2   # a continuation with this many or fewer left says so in its <wake>
 MAX_HOURS = 48.0
+INTERVALS = ("readings at intervals (a log every 30 min overnight) belong in a plan with time: {every, for} "
+             "(run_plan, or queue_add and queue_start): it measures them as one run without waking the chat")
 
 WAKE_ME = {
     "name": "wake_me",
@@ -31,7 +42,10 @@ WAKE_ME = {
                    "run or queue finishes (run_ends); meanwhile the lab is free for other chats. Use it for any wait "
                    "longer than "
                    "a minute: a cool-down, a temperature to settle, a long queue. note: what to do then, for "
-                   "yourself. One wake-up per chat; a new one replaces it.",
+                   "yourself. One wake-up per chat; a new one replaces it. A chat is continued at most a number of "
+                   "times a day the person sets (12 unless they changed it); each answer says how many are left. Not "
+                   "for readings at intervals: a plan with time: {every, for} measures those as one run without "
+                   "waking the chat.",
     "schema": {"type": "object", "required": ["note"], "properties": {
         "after_minutes": {"type": "number", "minimum": 0.5, "description": "Continue after this many minutes"},
         "until": {"type": "string", "description": "A condition on a reading: instrument.parameter < or > a value"},
@@ -76,14 +90,37 @@ class Waker:
 
     # -------------------------------------------------------------- asked for by a chat
 
+    def limit(self) -> int:
+        """How many times in 24 hours a chat may be continued by itself: the signed-in person's own number
+        (Settings: wakes_per_day, 1 to MOST_WAKES), else WAKES_PER_DAY. Theirs to change, never the AI's."""
+        n = getattr(getattr(self.agent, "settings", None), "wakes_per_day", None)
+        return n if isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= MOST_WAKES else WAKES_PER_DAY
+
+    def recent(self, chat_id: str) -> List[float]:
+        """When this chat was continued by itself in the last 24 hours (time.time()), the earliest first."""
+        now = time.time()
+        return sorted(t for t in self.history.get(chat_id, []) if now - t < 86400)
+
+    def used_up(self, chat_id: str) -> Optional[str]:
+        """Why this chat can't be continued by itself now (None: it can), in words: how many times it was, the most
+        allowed, when the next one is possible and who can change that."""
+        recent, most = self.recent(chat_id), self.limit()
+        if len(recent) < most:
+            return None
+        return ("Kelvin has continued this chat by itself %d times in the last 24 hours, the most the person allows "
+                "(they can change it: Settings → Models → Continue a chat by itself); the next is possible at %s. Tell "
+                "the person what is still to do and ask them before going on; %s" % (
+                    len(recent), time.strftime("%H:%M", time.localtime(recent[len(recent) - most] + 86400)),
+                    INTERVALS))
+
     def add(self, chat_id: str, args: Any) -> Tuple[str, bool]:
         args = args if isinstance(args, dict) else {}
         note = str(args.get("note") or "").strip()[:500]
         if not note:
             return "say in note what to do when continuing", True
-        recent = [t for t in self.history.get(chat_id, []) if time.time() - t < 86400]
-        if len(recent) >= WAKES_PER_DAY:
-            return ("this chat has been continued %d times today: ask the person before going on" % len(recent)), True
+        refused = self.used_up(chat_id)
+        if refused:
+            return "not set: " + refused, True
         now = time.monotonic()
         try:
             within = min(MAX_HOURS, float(args.get("within_hours") or 12.0)) * 3600
@@ -109,18 +146,24 @@ class Waker:
         replaced = chat_id in self.pending
         self.pending[chat_id] = wake
         self._keep()
-        return ("Kelvin continues this chat when %s (at most %s from now)%s. End your answer now, saying what you are "
-                "waiting for." % (wake.text, _dur(wake.due - now), "; the earlier wake-up is replaced"
-                                  if replaced else "")), False
+        most = self.limit()
+        left = most - len(self.recent(chat_id)) - 1   # after this one
+        if left > 0:
+            count = " After that, it may continue this chat by itself %d more time%s in 24 hours (%d at most)." % (
+                left, "" if left == 1 else "s", most)
+        else:   # said now, while the person may still read it, and again when it continues (_wake)
+            count = (" That is the last time it continues this chat by itself for now (%d in 24 hours, the most the "
+                     "person allows): tell the person in this answer what will still need doing then; %s." % (
+                         most, INTERVALS))
+        return ("Kelvin continues this chat when %s (at most %s from now)%s.%s End your answer now, saying what you "
+                "are waiting for." % (wake.text, _dur(wake.due - now), "; the earlier wake-up is replaced"
+                                      if replaced else "", count)), False
 
     def soon(self, chat_id: str, why: str) -> bool:
         """Continue this chat at once about a person's change to the sequence (notices.py), unless it waits for
         something already (that wake-up stays, and the change waits in the chat for it) or was continued too often
         today. False when it won't be."""
-        if chat_id in self.pending:
-            return False
-        recent = [t for t in self.history.get(chat_id, []) if time.time() - t < 86400]
-        if len(recent) >= WAKES_PER_DAY:
+        if chat_id in self.pending or self.used_up(chat_id):
             return False
         now = time.monotonic()
         wake = Wake(chat_id, "event", "say in a sentence or two what this change means for what you were doing, or "
@@ -299,10 +342,18 @@ class Waker:
         self.history.setdefault(w.chat_id, []).append(time.time())
         last = self.last = {"chat_id": w.chat_id, "at": time.time(), "why": why, "title": chat.get("title"),
                             "root": w.root}
-        agent.runtime.tell("run", "Kelvin continued “%s”" % (chat.get("title") or "a chat"), why,
+        most = self.limit()
+        left = max(0, most - len(self.recent(w.chat_id)))   # after this one
+        told = "" if left else " (the last time it continues this chat by itself for now: %d in 24 hours)" % most
+        agent.runtime.tell("run", "Kelvin continued “%s”" % (chat.get("title") or "a chat"), why + told,
                            agent._stays_here(chat))   # an unshared chat's title never goes through the hub
         why = why[0].upper() + why[1:]
-        text = "<wake>%s. You asked to continue then: %s</wake>" % (why, w.note)
+        count = "" if left > WARN_LEFT else (
+            " Kelvin may continue this chat by itself %d more time%s in 24 hours (%d at most)." % (
+                left, "" if left == 1 else "s", most) if left else
+            " This is the last time Kelvin continues this chat by itself for now (%d in 24 hours, the most the person "
+            "allows): tell the person what still needs doing; %s." % (most, INTERVALS))
+        text = "<wake>%s. You asked to continue then: %s%s</wake>" % (why, w.note, count)
 
         async def keep(event: Dict[str, Any]) -> None:   # nobody is watching: the chat keeps what happens
             pass

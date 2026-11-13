@@ -1202,6 +1202,13 @@ def _jsonrpc(spec: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any], 
         if not isinstance(steps, list) or not all(isinstance(s, str) and re.match("^" + RPC_METHOD + r"(\s|$)",
                                                                                   s.strip()) for s in steps):
             err("jsonrpc." + key, "a list of calls: <method> [arguments]")
+    words = spec.get("error_text")
+    if words is not None:   # asked only what an error number means: a method that turns it into words, or reads
+        name = re.match("^(" + RPC_METHOD + r")(\s|$)", str(words).strip()) if isinstance(words, str) else None
+        last = name.group(1).rsplit(".", 1)[-1] if name else ""
+        if not name or not (re.match(r"^errorNumberTo[A-Z]\w*$", last) or _rpc_reads(name.group(1))):
+            err("jsonrpc.error_text", "the call that says what an error number means, the number going last: "
+                                      "<method> [arguments] (attocube: com.attocube.system.errorNumberToString 0)")
     for p in params.values():
         for tmpl, verb in ((p.set_cmd, "SET"), (p.get_cmd, "GET")):
             if tmpl is None:

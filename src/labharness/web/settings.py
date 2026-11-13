@@ -39,7 +39,8 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "heartbeat_minutes", "approval_wait", "lab_scripts_python",
                      "sequence_react",   # Kelvin answers a stop or a failure of the sequence at once (notices.py)
                      "compare_models",   # Compare under the message box (Settings -> Models): off unless on
-                     "thinking"}   # how hard the model thinks (Settings -> Models -> Thinking): medium, high, xhigh
+                     "thinking",   # how hard the model thinks (Settings -> Models -> Thinking): medium, high, xhigh
+                     "wakes_per_day"}    # how often a chat may be continued by itself in 24 hours (wakeups.py)
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
        "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection", "idle_off",
@@ -401,6 +402,9 @@ class Settings:
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "compare_models":  # Compare (several models answer at once) in the chat: off unless on
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
+            if name == "wakes_per_day":  # continuations of a chat by itself in 24 hours: 1 to MOST_WAKES (12)
+                from .wakeups import MOST_WAKES, WAKES_PER_DAY
+                value = _minutes(value, 1, MOST_WAKES, WAKES_PER_DAY)   # a count, clamped as minutes are
             if name == "ask_folder":  # a folder is asked for each new chat (app or browser): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
@@ -503,6 +507,7 @@ class Settings:
             "checklist": self._user.get("checklist") != "hidden",
             "sequence_react": self._user.get("sequence_react") == "on",
             "compare_models": self._user.get("compare_models") == "on",
+            "wakes_per_day": self.wakes_per_day,
             "updates": self.updates,
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "own_keys": _own_keys(),   # Kelvin from source: the person's own API keys and services (edition.py)
@@ -540,6 +545,15 @@ class Settings:
         else:
             self._user.pop(name, None)
         self._save()
+
+    @property
+    def wakes_per_day(self) -> int:
+        """How many times in 24 hours one of this person's chats may be continued by itself (wake_me, a reply at
+        once to the sequence): their own number, else wakeups.WAKES_PER_DAY. Each continuation is a model turn nobody
+        started, on their model use: the person decides, never the AI."""
+        from .wakeups import WAKES_PER_DAY
+        value = str(self._user.get("wakes_per_day") or "")
+        return int(value) if value.isdigit() else WAKES_PER_DAY
 
     @property
     def answer_words(self) -> int:

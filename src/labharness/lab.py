@@ -41,11 +41,49 @@ class HealthResult:
     # before): a plan that measures one is refused; every other one may go (a 2400 another program left taking ten
     # readings a trigger still sweeps its source)
     not_now: Dict[str, str] = field(default_factory=dict)
+    # readings that failed while the instrument answered, and the error each gave (an attoDRY whose sample sensor was
+    # unplugged answered its temperature with the controller's error 31, every other reading as ever): said among the
+    # problems ("cannot read ..."), so the check fails; work that doesn't need one of them still runs (for_work)
+    unreadable: Dict[str, str] = field(default_factory=dict)
 
     def __str__(self) -> str:
         said = " (%s)" % "; ".join(self.notes) if self.notes else ""
         return "%s ok%s" % (self.instr, said) if self.ok else "%s FAIL (%s)%s" % (self.instr, "; ".join(self.problems),
                                                                                 said)
+
+    def for_work(self, needs: Dict[str, str], unused: str = "this run doesn't need it") -> Tuple[List[str], List[str]]:
+        """This check, for work (a run, a script) that needs these of the instrument's readings ({reading: what it
+        needs it for}, as RunEngine.needs says): (why the work can't start, what it is told). A reading that failed
+        while the instrument answered stops only work that needs it; the work is told of every other one (unused: what
+        that line ends with). Any other problem (another instrument at the address, its error queue, a drive outside
+        the limits, a card's check, no answer) stops any work, as it always has."""
+        if self.ok:
+            return [], []
+        unread = cannot_read(self.unreadable)
+        if any(p != unread for p in self.problems) or not self.unreadable:
+            return [str(self)], []
+        told = ["%s.%s can't be read now (%s); %s" % (self.instr, p, why, unused)
+                for p, why in self.unreadable.items() if p not in needs]
+        needed = [p for p in self.unreadable if p in needs]
+        if not needed:
+            return [], told
+        return ["%s FAIL (%s); %s" % (self.instr, cannot_read({p: self.unreadable[p] for p in needed}), "; ".join(
+            "it needs %s: %s" % (p, needs[p]) for p in needed))], told
+
+
+def cannot_read(unreadable: Dict[str, str]) -> str:
+    """The problem a health check says of readings that failed while the instrument answered."""
+    return "cannot read " + ", ".join("%s (%s)" % kv for kv in unreadable.items()) if unreadable else ""
+
+
+def error_words(name: str, e: BaseException) -> str:
+    """An instrument's error in words for a line that names the instrument already: its first line, without the name
+    in front, and long enough to keep what the instrument said (a cut at 60 characters once ended a controller's error
+    in the middle of its method's name, and the error number never showed)."""
+    text = (str(e).splitlines() or [""])[0].strip() or type(e).__name__
+    if text.startswith(name + ": "):
+        text = text[len(name) + 2:]
+    return text if len(text) <= 200 else text[:199] + "…"
 
 
 # the lab config entry of an instrument being connected and not yet in the lab (Lab.add, Lab.replace): a backend
@@ -637,7 +675,9 @@ class Lab:
     def health_check(self, names: Optional[List[str]] = None) -> List[HealthResult]:
         """Before an instrument is used: is it the model its card says (a swapped address would send commands to
         the wrong instrument), does its error queue look clean, does every reading work, are the card's sanity
-        checks fine, and are its drives inside the lab's limits? Only reads; never sets anything."""
+        checks fine, and are its drives inside the lab's limits? Only reads; never sets anything. A reading that
+        fails while the instrument answers is kept by name (HealthResult.unreadable): a run that doesn't need it
+        still runs (RunEngine.run)."""
         out = []
         for name in names or [n for n, inst in self.instruments.items() if inst.enabled]:
             inst = self.instruments.get(name)
@@ -650,6 +690,7 @@ class Lab:
             problems: List[str] = []
             notes: List[str] = []
             not_now: Dict[str, str] = {}
+            unreadable: Dict[str, str] = {}
             try:
                 card = inst.card
                 if card.idn_pattern:
@@ -676,22 +717,27 @@ class Lab:
                 err = inst.instrument_error()
                 if err:
                     problems.append("instrument reports %s" % err)
-                dead = []
+
+                def reads(spec: ParamSpec) -> Tuple[bool, Any]:
+                    """(read, its value), the instrument answering: (False, None) when it gave an error for this
+                    reading, kept by name (unreadable), or can't be asked it now (not_now)."""
+                    try:
+                        return True, inst.read(spec.name)
+                    except NotNow as e:   # that reading only, not the instrument: said, and kept for plans
+                        not_now[spec.name] = str(e)
+                    except (InstrumentLost, Garbled, InstrumentOff):
+                        raise   # the instrument, not this reading: nothing it says now can be relied on
+                    except Exception as e:
+                        if timed_out(e):
+                            raise   # it doesn't answer: each other reading would only wait as long again (an
+                            # SR830 that didn't took 36 s, the lab held, at every start and Save and connect)
+                        unreadable[spec.name] = error_words(name, e)   # its error for this reading: said, by name
+                    return False, None
                 for spec in card.params.values():  # every reading once (traces are slow, frames are files: skipped)
                     if spec.kind != "measure" or spec.get_cmd is None or spec.type in ("trace", "image") \
                             or spec.acquires:   # an acquisition runs only when asked or measured, as for a snapshot
                         continue
-                    try:
-                        inst.read(spec.name)
-                    except NotNow as e:   # that reading only, not the instrument: said, and kept for plans
-                        not_now[spec.name] = str(e)
-                    except Exception as e:
-                        if isinstance(e, InstrumentLost) or timed_out(e):
-                            raise   # it doesn't answer: each other reading would only wait as long again (an
-                            # SR830 that didn't took 36 s, the lab held, at every start and Save and connect)
-                        dead.append("%s (%s)" % (spec.name, str(e).splitlines()[0][:60] if str(e) else type(e).__name__))
-                if dead:
-                    problems.append("cannot read " + ", ".join(dead))
+                    reads(spec)
                 for chk in card.health:
                     if chk.query:
                         resp = inst.query_raw(chk.query).strip()
@@ -703,7 +749,7 @@ class Lab:
                                     not_now.setdefault(b, "%s doesn't read %s now: %s" % (name, b, said))
                             else:
                                 problems.append(said)
-                    else:
+                    elif chk.read not in unreadable:   # one that failed above is said there already
                         v = inst.read(chk.read)
                         lo, hi = chk.range
                         if v is not None and not lo <= v <= hi:
@@ -711,16 +757,22 @@ class Lab:
                 for spec in card.drives:
                     lim = inst.limits(spec.name)
                     if spec.numeric and lim and spec.get_cmd is not None:
-                        v = inst.read(spec.name)   # beyond them but at safe is not: an SR860's sine out off reads 0 V
-                        if v is not None and not lim[0] <= v <= lim[1] and spec.distance(v) > 0:
+                        got, v = reads(spec)   # one that fails says so (unreadable): its value isn't known to compare
+                        # beyond them but at safe is not: an SR860's sine out off reads 0 V
+                        if got and v is not None and not lim[0] <= v <= lim[1] and spec.distance(v) > 0:
                             problems.append("%s = %s is outside %s limits" % (spec.name, spec.show(v), inst.limits_where(spec.name)))
             except (InstrumentLost, Garbled, InstrumentFault) as e:   # in words already: which, where, what to do
                 problems.append(str(e))
             except Exception as e:
                 problems.append("no response (%s)" % e)
+            if unreadable:   # said whatever came after them
+                problems.append(cannot_read(unreadable))
             if not_now:
                 notes.append("not read now: %s" % "; ".join(sorted(set(not_now.values()))))
-            out.append(HealthResult(name, not problems, problems, notes, not_now))
+            if unreadable and problems == [cannot_read(unreadable)]:   # the instrument answers, and the rest works
+                notes.append("its other readings work: a run that doesn't need %s can still run" % " or ".join(
+                    sorted(unreadable)))
+            out.append(HealthResult(name, not problems, problems, notes, not_now, unreadable))
         return out
 
     def _state_of(self, inst: Instrument) -> Dict[str, Any]:

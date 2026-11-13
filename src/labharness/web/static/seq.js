@@ -34,8 +34,10 @@
     starting: false, msgTimer: 0, finished: "", el: {},
   };
   const FINISHED = new Set(["done", "failed", "stopped", "skipped"]);
-  const CHIP = { running: ["Running", "run"], done: ["Done", "ok"], failed: ["Failed", "bad"], stopped: ["Stopped", "warn"],
-                 skipped: ["Skipped", "line"] };
+  // starting: the queue picked it and checks its instruments (what it needs of them); it reads Running once they passed
+  const CHIP = { starting: ["Starting", "run"], running: ["Running", "run"], done: ["Done", "ok"], failed: ["Failed", "bad"],
+                 stopped: ["Stopped", "warn"], skipped: ["Skipped", "line"] };
+  const PICKED = new Set(["starting", "running"]);   // the block the queue is on: fixed until it ends
   const SWATCHES = [["Blue", "#2a78d6"], ["Green", "#13996b"], ["Violet", "#7155d8"], ["Amber", "#c98500"],
                     ["Rose", "#d6457a"], ["Grey", "#7d8a99"]];
   const MAX_COPIES = 400;
@@ -631,7 +633,7 @@
     const all = q.items || [];
     if (!all.length && q.state !== "running" && q.state !== "pausing") return ["Idle", "line", ""];   // nothing to resume
     if (q.state === "running") {
-      const at = all.findIndex((i) => i.status === "running");
+      const at = all.findIndex((i) => PICKED.has(i.status));
       return [at >= 0 ? "Running " + (at + 1) + " of " + all.length : "Running", "run", ""];
     }
     // any pause that waits for the running block: the person's own (Pausing… takes it back), Kelvin's, a failure's, a
@@ -875,8 +877,8 @@
     b("dup", K.icon("copy"), "Duplicate", () => op({ op: "duplicate", item: id }));
     if (it.run_id) b("run", ico("run"), "Open run", () => K.openRun(it.run_id, it.name));   // what it measured
     if (FINISHED.has(it.status)) b("again", ico("again"), "Again", () => op({ op: "again", item: id }));
-    if (it.status === "waiting" || it.status === "running") b("skip", ico("skip"), "Skip", () => op({ op: "skip", item: id }));
-    if (it.status !== "running") {
+    if (it.status === "waiting" || PICKED.has(it.status)) b("skip", ico("skip"), "Skip", () => op({ op: "skip", item: id }));
+    if (!PICKED.has(it.status)) {
       if (SEQ.confirm.has(id)) {
         const x = h("button", { class: "seq-act ask", type: "button", "data-k": "rm" }, "Remove?");
         x.addEventListener("click", (e) => { e.stopPropagation(); guard(removeItem, id); });
@@ -922,7 +924,7 @@
     else if (e.key === "Escape" && SEQ.edit.has(id)) { e.preventDefault(); toggleEd(id, false); }
     else if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
-      if (all[i].status === "running") return;
+      if (PICKED.has(all[i].status)) return;
       if (SEQ.confirm.has(id)) removeItem(id); else armRemove(id);
     } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       const next = SEQ.el.list.children[e.key === "ArrowDown" ? i + 1 : i - 1];
@@ -1000,7 +1002,7 @@
     return input;
   }
   function editor(it, look) {
-    const h = K.h, box = h("div", { class: "seq-ed" }), d = look.d, locked = it.status === "running";
+    const h = K.h, box = h("div", { class: "seq-ed" }), d = look.d, locked = PICKED.has(it.status);
     if (it.kind === "script") {
       const lib = look.entry || {};
       const settable = it.settable || lib.settable || {};

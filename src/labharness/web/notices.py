@@ -30,6 +30,7 @@ FILE = "_events.jsonl"
 KEEP = 500          # lines kept in _events.jsonl, the newest
 DIGEST = 12         # changes at most in one <lab_events> block
 DIGEST_S = 24 * 3600   # and none older than a day
+PICKED = ("running", "starting")   # the block the sequence is on: starting while its checks run (ScanQueue.pick)
 _LOCK = threading.Lock()
 
 
@@ -92,9 +93,10 @@ def queue_said(op: str, body: Dict[str, Any], before: Dict[str, Any], after: Dic
     if op == "again" and it:
         return "You put %s back in line." % _label(n, it), owner, False
     if op == "skip" and it:
-        running = it.get("status") == "running"
-        return ("You skipped %s while it ran; the sequence went on." if running else "You skipped %s.") % \
-            _label(n, it), owner + ([started_by] if running else []), False
+        running = it.get("status") in PICKED
+        how = "ran" if it.get("status") == "running" else "was starting"
+        return ("You skipped %s while it %s; the sequence went on." % (_label(n, it), how) if running else
+                "You skipped %s." % _label(n, it)), owner + ([started_by] if running else []), False
     if op == "duplicate" and it and new:
         return "You copied %s as #%s." % (_label(n, it), at[new[0]["id"]]), owner, False
     if op == "then_pause" and it:
@@ -109,7 +111,7 @@ def queue_said(op: str, body: Dict[str, Any], before: Dict[str, Any], after: Dic
         waiting = [i for i in before.get("items") or [] if i.get("status") == "waiting"]
         return "You started the sequence%s." % (" (%d blocks waiting)" % len(waiting) if waiting else ""), working, False
     if op == "pause":   # want "pausing": a second press of Pause, which took the pause back
-        running = next((i for i in before.get("items") or [] if i.get("status") == "running"), None)
+        running = next((i for i in before.get("items") or [] if i.get("status") in PICKED), None)
         after_it = " after %s" % (running.get("name") or "the running block") if running else ""
         if body.get("want") == "pausing":
             return "You took back the pause%s; the sequence goes on." % after_it, conductor, False
@@ -130,9 +132,9 @@ def stop_said(before: Dict[str, Any], started_by: Optional[str] = None) -> Optio
     """A person's Stop while the sequence ran: (text, chats, urgent), or None when it wasn't running."""
     if before.get("state") not in ("running", "pausing"):
         return None
-    n, it = next(((k, i) for k, i in enumerate(before.get("items") or [], 1) if i.get("status") == "running"),
+    n, it = next(((k, i) for k, i in enumerate(before.get("items") or [], 1) if i.get("status") in PICKED),
                  (None, None))
-    working = [i.get("chat") for i in before.get("items") or [] if i.get("status") in ("waiting", "running")]
+    working = [i.get("chat") for i in before.get("items") or [] if i.get("status") in ("waiting",) + PICKED]
     return ("You stopped the sequence%s; it paused." % (" at %s" % _label(n, it) if it else ""),
             [started_by] + working, True)
 

@@ -323,6 +323,10 @@ class ScanQueue:
         self.last: Optional[Dict[str, Any]] = None   # the account of its last run (summarize), until it runs again
         self.name = ""               # the sequence's name: a person's, or the minute its first item went in
         self.name_kept = False       # a person named it while it was empty: its first item keeps that name
+        # the item the queue picked to run next while it is checked (a plan's instruments, for what it needs of them):
+        # it shows as starting, is changed or taken out as the running one is, and is marked running only once its
+        # checks passed; a refusal marks it failed, saying why. Never kept: after a restart it waits again
+        self.starting: Optional[str] = None
         if path is not None:
             self._load()
 
@@ -456,8 +460,8 @@ class ScanQueue:
         ended by LabRuntime.queue_skip. ValueError: it is running, or has finished."""
         with self.lock:
             item = self.find(ref)
-            if item.status == "running":
-                raise ValueError("%s is running: the queue's skip ends it" % item.name)
+            if item.status == "running" or item.id == self.starting:
+                raise ValueError("%s is %s: the queue's skip ends it" % (item.name, self.status_of(item)))
             if item.status != "waiting":
                 raise ValueError("%s has finished (%s)" % (item.name, item.status))
             self.mark(item, "skipped", "skipped by %s" % by if by else "skipped")
@@ -469,8 +473,8 @@ class ScanQueue:
         kind, name = parse_item(text)
         with self.lock:
             item = self.find(ref)
-            if item.status == "running":
-                raise ValueError("%s is running; it can be edited after it finishes" % item.name)
+            if item.status == "running" or item.id == self.starting:
+                raise ValueError("%s is %s; it can be edited after it finishes" % (item.name, self.status_of(item)))
             if item.restores:
                 raise ValueError("%s restores the settings another item ran with, so it isn't edited: remove it and "
                                  "its item, then use Run again" % item.name)
@@ -497,8 +501,8 @@ class ScanQueue:
     def remove(self, ref: Any) -> Item:
         with self.lock:
             item = self.find(ref)
-            if item.status == "running":
-                raise ValueError("%s is running; stop it first" % item.name)
+            if item.status == "running" or item.id == self.starting:
+                raise ValueError("%s is %s; stop it first" % (item.name, self.status_of(item)))
             self.items.remove(item)
             self.save()
             return item
@@ -546,8 +550,20 @@ class ScanQueue:
         with self.lock:
             return next((i for i in self.items if i.status == "waiting"), None)
 
+    def pick(self, item: Item) -> None:
+        """The item the queue runs next, starting: it is checked first, and marked running once that passed."""
+        with self.lock:
+            self.starting = item.id
+            self.changed = time.time()
+
+    def status_of(self, item: Item) -> str:
+        """Its status as shown: "starting" while the queue checks it before it runs (starting), else its own."""
+        return "starting" if item.id == self.starting and item.status == "waiting" else item.status
+
     def mark(self, item: Item, status: str, message: str = "", run_id: Optional[str] = None) -> None:
         with self.lock:
+            if item.id == self.starting and status != "waiting":   # its checks are over: it runs, or it doesn't
+                self.starting = None
             item.status, item.message = status, message
             if run_id:
                 item.run_id = run_id
@@ -560,10 +576,12 @@ class ScanQueue:
     def view(self) -> Dict[str, Any]:
         with self.lock:
             running = next((i for i in self.items if i.status == "running"), None)
+            starting = next((i for i in self.items if i.id == self.starting and i.status == "waiting"), None)
             return {"state": self.state, "reason": self.reason, "on_error": self.on_error, "name": self.name,
-                    "items": [i.view() for i in self.items], "running": running.id if running else None,
-                    "waiting": sum(1 for i in self.items if i.status == "waiting"), "changed": self.changed,
-                    "last": self.last}
+                    "items": [dict(i.view(), status="starting") if i is starting else i.view() for i in self.items],
+                    "running": running.id if running else None, "starting": starting.id if starting else None,
+                    "waiting": sum(1 for i in self.items if i.status == "waiting" and i is not starting),
+                    "changed": self.changed, "last": self.last}
 
     def summarize(self, started: float, alarms: List[Any], points: Callable[[str], Optional[Tuple[int, int]]],
                   unshared: Callable[[Item], bool] = lambda item: False) -> List[str]:
@@ -576,6 +594,9 @@ class ScanQueue:
         end = time.time()
         with self.lock:
             ran = [(n, i) for n, i in enumerate(self.items, 1) if i.started and i.started >= started]
+            # refused by its check, or stopped, before it started: it never read running, so it has no start
+            unstarted = [(n, i) for n, i in enumerate(self.items, 1) if not i.started
+                         and i.status in ("failed", "stopped") and (i.finished or 0) >= started]
             waiting = [(n, i) for n, i in enumerate(self.items, 1) if i.status == "waiting"]
             skipped = [(n, i) for n, i in enumerate(self.items, 1) if i.status == "skipped" and not i.started
                        and (i.finished or 0) >= started]   # held back meanwhile (a restore before it didn't finish)
@@ -599,6 +620,9 @@ class ScanQueue:
             lines.append("Stopped part-way, its data kept: " + "; ".join(partial))
         if empty:
             lines.append("Stopped with no data: " + "; ".join(empty))
+        if unstarted:
+            lines.append("Never started: " + "; ".join("#%d %s: %s" % (n, i.name, _why(i.message) or i.status)
+                                                       for n, i in unstarted))
         if skipped:
             lines.append("Skipped: " + "; ".join("#%d %s: %s" % (n, i.name, i.message) for n, i in skipped))
         if waiting:
@@ -610,7 +634,7 @@ class ScanQueue:
             "%s %s%s (%s)" % (_at(a.raised), a.text, " (%d times)" % a.count if getattr(a, "count", 1) > 1 else "",
                               "cleared %s" % _at(a.cleared) if a.cleared else "still on")
             for a in raised) if raised else "No alarm was raised while it ran.")
-        named = [i for _, i in ran + skipped + waiting]
+        named = [i for _, i in ran + unstarted + skipped + waiting]
         with self.lock:
             self.last = {"started": started, "ended": end, "lines": lines, "items": [i.id for i in named]}
             if any(unshared(i) for i in named):
@@ -631,13 +655,14 @@ class ScanQueue:
         if self.name and not out:   # a person's own words, which may name unshared work: only when all is seen
             lines.append("name: %s" % self.name)
         for n, i in enumerate(self.items, 1):
+            status = self.status_of(i)   # starting: picked, its checks not over yet; running only once they passed
             if i.id in out:
                 lines.append("%d. [%s] a %s of unshared work (another project's or chat's)" % (
-                    n, i.status, KINDS.get(i.kind, i.kind)))
+                    n, status, KINDS.get(i.kind, i.kind)))
                 continue
             extra = (" → run %s" % i.run_id if i.run_id else "") + (": %s" % i.message if i.message else "") + (
                 "; the queue pauses after it" if i.then_pause and i.status in ("waiting", "running") else "")
-            lines.append("%d. [%s] %s %s%s%s" % (n, i.status, i.kind, i.name, " (%s)" % i.note if i.note else "", extra))
+            lines.append("%d. [%s] %s %s%s%s" % (n, status, i.kind, i.name, " (%s)" % i.note if i.note else "", extra))
         if not self.items:
             lines.append("(empty: add plans, steps or scripts with queue_add)")
         if self.last and v["state"] not in ("running", "pausing"):

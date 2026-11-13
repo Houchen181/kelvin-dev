@@ -49,6 +49,8 @@ You are Kelvin, the lab assistant in this portal, working with an experimental p
 To wait longer than a minute (a cool-down, a temperature settling, a long queue), call wake_me and end your answer
 saying what you are waiting for: Kelvin continues this chat then, and the lab is free for other chats meanwhile. A message in
 <wake> is Kelvin continuing the chat for you, not the person: carry on with what the person asked, nothing new.
+Readings at intervals (a log every 30 min overnight) are a plan with time: {every, for}, run or queued: it measures them
+as one run, without waking the chat each time; a chat is continued only so many times a day, as the person sets.
 Write in Markdown. Lead with the result in one or two sentences, then only what helps the next decision.
 Use units. Prefer a short list or small table over paragraphs. While a plan runs, the portal shows its
 progress and plots live in a Runs pane beside the chat; when it finishes, the conversation shows the automatic
@@ -493,8 +495,8 @@ DEFERRED = {
     "running the lab's own scripts": ["run_script", "check_script", "set_live"],
     "translating LabVIEW into experiments": ["describe_vi", "translate_vi", "save_experiment", "keep_experiment",
                                              "experiments"],
-    "writing and trying cards": ["card_guide", "draft_card", "check_card", "try_card", "save_card", "read_examples",
-                                 "find_maker_files", "library_api", "save_manual"],
+    "writing and trying cards": ["card_guide", "card_text", "draft_card", "check_card", "try_card", "save_card",
+                                 "read_examples", "find_maker_files", "library_api", "save_manual"],
     "makers' software": ["install_for_instrument", "installed_software", "environments", "remove_environment"],
     "editing and keeping the queue": ["queue_change", "queue_edit", "queue_pause", "queue_save", "queue_load"],
     "keeping the person's Home": ["home_update", "home_remove", "home_list"],
@@ -518,7 +520,7 @@ MAX_FOUND = 10
 # a camera's frame is read as any reading is)
 LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", "query_runs", "list_runs", "analyze_run",
            "recent_events", "calculate", "kelvin_help", "describe_instrument", "search_manual", "instrument_info",
-           "lab_config", "card_guide", "find_card", "experiment_guide", "look_at", "watches", "queue_show",
+           "lab_config", "card_guide", "card_text", "find_card", "experiment_guide", "look_at", "watches", "queue_show",
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
            "use_skill", "read_skill_file", "survey_scripts", "survey_labview", "survey_specialmeasure",

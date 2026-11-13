@@ -95,8 +95,75 @@ def test_conditions_runs_and_limits(tmp_path):
                                                                        "queue first", True)
     assert waker.add(chat["id"], {"note": "x"})[1] and waker.add(chat["id"], {"after_minutes": 5})[1]
     waker.history[chat["id"]] = [__import__("time").time()] * wakeups.WAKES_PER_DAY
-    assert "12 times today" in waker.add(chat["id"], {"after_minutes": 5, "note": "x"})[0]
+    assert "12 times in the last 24 hours" in waker.add(chat["id"], {"after_minutes": 5, "note": "x"})[0]
     assert waker.cancel(chat["id"]) and not waker.cancel(chat["id"])
+
+
+def test_each_wake_up_says_how_many_are_left_and_the_last_one_says_so(tmp_path):
+    """A field report (2026-11-13): pressures read every 30 min with wake_me stopped at the 13th, overnight, with no
+    word before; the limit's reason and who could change it were nowhere."""
+    import time
+    rt, store, provider, agent, notices = setup(tmp_path, [])
+    waker, chat = agent.waker, store.create("scripted:m1")
+    said, bad = waker.add(chat["id"], {"after_minutes": 30, "note": "read the pressures"})
+    assert not bad and "it may continue this chat by itself 11 more times in 24 hours (12 at most)" in said
+    now = time.time()
+    waker.history[chat["id"]] = [now - 3600 * k for k in range(11)]   # 11 continuations, the earliest 10 h ago
+    said, bad = waker.add(chat["id"], {"after_minutes": 30, "note": "read the pressures"})
+    assert not bad and "That is the last time it continues this chat by itself for now (12 in 24 hours" in said
+    assert "tell the person in this answer" in said and "a plan with time: {every, for}" in said
+    waker.history[chat["id"]].append(now)
+    said, bad = waker.add(chat["id"], {"after_minutes": 30, "note": "read the pressures"})
+    assert bad and said.startswith("not set: Kelvin has continued this chat by itself 12 times in the last 24 hours")
+    assert "Settings → Models → Continue a chat by itself" in said and "a plan with time: {every, for}" in said
+    assert "the next is possible at %s" % time.strftime("%H:%M", time.localtime(now - 36000 + 86400)) in said
+    waker.cancel(chat["id"])
+    assert not waker.soon(chat["id"], "the sequence stopped")   # a reply at once counts as any continuation
+
+
+def test_a_continuation_near_the_last_says_so_and_the_last_tells_the_person(tmp_path):
+    import time
+    rt, store, provider, agent, notices = setup(tmp_path, [say("Read them."), say("Read them; told the person.")])
+    chat = store.create("scripted:m1")
+
+    async def wake(left_before):
+        waker = agent.waker
+        waker.history[chat["id"]] = [time.time()] * (wakeups.WAKES_PER_DAY - left_before)
+        waker.add(chat["id"], {"after_minutes": 1, "note": "read the pressures"})
+        waker.pending[chat["id"]].due = 0
+        await waker.tick()
+        await asyncio.gather(*waker.waking)
+
+    async def day():
+        await agent.start()
+        try:
+            await wake(2)   # this one leaves 1
+            await wake(1)   # this one is the last
+        finally:
+            await agent.close()
+    asyncio.run(day())
+    woke = [m["text"] for m in store.load(chat["id"])["messages"] if m.get("wake")]
+    assert "Kelvin may continue this chat by itself 1 more time in 24 hours (12 at most)." in woke[0]
+    assert "This is the last time Kelvin continues this chat by itself for now" in woke[1]
+    assert "tell the person what still needs doing" in woke[1]
+    assert notices[-1][2].endswith("(the last time it continues this chat by itself for now: 12 in 24 hours)")
+
+
+def test_the_person_sets_how_often_a_chat_is_continued_by_itself(tmp_path):
+    import time
+    from labharness.web.settings import Settings
+    settings = Settings(tmp_path / "settings.json")
+    assert settings.wakes_per_day == wakeups.WAKES_PER_DAY and settings.public()["wakes_per_day"] == 12
+    for given, kept in (("48", 48), ("500", wakeups.MOST_WAKES), ("0", 1), ("twelve", 12), ("12", 12)):
+        settings.update({"wakes_per_day": given})
+        assert settings.wakes_per_day == kept, given
+    settings.update({"wakes_per_day": "48"})
+    rt, store, provider, agent, notices = setup(tmp_path, [])
+    agent.settings = settings
+    chat = store.create("scripted:m1")
+    agent.waker.history[chat["id"]] = [time.time()] * 12
+    said, bad = agent.waker.add(chat["id"], {"after_minutes": 30, "note": "read the pressures"})
+    assert not bad and "35 more times in 24 hours (48 at most)" in said
 
 
 def test_only_the_owners_chats_are_continued(tmp_path):

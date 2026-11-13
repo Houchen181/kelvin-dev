@@ -50,7 +50,7 @@ One harness core can connect to many lab runtimes (several setups or rooms). Eac
 | **Procedures** | A lab's existing scripts (VIs, .m files, Python) registered with declared inputs and limits, so the agent can call them as safe tools. This is the main adoption path. **Python scripts and notebooks built 2026-10-27** (`run_script`, scriptrun.py): run as they are from the lab's scripts folders, in the lab's own Python, every instrument command through the gate on Kelvin's own connection, one approval for the drive ranges read from the script; their settings are the inputs. VIs and .m files remain |
 | **Simulator** | Each card ships a twin; plans dry-run there first and return the predicted trajectory, duration and data shape. (A fully simulated **virtual lab** was removed on 2026-10-29; the tests keep one, `tests/simlab`.) |
 | **Safety gate** | Sits in front of every command, direct or planned. Lets measurement through; for drive changes, enforces limits and ramp rates, checks interlocks, roles and locks, watches guard readings, and asks a human when needed. Confirmations come only from a human action in the approval UI |
-| **Run engine** | Runs approved plans; preflight health checks; abort sends the drives the plan touched back to safe (or holds them where the lab says so) |
+| **Run engine** | Runs approved plans; preflight health checks, judged by what each plan needs (a reading it doesn't use that fails is a warning); abort sends the drives the plan touched back to safe (or holds them where the lab says so) |
 | **Data store** | Append-only event log. Each run stores a full instrument snapshot, the plan, the code version, the operator, and the sample/device/session IDs |
 | **Monitor daemon** | Rule-based alarms (threshold, rate of change, stale data) independent of the LLM; the LLM adds a diagnosis *after* the alert is sent |
 | **Domain packs** | Per field: plan templates (e.g. gate sweep, field sweep, pump–probe delay scan, frequency sweep), safety rules (laser interlocks, magnet quench, high voltage, vacuum), reviewer rubrics |
@@ -101,7 +101,7 @@ on_abort: { smu.V: { ramp_to: 0, rate_V_per_s: 1 } }
 | 3 | Caution + trust | Measure/drive tags per parameter; measurement runs freely; drive changes away from safe are limit-checked, previewed, confirmed and ramped while guard readings are watched; per-instrument trust; a stop button; open-source gate |
 | 4 | Custom instruments | Adapters + card format + procedures; the agent drafts cards from manuals and adds the instruments people name; every output change on a draft or a Kelvin-added instrument asks until the owner reviews it |
 | 5 | Literature-based plans | Advisor + literature service + domain-pack templates output a plan with rationale and expected signal |
-| 6 | Know and test instruments | Cards (correct operating conditions); preflight health checks block runs on failure |
+| 6 | Know and test instruments | Cards (correct operating conditions); preflight health checks block the runs that need what failed |
 | 7 | Track everything | Event log + per-run snapshot + sample/device/session registry |
 | 8 | PDF/PPT logs | Templates (daily log, run summary, advisor update, group-meeting deck); every figure cites a run ID |
 | 9 | Concise answers | Reply = answer (≤ 3 lines) + status/next action + collapsed details; units and run IDs always |
