@@ -4,7 +4,10 @@ Requests go to the public Responses API with the account's access token, store=f
 whole conversation in `input` each time (the route keeps no server-side history). The system prompt goes in
 `instructions`; parameters the route refuses (temperature, max_output_tokens, previous_response_id...) are never sent.
 Function tools are offered grouped in a namespace, as the route asks; if it refuses that form, plain function tools are
-tried instead and the form that works is remembered."""
+tried instead and the form that works is remembered.
+
+The model's reasoning goes with the conversation, as Codex sends it, and the turn's effort as its reasoning effort
+(responses.py, which GPT with an API key shares). Either one the route refuses is dropped, and remembered."""
 from __future__ import annotations
 
 import asyncio
@@ -15,50 +18,17 @@ from typing import Any, Dict, List, Optional
 import openai
 
 from ..chatgpt import MANAGE_USAGE, RESOURCE, NotSignedIn, SignIn
-from .base import PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url, safe_id, text_of, user_text
+from . import responses
+from .base import EFFORT, Emit, ModelInfo, Provider, TurnResult
 
 NAMESPACE = "kelvin"
 LIMITS = {"subscription_sharing_usage_limit_exceeded": "Your ChatGPT plan's usage limit is reached for now.",
           "subscription_sharing_usage_unavailable": "ChatGPT plan usage is not available for this account right now."}
 
 
-def _plain(item: Any) -> Dict[str, Any]:
-    if isinstance(item, dict):
-        return item
-    dump = getattr(item, "model_dump", None)
-    return dump(exclude_none=True) if dump else dict(vars(item))
-
-
-def to_input(history: List[Dict[str, Any]], provider: str) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for m in history:
-        if m["role"] == "user":
-            images = m.get("images") or []
-            out.append({"role": "user", "content": [{"type": "input_text", "text": user_text(m)}] + [
-                {"type": "input_image", "image_url": data_url(i)} for i in images] if images else user_text(m)})
-        elif m["role"] == "assistant":
-            if m.get("provider") == provider and isinstance(m.get("raw"), list):
-                for item in m["raw"]:   # our own earlier output, replayed as it was (without server ids)
-                    out.append({k: v for k, v in item.items() if k not in ("id", "status")})
-                continue
-            text = text_of(m["blocks"])
-            if text:
-                out.append({"role": "assistant", "content": text})
-            n = 0
-            for b in m["blocks"]:
-                if b["type"] == "tool_call":
-                    n += 1
-                    out.append({"type": "function_call", "call_id": safe_id(b["id"], n), "name": b["name"],
-                                "arguments": json.dumps(b["input"] or {})})
-        elif m["role"] == "tool":
-            for r in m["results"]:
-                out.append({"type": "function_call_output", "call_id": safe_id(r["id"], 0),
-                            "output": r["content"] or "(empty)"})
-            images = [i for r in m["results"] for i in r.get("images") or []]
-            if images:   # the pictures follow as the user's
-                out.append({"role": "user", "content": [{"type": "input_text", "text": PICTURES_NOTE}] + [
-                    {"type": "input_image", "image_url": data_url(i)} for i in images]})
-    return out
+def to_input(history: List[Dict[str, Any]], provider: str, model: Optional[str] = None) -> List[Dict[str, Any]]:
+    """model: the model answering now; reasoning goes back only to the model that wrote it (another can't read it)."""
+    return responses.to_input(history, provider, model)
 
 
 def tool_list(tools: List[Dict[str, Any]], style: str) -> List[Dict[str, Any]]:
@@ -76,6 +46,8 @@ class ChatGPTProvider(Provider):
     def __init__(self, signin: SignIn, client_factory: Any = None, http_get: Any = None):
         self.signin = signin
         self.tool_style = "namespace"
+        self.no_include: set = set()   # the models the route gives no encrypted reasoning for
+        self.no_effort: set = set()    # the models that refused any reasoning effort (one refusing xhigh takes high)
         self._client = client_factory or (lambda token: openai.AsyncOpenAI(api_key=token, base_url=RESOURCE,
                                                                            max_retries=0))
         self._get = http_get or self._get_json
@@ -109,18 +81,29 @@ class ChatGPTProvider(Provider):
         except NotSignedIn as e:
             raise RuntimeError(str(e))
         client = self._client(token)
-        body: Dict[str, Any] = {"model": model, "instructions": system, "input": to_input(history, self.name),
+        body: Dict[str, Any] = {"model": model, "instructions": system, "input": to_input(history, self.name, model),
                                 "store": False, "stream": True}
         if tools:
             body["tools"] = tool_list(tools, self.tool_style)
-        try:
-            events = await client.responses.create(**body)
-        except openai.BadRequestError as e:
-            if not tools or self.tool_style != "namespace" or "tool" not in str(e).lower():
-                raise
-            self.tool_style = "function"   # this route takes plain function tools after all
-            body["tools"] = tool_list(tools, self.tool_style)
-            events = await client.responses.create(**body)
+        if model not in self.no_include:
+            body["include"] = list(responses.INCLUDE)
+        effort = EFFORT.get()
+        if model not in self.no_effort and effort in responses.EFFORTS:
+            body["reasoning"] = {"effort": effort}
+        for _ in range(6):   # each refusal below takes one thing away, once
+            try:
+                events = await client.responses.create(**body)
+                break
+            except openai.BadRequestError as e:
+                if responses.relax(body, e, model, self.no_effort, self.no_include):
+                    continue
+                if tools and self.tool_style == "namespace" and "tool" in str(e).lower():
+                    self.tool_style = "function"   # this route takes plain function tools after all
+                    body["tools"] = tool_list(tools, self.tool_style)
+                else:
+                    raise
+        else:
+            raise RuntimeError("ChatGPT refused the request in every form Kelvin knows.")
         final = None
         incomplete = False
         async for ev in events:
@@ -139,34 +122,15 @@ class ChatGPTProvider(Provider):
                 raise RuntimeError("ChatGPT could not answer: %s" % (getattr(err, "message", None) or code or "unknown error"))
         if final is None:
             raise RuntimeError("ChatGPT's answer stopped before it was complete; try again.")
-        blocks: List[Dict[str, Any]] = []
-        raw: List[Dict[str, Any]] = []
-        for item in getattr(final, "output", None) or []:
-            item = _plain(item)
-            kind = item.get("type")
-            if kind == "message":
-                text = "".join(c.get("text", "") for c in item.get("content") or [] if c.get("type") == "output_text")
-                if text:
-                    blocks.append({"type": "text", "text": text})
-                    raw.append({"type": "message", "role": "assistant",
-                                "content": [{"type": "output_text", "text": text}]})
-            elif kind == "function_call":
-                name = str(item.get("name") or "")
-                if name.startswith(NAMESPACE + "."):
-                    name = name[len(NAMESPACE) + 1:]
-                try:
-                    args = json.loads(item.get("arguments") or "{}")
-                    args = args if isinstance(args, dict) else None
-                except ValueError:
-                    args = None
-                blocks.append({"type": "tool_call", "id": item.get("call_id") or item.get("id"), "name": name, "input": args})
-                raw.append({k: v for k, v in item.items() if k in ("type", "call_id", "name", "arguments", "namespace")})
+        blocks, raw, declined = responses.read(getattr(final, "output", None), model, NAMESPACE)
         result = TurnResult(blocks, raw, model=getattr(final, "model", None) or model)
-        if incomplete:
-            result.stop_reason, result.note = "max_tokens", "The answer was cut short."
+        if incomplete or declined:
+            result.stop_reason, result.note = ("refusal", "The model declined this request.") if declined and \
+                not incomplete else ("max_tokens", "The answer was cut short.")
             result.blocks = [b for b in blocks if b["type"] != "tool_call"]
-            # nor sent again: a call that never ran has no output to follow it, which the route refuses
-            result.raw = [i for i in raw if i["type"] != "function_call"]
+            # nor sent again: a call that never ran has no output to follow it, which the route refuses; nor the
+            # reasoning that led to it
+            result.raw = responses.without_calls(raw)
         elif result.tool_calls:
             result.stop_reason = "tool_calls"
         return result

@@ -58,7 +58,10 @@ def test_a_message_written_meanwhile_reaches_the_next_step(tmp_path):
     agent, chat, events = day(tmp_path, provider)
     roles = [m["role"] for m in chat["messages"]]
     assert roles == ["user", "assistant", "tool", "user", "assistant"]
-    assert chat["messages"][3] == {"role": "user", "text": "also record lockin.Y", "steer": True}
+    steer = chat["messages"][3]
+    assert {k: v for k, v in steer.items() if k not in ("sent", "sent_at")} == {
+        "role": "user", "text": "also record lockin.Y", "steer": True, "words": 200}   # under the budget then
+    assert steer["sent"].startswith("<sent>")                            # with when it was written, as any message
     assert provider.prompts[1][-1] == "also record lockin.Y"           # the model read it before answering
     assert {"type": "steered", "texts": ["also record lockin.Y"]} in events
     assert chat["id"] not in agent._steer

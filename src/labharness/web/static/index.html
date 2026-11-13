@@ -776,7 +776,7 @@
           </div>
           <div id="cc-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Claude Code <span class="tag">temporary</span></span><span id="cc-status" class="hint"></span></div>
-            <span class="hint">Your Claude plan; it can also operate this computer's screen.</span>
+            <span class="hint">Your Claude plan; it can also operate this computer's screen. Claude Code keeps each chat's conversation on this computer as one of its sessions, to go on from it (not an incognito chat's).</span>
             <label class="check"><input id="cc-on" name="claude_code" type="checkbox"> Use Claude Code</label>
             <label for="cc-path">Program path</label>
             <input id="cc-path" name="claude_code_path" spellcheck="false" placeholder="Found by Kelvin when empty">
@@ -792,6 +792,14 @@
               <option value="200">Up to 200 words</option>
               <option value="400">Up to 400 words</option>
               <option value="off">Any length</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="thinking" title="How long the model thinks before it answers and between its steps (Claude, and GPT on the ChatGPT plan). Writing &quot;think hard&quot; in a message gets the deepest for that answer.">Thinking</label>
+            <select id="thinking" name="thinking">
+              <option value="medium">Standard: faster, costs less</option>
+              <option value="high">Deep</option>
+              <option value="xhigh">Deepest: slower, for hard problems</option>
             </select>
           </div>
           <div class="field">

@@ -1,9 +1,16 @@
 """TEMPORARY (Claude Code bridge, see claudecode.py): chats answered by the Claude Code on this computer.
 
-Claude Code runs with its own tools switched off and Kelvin's system prompt. Kelvin's tools are described in that
-prompt and called as <tool_call name="...">{json}</tool_call>; Kelvin runs them in its own loop, through the
-safety gate like any model's calls, and sends the results back in the next turn. Each turn is one `claude -p`
-run that is not saved as a Claude Code session.
+Claude Code runs with its own tools switched off and Kelvin's system prompt. A turn with Kelvin's tools goes the
+native way (claudecode_native.py): Kelvin's tools are Claude Code's own, as an MCP server inside Kelvin, so the model
+calls them as real tool calls, and one `claude` run lasts the whole answer, the model thinking on from step to step;
+between answers Claude Code keeps the conversation as a session the next answer goes on in. Kelvin still runs every
+call in its own loop, through the safety gate like any model's calls.
+
+A `claude` that can't do that (too old, or its settings keep Kelvin's tools from it) gets the text protocol below,
+as every turn did before 2026-11: Kelvin's tools are described in the prompt and called as
+<tool_call name="...">{json}</tool_call>; Kelvin runs them and sends the results back in the next turn, each turn one
+`claude -p` run of the whole conversation, not saved as a Claude Code session. So does a turn without tools (a
+summary, a second opinion's plain answer).
 
 Claude models often write a call in the form they are trained on instead, <invoke name="..."><parameter
 name="...">...</parameter></invoke> (sometimes inside <function_calls>), and with no tools of its own in the run
@@ -22,12 +29,15 @@ import logging
 import os
 import re
 import tempfile
+import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ... import claudecode
-from .base import Emit, ModelInfo, Provider, TurnResult, user_text
+from . import claudecode_native as native
+from .base import (ANSWER, EFFORT, EFFORTS, RESUMABLE, SESSION, Emit, ModelInfo, Provider, TurnResult,
+                   user_text)
 
 log = logging.getLogger("kelvin")
 
@@ -383,10 +393,25 @@ class ClaudeCodeProvider(Provider):
     can_search = True
     sees_images = True   # through stream-json input (stream_message); F1, F2, F3: the bridge once passed none
 
-    def __init__(self, cmd: Optional[List[str]], cwd: Optional[Path] = None, timeout: float = 600):
+    def __init__(self, cmd: Optional[List[str]], cwd: Optional[Path] = None, timeout: float = 600,
+                 native_tools: bool = True):
         self.cmd = cmd
         self.cwd = cwd or claudecode.workdir()
         self.timeout = timeout
+        self.effort = True   # passes the turn's thinking effort (--effort); off for good with a `claude` without it
+        self.native = native_tools   # Kelvin's tools as Claude Code's own; off for good with a `claude` that can't
+        self.snapshot = True   # --system-prompt-snapshot off; dropped for good with a `claude` from before it
+        self.misses = 0        # native runs that didn't start where the text protocol then worked
+        self.record = native.Record.at(self.cwd / "bridge-sessions.json")   # what each session took in
+
+    @property
+    def live(self) -> List["native.Live"]:
+        """This provider's runs going on (claudecode_native.RUNS has every provider object's)."""
+        return [r for r in native.RUNS if getattr(r, "owner", None) is self]
+
+    @property
+    def claimed(self) -> Set[str]:
+        return native.CLAIMED
 
     async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
         """Claude Code's WebSearch on the person's plan: one `claude -p` run with only that tool allowed."""
@@ -416,6 +441,158 @@ class ClaudeCodeProvider(Provider):
 
     async def stream(self, model: str, system: str, history: List[Dict[str, Any]],
                      tools: List[Dict[str, Any]], emit: Emit) -> TurnResult:
+        if tools and self.native and self.cmd:
+            try:
+                return await self._native(model, system, history, tools, emit)
+            except native.NoStart as e:   # nothing shown, nothing run: this step the text protocol's way
+                return await self._instead(e, model, system, history, tools, emit)
+        return await self._text(model, system, history, tools, emit)
+
+    # ------------------------------------------------------------------ native tool calls (claudecode_native.py)
+
+    async def _native(self, model: str, system: str, history: List[Dict[str, Any]], tools: List[Dict[str, Any]],
+                      emit: Emit) -> TurnResult:
+        """The answer's next step: in the run its last step left waiting for these results, else in a new run."""
+        results, after = native.answered(history)
+        ids = {str(r.get("id")) for r in (results or {}).get("results") or []}
+        live = next((r for r in native.RUNS if ids and set(r.given) == ids and not r.busy and r.run.alive()), None)
+        self._reap(but=live)
+        if live is None:
+            return await self._begin(model, system, history, tools, emit)
+        live.busy = True   # its own again: no other chat's step ends it while Claude Code takes a new tool list
+        try:
+            await live.answer(results or {}, after, tools)
+        except BaseException:   # stopped while Claude Code took a new tool list
+            self._drop(live, now=True)
+            raise
+        return await self._read(live, emit)
+
+    async def _begin(self, model: str, system: str, history: List[Dict[str, Any]], tools: List[Dict[str, Any]],
+                     emit: Emit) -> TurnResult:
+        """A new run: going on in the session the conversation was left in (only what it hasn't taken in goes in),
+        else a new session with the conversation so far in its first message. A flag this `claude` doesn't know is left
+        out and the run started again; a session that can't go on gives way to a new one."""
+        kept = bool(RESUMABLE.get())   # not for an incognito chat, nor for a second opinion, a summary, an analysis
+        found = native.resumable(history, model, system) if kept else None
+        first, told = native.first_mark(history, system), native.told_mark(history)
+        while True:
+            resume = found[0] if found else ""
+            fork = bool(resume) and resume in native.CLAIMED   # another run goes on in it now: it gets a copy
+            live = native.Live(self.cmd, self._native_args(model, kept, resume, fork), self.cwd, system, tools,
+                               SESSION.get(), model, first, kept, bool(ANSWER.get()),
+                               resumed=resume if resume and not fork else "", told=told)
+            live.owner = self
+            native.RUNS.append(live)
+            if live.resumed:
+                native.CLAIMED.add(live.resumed)
+            parts, keys = native.since(history, found[1], self.record.taken(resume), self.record.unheard(resume)) \
+                if found else native.opening(history)
+            live.start(parts, keys)
+            try:
+                return await self._read(live, emit)
+            except native.NoStart as e:
+                if e.option == "--effort" and self.effort:
+                    self.effort = False
+                elif e.option == "--system-prompt-snapshot" and self.snapshot:
+                    self.snapshot = False
+                elif found and not e.unable:
+                    log.info("Claude Code bridge: session %s didn't go on (%s); a new one", resume, e)
+                    found = None
+                else:
+                    raise
+
+    def _native_args(self, model: str, kept: bool, resume: str, fork: bool) -> List[str]:
+        args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages", "--replay-user-messages"]
+        if self.snapshot:   # a resumed session would keep the system prompt it began with
+            args += ["--system-prompt-snapshot", "off"]
+        args += ["--tools", "", "--mcp-config", native.CONFIG, "--strict-mcp-config", "--allowedTools", native.ALLOW,
+                 "--permission-mode", "dontAsk", "--model", model]
+        effort = EFFORT.get()
+        if self.effort and effort in EFFORTS:   # Settings → Models → Thinking, and "think hard" (agent.py)
+            args += ["--effort", effort]
+        if not kept:
+            args.append("--no-session-persistence")
+        if resume:
+            args += ["--resume", resume] + (["--fork-session"] if fork else [])
+        return args
+
+    async def _read(self, live: "native.Live", emit: Emit) -> TurnResult:
+        """The run's next step as Kelvin's loop takes it. Stop (the step cancelled), an error or the time limit end
+        the run; the answer's end lets it end by itself (at once when a message of the person's is still waiting in
+        it: that goes with the next answer)."""
+        try:
+            blocks, ended = await live.step(emit, self.timeout)
+        except BaseException:
+            self._drop(live, now=True)
+            raise
+        self.misses = 0
+        self._note(live)
+        if ended is None:
+            return TurnResult(blocks, raw=live.raw(), stop_reason="tool_calls", model=live.model)
+        self._drop(live, now=live.left)
+        return TurnResult(blocks, raw=live.raw(), model=live.model,
+                          stop_reason=ended if ended in ("max_tokens", "refusal") else "end")
+
+    def _note(self, live: "native.Live", ended: bool = False) -> None:
+        """What the run's session took in so far, into the record (a session nothing keeps needs none); as the run
+        ends, also the person's messages it never took in."""
+        if live.kept:
+            self.record.add(live.session, live.what_it_took(), live.what_it_missed() if ended else set())
+
+    async def _instead(self, e: "native.NoStart", model: str, system: str, history: List[Dict[str, Any]],
+                       tools: List[Dict[str, Any]], emit: Emit) -> TurnResult:
+        """A native run that ended before the model said anything: this step the text protocol's way. If that works,
+        the native way is left for good once this `claude` can't take Kelvin's tools (e.unable) or failed twice; if it
+        fails too, its error is the one said (a sign-in, a usage limit), and the native way stays."""
+        log.info("Claude Code bridge: Kelvin's tools as Claude Code's own didn't start (%s); the text protocol", e)
+        result = await self._text(model, system, history, tools, emit)
+        self.misses += 1
+        if e.unable or self.misses >= 2:
+            self.native = False
+            log.info("Claude Code bridge: the text protocol from now on")
+            result.note = ((result.note + " ") if result.note else "") + (
+                "This Claude Code can't take Kelvin's tools as its own (%s), so Kelvin describes them in the prompt "
+                "instead, as it did before; an up-to-date Claude Code does better." % e)
+        return result
+
+    def _drop(self, live: "native.Live", now: bool) -> None:
+        if live in native.RUNS:
+            native.RUNS.remove(live)
+        native.CLAIMED.discard(live.resumed)
+        live.close() if now else live.finish()
+        self._note(live, ended=True)
+
+    def _reap(self, but: Optional["native.Live"] = None) -> None:
+        """Runs nobody comes back for: ended on their own, or a second opinion's or an analysis's left waiting
+        ADRIFT_S (its loop stopped between steps: nothing ends it). A chat's answer ends its own (end_answer): only
+        OWNED_S unheard of ends one here, as one of its calls may wait that long for a person or a run. `but`: the
+        run this step goes on in."""
+        for live in list(native.RUNS):
+            limit = native.OWNED_S if live.owned else native.ADRIFT_S
+            if live is not but and not live.busy and \
+                    (not live.run.alive() or time.monotonic() - live.since > limit):
+                self._drop(live, now=True)
+
+    def end_answer(self) -> None:
+        """This chat's answer is over (agent.py): a run its last step left waiting for results that won't come (Stop
+        during a call, the step limit, an error) ends. Its session keeps the calls, marked unfinished by Claude Code;
+        Kelvin's results for them go with the next answer (claudecode_native.since). A second opinion's or an
+        analysis's run in the same chat isn't the answer's: it goes on."""
+        key = SESSION.get()
+        for live in list(native.RUNS):
+            if live.owned and live.key == key and not live.busy:
+                self._drop(live, now=True)
+        self._reap()
+
+    def close(self) -> None:
+        for live in list(native.RUNS):
+            self._drop(live, now=True)
+
+    # ------------------------------------------------------------------ the text protocol
+
+    async def _text(self, model: str, system: str, history: List[Dict[str, Any]],
+                    tools: List[Dict[str, Any]], emit: Emit) -> TurnResult:
         prompt = system + ("\n\n" + PROTOCOL + "\n\n" + tool_catalog(tools) if tools else "")
         schemas = {t["name"]: t.get("schema") or {} for t in tools}
         fd, path = tempfile.mkstemp(prefix="system-", suffix=".md", dir=str(self.cwd))
@@ -423,6 +600,9 @@ class ClaudeCodeProvider(Provider):
             f.write(prompt)
         common = ["--output-format", "stream-json", "--verbose", "--include-partial-messages", "--system-prompt-file",
                   path, "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--model", model]
+        effort = EFFORT.get()
+        if self.effort and effort in EFFORTS:   # Settings → Models → Thinking, and "think hard" (agent.py)
+            common += ["--effort", effort]
         pictures = has_pictures(history)
         if pictures:   # the conversation, pictures and all, as one message on standard input; the request ends it
             args = ["-p", "--input-format", "stream-json"] + common
@@ -437,7 +617,16 @@ class ClaudeCodeProvider(Provider):
             def stdin(extra: str = "") -> str:
                 return said_text + ("\n" + extra if extra else "")
         try:
-            reading = await self._turn(args, stdin(), schemas, emit)
+            try:
+                reading = await self._turn(args, stdin(), schemas, emit)
+            except RuntimeError as e:   # a `claude` from before --effort: without it, from now on
+                said = str(e).lower()
+                if "--effort" not in args or not ("--effort" in said or "unknown option" in said and "effort" in said):
+                    raise
+                self.effort = False
+                at = args.index("--effort")
+                args = args[:at] + args[at + 2:]
+                reading = await self._turn(args, stdin(), schemas, emit)
             if tools and reading.markup and not reading.run:   # nothing Kelvin can run: once more, told why
                 why = ("a tool result you wrote yourself" if reading.made_up else
                        "tool-call markup Kelvin could not read")

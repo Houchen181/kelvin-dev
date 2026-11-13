@@ -52,7 +52,7 @@ def test_rarer_tools_load_when_a_chat_needs_them(tmp_path):
     assert len(first) < len(second) and {"add_instrument", "try_card"} <= set(second)
     assert chat["tools"] == ["add_instrument", "try_card"] and set(third) >= {"add_instrument", "try_card"}
     assert "# More tools" in provider.systems[0] and "add_instrument" in provider.systems[0]
-    assert "add_instrument" not in provider.systems[2].split("# More tools")[1].split("#")[0]   # listed until loaded
+    assert provider.systems[2] == provider.systems[0]   # the list stays as it was: the prompt never changes for it
     found = next(e for e in events if e["type"] == "tool_end")
     assert found["content"].startswith("loaded, from the next step on:\n- add_instrument: ")
 

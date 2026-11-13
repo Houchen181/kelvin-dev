@@ -7,6 +7,8 @@ History is provider-neutral and append-only:
 Pictures: in the request the agent builds (agent.py, _pictures), a user message or a tool result may carry
 "images": [{"mime", "data" (base64)}] for a provider that sees_images, and "documents": [{"mime": "application/pdf",
 "data", "name"}] (PDFs to read whole, figures and all) for one that sees_pdfs; the stored chat keeps only file names.
+A user message may carry "update": what changed in the chat's setup since its prompt was written (agent.py, _frame),
+which a model reads with the message (update_block), or Claude as a system message right after it (anthropic_provider).
 Assistant blocks: {"type": "text", "text"}, {"type": "thinking", "text"},
 {"type": "tool_call", "id", "name", "input"} (input None = arguments were not valid JSON).
 `raw` is the provider's own form of the turn, replayed unchanged to the same
@@ -24,6 +26,19 @@ Emit = Callable[[Dict[str, Any]], Awaitable[None]]
 # the chat a model request belongs to (agent.py sets it for each turn), for services that route and cache by
 # conversation (OpenCode's x-opencode-session)
 SESSION: contextvars.ContextVar = contextvars.ContextVar("kelvin_session", default="")
+# how hard the model thinks in this turn: low, medium, high, xhigh or max ("": the provider's own default). agent.py
+# sets it for each turn from Settings (Thinking), and raises it to xhigh for a message that asks Kelvin to think hard;
+# the providers that take an effort (Claude, the ChatGPT plan) send it, the others ignore it.
+EFFORT: contextvars.ContextVar = contextvars.ContextVar("kelvin_effort", default="")
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Claude Code bridge: may the model's service keep this conversation between the chat's answers, to go on from it in
+# the next one (claudecode_native.py: a Claude Code session on this computer)? agent.py says yes for the steps of a
+# chat's own answers (and of its Compare lanes), unless the chat is incognito (it leaves nothing behind); a second
+# opinion, a summary or an analysis keeps nothing.
+RESUMABLE: contextvars.ContextVar = contextvars.ContextVar("kelvin_resumable", default=False)
+# ...and is this request a step of a chat's own answer (or Compare lane), whose end agent.py tells the provider
+# (Provider.end_answer)? An incognito chat's answer is one, though it keeps nothing.
+ANSWER: contextvars.ContextVar = contextvars.ContextVar("kelvin_answer", default=False)
 
 
 def session_key(outside: str = "") -> str:
@@ -83,6 +98,13 @@ class Provider:
         """Web results ({title, url, snippet}) through this service's own web search."""
         raise NotImplementedError
 
+    def end_answer(self) -> None:
+        """The answer of this task's chat (SESSION) is over, however it ended: anything kept between its steps goes
+        (the Claude Code bridge's run). Most providers keep nothing."""
+
+    def close(self) -> None:
+        """Kelvin is closing: anything still running goes."""
+
 
 def sees_images(provider: Any, model: str) -> bool:
     """Whether this model takes pictures: model by model where a service's models differ (model_sees_images,
@@ -105,9 +127,16 @@ def safe_id(value: Any, n: int) -> str:
     return text or "lh_call_%d" % n
 
 
-def user_text(message: Dict[str, Any]) -> str:
+def update_block(text: str) -> str:
+    """A change to the chat's setup since its prompt was written (agent.py, _frame), as a model reads it with the
+    person's message when its service takes no system message mid-conversation."""
+    return "<context_update>\n%s\n</context_update>" % text
+
+
+def user_text(message: Dict[str, Any], updates: bool = True) -> str:
     """A user message as the model sees it: notes recalled for it (if any) in front of what the user wrote.
-    Stored with the message, so earlier turns replay unchanged and the prompt cache holds."""
+    Stored with the message, so earlier turns replay unchanged and the prompt cache holds. updates: with the change
+    to the chat's setup it carries (False: the provider sends that as a system message of its own)."""
     from ..memory import block
     notes = message.get("memory")
     own = message["text"]
@@ -125,11 +154,44 @@ def user_text(message: Dict[str, Any]) -> str:
     if message.get("events"):   # the person's changes to the sequence or Home meanwhile (notices.py)
         from ..notices import block as events_block
         text = "%s\n\n%s" % (events_block(message["events"]), text) if text else events_block(message["events"])
+    if updates and message.get("update"):   # the chat's setup changed since its prompt was written (agent.py)
+        text = "%s\n\n%s" % (update_block(message["update"]), text) if text else update_block(message["update"])
     review = message.get("review")
     if review:   # a second opinion on the previous answer, asked for by the user
         text = '<second_opinion model="%s" verdict="%s">\n%s\n</second_opinion>\n\n%s' % (
             review.get("label") or review.get("model"), review.get("verdict"), review.get("text", ""), text)
+    if message.get("sent"):   # when the person sent it (agent.py, sent_line): kept with it, so it replays the same
+        text = "%s\n%s" % (message["sent"], text)
     return text
+
+
+def sent_line(at: float, before: Optional[float] = None, woke: bool = False) -> str:
+    """When a message was sent, as the model reads it with the message (<sent>): the local date and time, and how
+    long after the person's message before it. A model knows no clock of its own: without it "this morning's run" or
+    "how long since the cool-down started" are guesses. woke: Kelvin continuing the chat itself (wakeups.py)."""
+    import time
+    stamp = time.strftime("%a %d %b %Y, %H:%M", time.localtime(at)) + " (local time)"
+    if woke:
+        stamp += ": Kelvin continued the chat"
+    if before is None or at < before:
+        return "<sent>%s</sent>" % stamp
+    return "<sent>%s, %s after the person's %smessage before</sent>" % (stamp, _span(at - before),
+                                                                     "last " if woke else "")
+
+
+def _span(seconds: float) -> str:
+    """A time span in a person's words: 40 s, 12 min, 3 h 5 min, 2 days 4 h."""
+    s = int(round(seconds))
+    if s < 60:
+        return "%d s" % s
+    m = s // 60
+    if m < 60:
+        return "%d min" % m
+    h, m = divmod(m, 60)
+    if h < 48:
+        return "%d h %d min" % (h, m) if m else "%d h" % h
+    d, h = divmod(h, 24)
+    return "%d days %d h" % (d, h) if h else "%d days" % d
 
 
 def text_of(blocks: List[Dict[str, Any]]) -> str:

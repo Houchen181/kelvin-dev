@@ -208,7 +208,9 @@ def test_reading_list_in_projects_and_reports(runtime, tmp_path):
         assert "save_paper" in bot.tool_names[0] and "search_papers" in bot.tool_names[0]
 
         stream_turn(client, headers, chat["id"], "plan it", "scripted:m1")
-        assert "## Reading list" in bot.systems[-1] and "[id doi:10.1021/acs.nanolett.2c02863] — strain tuning" in bot.systems[-1]
+        said = bot.sent[-1][-1]   # the paper kept meanwhile goes with the next message (the prompt stays as it began)
+        assert "## Reading list" in said and "[id doi:10.1021/acs.nanolett.2c02863] — strain tuning" in said
+        assert "## Reading list" not in bot.systems[-1] and bot.systems[-1] == bot.systems[0]
         loose = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
         stream_turn(client, headers, loose["id"], "hello", "scripted:m1")
         assert "save_paper" not in bot.tool_names[-1] and "## Reading list" not in bot.systems[-1]

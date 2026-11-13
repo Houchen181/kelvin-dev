@@ -20,11 +20,40 @@ on or so that the then there this to was what when where which who why will with
 
 
 def portal_map() -> str:
-    """The map of the portal, for a model's instructions ("" if the app lacks it)."""
+    """The map of the portal, whole ("" if the app lacks it): kelvin_help searches it, point by point."""
     try:
         return MAP.read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+INDEX_LEAD = """# Where things are in Kelvin's portal
+
+You can't see the portal. When the person must do something there, tell them exactly where, with the names in bold \
+as the portal shows them; never guess a menu or a button. The portal's map has a point on each of the places below: \
+kelvin_help gives a point whole (ask it with the place's or the task's words) before you tell a person where to \
+click. If it isn't there either, say you don't know where it is."""
+MAX_INDEX_TOPIC = 90
+
+
+def portal_index() -> str:
+    """The map's table of contents, for a model's instructions: each point's place in a line, its steps through
+    kelvin_help. The whole map (about 37,000 characters, a quarter of a chat's prompt) went with every step a model
+    took, for the few answers that send a person somewhere; a place's point, looked up when it's needed, says the
+    same."""
+    whole = portal_map()
+    if not whole:
+        return ""
+    places: List[str] = []
+    for line in whole.splitlines():
+        if not line.startswith("- "):
+            continue
+        topic = re.split(r":(?:\s|$)", line[2:], maxsplit=1)[0].strip()
+        if len(topic) > MAX_INDEX_TOPIC:   # a point that opens with a sentence: its first words
+            topic = topic[:MAX_INDEX_TOPIC].rsplit(" ", 1)[0] + " …"
+        if topic and topic not in places:
+            places.append(topic)
+    return INDEX_LEAD + "\n" + "\n".join("- " + p for p in places)
 
 
 def _folders() -> List[Path]:
@@ -45,9 +74,12 @@ def passages() -> List[Tuple[str, str]]:
 
         def flush() -> None:
             text = "\n".join(buf).strip()
-            lead = re.match(r"^- (?:\*\*)?([^:*\n]{2,80}?)(?:\*\*)?:", text)   # a point's topic: "A draft card:"
+            # a point's topic: "A draft card:", "The **Runs** pane:", "**Runs pane:**", in its place's words, so a
+            # question in them finds that point (the prompt lists the map's places by them: guide.portal_index)
+            lead = re.match(r"^- ([^\n]{2,120}?):(?:\*\*)?(?:\s|$)", text)
+            topic = lead.group(1).replace("**", "").strip() if lead else ""
             if text:
-                out.append((" › ".join([name] + heading + ([lead.group(1)] if lead else [])), text))
+                out.append((" › ".join([name] + heading + ([topic] if topic else [])), text))
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.startswith("```"):
                 code = not code

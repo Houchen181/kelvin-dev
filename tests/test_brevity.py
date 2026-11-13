@@ -86,7 +86,10 @@ def test_the_budget_follows_the_setting(parts):
 
         settings.update({"answer_words": "100"})
         stream_turn(client, headers, chat["id"], "and now?", "scripted:m1")
-        assert "under 100 words" in model.systems[1] and ASKED % 100 in model.asked[1][-1]
+        assert model.systems[1] == model.systems[0]                          # the chat's prompt stays as it began...
+        update = model.asked[1][-1].split("</context_update>")[0]            # ...and the change goes with the message
+        assert "<context_update>" in update and "under 100 words" in update and ASKED % 100 in model.asked[1][-1]
+        assert "(Answer in" not in model.asked[1][0]                         # the first went without a budget, still
         assert client.get("/api/settings", headers=headers).json()["settings"]["answer_words"] == 100
 
 

@@ -47,8 +47,8 @@ def test_the_portal_model_has_the_map_and_kelvin_help(tmp_path):
     from labharness.agent.runtime import LabRuntime
     from labharness.agent.server import INSTRUCTIONS, build_server
     from labharness.web.agent import SYSTEM
-    assert SYSTEM.endswith(guide.portal_map()) and "look it up with kelvin_help, never guess" in " ".join(
-        INSTRUCTIONS.split())
+    assert SYSTEM.endswith(guide.portal_index()) and "look it up with kelvin_help, never guess" in " ".join(
+        INSTRUCTIONS.split())   # the map's table of contents; each place's point through kelvin_help
     rt = LabRuntime(build_virtual_lab(), ScriptedApprover([]), tmp_path / "data")
 
     async def ask():

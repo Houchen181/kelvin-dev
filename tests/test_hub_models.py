@@ -58,6 +58,19 @@ def chat_stream(model, usage=True):
     return "".join("data: %s\n\n" % json.dumps(c) for c in chunks).encode() + b"data: [DONE]\n\n"
 
 
+def responses_stream(model):
+    """OpenAI's Responses API streaming its answer, as GPT with an API key is asked (openai_provider.py)."""
+    said = {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": "Six points.", "annotations": []}]}
+    return sse({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "content_index": 0,
+                "delta": "Six points.", "sequence_number": 1},
+               {"type": "response.completed", "sequence_number": 2, "response": {
+                   "id": "resp_1", "object": "response", "created_at": 1, "model": model, "status": "completed",
+                   "output": [said], "usage": {"input_tokens": 2000, "output_tokens": 300, "total_tokens": 2300,
+                                               "input_tokens_details": {"cached_tokens": 1500},
+                                               "output_tokens_details": {"reasoning_tokens": 0}}}})
+
+
 GEMINI_STREAM = b"".join(b"data: %s\r\n\r\n" % json.dumps(c).encode() for c in (
     {"candidates": [{"content": {"role": "model", "parts": [{"text": "Settled."}]}}],
      "usageMetadata": {"promptTokenCount": 300000, "candidatesTokenCount": 10}},
@@ -89,6 +102,9 @@ class Services:
             return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=CLAUDE_STREAM)
         if host == "api.openai.com":
             assert request.headers["authorization"] == "Bearer " + self.keys["openai"]
+            if path == "/v1/responses":
+                return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                      content=responses_stream(body["model"]))
             return httpx.Response(200, headers={"content-type": "text/event-stream"},
                                   content=chat_stream(body["model"], (body.get("stream_options") or {}).get(
                                       "include_usage", False)))

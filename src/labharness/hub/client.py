@@ -113,9 +113,16 @@ def collect(store: Any) -> Dict[str, List[Dict[str, Any]]]:
         if not shareable_chat(chat):
             continue
         chats.append({"id": chat["id"], "project": summary.get("project"), "title": chat.get("title", "Chat"),
-                      "updated": chat.get("updated"), "messages": chat.get("messages", []),
+                      "updated": chat.get("updated"), "messages": [_shared(m) for m in chat.get("messages", [])],
                       "rules": chat.get("rules"), "unpublished": False, "confidential": False, "incognito": False})
     return {"projects": out_projects, "chats": chats}
+
+
+def _shared(message: Dict[str, Any]) -> Dict[str, Any]:
+    """A message as the hub gets it: without what Kelvin told the model of the chat's setup with it (its "update":
+    the person's and the project's instructions, the lab's memory, the chat's folder: web/agent.py, _frame), which
+    the system prompt held before, and never went."""
+    return {k: v for k, v in message.items() if k != "update"} if message.get("update") else message
 
 
 class HubClient:

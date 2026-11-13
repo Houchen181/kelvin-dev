@@ -38,13 +38,19 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_from", "smtp_to",   # email notices
                      "heartbeat_minutes", "approval_wait", "lab_scripts_python",
                      "sequence_react",   # Kelvin answers a stop or a failure of the sequence at once (notices.py)
-                     "compare_models"}   # Compare under the message box (Settings -> Models): off unless on
+                     "compare_models",   # Compare under the message box (Settings -> Models): off unless on
+                     "thinking"}   # how hard the model thinks (Settings -> Models -> Thinking): medium, high, xhigh
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
        "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection", "idle_off",
        "idle_off_all", "approval_wait", "lab_scripts_python"}
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
+# How hard the model thinks (providers/base.EFFORT): Standard (medium) answers sooner and costs less, Deep (high, the
+# default) is for a lab's multi-step work, Deepest (xhigh) for the hardest problems; a message that asks Kelvin to think
+# hard gets xhigh for its turn whatever this says (agent.py).
+THINKING = ("medium", "high", "xhigh")
+DEFAULT_THINKING = "high"
 IDLE_OFF_MINUTES = 60   # outputs left on this long with nothing happening go to safe (LabRuntime._idle_check)
 APPROVAL_WAIT_MINUTES = 60   # a request nobody answered at the computer waits this long for the phone, then declines
 HEARTBEAT_MINUTES = 5        # minutes between heartbeat pings
@@ -379,6 +385,8 @@ class Settings:
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "answer_words":  # how long the model is asked to keep answers (brevity.py)
                 value = _answer_words(value)
+            if name == "thinking":  # how hard the model thinks: medium, high (the default, stored as "") or xhigh
+                value = value.lower() if value.lower() in THINKING and value.lower() != DEFAULT_THINKING else ""
             if name == "idle_off":  # minutes before light left on with nothing happening goes to safe, or off
                 value = _idle_off(value)
             if name == "idle_off_all":  # other outputs (sources, excitations, RF) too: off unless on
@@ -480,6 +488,7 @@ class Settings:
             "notify_kinds": self.notify_kinds,
             "reviewer": self._user.get("reviewer", ""),
             "answer_words": self.answer_words,
+            "thinking": self.thinking,
             "literature": self._user.get("literature") != "off",
             "auto_setup": self._lab.get("auto_setup") != "off",
             "manuals": self._lab.get("manuals") != "off",
@@ -539,6 +548,12 @@ class Settings:
         if value == "off":
             return 0
         return int(value) if value and value.isdigit() else ANSWER_WORDS
+
+    @property
+    def thinking(self) -> str:
+        """How hard the model thinks in a turn (providers/base.EFFORT): medium, high (the default) or xhigh."""
+        value = self._user.get("thinking")
+        return value if value in THINKING else DEFAULT_THINKING
 
     @property
     def card_language(self) -> str:

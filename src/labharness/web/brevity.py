@@ -36,8 +36,13 @@ def words(text: str) -> int:
 def with_reminder(history: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
     """The history as the model gets it: each of the person's messages comes with the word budget ("brief", which
     user_text adds), so the model keeps its answers short itself. On every message, not only the latest, so earlier
-    turns replay unchanged and the prompt cache holds. The stored chat never has it. No budget, no change."""
-    if not limit:
+    turns replay unchanged and the prompt cache holds: each with the budget it was sent under ("words", which the chat
+    keeps with it: agent.py, _step), so a budget changed later changes no earlier message; limit for one without.
+    The stored chat never has the brief. No budget, no change."""
+    if not limit and not any(m.get("words") for m in history if m["role"] == "user"):
         return history
-    brief = REMINDER.format(words=limit)
-    return [dict(m, brief=brief) if m["role"] == "user" else m for m in history]
+    out = []
+    for m in history:
+        words = m.get("words", limit) if m["role"] == "user" else 0
+        out.append(dict(m, brief=REMINDER.format(words=words)) if words else m)
+    return out

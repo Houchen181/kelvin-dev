@@ -144,7 +144,9 @@ def test_a_skill_and_a_recipe_are_kept_and_shown_in_the_chat(parts):
     assert results[2]["content"].startswith("recipe find-gate-peak (2 stages), values: span = 0.5")
     assert "done; values:" in results[2]["content"]
     assert results[3]["is_error"] and "no kept recipe 'unknown-one' (kept: find-gate-peak)" in results[3]["content"]
-    assert "- gate-check: Checking the gate before a run (this project's)" in main.systems[-1]
+    kept = "- gate-check: Checking the gate before a run (this project's)"
+    assert kept not in main.systems[-1] and main.systems[-1] == main.systems[0]   # the chat's prompt as it began...
+    assert kept in main.sent[-1][1] and "<context_update>" in main.sent[-1][1]   # ...the skill said with the next message
     assert gone.status_code == 200 and kelvins.status_code == 404
     assert not (store.root / "recipes" / project["id"]).exists()                # it went with its project
     assert any(e["type"] == "approval" for e in ran)

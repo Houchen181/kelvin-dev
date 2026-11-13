@@ -36,8 +36,11 @@ class Scripted(Provider):
         self.seen = []
         self.systems = []
         self.tool_names = []
-        self.prompts = []   # the user messages as the model sees them (with recalled memory), without the word budget
-        self.asked = []     # the same with the word budget, as sent (brevity.py)
+        # the user messages as the model sees them (with recalled memory), without the word budget and the time they
+        # were sent (test_harness_2026_11_12 has that)
+        self.prompts = []
+        self.asked = []     # the same with the word budget, as sent (brevity.py), without the time
+        self.sent = []      # as sent, whole
 
     def available(self):
         return True
@@ -49,8 +52,9 @@ class Scripted(Provider):
         self.seen.append([m["role"] for m in history])
         self.systems.append(system)
         self.tool_names.append([t["name"] for t in tools])
-        self.prompts.append([user_text(dict(m, brief=None)) for m in history if m["role"] == "user"])
-        self.asked.append([user_text(m) for m in history if m["role"] == "user"])
+        self.prompts.append([user_text(dict(m, brief=None, sent=None)) for m in history if m["role"] == "user"])
+        self.asked.append([user_text(dict(m, sent=None)) for m in history if m["role"] == "user"])
+        self.sent.append([user_text(m) for m in history if m["role"] == "user"])
         if self.delay:
             await asyncio.sleep(self.delay)
         blocks = self.turns.pop(0)

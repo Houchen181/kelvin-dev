@@ -62,7 +62,9 @@ def test_models_answer_side_by_side_and_the_user_picks_one(parts):
         assert next(e for e in events if e["type"] == "tool_end" and e["lane"] == 0)["content"].startswith("Virtual Lab")
         assert events[-2] == {"type": "compare_end", "chosen": 0} and events[-1]["type"] == "turn_end"
         assert "set_value" not in alpha.tool_names[0] and "lab_status" in alpha.tool_names[0]
-        assert "remember" not in alpha.tool_names[0] and "Comparing models" in alpha.systems[0]
+        assert "remember" not in alpha.tool_names[0] and "Comparing models" not in alpha.systems[0]
+        assert "<context_update>\n# Comparing models" in alpha.prompts[0][-1]   # said with the message: the chat's own
+        assert alpha.prompts[0][-1].endswith("how is the lab?")                 # prompt stays as it was written
 
         saved = client.get("/api/chats/" + chat["id"], headers=headers).json()
         user = saved["messages"][0]
@@ -77,7 +79,8 @@ def test_models_answer_side_by_side_and_the_user_picks_one(parts):
         assert len(saved["messages"]) == 1 + len(saved["messages"][0]["compare"]["lanes"][1]["messages"])
 
         stream_turn(client, headers, chat["id"], "go on", "beta:m1")    # the chat continues from Beta's answer
-        assert beta.seen[-1] == ["user", "assistant", "tool", "assistant", "user"] and beta.prompts[-1] == ["how is the lab?", "go on"]
+        assert beta.seen[-1] == ["user", "assistant", "tool", "assistant", "user"] and beta.prompts[-1][1] == "go on"
+        assert beta.prompts[-1][0] == alpha.prompts[0][-1] and beta.systems[-1] == alpha.systems[0]   # as it was sent
         assert client.post("/api/chats/%s/choose" % chat["id"], json={"index": 0}, headers=headers).status_code == 400
 
 
