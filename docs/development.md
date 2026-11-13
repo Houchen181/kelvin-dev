@@ -30,6 +30,8 @@ python -m pytest
 
 If a pytest plugin installed elsewhere breaks collection, set `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`.
 
+To judge a change to the chat agent by numbers rather than impressions, the lab benchmark in `bench/` runs lab tasks on a simulated lab through two versions of Kelvin and through Claude Code, on your own Claude plan, grades each episode and compares the arms: see [bench/README.md](../bench/README.md). Its own tests run with `python -m pytest bench/tests`; the suite above leaves them out.
+
 ## Working together
 
 Set up a checkout (Python ≥ 3.10 for everything; the core alone runs on 3.9):
@@ -101,6 +103,7 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/desktop.py` | The desktop app: the portal in a native window, one copy at a time, `--self-test`; on quitting, requests still being answered get 3 s, then the instruments are closed (by the launcher itself if the portal's closing never gets there) |
 | `packaging/` | PyInstaller recipe (`kelvin.spec`), Windows installer (`kelvin.iss`), app icons (`make_icons.py`, `icons/`, and the iPhone app's) |
 | `ios/` | Kelvin for iPhone: SwiftUI app, the KelvinKit package, XcodeGen spec. See [ios.md](ios.md) |
+| `bench/` | The lab benchmark of the chat agent: tasks, arms, grading and reports. See [bench/README.md](../bench/README.md) |
 
 ## Brand
 
