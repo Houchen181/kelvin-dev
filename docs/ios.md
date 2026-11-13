@@ -13,6 +13,7 @@ How people use it is in [portal.md](portal.md#phone-and-remote-access). This pag
 | `ios/project.yml` | The Xcode project, as an [XcodeGen](https://github.com/yonaskolb/XcodeGen) spec. `Kelvin.xcodeproj` and `Support/Info.plist` are generated from it and not committed. |
 | `ios/KelvinKit/` | A Swift package with no UI and only Foundation: the phone API client, the models, the chat stream and transcript, plot data, the team chat thread (`Team.swift`), Analysis specs and results and fitted values with their errors (`Analysis.swift`), the AI company behind a chat's model (`AIService.swift`). Its tests run on Linux too. |
 | `ios/Kelvin/` | The SwiftUI app: `AppModel.swift` (the computers, one `LabSession` per computer, `ChatModel`), `Platform.swift` (URLSession, Keychain, notifications), `Dictation.swift` (voice input), `Demo.swift` (the demo lab), `TeamView.swift` and `AnalysisView.swift` (with their models) and the other screens. |
+| `ios/Kelvin/PrivacyInfo.xcprivacy` | The app's privacy manifest, which App Review reads: no tracking, the data the App Privacy answers list (below), and why the app uses UserDefaults (its own settings only, reason CA92.1). XcodeGen puts it in the app as a resource; `PrivacyManifestTests` checks it is there and says the same. |
 | `ios/KelvinTests/` | App tests: the Keychain, falling back to the Tailscale address, a chat, a message that couldn't be sent or that Kelvin refused, an answer cut short, Stop before Kelvin has the message, a chat that answers without the phone, signing in to the account again, never a public address directly, deleting the account, a run's file name, notifications, the team chat and its unread count, Analysis on the demo lab, asking before a chat's first message goes to an AI company. `ios/KelvinUITests/`: the keyboard, the message bar at the largest text size, the privacy notice on the welcome screen, and a walkthrough of every screen on the demo lab. |
 | `.github/workflows/ios.yml` | CI: KelvinKit's tests on Linux; when they pass, the app's build and tests on the iOS Simulator (macOS runner), screenshots of the demo lab (`ios-screenshots`), and the App Store's: a 6.9-inch iPhone and a 13-inch iPad, light (`app-store-screenshots`). |
 | `.github/workflows/ios-testflight.yml` | On a tag `ios-v*`: builds with the newest Xcode, signs with an App Store Connect API key and uploads to TestFlight. |
@@ -108,18 +109,19 @@ The App Store takes the same build as TestFlight: a tag `ios-v*` uploads it, and
 
 1. **Finish the hub's terms and privacy notice.** Both still open with "Draft". The app links the privacy notice (the welcome screen, the sign-in sheet, Computers → Kelvin account) and so does the store page, so it must be final, and the hub must be up while Apple reviews.
 2. **A review account:** a Kelvin account on the hub, for Apple. The reviewer may try **Delete Kelvin account…** on it; make another if so.
-3. **App Information:** subtitle and category (below); content rights: no third-party content; the age rating questions: messaging yes (the team chat), and count what an AI model could write in a chat when answering the content questions. Apple works out the rating.
+3. **App Information:** subtitle and category (below); content rights: no third-party content; the age rating questions: Messaging and Chat, and User-Generated Content, yes (the team chat); a social feed and unrestricted web access, no; and, as Apple asks, count what an AI model could write in a chat when answering the content questions. Apple works out the rating.
 4. **App Privacy:** the privacy policy URL is the hub's `/privacy` (`https://kelvin.tail269ee5.ts.net/privacy` while the hub runs on the workstation). The data, from the hub's privacy notice, all linked to the person and none used for tracking:
    - Contact info: name and email address (App Functionality).
    - Identifiers: user ID, the account; device ID, the phone's installation id (App Functionality).
-   - User content: other user content, the chats and run records Kelvin shares with the hub unless switched off (App Functionality; Analytics too while the Kelvin team reads shared work to improve Kelvin).
+   - User content: other user content, the chats and run records Kelvin shares with the hub (App Functionality; Analytics too, as the Kelvin team reads shared work to improve Kelvin). Sharing is off unless the person switches it on (since Kelvin 0.3.51), but declare it all the same: once on, it sends every few minutes, which Apple's exemption for rare, optional data doesn't cover.
+   - The app's privacy manifest (`ios/Kelvin/PrivacyInfo.xcprivacy`) lists the same data; change both together.
 5. **Pricing and Availability:** free. Leave out China mainland, which asks for a government (ICP) filing number.
 6. **EU trader status** (Business in App Store Connect), without which the app isn't offered in the EU. A trader's address, phone and email show on EU store pages.
 
 ### Each version
 
 1. Push a tag `ios-v<version>`, such as `ios-v1.0.0`. The build appears under TestFlight 10 to 30 minutes later.
-2. **iOS App → + Version** with the same version number (the first version is there already).
+2. **iOS App → + Version** with the same version number. The first version is there already: set its number to the tag's (1.0.0 for `ios-v1.0.0`).
 3. **Screenshots:** the `app-store-screenshots` artifact of the iOS app workflow on that commit. Its iPhone folder goes under 6.9-inch Display, its iPad folder under 13-inch Display.
 4. The store text (below) and, from the second version on, What's New.
 5. **Build:** the one from TestFlight.
@@ -134,6 +136,8 @@ The App Store takes the same build as TestFlight: a tag `ios-v*` uploads it, and
 - **Promotional text:** Your lab at a glance: approve Kelvin's requests, stop a run and chat with Kelvin, from anywhere.
 - **Keywords:** `lab,experiment,physics,chemistry,measurement,instrument,research,scientist,AI,assistant,remote`
 - **Support URL:** https://github.com/Houchen181/kelvin/issues
+- **Marketing URL:** https://github.com/Houchen181/kelvin, where the reviewer finds the desktop app the phone works with.
+- **Copyright:** the year and the account holder's name.
 - **Description:**
 
   ```text
@@ -158,7 +162,7 @@ The App Store takes the same build as TestFlight: a tag `ios-v*` uploads it, and
   ```text
   No lab computer needed: tap "Try a demo lab" on the first screen. It answers inside the app and shows every screen: the lab, a request to approve, a run with Stop, a chat, the team chat, past runs and Analysis.
 
-  The app is a remote for Kelvin, a desktop app on the computer that controls a lab's instruments. Signed in with a Kelvin account (the review account above), the phone reaches that person's Kelvin computers; this account has none, so its list stays empty.
+  The app is a remote for Kelvin, a desktop app on the computer that controls a lab's instruments. Signed in with a Kelvin account (the review account above), the phone reaches that person's Kelvin computers; this account has none, so its list stays empty. The team chat is private to the people who sign in on one lab's Kelvin computer, and their phones: there is no public content and no way to find or write to strangers.
 
   Plain http goes only to the person's own lab computer, on the local network or inside Tailscale (which encrypts it), never to a public server. Chats are answered by the AI model chosen on the lab computer; the app names the AI company and asks before a chat's first message goes there. Deleting the account: Computers → Kelvin account → Delete Kelvin account.
   ```

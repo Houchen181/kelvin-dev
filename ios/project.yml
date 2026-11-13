@@ -21,7 +21,7 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: Kelvin
+      - path: Kelvin                # PrivacyInfo.xcprivacy in it goes into the app as a resource
     dependencies:
       - package: KelvinKit
     settings:
