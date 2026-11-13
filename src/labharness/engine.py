@@ -770,10 +770,12 @@ class RunEngine:
         acts through, its rate, its range and current limit, the levels a switch applies); the guards, interlocks and
         lab watches on it; and the interlocks whose reading it changes, with their drives (read, to know whether they
         are up). actions: the cards' actions the work does (instr, action): the switch one drives the sample under.
-        Once anything drives the sample (a drive among keys, an action that drives, or driving), the lab watches that
-        stop runs are needed too: they are what stops it."""
+        A lab watch that sends a drive of an instrument it drives to safe (then:) is needed too, whether or not it
+        stops runs: it protects what the work drives there. Once anything drives the sample (a drive among keys, an
+        action that drives, or driving), the lab watches that stop runs are needed too: they are what stops it."""
         lab, out = self.lab, {}   # type: Any, Dict[str, Dict[str, str]]
         interlocks, watches = lab.config.interlocks, lab.config.watches
+        driven: Dict[str, str] = {}   # the instruments it drives, each with a drive it sets there
         for raw in dict.fromkeys(keys):
             try:
                 inst, spec = lab.resolve(raw)
@@ -781,6 +783,8 @@ class RunEngine:
                 continue   # a plan validate refuses: said there
             key = "%s.%s" % (inst.name, spec.name)
             driving = driving or spec.is_drive
+            if spec.is_drive:
+                driven.setdefault(inst.name, key)
             mine = inst.name + "."
             if spec.get_cmd is not None:
                 need(lab, out, key, "it sets it, and Kelvin reads it before it moves and back after")
@@ -817,13 +821,44 @@ class RunEngine:
             except KeyError:
                 continue
             driving = driving or action.drives
+            if action.drives:
+                driven.setdefault(instr, "%s.%s" % (instr, name))
             if action.drives and action.drives_when:
                 need(lab, out, "%s.%s" % (instr, action.drives_when),
                      "its action %s.%s drives the sample only while it is on" % (instr, name))
+        for w in watches:   # one that sends a drive of an instrument it drives to safe: it protects what it drives
+            sent = [canonical(lab, "%s.%s" % (i, p)) for i, p, _ in w["then"]]
+            there = next((k for k in sent if k.split(".")[0] in driven), None)
+            if there is not None:
+                need(lab, out, w["read"], "the lab watch on it brings %s to safe, on %s, which it drives (%s)" % (
+                    there, there.split(".")[0], driven[there.split(".")[0]]))
         if driving:
             for w in watches:
                 if w["stop_run"]:
                     need(lab, out, w["read"], "the lab watch on it stops the run (%s)" % watch_edge(lab, w))
+        return out
+
+    def read_needed(self, names: Iterable[str], needs: Dict[str, Dict[str, str]]) -> List[str]:
+        """Instruments work doesn't use itself whose readings it needs (a lab watch that stops runs, an interlock or a
+        guard on what it drives, reads one): each of those readings read now, as the protection will read it. Why the
+        work can't start, a line each: the instrument isn't in the lab, connected or switched on, or a reading it
+        needs fails, however (nothing that protects a drive is set aside). Its other readings aren't asked, nor its
+        error queue: other work may be using it."""
+        out: List[str] = []
+        for name in names:
+            wanted = needs.get(name) or {}
+            inst = self.lab.instruments.get(name)
+            away = "not in this lab" if inst is None else (self.lab.away(name) or "switched off in the Lab panel") \
+                if not inst.enabled else ""
+            if away:
+                out.append("%s is %s; %s" % (name, away, "; ".join("it needs %s.%s: %s" % (name, p, why)
+                                                                  for p, why in wanted.items())))
+                continue
+            for param, why in wanted.items():
+                try:
+                    self.lab.read(name, param)
+                except Exception as e:
+                    out.append("%s.%s can't be read (%s); it needs it: %s" % (name, param, error_words(name, e), why))
         return out
 
     def checked(self, plan: Plan, fresh: Optional[bool] = None) -> Tuple[Optional[str], List[str]]:
@@ -840,6 +875,9 @@ class RunEngine:
         results = self.preflight(plan.requires, fresh=bool(self.drive_values(plan)) if fresh is None else fresh,
                                  needs=needs)
         stop, told = self.judge(results, needs)
+        # what protects it on instruments it doesn't use itself (a lab watch that stops runs, on a cryostat it doesn't
+        # set): read now, as that protection will read it
+        stop += self.read_needed([i for i in needs if i not in plan.requires], needs)
         if stop:
             return "preflight failed: " + "; ".join(stop), told
         for cond in plan.preconditions:

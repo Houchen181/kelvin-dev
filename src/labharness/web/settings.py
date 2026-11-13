@@ -130,7 +130,7 @@ def _answer_words(value: str) -> str:
         return "off"
     try:
         n = max(50, min(2000, int(float(value))))
-    except ValueError:
+    except (ValueError, OverflowError):   # 1e999, inf: no number
         return ""
     return "" if n == ANSWER_WORDS else str(n)
 
@@ -141,7 +141,7 @@ def _idle_off(value: str) -> str:
         return "off"
     try:
         n = max(5, min(1440, int(float(value))))
-    except ValueError:
+    except (ValueError, OverflowError):   # 1e999, inf: no number
         return ""
     return "" if n == IDLE_OFF_MINUTES else str(n)
 
@@ -153,7 +153,7 @@ def _minutes(value: str, low: int, high: int, default: int, off: bool = False) -
         return "off"
     try:
         n = max(low, min(high, int(float(value))))
-    except ValueError:
+    except (ValueError, OverflowError):   # 1e999, inf: no number
         return ""
     return "" if n == default else str(n)
 

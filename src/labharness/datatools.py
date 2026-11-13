@@ -582,6 +582,9 @@ def run_python(rt: Any, code: str, runs: Optional[Sequence[str]] = None, timeout
     def stopped() -> bool:   # a person's Stop, or the MCP client cancelling the call
         return rt.gate.stop_generation != gen or bool(call is not None and call.cancelled)
     out = sandbox.run(code, folders, Path(rt.data_dir) / "python", timeout_s=timeout_s, stopped=stopped)
+    # Kelvin's own record of what ran: the runs it read and its code's SHA-256 as written before it ran, which
+    # import_data trusts over anything in its folder (the code may rewrite that)
     rt.gate.log.write("run_python", by="agent", runs=list(folders), seconds=round(out.seconds, 2),
-                      status=out.status, folder=str(out.folder), code_chars=len(code or ""))
+                      status=out.status, folder=str(out.folder), code_chars=len(code or ""),
+                      code_sha256=out.code_sha256 or None)
     return out.images, out.text()

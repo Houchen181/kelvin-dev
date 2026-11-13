@@ -21,6 +21,7 @@ Kelvin's settings; it is not a wall against a determined attacker. Within its ti
 (it runs at low priority), and outside Windows its memory is limited only where the system allows it."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -53,6 +54,9 @@ class Outcome:
     files: List[Tuple[str, int]] = field(default_factory=list)
     available: Dict[str, Optional[str]] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    # code.py's SHA-256 as Kelvin wrote it, before the code ran (the code may rewrite its own folder, code.py and
+    # job.json too): what its record keeps, and what import_data checks the folder's code.py against
+    code_sha256: str = ""
 
     def text(self) -> str:
         head = {"ok": "finished", "error": "stopped with an error (the traceback is in the output)",
@@ -182,6 +186,7 @@ def run(code: str, runs: Dict[str, Path], base: Path, timeout_s: float = TIME_LI
         out.output = "no code given"
         return out
     (folder / "code.py").write_text(code, encoding="utf-8")
+    out.code_sha256 = hashlib.sha256((folder / "code.py").read_bytes()).hexdigest()   # before anything runs
     given: Dict[str, Dict[str, Any]] = {}
     for run_id, run_dir in runs.items():
         run_dir = Path(run_dir)
