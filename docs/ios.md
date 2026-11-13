@@ -15,7 +15,7 @@ How people use it is in [portal.md](portal.md#phone-and-remote-access). This pag
 | `ios/Kelvin/` | The SwiftUI app: `AppModel.swift` (the computers, one `LabSession` per computer, `ChatModel`), `Platform.swift` (URLSession, Keychain, notifications), `Dictation.swift` (voice input), `Demo.swift` (the demo lab), `TeamView.swift` and `AnalysisView.swift` (with their models) and the other screens. |
 | `ios/Kelvin/PrivacyInfo.xcprivacy` | The app's privacy manifest, which App Review reads: no tracking, the data the App Privacy answers list (below), and why the app uses UserDefaults (its own settings only, reason CA92.1). XcodeGen puts it in the app as a resource; `PrivacyManifestTests` checks it is there and says the same. |
 | `ios/KelvinTests/` | App tests: the Keychain, falling back to the Tailscale address, a chat, a message that couldn't be sent or that Kelvin refused, an answer cut short, Stop before Kelvin has the message, a chat that answers without the phone, signing in to the account again, never a public address directly, deleting the account, a run's file name, notifications, the team chat and its unread count, Analysis on the demo lab, asking before a chat's first message goes to an AI company. `ios/KelvinUITests/`: the keyboard, the message bar at the largest text size, the privacy notice on the welcome screen, and a walkthrough of every screen on the demo lab. |
-| `.github/workflows/ios.yml` | CI: KelvinKit's tests on Linux; when they pass, the app's build and tests on the iOS Simulator (macOS runner), screenshots of the demo lab (`ios-screenshots`), and the App Store's: a 6.9-inch iPhone and a 13-inch iPad, light (`app-store-screenshots`). |
+| `.github/workflows/ios.yml` | CI: KelvinKit's tests on Linux; when they pass, the app's build and tests on the iOS Simulator (macOS runner), screenshots of the demo lab (`ios-screenshots`), and the App Store's: a 6.3-inch iPhone and a 13-inch iPad, light (`app-store-screenshots`). |
 | `.github/workflows/ios-testflight.yml` | On a tag `ios-v*`: builds with the newest Xcode, signs with an App Store Connect API key and uploads to TestFlight. |
 
 The app needs iOS 16. It uses only Apple's frameworks (SwiftUI, Charts, Speech for voice input, QuickLook for reports).
@@ -122,7 +122,7 @@ The App Store takes the same build as TestFlight: a tag `ios-v*` uploads it, and
 
 1. Push a tag `ios-v<version>`, such as `ios-v1.0.0`. The build appears under TestFlight 10 to 30 minutes later.
 2. **iOS App → + Version** with the same version number. The first version is there already: set its number to the tag's (1.0.0 for `ios-v1.0.0`).
-3. **Screenshots:** the `app-store-screenshots` artifact of the iOS app workflow on that commit. Its iPhone folder goes under 6.9-inch Display, its iPad folder under 13-inch Display.
+3. **Screenshots:** the `app-store-screenshots` artifact of the iOS app workflow on that commit. Its iPhone folder (1206 × 2622) goes in the iPhone 6.1" or 6.3" box, the one iPhone size App Store Connect requires since October 2026 (each box refuses other sizes, so a 6.9-inch set of 1320 × 2868 doesn't go there); its iPad folder in the iPad 13" box.
 4. The store text (below) and, from the second version on, What's New.
 5. **Build:** the one from TestFlight.
 6. **App Review Information:** sign-in required, with the review account, and the note below. A short screen recording of the app with a real lab helps, since the reviewer has none.

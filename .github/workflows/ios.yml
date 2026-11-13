@@ -93,10 +93,11 @@ jobs:
           name: ios-screenshots
           path: shots
           if-no-files-found: ignore
-      - name: App Store screenshots (6.9-inch iPhone, 13-inch iPad)
-        # The sizes App Store Connect takes for the store page, light, with a tidy status bar: the demo lab on the
-        # newest Pro Max iPhone and a 13-inch iPad (the app runs on iPad, so the store asks for both). An asset, not a
-        # test: a runner without such a simulator warns instead of failing the build.
+      - name: App Store screenshots (6.3-inch iPhone, 13-inch iPad)
+        # The sizes App Store Connect requires for the store page, light, with a tidy status bar: the demo lab on
+        # the newest iPhone Pro (6.3-inch, the one iPhone size it requires since October 2026; its iPhone box
+        # refuses a Pro Max's 1320 x 2868) and a 13-inch iPad (the app runs on iPad, so the store asks for both).
+        # An asset, not a test: a runner without such a simulator warns instead of failing the build.
         continue-on-error: true
         run: |
           app=io.github.houchen181.kelvin
@@ -120,7 +121,7 @@ jobs:
             xcrun simctl io "$1" screenshot "$2"
           }
           hall='{"y": "lockin.y", "steps": [{"op": "antisymmetrize"}], "fit": {"model": "linear"}}'
-          for want in "^iPhone [0-9]+ Pro Max$" "^iPad Pro 13-inch|^iPad Air 13-inch|12[.]9-inch"; do
+          for want in "^iPhone [0-9]+ Pro$" "^iPad Pro 13-inch|^iPad Air 13-inch|12[.]9-inch"; do
             read -r udid name < <(python3 "$RUNNER_TEMP/pick.py" "$want") || exit 1
             out="store/$name"
             mkdir -p "$out"
@@ -138,7 +139,7 @@ jobs:
             xcrun simctl shutdown "$udid" || true
           done
           # App Store Connect takes these sizes (portrait) and no transparency: anything else fails here, not there
-          sizes=" 1320x2868 1290x2796 1260x2736 2064x2752 2048x2732 "
+          sizes=" 1206x2622 1179x2556 2064x2752 2048x2732 "
           for f in store/*/*.png; do
             w=$(sips -g pixelWidth "$f" | awk '/pixelWidth/ {print $2}')
             h=$(sips -g pixelHeight "$f" | awk '/pixelHeight/ {print $2}')
