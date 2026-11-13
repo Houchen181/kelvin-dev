@@ -7,6 +7,8 @@ History is provider-neutral and append-only:
 Pictures: in the request the agent builds (agent.py, _pictures), a user message or a tool result may carry
 "images": [{"mime", "data" (base64)}] for a provider that sees_images, and "documents": [{"mime": "application/pdf",
 "data", "name"}] (PDFs to read whole, figures and all) for one that sees_pdfs; the stored chat keeps only file names.
+A user message may carry "update": what changed in the chat's setup since its prompt was written (agent.py, _frame),
+which a model reads with the message (update_block), or Claude as a system message right after it (anthropic_provider).
 Assistant blocks: {"type": "text", "text"}, {"type": "thinking", "text"},
 {"type": "tool_call", "id", "name", "input"} (input None = arguments were not valid JSON).
 `raw` is the provider's own form of the turn, replayed unchanged to the same
@@ -110,9 +112,16 @@ def safe_id(value: Any, n: int) -> str:
     return text or "lh_call_%d" % n
 
 
-def user_text(message: Dict[str, Any]) -> str:
+def update_block(text: str) -> str:
+    """A change to the chat's setup since its prompt was written (agent.py, _frame), as a model reads it with the
+    person's message when its service takes no system message mid-conversation."""
+    return "<context_update>\n%s\n</context_update>" % text
+
+
+def user_text(message: Dict[str, Any], updates: bool = True) -> str:
     """A user message as the model sees it: notes recalled for it (if any) in front of what the user wrote.
-    Stored with the message, so earlier turns replay unchanged and the prompt cache holds."""
+    Stored with the message, so earlier turns replay unchanged and the prompt cache holds. updates: with the change
+    to the chat's setup it carries (False: the provider sends that as a system message of its own)."""
     from ..memory import block
     notes = message.get("memory")
     own = message["text"]
@@ -130,6 +139,8 @@ def user_text(message: Dict[str, Any]) -> str:
     if message.get("events"):   # the person's changes to the sequence or Home meanwhile (notices.py)
         from ..notices import block as events_block
         text = "%s\n\n%s" % (events_block(message["events"]), text) if text else events_block(message["events"])
+    if updates and message.get("update"):   # the chat's setup changed since its prompt was written (agent.py)
+        text = "%s\n\n%s" % (update_block(message["update"]), text) if text else update_block(message["update"])
     review = message.get("review")
     if review:   # a second opinion on the previous answer, asked for by the user
         text = '<second_opinion model="%s" verdict="%s">\n%s\n</second_opinion>\n\n%s' % (

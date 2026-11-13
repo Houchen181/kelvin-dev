@@ -14,6 +14,8 @@ import asyncio
 import base64
 import contextvars
 import copy
+import hashlib
+import io
 import json
 import math
 import re
@@ -68,6 +70,10 @@ by the person. Take it into account where it bears on your work; don't repeat it
 Or with a <second_opinion> block: another model's review of your previous answer, asked for by the user. Weigh it on
 its merits and say briefly where you agree or not. A run_plan result may start with a second opinion on the plan;
 mention its concerns if they matter.
+These instructions stay as they were when the conversation began. When this chat's setup changes (the lab's memory,
+the user's or the project's instructions, the reading list, the skills, the chat's folder, the tools you may use),
+Kelvin says so in a system message after the person's message, or in a <context_update> block at the start of it:
+written by Kelvin, not by the person. Each part it gives replaces the part of these instructions with the same heading.
 
 """ + guide.portal_index()   # where things are in the portal (kelvin_help has each place's steps): never a guessed menu
 COMPARE = """# Comparing models
@@ -182,6 +188,11 @@ MAX_PICTURES = 8          # the latest pictures a model sees again at each step;
 # only if each is at most 2000 px a side, and a photo the person reads with read_file can be larger: so 20.
 MAX_KEPT_PICTURES = 20
 MAX_DOCUMENTS = 2         # and the latest PDFs it reads whole (read_file's pages, PDFs the person attached)
+# A model that needs its history as it was sent keeps its PDFs where they came, as it keeps its pictures, up to these
+# (past either, _step summarises the earlier turns): a PDF is up to MAX_PDF_PAGES pages and 10 MB, and Claude takes
+# 32 MB in one request, base64 and all, pictures included
+MAX_KEPT_DOCUMENTS = 6
+MAX_KEPT_DOCUMENT_BYTES = 16 * 2 ** 20
 REVIEW_S = 300            # a second opinion with its lookups
 MAX_ATTACHED_CHARS = 60000   # of an attached PDF's or text file's text, in the message
 MAX_DRAWN = 6                # PDF pages the Kelvin hub draws at once, for a model that sees pictures but not PDFs
@@ -418,8 +429,21 @@ def with_notes(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def keeps_history(provider: Any) -> bool:
     """Does this model's service need every earlier part of the conversation sent as it was (Claude: its thinking is
-    bound to what came before it)? Then a picture is never taken out of an earlier turn (_pictures)."""
+    bound to what came before it)? Then a picture or a PDF is never taken out of an earlier turn (_pictures)."""
     return bool(getattr(provider, "keeps_history", False))
+
+
+def documents_in(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The PDFs in a history as the chat keeps it that a model reading PDFs gets whole: read_file's pages, and the PDFs
+    the person attached that are short enough (_pictures)."""
+    out: List[Dict[str, Any]] = []
+    for m in history:
+        if m.get("role") == "tool":
+            out += [d for r in m.get("results") or [] for d in r.get("documents") or []]
+        elif m.get("role") == "user":
+            out += [a for a in m.get("attachments") or [] if a.get("mime") == "application/pdf" and a.get("text")
+                    and 0 < int(a.get("pages") or 0) <= MAX_PDF_PAGES]
+    return out
 
 
 def pictures_in(history: List[Dict[str, Any]]) -> int:
@@ -726,6 +750,49 @@ REPORT_SCOPE = (" In this portal, with no runs, day or last chosen, the report c
                 "conversation, or in all of this project's conversations if it is in a project, and includes the "
                 "project's notes.")
 
+# ------------------------------------------------------------------ a chat's frame (ChatAgent._frame)
+# The tools of the portal's own beside the lab's (MCP): with these, a chat's frame names its tools and the definitions
+# come from here, the same in every request of a Kelvin. A tool not here, or one whose definition depends on the chat
+# (DYNAMIC_TOOLS), is kept whole in the frame as it was first declared.
+OWN_TOOLS = [FIND_TOOLS, LIST_FOLDER, READ_FILE, WRITE_FILE, CHAT_HISTORY, WEB_SEARCH, SAVE_PAPER, DEVICES, ADD_DEVICE,
+             MOUNT_DEVICE, KEEP_PICTURE, TEAM_CHAT, ANALYZE, OPERATE_COMPUTER, WAKE_ME, USE_SKILL, READ_SKILL_FILE,
+             SAVE_SKILL, SAVE_RECIPE]
+DYNAMIC_TOOLS = {"remember"}   # remember_tool: its scopes follow the chat's project and whether its work is shared
+UPDATE = ("Kelvin's setup for this chat changed since these instructions were written. Each part below replaces the "
+          "part of the instructions with the same heading; the rest stays as it was.")
+UPDATE_GONE = "The part headed “%s” no longer applies."
+TOOLS_ON = ("Tools this chat may use now: %s. One that isn't among your tools yet loads as Kelvin's rarer tools do "
+            "(the tool search, or find_tools).")
+TOOLS_OFF = "No longer available in this chat: %s."
+TOOL_CHANGED = "%s works differently now: %s"
+NOT_HERE = "not available in this chat now (its setup changed): don't call it again"
+FOUND_FOR_SEARCH = "these are the ones; load them with your tool search tool (search for their names):"
+NO_FOLDER = ("this chat has no folder of its own: the person can choose one with the folder button under the message "
+             "box")
+
+
+def _rendered(parts: List[Tuple[str, str]]) -> str:
+    """A system prompt from its parts (ChatAgent.context), in order."""
+    return "\n\n".join(text for _, text in parts if text)
+
+
+def _fingerprint(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
+def _heading(text: str) -> str:
+    """A part's heading, as an update names a part that went: its first line, without the Markdown."""
+    return (text.strip().splitlines() or [""])[0].lstrip("#").strip()
+
+
+def _pdf_pages(data: bytes) -> Optional[int]:
+    """How many pages a PDF has (None: Kelvin can't tell here)."""
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(io.BytesIO(data)).pages)
+    except Exception:
+        return None
+
 
 def describe_error(provider: Provider, e: Exception) -> str:
     """A model service's failure in plain words: a missing, wrong or expired key, no credit, a limit (modelerrors.py)."""
@@ -903,26 +970,25 @@ class ChatAgent:
     def _folder_tools(chat: Dict[str, Any]) -> List[Dict[str, Any]]:
         return [LIST_FOLDER, READ_FILE, WRITE_FILE] if chat.get("folder") else []
 
-    def _lab_tools(self, chat: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """The lab's tools this chat has: all but the rarer ones it hasn't loaded (find_tools)."""
-        loaded = set(chat.get("tools") or [])
-        return [t for t in self.tools if t["name"] not in DEFERRED_NAMES or t["name"] in loaded]
-
     def _more_tools(self, chat: Dict[str, Any]) -> str:
         """The rarer tools, by what they are for: the same list for the whole chat, the ones it loaded too, so loading
         one never changes the system prompt (an earlier part of the conversation, to the cache and to Claude's
-        thinking). The tools a chat has loaded are in its tools."""
+        thinking). The tools a chat has loaded are in its tools. Claude finds them with Anthropic's tool search, other
+        models load them with find_tools (_declared)."""
         have = {t["name"] for t in self.tools}
         lines = ["- %s: %s" % (what, ", ".join(n for n in names if n in have))
                  for what, names in DEFERRED.items() if any(n in have for n in names)]
-        return ("# More tools\nKelvin has these too; find_tools loads them when a task needs them (one call for "
-                "several; one already among your tools is loaded):\n" + "\n".join(lines)) if lines else ""
+        return ("# More tools\nKelvin has these too, loaded when a task needs them: find them with your tool search "
+                "tool (search by what they do), or load them with find_tools, whichever you have (one search or call "
+                "for several; one already among your tools is loaded):\n" + "\n".join(lines)) if lines else ""
 
     def _find_tools(self, chat: Dict[str, Any], context: Dict[str, Any], args: Any) -> Tuple[str, bool]:
         """Load the rarer tools a task needs: by name, else by the words of their names, purposes and descriptions."""
         query = str((args or {}).get("query") or "") if isinstance(args, dict) else ""
         words = [w for w in re.findall(r"[a-z0-9_]+", query.lower()) if len(w) > 2]
-        by_name = {t["name"]: t for t in self.tools if t["name"] in DEFERRED_NAMES}
+        allowed = context.get("allowed")   # not one this chat's rules keep from it (a confidential project's web tools)
+        by_name = {t["name"]: t for t in self.tools if t["name"] in DEFERRED_NAMES and (allowed is None
+                                                                                       or t["name"] in allowed)}
         found = [by_name[w] for w in dict.fromkeys(words) if w in by_name]   # named: in the order asked
         if not words or any(w not in by_name for w in words):
             # words for a task: in a tool's name most, in what it is for next, in its description least
@@ -943,9 +1009,10 @@ class ChatAgent:
             "- %s: %s" % (t["name"], t["description"].split("\n")[0][:200]) for t in found), False
 
     def _load_tools(self, chat: Dict[str, Any], context: Dict[str, Any], names: List[str]) -> None:
-        """These rarer tools from now on, in this turn and the chat's next ones."""
+        """These rarer tools from now on, in this turn and the chat's next ones (those this chat may call)."""
         loaded = list(chat.get("tools") or [])
-        new = [n for n in names if n in DEFERRED_NAMES and n not in loaded]
+        allowed = context.get("allowed")
+        new = [n for n in names if n in DEFERRED_NAMES and n not in loaded and (allowed is None or n in allowed)]
         if not new:
             return
         chat["tools"] = loaded + new
@@ -1205,62 +1272,229 @@ class ChatAgent:
         await emit({"type": "steered", "texts": waiting})
 
     def context(self, chat: Dict[str, Any]) -> Dict[str, Any]:
-        """The system prompt and tools for one turn in this chat. Only stable text goes here (Kelvin's rules, the
-        user's instructions, the project's instructions), so the cached prompt prefix survives; notes are recalled
-        per message instead (see recall). A chat outside every project gets no project memory; an incognito chat
-        gets no memory at all (not the user's, a project's or the lab's) and cannot save any. Every other chat has
-        the lab's memory (the lab's facts and lessons, everyone's: labmemory.py), as it has the lab's instruments."""
+        """The system prompt and tools for one turn in this chat as its setup is now (the chat's requests send its
+        frame, which keeps them as they first were, with what changed since as updates: _frame). Only stable text goes
+        here (Kelvin's rules, the user's instructions, the project's instructions); notes are recalled per message
+        instead (see recall). A chat outside every project gets no project memory; an incognito chat gets no memory at
+        all (not the user's, a project's or the lab's) and cannot save any. Every other chat has the lab's memory (the
+        lab's facts and lessons, everyone's: labmemory.py), as it has the lab's instruments.
+
+        parts: the system prompt's parts by name, in order; tools: what a model that loads Kelvin's rarer tools with
+        find_tools is offered now; every: every tool this chat may call now, the rarer ones too; allowed: their names."""
         if chat.get("incognito"):   # not kept, so never continued later either; Kelvin's own skills only
             own = self.know.index(incognito=True)
-            lab_tools = [t for t in self._lab_tools(chat) if t["name"] not in LAB_MEMORY_TOOLS | HOME_TOOLS]
-            return {"system": "\n\n".join([SYSTEM] + self._brevity() + [INCOGNITO] +
-                                           ([READ_GUIDE + "\n" + own] if own else []) + [
-                                               self._more_tools(chat), self._files(), self._folder(chat)]),
-                    "tools": lab_tools + [CHAT_HISTORY, TEAM_CHAT, ANALYZE, FIND_TOOLS] +
-                    ([USE_SKILL, READ_SKILL_FILE] if own else []) +
-                    self._folder_tools(chat), "project": None, "learn": False}
-        parts = [SYSTEM] + self._brevity()
+            parts = [("kelvin", SYSTEM)] + [("brevity", b) for b in self._brevity()] + [("incognito", INCOGNITO)] + \
+                ([("skills", READ_GUIDE + "\n" + own)] if own else []) + [
+                    ("more_tools", self._more_tools(chat)), ("files", self._files()), ("folder", self._folder(chat))]
+            every = [t for t in self.tools if t["name"] not in LAB_MEMORY_TOOLS | HOME_TOOLS] + \
+                [CHAT_HISTORY, TEAM_CHAT, ANALYZE, FIND_TOOLS] + ([USE_SKILL, READ_SKILL_FILE] if own else []) + \
+                self._folder_tools(chat)
+            return self._assembled(chat, parts, every, project=None, learn=False, rules=self.chat_rules(chat),
+                                   private=True)
+        parts = [("kelvin", SYSTEM)] + [("brevity", b) for b in self._brevity()]
         mine = self.settings.get("instructions") if self.settings else None
         if mine:
-            parts.append("# The user's instructions for every conversation\n" + mine)
+            parts.append(("instructions", "# The user's instructions for every conversation\n" + mine))
         project = self.store.memory_of(chat["id"])
         if project:
-            parts.append(PROJECT.format(name=project["name"]))
+            parts.append(("project", PROJECT.format(name=project["name"])))
             if project["instructions"]:
-                parts.append("## Instructions\n" + project["instructions"])
+                parts.append(("project_instructions", "## Instructions\n" + project["instructions"]))
             papers = project.get("papers") or []
-            if papers:   # changes only when a paper is added, so the cached prefix mostly holds
-                parts.append("## Reading list (read_paper takes the id)\n" + "\n".join(
+            if papers:
+                parts.append(("reading_list", "## Reading list (read_paper takes the id)\n" + "\n".join(
                     "- %s [id %s]%s" % (reference(e), e["paper"], " — " + e["why"] if e.get("why") else "")
-                    for e in papers[-40:]))
+                    for e in papers[-40:])))
         learn = self.settings.learning if self.settings else True
         rules = self.chat_rules(chat)
         private = unshared(project) or unshared(dict(chat, rules=rules))   # no notes for every conversation from it
-        parts.append(MEMORY_RULES + ("\n" + LEARN_RULES if learn else ""))
+        parts.append(("memory", MEMORY_RULES + ("\n" + LEARN_RULES if learn else "")))
         with self.runtime.viewing(self.viewer_for(chat)):   # the lab's, everyone's; unshared work's sample its own
-            parts += self._lab_memory("remember, scope lab" if learn and not private else "")
+            parts += [("lab_memory", b) for b in self._lab_memory("remember, scope lab" if learn and not private
+                                                                  else "")]
         know = self.know.index(project["id"] if project else None)
-        parts.append(SKILLS_GUIDE + ("\n" + know if know else ""))
+        parts.append(("skills", SKILLS_GUIDE + ("\n" + know if know else "")))
         if rulebook.restrictive(rules):
-            parts.append(CONFIDENTIAL.format(rules=rulebook.describe(rules)))
-        parts.append(self._more_tools(chat))
-        parts.append(self._files())
-        parts.append(self._folder(chat))   # last: it changes only when the person picks another folder
+            parts.append(("confidential", CONFIDENTIAL.format(rules=rulebook.describe(rules))))
+        parts += [("more_tools", self._more_tools(chat)), ("files", self._files()), ("folder", self._folder(chat))]
         remember = [remember_tool(bool(project), not private)] if learn and (project or not private) else []
-        tools = self._lab_tools(chat) + remember + ([SAVE_PAPER] if project else []) + [
+        every = list(self.tools) + remember + ([SAVE_PAPER] if project else []) + [
             DEVICES, ADD_DEVICE, MOUNT_DEVICE, KEEP_PICTURE, CHAT_HISTORY, TEAM_CHAT, ANALYZE, WAKE_ME, USE_SKILL,
             READ_SKILL_FILE, FIND_TOOLS]
         if project or not private:   # unshared work keeps what it learned in its project
-            tools = tools + [SAVE_SKILL, SAVE_RECIPE]
-        tools = tools + self._folder_tools(chat)
+            every = every + [SAVE_SKILL, SAVE_RECIPE]
+        every = every + self._folder_tools(chat)
         if any(p.available() and getattr(p, "can_search", False) for p in self.providers.values()):
-            tools = tools + [WEB_SEARCH]
+            every = every + [WEB_SEARCH]
         if "claudecode" in self.providers and rulebook.allows(rules, "claudecode:opus"):   # Claude Code bridge
-            tools = tools + [OPERATE_COMPUTER]
+            every = every + [OPERATE_COMPUTER]
         if not rules["literature"]:
-            tools = [t for t in tools if t["name"] not in WEB_TOOLS]
-        return {"system": "\n\n".join(parts), "tools": tools, "project": project["id"] if project else None,
-                "learn": learn, "rules": rules, "private": private}
+            every = [t for t in every if t["name"] not in WEB_TOOLS]
+        return self._assembled(chat, parts, every, project=project["id"] if project else None, learn=learn,
+                               rules=rules, private=private)
+
+    @staticmethod
+    def _assembled(chat: Dict[str, Any], parts: List[Tuple[str, str]], every: List[Dict[str, Any]],
+                   **rest: Any) -> Dict[str, Any]:
+        loaded = set(chat.get("tools") or [])
+        parts = [(key, text) for key, text in parts if text]
+        return dict(rest, system=_rendered(parts), parts=parts, every=every, allowed={t["name"] for t in every},
+                    tools=[t for t in every if t["name"] not in DEFERRED_NAMES or t["name"] in loaded])
+
+    # ------------------------------------------------------------------ the chat's frame: its prompt and tools as sent
+
+    def _frame(self, chat: Dict[str, Any], context: Dict[str, Any], message: Dict[str, Any]) -> None:
+        """The chat's prompt and tools as its requests send them: as they were when the chat began (its frame, kept
+        with the chat), so a request only ever grows at its end. A model's cache holds what came before, and Claude's
+        thinking stays bound to it (keeps_history). What changed in the chat's setup since (this turn's context: the
+        lab's memory, the user's or the project's instructions, the reading list, the skills, the folder, the tools
+        the chat may call) goes with the person's message as its "update", kept with it so it replays the same; the
+        frame then holds the setup as the model knows it. The frame is written again only at a boundary: a summary of
+        the earlier turns (_reframe), or a Kelvin whose own instructions or tools changed (or a chat from before
+        frames), the thinking before it set aside (compaction.view). context["system"] becomes the frame's prompt."""
+        frame = chat.get("frame")
+        parts = {key: text for key, text in context["parts"] if key != "kelvin"}
+        if not isinstance(frame, dict) or frame.get("kelvin") != _fingerprint(SYSTEM) or \
+                frame.get("digest") != self._digest(frame.get("tools") or []):
+            since = len(chat.get("messages") or [])
+            chat["frame"] = self._new_frame(chat, context)
+            if since:   # what was thought before was bound to another prompt or other tools: set aside, as Claude
+                chat["frame"]["since"] = since   # would drop it at each request (or refuse it, on some routes)
+            context["system"] = self.prompt(chat)
+            return
+        old = frame.get("parts") or {}
+        said = [text for key, text in parts.items() if old.get(key) != text]
+        said += [UPDATE_GONE % _heading(text) for key, text in old.items() if key not in parts]
+        tools = self._tool_changes(frame, context, chat)
+        frame["parts"] = parts
+        context["system"] = self.prompt(chat)
+        if said or tools:
+            message["update"] = "\n\n".join(([UPDATE] + said if said else []) + tools)
+
+    @staticmethod
+    def prompt(chat: Dict[str, Any]) -> str:
+        """The system prompt of the chat's frame, as its requests send it. Kelvin's own instructions (SYSTEM) are
+        kept by their fingerprint, as every chat of a Kelvin has the same (_frame writes the frame again when they
+        change); the parts after them as they were first sent."""
+        rest = (chat.get("frame") or {}).get("rest") or ""
+        return SYSTEM + "\n\n" + rest if rest else SYSTEM
+
+    def _new_frame(self, chat: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        """A frame from this turn's context: its prompt; its tools, the rarer ones waiting for the tool search (but
+        those this chat loaded with find_tools); the definitions of those that depend on the chat, kept whole. A tool
+        the chat called earlier (another model's find_tools, one taken away since) stays declared too, waiting for the
+        search (and refused, if it is no longer the chat's), as its calls are in the conversation."""
+        own = self._own_defs()
+        names = [t["name"] for t in context["every"] if t["name"] != FIND_TOOLS["name"]]
+        called = [n for n in self._called(chat) if n not in names and n in own]
+        loaded = set(chat.get("tools") or [])
+        defs = {t["name"]: t for t in context["every"] if t["name"] in DYNAMIC_TOOLS or t["name"] not in own}
+        parts = [(key, text) for key, text in context["parts"] if key != "kelvin"]
+        allowed = {t["name"] for t in context["every"]}
+        return {"kelvin": _fingerprint(SYSTEM), "rest": _rendered(parts), "parts": dict(parts), "tools": names + called,
+                "deferred": [n for n in names if n in DEFERRED_NAMES and n not in loaded] + called, "defs": defs,
+                "told": {n: _fingerprint(t) for n, t in defs.items()}, "off": [n for n in called if n not in allowed],
+                "digest": self._digest(names + called), "at": time.time()}
+
+    @staticmethod
+    def _called(chat: Dict[str, Any]) -> List[str]:
+        """The tools this chat's models called, by any model, in the order first called."""
+        seen: List[str] = []
+        for m in chat.get("messages") or []:
+            for b in m.get("blocks") or [] if m.get("role") == "assistant" else []:
+                if b.get("type") == "tool_call" and b.get("name") and b["name"] not in seen:
+                    seen.append(b["name"])
+        return seen
+
+    def _reframe(self, chat: Dict[str, Any], context: Dict[str, Any]) -> None:
+        """After a summary of the earlier turns (a boundary already: the turns kept lose their thinking and their
+        updates, compaction.view), the frame written again from this turn's setup, so it holds what the updates said."""
+        chat["frame"] = self._new_frame(chat, context)
+        context["system"] = self.prompt(chat)
+
+    def _tool_changes(self, frame: Dict[str, Any], context: Dict[str, Any], chat: Dict[str, Any]) -> List[str]:
+        """The frame's tools against those the chat may call now. A tool allowed since the chat began joins the frame's
+        tools waiting for the tool search (declared late, so it changes nothing before it); one taken away stays
+        declared, and a call to it is refused (_not_here); a tool whose definition depends on the chat keeps the one
+        first declared, and the model is told how it works now. A tool another model of the chat called (find_tools)
+        joins too, silently, as its calls are in the conversation. The lines that tell the model, if any."""
+        own, current = self._own_defs(), {t["name"]: t for t in context["every"]}
+        names = [n for n in current if n != FIND_TOOLS["name"]]
+        known = set(frame.get("tools") or [])
+        new = [n for n in names if n not in known]
+        called = [n for n in self._called(chat) if n not in known and n not in new and n in own]
+        if new or called:
+            frame["tools"] = list(frame.get("tools") or []) + new + called
+            frame["deferred"] = list(frame.get("deferred") or []) + new + called
+            late = {n: current[n] for n in new if n in DYNAMIC_TOOLS or n not in own}
+            frame["defs"] = dict(frame.get("defs") or {}, **late)
+            frame["told"] = dict(frame.get("told") or {}, **{n: _fingerprint(t) for n, t in late.items()})
+            frame["digest"] = self._digest(frame["tools"])
+        was = set(frame.get("off") or []) | {n for n in called if n not in current}   # never this chat's to say
+        off = [n for n in frame["tools"] if n not in current]
+        on = new + [n for n in frame["tools"] if n in was and n in current]
+        gone = [n for n in off if n not in was]
+        frame["off"] = off
+        lines = [TOOLS_ON % ", ".join(on)] if on else []
+        if gone:
+            lines.append(TOOLS_OFF % ", ".join(gone))
+        told = frame.get("told") or {}
+        for name in frame.get("defs") or {}:
+            if name in current and name not in new and told.get(name) != _fingerprint(current[name]):
+                lines.append(TOOL_CHANGED % (name, current[name]["description"]))
+                frame["told"] = dict(told, **{name: _fingerprint(current[name])})
+                told = frame["told"]
+        return lines
+
+    def _own_defs(self) -> Dict[str, Dict[str, Any]]:
+        """Kelvin's tools by name, as every chat of this Kelvin declares them: the lab's and the portal's own."""
+        return {t["name"]: t for t in list(self.tools) + OWN_TOOLS}
+
+    def _digest(self, names: List[str]) -> str:
+        """The definitions these tools have in this Kelvin (those kept whole in a frame aside): when it differs from a
+        frame's, Kelvin's tools changed, and the frame is written again (_frame)."""
+        own = self._own_defs()
+        return _fingerprint([[n, own[n]] for n in names if n in own])
+
+    def _declared(self, chat: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Every tool of the chat's frame as Claude gets it, the same in each of the chat's requests: the rarer ones and
+        those allowed after the chat began wait for its tool search ("defer"); one the chat may no longer call stays
+        (_not_here refuses it), as taking it out would change what came before."""
+        frame = chat.get("frame") or {}
+        own, defs = self._own_defs(), frame.get("defs") or {}
+        later = set(frame.get("deferred") or [])
+        out = []
+        for name in frame.get("tools") or []:
+            tool = defs.get(name) or own.get(name)
+            if tool is not None:
+                out.append(dict(tool, defer=True) if name in later else tool)
+        return out
+
+    def _offered(self, chat: Dict[str, Any], context: Dict[str, Any], provider: Provider,
+                 model: str) -> List[Dict[str, Any]]:
+        """The tools a request offers: to a model that finds Kelvin's rarer tools itself (Claude's tool search), every
+        tool of the chat's frame (_declared); to another, this turn's, the rarer ones loaded with find_tools."""
+        search = getattr(provider, "searches_tools", None)
+        if chat.get("frame") and callable(search) and search(model):
+            return self._declared(chat)
+        return context["tools"]
+
+    @staticmethod
+    def _not_here(chat: Dict[str, Any], context: Dict[str, Any], name: str) -> str:
+        """Why a tool of the chat's frame can't be called in this chat now ("": it can, or it was never the chat's,
+        and its own handling says why): the chat's setup changed since the tool was declared to its model (_declared
+        keeps it declared, as taking it out would change what came before)."""
+        allowed = context.get("allowed")
+        if allowed is None or name in allowed or (name not in ((chat.get("frame") or {}).get("tools") or [])
+                                                  and name != OPERATE_COMPUTER["name"]):
+            return ""
+        if name == OPERATE_COMPUTER["name"]:   # its only gate is the chat's: wherever the model saw it
+            return "not available in this chat: the Claude Code bridge isn't set up, or this chat's rules keep it out"
+        if name in ("list_folder", "read_file", "write_file") and not chat.get("folder"):
+            return NO_FOLDER
+        if name in WEB_TOOLS and not (context.get("rules") or {}).get("literature", True):
+            return "not available: this project keeps its work off the internet"
+        return NOT_HERE
 
     # ------------------------------------------------------------------ short answers (brevity.py)
 
@@ -1271,6 +1505,27 @@ class ChatAgent:
     def _brevity(self) -> List[str]:
         limit = self._budget()
         return [brevity.RULE.format(words=limit)] if limit else []
+
+    def _words(self, chat: Dict[str, Any]) -> None:
+        """Each of the chat's user messages keeps the word budget it was first sent under (brevity.with_reminder), so a
+        budget changed later changes no message already sent (the new one goes in the chat's frame's update)."""
+        limit = self._budget()
+        for m in chat.get("messages") or []:
+            if m.get("role") == "user" and "words" not in m:
+                m["words"] = limit
+
+    def _weight(self, chat_id: str, docs: List[Dict[str, Any]]) -> int:
+        """The bytes of these PDFs kept with the chat (as noted when kept, else read)."""
+        total = 0
+        for d in docs:
+            size = d.get("bytes")
+            if not isinstance(size, int):
+                try:
+                    size = len(self.store.media(chat_id, d["file"]))
+                except (KeyError, OSError):
+                    size = 0
+            total += size
+        return total
 
     # ------------------------------------------------------------------ who may see a project
 
@@ -1618,13 +1873,14 @@ class ChatAgent:
             self._attach_review(chat, message)
             self._stamp(chat)
             self.notices.at_turn(chat, message)   # the person's changes since its last message, with it
+            context = self.context(chat)  # fixed for the whole turn, so every step reuses the cached prefix
+            self._frame(chat, context, message)   # the prompt as the chat began, what changed since with the message
             chat["messages"].append(message)
             if chat.get("title", "New chat") == "New chat":
                 first = text.strip().splitlines()[0]
                 chat["title"] = first[:48] + ("…" if len(first) > 48 else "")
             chat["model"] = model_key
             await self._save(chat)
-            context = self.context(chat)  # fixed for the whole turn, so every step reuses the cached prefix
             context["model"] = model_id   # what its tools show the model: pictures, PDF pages (read_file)
             await emit({"type": "turn_start", "model": model_key, "title": chat["title"], "chat_id": chat_id,
                         "from": len(chat["messages"]) - 1})   # where this turn begins in the chat: its message
@@ -1695,6 +1951,9 @@ class ChatAgent:
                     for k in ("upto", "made"):
                         if isinstance(held.get(k), int) and held[k] > i:
                             held[k] += 1
+                    frame = chat.get("frame") or {}   # and where the frame was written again
+                    if isinstance(frame.get("since"), int) and frame["since"] > i:
+                        frame["since"] += 1
                 elif missing:   # some answered: the rest join that step's results
                     messages[j]["results"] = list(messages[j]["results"]) + [
                         {"id": b.get("id"), "name": b.get("name"), "content": INTERRUPTED, "is_error": True}
@@ -1781,7 +2040,9 @@ class ChatAgent:
     async def _step(self, chat: Dict[str, Any], provider: Provider, model_id: str, context: Dict[str, Any],
                     emit: Emit) -> bool:
         """One model response plus its tool calls. Returns True if the turn continues."""
-        await self._take_steer(chat, emit)
+        last = (chat.get("messages") or [{}])[-1]
+        if last.get("role") != "assistant":   # a paused answer (Claude's tool search) resumes first: nothing may
+            await self._take_steer(chat, emit)   # come between it and its continuation
         partial: List[str] = []
         heard = [time.monotonic()]   # when the model was last heard from (_answer)
 
@@ -1802,13 +2063,18 @@ class ChatAgent:
             await emit({"type": "turn_end", "reason": "stopped"})
             return False
 
+        self._words(chat)
         history = compaction.view(chat)
         stored = pictures_in(history)
-        shown = min(stored, MAX_KEPT_PICTURES if keeps_history(provider) else MAX_PICTURES) \
+        keeps = keeps_history(provider)
+        shown = min(stored, MAX_KEPT_PICTURES if keeps else MAX_PICTURES) \
             if sees_images(provider, model_id) else 0   # the pictures this model is sent (_pictures)
-        if compaction.size(context["system"], context["tools"], history, shown) > \
-                compaction.limit(provider, model_id) or \
-                (keeps_history(provider) and stored > MAX_KEPT_PICTURES):   # a long day: earlier turns, summarised
+        docs = documents_in(history) if getattr(provider, "sees_pdfs", False) else []   # and the PDFs it reads whole
+        pages = sum(int(d.get("pages") or MAX_PDF_PAGES) for d in (docs if keeps else docs[-MAX_DOCUMENTS:]))
+        if compaction.size(context["system"], context["tools"], history, shown, pages) > \
+                compaction.limit(provider, model_id) or (keeps and (
+                    stored > MAX_KEPT_PICTURES or len(docs) > MAX_KEPT_DOCUMENTS or
+                    self._weight(chat["id"], docs) > MAX_KEPT_DOCUMENT_BYTES)):   # a long day: earlier turns, summarised
             self._stream_task = asyncio.ensure_future(compaction.compact(chat, provider, model_id))
             try:
                 folded = await self._stream_task
@@ -1819,6 +2085,7 @@ class ChatAgent:
             finally:
                 self._stream_task = None
             if folded:
+                self._reframe(chat, context)   # the prompt with what the summarised turns' updates said
                 await self._save(chat)
                 history = compaction.view(chat)
                 await emit({"type": "note", "text": "Kelvin summarised the earlier part of this conversation for the "
@@ -1828,7 +2095,7 @@ class ChatAgent:
             provider.stream(model_id, context["system"],
                             self._pictures(chat, with_notes(brevity.with_reminder(history, self._budget())), provider,
                                            model_id),
-                            context["tools"], relay))
+                            self._offered(chat, context, provider, model_id), relay))
         try:
             result = await _answer(self._stream_task, heard, emit)
         except asyncio.CancelledError:
@@ -1911,8 +2178,8 @@ class ChatAgent:
             content, is_error = "not run: the user pressed stop", True
         else:
             await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
-            if call["name"] in DEFERRED_NAMES:   # called by its name before find_tools: it is loaded now
-                self._load_tools(chat, context, [call["name"]])
+            if call["name"] in DEFERRED_NAMES:   # called by its name before find_tools (or found by Claude's tool
+                self._load_tools(chat, context, [call["name"]])   # search): it is loaded now
             with self.runtime.viewing(self.viewer_for(chat)):   # the runs and records this chat's model may see
                 work = asyncio.ensure_future(self._work(chat, provider, context, call, emit))
             while not work.done():   # a stop ends the call at once, even one an instrument holds up
@@ -1947,18 +2214,25 @@ class ChatAgent:
                         call: Dict[str, Any], emit: Emit) -> Tuple[str, bool, Optional[Dict[str, Any]]]:
         """The tool call itself: its text, whether it failed, and a reviewer's opinion of a plan (if any)."""
         name, args = call["name"], call["input"]
-        if name == "find_tools":
-            return _without_opinion(self._find_tools(chat, context, args))
-        if name == "remember" and context["learn"]:
-            if isinstance(args, dict) and args.get("scope") == "lab" and not context.get("private"):
-                return _without_opinion(await self._remember_lab(chat, call, emit))
-            return _without_opinion(self._remember(chat, context, args))
         if name in MCP_ONLY:   # an agent's over MCP: a chat that calls one by name never gets past its own rules
             return "not a tool in Kelvin's chats: keep a fact about the lab with remember, scope lab", True, None
         if name in LAB_MEMORY_TOOLS and chat.get("incognito"):   # called by its name: it isn't this chat's
             return "not in an incognito chat: it uses no memory, not the lab's either", True, None
         if name in HOME_TOOLS and chat.get("incognito"):   # Home outlives the chat, which leaves nothing behind
             return "not in an incognito chat: it leaves nothing behind, Home included", True, None
+        why = self._not_here(chat, context, name)   # declared to Claude when the chat began, taken away since
+        if why:
+            return why, True, None
+        if name == "find_tools":   # (Claude has it only when another model of the chat called it: it loads nothing
+            text, failed = self._find_tools(chat, context, args)   # for Claude, whose tool search does)
+            search = getattr(provider, "searches_tools", None)
+            if not failed and callable(search) and search(context.get("model", "")):
+                text = text.replace("loaded, from the next step on:", FOUND_FOR_SEARCH, 1)
+            return text, failed, None
+        if name == "remember" and context["learn"]:
+            if isinstance(args, dict) and args.get("scope") == "lab" and not context.get("private"):
+                return _without_opinion(await self._remember_lab(chat, call, emit))
+            return _without_opinion(self._remember(chat, context, args))
         if name == "wake_me" and not chat.get("incognito"):
             return _without_opinion(self.waker.add(chat["id"], args))
         if name == "wait" and _seconds(args) > WAIT_S:   # other chats would wait too
@@ -2375,23 +2649,30 @@ class ChatAgent:
             self._attach_review(chat, message)
             self._stamp(chat)
             self.notices.at_turn(chat, message)   # the person's changes since its last message, with it
+            context = self.context(chat)
+            self._frame(chat, context, message)
+            # this answer only reads the lab: said with the message (as a system message to Claude), so the answer
+            # chosen goes on under the chat's own prompt, as it was written
+            message["update"] = "\n\n".join(u for u in (message.get("update"), COMPARE) if u)
             chat["messages"].append(message)
             if chat.get("title", "New chat") == "New chat":
                 first = text.strip().splitlines()[0]
                 chat["title"] = first[:48] + ("…" if len(first) > 48 else "")
+            self._words(chat)
             await self._save(chat)
-            context = self.context(chat)
             tools = [t for t in context["tools"] if t["name"] in self.read_only]   # already without web tools if barred
-            system = context["system"] + "\n\n" + COMPARE
+            readable = {t["name"] for t in context["every"] if t["name"] in self.read_only}
+            system = context["system"]
             base = list(compaction.view(chat))   # with the lab handoff, on a long day
             await emit({"type": "compare_start", "models": keys, "labels": [self.label(k) for k in keys],
                         "title": chat["title"], "from": len(chat["messages"]) - 1})
             if message.get("memory"):
                 await emit({"type": "memory", "notes": message["memory"]})
-            self._lanes = [asyncio.ensure_future(self._lane(i, key, provider, model_id, system, base, tools, emit,
-                                                            chat_id, self.viewer_for(chat, key),
-                                                            bool(chat.get("incognito"))))
-                           for i, (key, provider, model_id) in enumerate(lanes)]
+            self._lanes = [asyncio.ensure_future(self._lane(
+                i, key, provider, model_id, system, base, self._offered(chat, dict(context, tools=tools), provider,
+                                                                        model_id), emit,
+                chat_id, self.viewer_for(chat, key), bool(chat.get("incognito")), readable))
+                for i, (key, provider, model_id) in enumerate(lanes)]
             done = await asyncio.gather(*self._lanes, return_exceptions=True)
             results = []
             for i, r in enumerate(done):
@@ -2423,10 +2704,13 @@ class ChatAgent:
 
     async def _lane(self, i: int, key: str, provider: Provider, model_id: str, system: str,
                     base: List[Dict[str, Any]], tools: List[Dict[str, Any]], emit: Emit,
-                    chat_id: str = "", viewer: Optional[Viewer] = None, incognito: bool = False) -> Dict[str, Any]:
+                    chat_id: str = "", viewer: Optional[Viewer] = None, incognito: bool = False,
+                    readable: Optional[Set[str]] = None) -> Dict[str, Any]:
         """One model's answer while comparing. viewer: what this lane's model may see of the lab's runs and
         records (the chat's project, under its rules). incognito: the chat uses no memory, so its tools' answers
-        come without the lab's notes, as in its ordinary turns."""
+        come without the lab's notes, as in its ordinary turns. readable: the tools it may call (those that only
+        read the lab; by default, those it is offered: Claude is offered every tool of the chat's frame)."""
+        readable = {t["name"] for t in tools} if readable is None else readable
         out: List[Dict[str, Any]] = []
         heard = [time.monotonic()]   # when this lane's model was last heard from (_answer)
 
@@ -2450,7 +2734,7 @@ class ChatAgent:
                 for call in result.tool_calls:
                     await lane_emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
                     kept: List[Dict[str, str]] = []
-                    if call["name"] not in {t["name"] for t in tools}:
+                    if call["name"] not in readable:
                         content, is_error = ("not available while comparing models: only tools that read the lab are "
                                              "(and only those this chat allows). Say what you would do instead."), True
                     elif call["input"] is None:
@@ -2693,8 +2977,7 @@ class ChatAgent:
         from .. import folderfiles
         folder = chat.get("folder")
         if not folder:
-            return ("this chat has no folder of its own: the person can choose one with the folder button under the "
-                    "message box"), True
+            return NO_FOLDER, True
         args = call["input"] if isinstance(call["input"], dict) else {}
         path = str(args.get("path") or "")
         if call["name"] == "list_folder":
@@ -2778,8 +3061,7 @@ class ChatAgent:
         from .. import folderfiles, library
         folder = chat.get("folder")
         if not folder:
-            return ("this chat has no folder of its own: the person can choose one with the folder button under the "
-                    "message box"), True
+            return NO_FOLDER, True
         args = call["input"] if isinstance(call["input"], dict) else {}
         path, text = str(args.get("path") or ""), args.get("content")
         if not isinstance(text, str):
@@ -2850,15 +3132,20 @@ class ChatAgent:
             return "the skill %s comes with no files" % item.name, True
         return await self._read_in(item.folder, call, provider, (), context.get("model", ""), chat)
 
-    def _keep_documents(self, chat_id: str, call_id: str) -> List[Dict[str, str]]:
-        """The PDF pages a tool call returned, kept with the chat: [{file, mime, name}]."""
-        out = []
+    def _keep_documents(self, chat_id: str, call_id: str) -> List[Dict[str, Any]]:
+        """The PDF pages a tool call returned, kept with the chat: [{file, mime, name, bytes, pages}] (what they cost a
+        model that reads them whole: _step)."""
+        out: List[Dict[str, Any]] = []
         for name, data in self._documents.pop(call_id, []) if chat_id else []:
             try:
-                out.append({"file": self.store.put_media(chat_id, data, "pdf"), "mime": "application/pdf",
-                            "name": name})
+                kept: Dict[str, Any] = {"file": self.store.put_media(chat_id, data, "pdf"), "mime": "application/pdf",
+                                        "name": name, "bytes": len(data)}
             except (KeyError, ValueError, OSError):
-                pass
+                continue
+            pages = _pdf_pages(data)
+            if pages:
+                kept["pages"] = pages
+            out.append(kept)
         return out
 
     def _document(self, chat_id: str, item: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -2963,7 +3250,8 @@ class ChatAgent:
             text = "\n\n".join("[page %d]\n%s" % (i + 1, p.strip()) for i, p in enumerate(pages) if p.strip())
             if len(text) < 200:
                 raise ValueError("This PDF has almost no text (a scan?): attach pictures of its pages instead.")
-            out.update(text=self.store.put_media(chat_id, text.encode("utf-8"), "txt"), pages=len(pages))
+            out.update(text=self.store.put_media(chat_id, text.encode("utf-8"), "txt"), pages=len(pages),
+                       bytes=len(data))
         return out
 
     def _attach_text(self, chat_id: str, name: str, data: bytes) -> Dict[str, Any]:
@@ -3015,7 +3303,7 @@ class ChatAgent:
         for a in (items if isinstance(items, list) else [])[:10]:
             if not isinstance(a, dict):
                 continue
-            self.store.media(chat_id, str(a.get("file")))   # KeyError: not this chat's
+            data = self.store.media(chat_id, str(a.get("file")))   # KeyError: not this chat's
             ext = str(a["file"]).rsplit(".", 1)[-1]
             one = {"name": str(a.get("name") or a["file"])[:120], "file": str(a["file"]),
                    "mime": {"pdf": "application/pdf", "jpg": "image/jpeg"}.get(ext, "image/" + ext)}
@@ -3023,7 +3311,7 @@ class ChatAgent:
                 if not a.get("text"):
                     raise KeyError("no text for %s" % one["name"])
                 self.store.media(chat_id, str(a["text"]))
-                one.update(text=str(a["text"]), pages=int(a.get("pages") or 0))
+                one.update(text=str(a["text"]), pages=int(a.get("pages") or 0), bytes=len(data))
             elif ext == "dat":   # a data file, a run since it was attached: Kelvin's words for it go to the model
                 if not a.get("summary"):
                     raise KeyError("no summary for %s" % one["name"])
@@ -3054,10 +3342,23 @@ class ChatAgent:
                                                                          for r in m["results"])) for m in history):
             return history
         sees = sees_images(provider, model)
-        # a model that needs its history as it was sent keeps every picture (up to MAX_KEPT_PICTURES, past which _step
-        # summarises the earlier turns); another sees the latest MAX_PICTURES again at each step
-        left = (MAX_KEPT_PICTURES if keeps_history(provider) else MAX_PICTURES) if sees else 0
-        whole = MAX_DOCUMENTS if getattr(provider, "sees_pdfs", False) else 0
+        # a model that needs its history as it was sent keeps every picture and PDF where it came (up to
+        # MAX_KEPT_PICTURES, MAX_KEPT_DOCUMENTS and MAX_KEPT_DOCUMENT_BYTES, past which _step summarises the earlier
+        # turns); another sees the latest MAX_PICTURES and MAX_DOCUMENTS again at each step
+        keeps = keeps_history(provider)
+        left = (MAX_KEPT_PICTURES if keeps else MAX_PICTURES) if sees else 0
+        whole = (MAX_KEPT_DOCUMENTS if keeps else MAX_DOCUMENTS) if getattr(provider, "sees_pdfs", False) else 0
+        room = MAX_KEPT_DOCUMENT_BYTES if keeps else None   # their bytes, for a service with a request size
+
+        def fits(docs: List[Dict[str, str]]) -> bool:
+            nonlocal room
+            if room is None:
+                return True
+            weight = sum(len(d["data"]) * 3 // 4 for d in docs)
+            if weight > room:
+                return False
+            room -= weight
+            return True
         out: List[Dict[str, Any]] = []
         for m in reversed(history):   # the newest pictures are the ones still shown
             if m["role"] == "tool" and any(r.get("images") or r.get("documents") for r in m["results"]):
@@ -3077,7 +3378,7 @@ class ChatAgent:
                         kept = r["documents"]
                         r = {k: v for k, v in r.items() if k != "documents"}
                         docs = [d for d in (self._document(chat["id"], i) for i in kept) if d]
-                        if docs and whole >= len(docs):
+                        if docs and whole >= len(docs) and fits(docs):
                             r["documents"], whole = docs, whole - len(docs)
                         else:
                             r["content"] = "%s\n(these pages were shown earlier, no longer: read_file again to see them)" \
@@ -3109,7 +3410,7 @@ class ChatAgent:
                         continue
                     doc = self._document(chat["id"], a) if a.get("text") and whole > 0 and \
                         0 < int(a.get("pages") or 0) <= MAX_PDF_PAGES else None
-                    if doc:   # the PDF itself, figures and all, for a model that reads PDFs
+                    if doc and fits([doc]):   # the PDF itself, figures and all, for a model that reads PDFs
                         documents.append(dict(doc, name=a["name"]))
                         whole -= 1
                         texts.append(OUTSIDE % ("%s, a PDF the person attached" % a["name"],

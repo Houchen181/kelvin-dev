@@ -1,8 +1,11 @@
 """GPT models, local models behind any OpenAI-compatible server (Ollama, vLLM, LM Studio), and other services that
 speak the same API (OpenRouter, OpenCode, DeepSeek, Groq, Mistral, xAI, gateways; see services.py).
 
-Uses the Chat Completions API, which all of them speak. Pictures go to OpenAI's own models, and to other services'
-models that see them, model by model (vision.py); one that refuses a picture gets the message without it.
+OpenAI's own models (an API key, here or through the Kelvin hub) go through the Responses API, which carries their
+reasoning from one step to the next: encrypted, sent again to the model that wrote it, nothing stored at OpenAI
+(responses.py, as on the ChatGPT plan). The others use the Chat Completions API, which all of them speak, and which
+carries no reasoning between tool calls. Pictures go to OpenAI's own models, and to other services' models that see
+them, model by model (vision.py); one that refuses a picture gets the message without it.
 """
 from __future__ import annotations
 
@@ -16,8 +19,9 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import openai
 
-from .base import (DOCUMENTS_NOTE, PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url, opencode_session,
-                   safe_id, session_key, text_of, user_text)
+from . import responses
+from .base import (DOCUMENTS_NOTE, EFFORT, PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url,
+                   opencode_session, safe_id, session_key, text_of, user_text)
 
 _SKIP = ("audio", "realtime", "tts", "transcribe", "image", "search", "embedding", "instruct", "moderation",
          "dall-e", "whisper", "davinci", "babbage")
@@ -153,6 +157,8 @@ class OpenAIProvider(Provider):
         self.pictures = pictures if pictures in ("on", "off") else ""
         self.vision = vision
         self._inputs: Dict[str, bool] = {}   # what the service's own list says: does the model take pictures?
+        self.no_include: set = set()   # OpenAI's own models that give no encrypted reasoning back (responses.relax)
+        self.no_effort: set = set()    # and those that take no reasoning effort (one refusing xhigh takes high)
         host = (urllib.parse.urlparse(base_url or "").hostname or "").lower()
         # an OpenCode service's session for its requests outside any chat (each chat has its own: extra_headers)
         self._outside = secrets.token_hex(12) if self.preset in OPENCODE or host == OPENCODE_HOST \
@@ -237,6 +243,8 @@ class OpenAIProvider(Provider):
 
     async def stream(self, model: str, system: str, history: List[Dict[str, Any]],
                      tools: List[Dict[str, Any]], emit: Emit) -> TurnResult:
+        if self.own:   # OpenAI's own models: their reasoning goes with the conversation
+            return await self._respond(model, system, history, tools, emit)
         request: Dict[str, Any] = {"model": model, "messages": to_messages(system, history), "stream": True}
         if tools:   # an empty list is refused by OpenAI and others: leave it out (e.g. for a second opinion)
             request["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
@@ -305,4 +313,66 @@ class OpenAIProvider(Provider):
             result.stop_reason = "tool_calls"
         if left_out:
             result.note = "%s %s" % (result.note, left_out) if result.note else left_out
+        return result
+
+    async def _respond(self, model: str, system: str, history: List[Dict[str, Any]],
+                       tools: List[Dict[str, Any]], emit: Emit) -> TurnResult:
+        """OpenAI's own models, through the Responses API (responses.py): the whole conversation each time, nothing
+        stored at OpenAI (store=false), each answer's reasoning back encrypted and sent again to the model that wrote
+        it, the turn's effort as its reasoning effort, PDFs whole, and a chat's requests to the cache holding its
+        prompt (prompt_cache_key). What a model refuses of the reasoning is dropped, and remembered for that model."""
+        body: Dict[str, Any] = {"model": model, "instructions": system, "store": False, "stream": True,
+                                "input": responses.to_input(history, self.name, model, documents=self.sees_pdfs)}
+        if tools:   # an empty list: left out (a summary's, a second opinion's)
+            # not strict: strict, the Responses API would make every optional argument a must (or null, which a lab
+            # tool refuses)
+            body["tools"] = [{"type": "function", "name": t["name"], "description": t["description"],
+                              "parameters": t["schema"], "strict": False} for t in tools]
+        if model not in self.no_include:
+            body["include"] = list(responses.INCLUDE)
+        effort = EFFORT.get()
+        if model not in self.no_effort and effort in responses.EFFORTS:
+            body["reasoning"] = {"effort": effort}
+        key = session_key()
+        if key:   # a chat's requests go to the cache holding its prompt (from GPT-5.6, one of its own)
+            body["prompt_cache_key"] = key
+        extra = self.extra_headers()
+        if extra:
+            body["extra_headers"] = extra
+        for _ in range(5):   # each refusal takes one thing away, once
+            try:
+                events = await self.client.responses.create(**body)
+                break
+            except openai.BadRequestError as e:
+                if not responses.relax(body, e, model, self.no_effort, self.no_include):
+                    raise
+        else:
+            raise RuntimeError("%s refused the request in every form Kelvin knows." % self.label)
+        final, incomplete = None, False
+        async for ev in events:
+            kind = getattr(ev, "type", "")
+            if kind == "response.output_text.delta":
+                await emit({"type": "text", "delta": ev.delta})
+            elif kind == "response.completed":
+                final = ev.response
+            elif kind == "response.incomplete":
+                final, incomplete = ev.response, True
+            elif kind in ("response.failed", "error"):
+                err = getattr(getattr(ev, "response", None), "error", None) or ev
+                said = getattr(err, "message", None) or (err.get("message") if isinstance(err, dict) else None)
+                raise RuntimeError("%s could not answer: %s" % (self.label, said or "unknown error"))
+        if final is None:
+            raise RuntimeError("%s's answer stopped before it was complete; try again." % self.label)
+        blocks, raw, declined = responses.read(getattr(final, "output", None), model)
+        result = TurnResult(blocks, raw, model=getattr(final, "model", None) or model)
+        why = getattr(getattr(final, "incomplete_details", None), "reason", None) if incomplete else None
+        if declined or why == "content_filter":
+            result.stop_reason, result.note = "refusal", "The model declined this request."
+        elif incomplete:
+            result.stop_reason, result.note = "max_tokens", "The answer hit the length limit."
+        elif result.tool_calls:
+            result.stop_reason = "tool_calls"
+        if result.stop_reason in ("refusal", "max_tokens"):   # a call that never ran is never sent again, nor the
+            result.blocks = [b for b in blocks if b["type"] != "tool_call"]   # reasoning that led to it
+            result.raw = responses.without_calls(raw)
         return result

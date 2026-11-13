@@ -1665,6 +1665,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                         data.pop("folder", None)
                     await asyncio.to_thread(store.save, data)
             out = dict(data, messages=[shown(m) for m in data["messages"]])
+            out.pop("frame", None)   # the prompt and tools as the chat's model got them (agent.py): the model's only
             out["folder"] = data.get("folder") or str(runtime.data_dir / "runs")   # where its runs go
             out["own_folder"] = bool(data.get("folder"))
             out["project"] = store.project_of(chat_id)  # the browser never needs provider-internal state

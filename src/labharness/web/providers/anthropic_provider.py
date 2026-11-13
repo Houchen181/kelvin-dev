@@ -1,7 +1,14 @@
-"""Claude, through the official Anthropic SDK (streaming Messages API with client tools)."""
+"""Claude, through the official Anthropic SDK (streaming Messages API with client tools).
+
+A chat's requests only ever grow at their end, as Claude binds each thinking block to everything before it (the
+system prompt, the tools, the earlier turns) and caches the same prefix: Kelvin's rarer tools are declared from the
+chat's first request with defer_loading, and Claude finds them with Anthropic's tool search (its results stay in the
+turn that searched, so a tool it loaded stays loaded); a change to the chat's setup goes as a system message after the
+person's message, on the models that take one (agent.py keeps the prompt and the tools as the chat first had them)."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import anthropic
 
@@ -34,6 +41,46 @@ DROP_UNBOUND = {"prefix_mismatch_behavior": "drop_block"}
 # opinion) keeps the 5-minute default.
 LONG_CACHE = {"type": "ephemeral", "ttl": "1h"}
 SHORT_CACHE = {"type": "ephemeral"}
+# Anthropic's tool search (a server tool, no beta): the tools marked defer_loading stay out of Claude's context until a
+# search by words finds them, so the chat's tools are declared once, whole, and never change (agent.py, _declared)
+TOOL_SEARCH = {"type": "tool_search_tool_bm25_20251119", "name": "tool_search_tool_bm25"}
+_CLAUDE = re.compile(r"claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?(?!\d)")
+
+
+def _claude(model: str) -> Optional[Tuple[str, Tuple[int, int]]]:
+    """A Claude model's family and version: ("opus", (5, 5)) for claude-opus-5-5; None for anything else."""
+    m = _CLAUDE.search(model or "")
+    return (m.group(1), (int(m.group(2)), int(m.group(3) or 0))) if m else None
+
+
+def system_messages(model: str) -> bool:
+    """Does this model take a system message mid-conversation (no beta)? Claude Opus 4.8 and later, Sonnet and Haiku
+    5.5 and later, every Fable and Mythos; not Sonnet 5, nor older ones."""
+    found = _claude(model)
+    if found is None:
+        return False
+    family, version = found
+    return family in ("fable", "mythos") or (family == "opus" and version >= (4, 8)) or \
+        (family in ("sonnet", "haiku") and version >= (5, 5))
+
+
+def searches_tools(model: str) -> bool:
+    """Does this model take Anthropic's tool search (deferred tools)? Claude 4.5 and later, every Fable and Mythos."""
+    found = _claude(model)
+    return found is not None and (found[0] in ("fable", "mythos") or found[1] >= (4, 5))
+
+
+def tool_list(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Kelvin's tools as Claude takes them: a tool marked "defer" (agent.py, _declared) waits for the tool search,
+    which is then offered first."""
+    out = [dict(TOOL_SEARCH)] if any(t.get("defer") for t in tools) else []
+    for t in tools:
+        one = {"name": t["name"], "description": t["description"], "input_schema": t["schema"],
+               "eager_input_streaming": True}
+        if t.get("defer"):
+            one["defer_loading"] = True
+        out.append(one)
+    return out
 
 
 def cached(system: str, tools: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -69,10 +116,18 @@ def without_thinking(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def unanswered(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A turn without a server tool's call that has no result in it (a tool search cut short, or one a paused turn
+    was to go on from)."""
+    answered = {b.get("tool_use_id") for b in raw if str(b.get("type", "")).endswith("_tool_result")}
+    return [b for b in raw if not (b.get("type") == "server_tool_use" and b.get("id") not in answered)]
+
+
 def without_calls(raw: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
     """A cut or declined turn as it is sent again: without its tool calls, which never ran (no result follows them,
-    and Claude refuses a tool_use without its tool_result). None when no text is left (the blocks are sent then)."""
-    kept = [b for b in raw if b.get("type") != "tool_use"]
+    and Claude refuses a tool_use without its tool_result), nor a tool search cut before its result. None when no text
+    is left (the blocks are sent then)."""
+    kept = [b for b in unanswered(raw) if b.get("type") != "tool_use"]
     return kept if any(b.get("type") == "text" for b in kept) else None
 
 
@@ -84,14 +139,37 @@ def _document(doc: Dict[str, str]) -> Dict[str, Any]:
     return {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": doc["data"]}}
 
 
-def to_messages(history: List[Dict[str, Any]], own: str = "anthropic") -> List[Dict[str, Any]]:
-    """own: this provider's name; its own turns go back as they came (raw: thinking blocks and all)."""
+def to_messages(history: List[Dict[str, Any]], own: str = "anthropic", model: str = "",
+                apart: Optional[bool] = None) -> List[Dict[str, Any]]:
+    """own: this provider's name; its own turns go back as they came (raw: thinking blocks and all). model: the model
+    asked; one that takes system messages mid-conversation gets a change to the chat's setup (a user message's
+    "update") as one, after that turn and before Claude's next, rather than in the person's words. apart: whether it
+    does, where the route says otherwise (AnthropicProvider.inline)."""
     out: List[Dict[str, Any]] = []
     n = 0
-    for m in history:
+    apart = system_messages(model) if apart is None else apart
+    later: List[str] = []   # updates waiting for the end of their user turn
+
+    def system() -> None:   # a system message follows a user turn, and an assistant turn or nothing follows it
+        if later:
+            out.append({"role": "system", "content": "\n\n".join(later)})
+            later.clear()
+    after: List[Optional[str]] = [None] * len(history)   # the role of the turn that follows each message, if any
+    for j in range(len(history) - 2, -1, -1):
+        role = history[j + 1]["role"]
+        after[j] = role if role in ("user", "assistant", "tool") else after[j + 1]
+    for i, m in enumerate(history):
         if m["role"] == "user":   # PDFs and pictures first, then the words about them
-            content = [_document(d) for d in m.get("documents") or []] + \
-                [_image(i) for i in m.get("images") or []] + [{"type": "text", "text": user_text(m)}]
+            update = m.get("update") if apart else None
+            words = user_text(m, updates=not update)
+            media = [_document(d) for d in m.get("documents") or []] + [_image(i) for i in m.get("images") or []]
+            if update and not (words or media or out and out[-1]["role"] == "user"):
+                words, update = user_text(m), None   # no user turn for a system message to follow: in the words
+            content = media + ([{"type": "text", "text": words}] if words else [])
+            if update:
+                later.append(update)
+            if not content:
+                continue
             if out and out[-1]["role"] == "user":   # written while Kelvin worked: after the tool results, one turn
                 out[-1]["content"] = list(out[-1]["content"]) + content
             else:
@@ -99,6 +177,8 @@ def to_messages(history: List[Dict[str, Any]], own: str = "anthropic") -> List[D
         elif m["role"] == "assistant":
             if m.get("provider") == own and m.get("raw"):
                 content = m["raw"]
+                if after[i] not in (None, "assistant"):   # a paused turn that something else followed (its answer
+                    content = unanswered(content)          # was stopped): not a search left waiting for a result
             else:
                 content = []
                 for b in m["blocks"]:
@@ -109,6 +189,7 @@ def to_messages(history: List[Dict[str, Any]], own: str = "anthropic") -> List[D
                         content.append({"type": "tool_use", "id": safe_id(b["id"], n), "name": b["name"],
                                         "input": b["input"] if isinstance(b["input"], dict) else {}})
             if content:
+                system()
                 out.append({"role": "assistant", "content": content})
         elif m["role"] == "tool":
             content = [
@@ -120,6 +201,7 @@ def to_messages(history: List[Dict[str, Any]], own: str = "anthropic") -> List[D
             if docs:   # after every result, as a user message may go on
                 content += [{"type": "text", "text": DOCUMENTS_NOTE}] + [_document(d) for d in docs]
             out.append({"role": "user", "content": content})
+    system()
     return out
 
 
@@ -136,6 +218,11 @@ class AnthropicProvider(Provider):
         self.name, self.label = name or self.name, label or self.label
         self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url) if api_key else None
         self.binding = True   # asks the API to drop unbound thinking blocks; off for good where a route refuses it
+        # where a request with a chat's update as a system message was refused for it: the models whose refusal
+        # fallback then goes (Sonnet 5.5's goes to Sonnet 5, which takes none), and those whose updates then go in the
+        # person's words (a gateway that doesn't know the role)
+        self.no_fallback: set = set()
+        self.inline: set = set()
 
     async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
         """Claude's web search (a server tool: Anthropic runs the searches). The results it found, with Claude's
@@ -160,6 +247,12 @@ class AnthropicProvider(Provider):
     def available(self) -> bool:
         return self.client is not None
 
+    @staticmethod
+    def searches_tools(model: str) -> bool:
+        """Can this model find Kelvin's rarer tools itself (Anthropic's tool search)? Then a chat declares every tool
+        from its first request (agent.py, _declared) instead of loading them with find_tools."""
+        return searches_tools(model)
+
     async def models(self) -> List[ModelInfo]:
         return [ModelInfo(mid, label, self.name) for mid, label in MODELS]
 
@@ -169,15 +262,15 @@ class AnthropicProvider(Provider):
         kwargs: Dict[str, Any] = dict(
             model=model,
             max_tokens=64000,
-            messages=to_messages(history, self.name),
-            tools=[{"name": t["name"], "description": t["description"], "input_schema": t["schema"],
-                    "eager_input_streaming": True} for t in tools],
+            messages=to_messages(history, self.name, model, apart=False if model in self.inline else None),
+            tools=tool_list(tools),
             thinking={"type": "adaptive", "display": "summarized"},
             output_config={"effort": effort if effort in EFFORTS else DEFAULT_EFFORT},
             **cached(system, tools),
         )
-        betas = [FALLBACK_BETA] if model in FALLBACK_MODELS else []
-        if model in FALLBACK_MODELS:
+        fallback = model in FALLBACK_MODELS and model not in self.no_fallback
+        betas = [FALLBACK_BETA] if fallback else []
+        if fallback:
             kwargs.update(fallbacks="default")
         retries, stripped = 0, False
         while True:
@@ -212,6 +305,20 @@ class AnthropicProvider(Provider):
                 elif self.binding and "binding" in said:
                     # a route (a gateway, an older API) that doesn't take the binding control: without it from now on
                     self.binding = False
+                elif ("system" in said or "role" in said) and any(m["role"] == "system" for m in kwargs["messages"]):
+                    if "fallbacks" in kwargs:   # its refusal fallback's model takes no system message: none for it
+                        self.no_fallback.add(model)
+                        del kwargs["fallbacks"]
+                        betas = [b for b in betas if b != FALLBACK_BETA]
+                    else:   # no system message mid-conversation here after all: the updates in the person's words,
+                        self.inline.add(model)   # for this model, from now on
+                        kwargs["messages"] = to_messages(history, self.name, model, apart=False)
+                        if stripped:
+                            kwargs["messages"] = without_thinking(kwargs["messages"])
+                        if model in self.no_fallback:   # the fallback wasn't what it refused: it comes back
+                            self.no_fallback.discard(model)
+                            kwargs["fallbacks"] = "default"
+                            betas = [FALLBACK_BETA] + betas
                 else:
                     raise
                 await emit({"type": "reset"})

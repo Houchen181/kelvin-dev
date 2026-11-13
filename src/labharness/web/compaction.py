@@ -72,10 +72,11 @@ def limit(provider: Provider, model_id: str) -> int:
 
 
 def size(system: str, tools: List[Dict[str, Any]], messages: List[Dict[str, Any]],
-         pictures: Optional[int] = None) -> int:
+         pictures: Optional[int] = None, pages: int = 0) -> int:
     """About how many tokens a request takes (four characters a token), with its pictures (the chat keeps only their
     files' names: PICTURE_TOKENS each). pictures: how many the model is sent (agent._step knows: a model that sees none
-    is sent none, another the latest few); None counts every one the messages hold."""
+    is sent none, another the latest few); None counts every one the messages hold. pages: the PDF pages it reads
+    whole, each about a picture."""
     chars = len(system) + len(json.dumps(tools, default=str))
     held = 0
     for m in messages:
@@ -85,10 +86,30 @@ def size(system: str, tools: List[Dict[str, Any]], messages: List[Dict[str, Any]
         elif m.get("role") == "user":   # pictures the person attached, and a PDF's pages the hub drew
             held += sum((1 if str(a.get("mime", "")).startswith("image/") else 0) + len(a.get("drawn") or [])
                         for a in m.get("attachments") or [])
-    return chars // 4 + (held if pictures is None else pictures) * PICTURE_TOKENS
+    return chars // 4 + ((held if pictures is None else pictures) + pages) * PICTURE_TOKENS
 
 
 THINKING = ("thinking", "redacted_thinking")
+
+
+def _unbound(block: Any) -> bool:
+    """A block of Claude's that goes from a turn before a boundary: thinking, and a server tool's call and result
+    (the tool search's)."""
+    kind = str(block.get("type", "")) if isinstance(block, dict) else ""
+    return kind in THINKING or kind == "server_tool_use" or (kind.endswith("_tool_result") and kind != "tool_result")
+
+
+def _set_aside(m: Dict[str, Any]) -> Dict[str, Any]:
+    """A turn from before a boundary as the model sees it: Claude's without its thinking (no longer bound to what
+    came before it) and without its tool searches (what they found was declared in the frame then, maybe not in the
+    one written at the boundary: Claude refuses a reference to a tool it isn't given), a user message without its
+    update (the chat's frame, written at the boundary, holds it)."""
+    raw = m.get("raw")
+    if m.get("role") == "assistant" and isinstance(raw, list) and any(_unbound(b) for b in raw):
+        return dict(m, raw=[b for b in raw if not _unbound(b)])
+    if m.get("role") == "user" and m.get("update"):
+        return {k: v for k, v in m.items() if k != "update"}
+    return m
 
 
 def view(chat: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -97,18 +118,21 @@ def view(chat: Dict[str, Any]) -> List[Dict[str, Any]]:
     The turns kept as they were (the last ones the person started) were written before the handoff existed, so their
     thinking (Claude's) was written after the turns the handoff now stands in for: Claude refuses a thinking block whose
     conversation changed (or drops it, when asked to), and a kept turn's goes, its words and calls stay. Turns written
-    after the handoff keep theirs. A handoff from before Kelvin noted where it ended ("made") counts as covering all."""
+    after the handoff keep theirs. A handoff from before Kelvin noted where it ended ("made") counts as covering all.
+    The chat's prompt is written again with a summary (agent.py, _reframe), so the kept turns' updates go too; and
+    likewise before the message where a Kelvin whose own instructions or tools changed wrote it again (the frame's
+    "since")."""
     messages, c = chat["messages"], chat.get("compact")
+    since = (chat.get("frame") or {}).get("since")
+    since = since if isinstance(since, int) else 0
     if not c or not 0 < c.get("upto", 0) < len(messages) or messages[c["upto"]].get("role") != "user":
-        return messages
+        return [_set_aside(m) if i < since else m for i, m in enumerate(messages)] if since else messages
     upto, made = c["upto"], c.get("made", len(messages))
-    out = [dict(messages[upto], handoff=c["summary"])]
+    before = max(made, since)
+    first = dict(messages[upto], handoff=c["summary"])
+    out = [_set_aside(first) if upto < before else first]
     for i in range(upto + 1, len(messages)):
-        m = messages[i]
-        if i < made and m.get("role") == "assistant" and isinstance(m.get("raw"), list) and \
-                any(isinstance(b, dict) and b.get("type") in THINKING for b in m["raw"]):
-            m = dict(m, raw=[b for b in m["raw"] if not (isinstance(b, dict) and b.get("type") in THINKING)])
-        out.append(m)
+        out.append(_set_aside(messages[i]) if i < before else messages[i])
     return out
 
 

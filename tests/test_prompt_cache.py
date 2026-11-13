@@ -141,6 +141,24 @@ class FakeChat:
         return chunks()
 
 
+class FakeResponses:
+    """The Responses API client as the provider uses it for OpenAI's own models: what each request asked for, and a
+    one-line answer."""
+
+    def __init__(self):
+        self.sent = []
+        self.responses = SimpleNamespace(create=self._create)
+
+    async def _create(self, **body):
+        self.sent.append(body)
+
+        async def events():
+            yield SimpleNamespace(type="response.output_text.delta", delta="ok")
+            yield SimpleNamespace(type="response.completed", response=SimpleNamespace(model=body["model"], output=[
+                {"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]))
+        return events()
+
+
 def test_openais_own_models_get_a_cache_key_for_each_chat_and_other_services_none():
     pytest.importorskip("openai")
     from labharness.web.providers.base import SESSION, session_key
@@ -148,8 +166,7 @@ def test_openais_own_models_get_a_cache_key_for_each_chat_and_other_services_non
     gpt = OpenAIProvider("openai", "OpenAI", "test-key")
     deepseek = OpenAIProvider("deepseek", "DeepSeek", "test-key", base_url="https://api.deepseek.com/v1")
     hi = [{"role": "user", "text": "hi"}]
-    for provider in (gpt, deepseek):
-        provider.client = FakeChat()
+    gpt.client, deepseek.client = FakeResponses(), FakeChat()
     token = SESSION.set("chat-1")
     try:
         key = session_key()
@@ -158,7 +175,7 @@ def test_openais_own_models_get_a_cache_key_for_each_chat_and_other_services_non
     finally:
         SESSION.reset(token)
     assert key.startswith("kelvin-") and "chat-1" not in key   # never the chat's own id
-    assert gpt.client.sent[-1]["extra_body"] == {"prompt_cache_key": key}
+    assert gpt.client.sent[-1]["prompt_cache_key"] == key      # OpenAI's own: the Responses API's cache key
     assert "extra_body" not in deepseek.client.sent[-1]   # DeepSeek caches by itself, for hours
     asyncio.run(gpt.stream("gpt-6-sol", "rules", hi, TOOLS, quiet))   # outside any chat: no key
-    assert "extra_body" not in gpt.client.sent[-1]
+    assert "prompt_cache_key" not in gpt.client.sent[-1]
