@@ -32,8 +32,8 @@ from ..folderfiles import MAX_PDF_PAGES
 from ..gate import ApprovalRequest
 from ..protection import summary as protection_summary
 from .hubmodels import through_hub
-from .providers.base import (EFFORT, SESSION, Emit, ModelInfo, Provider, TurnResult, sees_images, sent_line,
-                             text_of)
+from .providers.base import (ANSWER, EFFORT, RESUMABLE, SESSION, Emit, ModelInfo, Provider, TurnResult,
+                             sees_images, sent_line, text_of)
 from . import analyst, brevity, compaction, memory, review, rules as rulebook
 from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, READ_SKILL_FILE, SAVE_RECIPE, SAVE_SKILL, USE_SKILL, Know
 from .wakeups import WAKE_ME, Waker
@@ -399,6 +399,20 @@ def refusal(text: str) -> bool:
     """A call's result that says the gate refused it, a person declined it, a guard tripped or a run was stopped:
     final for what it stopped, not a failure the model may work around."""
     return bool(_REFUSAL.search(text or ""))
+
+
+def _ended(providers: Iterable[Any]) -> None:
+    """An answer of this task's chat (SESSION) is over, however it ended: what its providers kept between its steps
+    goes (the Claude Code bridge's run, left waiting for results by Stop during a call, the step limit, an error)."""
+    done: List[Any] = []
+    for p in providers:
+        end = getattr(p, "end_answer", None)
+        if callable(end) and not any(p is d for d in done):
+            done.append(p)
+            try:
+                end()
+            except Exception:   # never in the way of the answer's own ending
+                pass
 
 
 def with_notes(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -826,6 +840,13 @@ class ChatAgent:
                       for t in listed if t.name not in MCP_ONLY]
 
     async def close(self) -> None:
+        for provider in self.providers.values():   # Claude Code bridge: a run still going
+            close = getattr(provider, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
         await self._exit.aclose()
 
     async def models(self) -> Dict[str, Any]:
@@ -1644,6 +1665,7 @@ class ChatAgent:
             if self.turns.get(chat_id) is turn:
                 del self.turns[chat_id]
                 self.notices.after_turn(chat_id)   # a change told after its last step: into its thread
+            _ended([provider])
             _TURN.reset(held)
             SESSION.reset(session)
             EFFORT.reset(effort)
@@ -1824,11 +1846,17 @@ class ChatAgent:
                 await emit({"type": "note", "text": "Kelvin summarised the earlier part of this conversation for the "
                                                     "model, to stay within what it can read at once. The whole chat "
                                                     "stays here, and Kelvin can still search it."})
-        self._stream_task = asyncio.ensure_future(
-            provider.stream(model_id, context["system"],
-                            self._pictures(chat, with_notes(brevity.with_reminder(history, self._budget())), provider,
-                                           model_id),
-                            context["tools"], relay))
+        keep = RESUMABLE.set(not chat.get("incognito"))   # Claude Code bridge: its session goes on next answer,
+        own = ANSWER.set(True)                             # and this answer's end ends its run
+        try:
+            self._stream_task = asyncio.ensure_future(
+                provider.stream(model_id, context["system"],
+                                self._pictures(chat, with_notes(brevity.with_reminder(history, self._budget())),
+                                               provider, model_id),
+                                context["tools"], relay))
+        finally:   # the step's task has them; a second opinion in a call of this answer doesn't
+            ANSWER.reset(own)
+            RESUMABLE.reset(keep)
         try:
             result = await _answer(self._stream_task, heard, emit)
         except asyncio.CancelledError:
@@ -2417,6 +2445,7 @@ class ChatAgent:
             if self.turns.get(chat_id) is turn:
                 del self.turns[chat_id]
                 self.notices.after_turn(chat_id)   # a change told while the lanes answered: into its thread
+            _ended(provider for _, provider, _ in lanes)
             _TURN.reset(held)
             SESSION.reset(session)
             EFFORT.reset(effort)
@@ -2439,9 +2468,16 @@ class ChatAgent:
 
         try:
             for _ in range(COMPARE_STEPS):
-                result = await _answer(asyncio.ensure_future(provider.stream(model_id, system, self._pictures(
-                    {"id": chat_id}, brevity.with_reminder(base + out, self._budget()), provider, model_id), tools,
-                    lane_emit)), heard, lane_note)
+                keep = RESUMABLE.set(not incognito)   # Claude Code bridge: the chosen lane's session goes on
+                own = ANSWER.set(True)
+                try:
+                    task = asyncio.ensure_future(provider.stream(model_id, system, self._pictures(
+                        {"id": chat_id}, brevity.with_reminder(base + out, self._budget()), provider, model_id), tools,
+                        lane_emit))
+                finally:
+                    ANSWER.reset(own)
+                    RESUMABLE.reset(keep)
+                result = await _answer(task, heard, lane_note)
                 out.append({"role": "assistant", "provider": provider.name, "model": result.model or model_id,
                             "blocks": result.blocks, "raw": result.raw})
                 if result.stop_reason != "tool_calls":

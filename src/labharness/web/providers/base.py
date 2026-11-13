@@ -29,6 +29,14 @@ SESSION: contextvars.ContextVar = contextvars.ContextVar("kelvin_session", defau
 # the providers that take an effort (Claude, the ChatGPT plan) send it, the others ignore it.
 EFFORT: contextvars.ContextVar = contextvars.ContextVar("kelvin_effort", default="")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Claude Code bridge: may the model's service keep this conversation between the chat's answers, to go on from it in
+# the next one (claudecode_native.py: a Claude Code session on this computer)? agent.py says yes for the steps of a
+# chat's own answers (and of its Compare lanes), unless the chat is incognito (it leaves nothing behind); a second
+# opinion, a summary or an analysis keeps nothing.
+RESUMABLE: contextvars.ContextVar = contextvars.ContextVar("kelvin_resumable", default=False)
+# ...and is this request a step of a chat's own answer (or Compare lane), whose end agent.py tells the provider
+# (Provider.end_answer)? An incognito chat's answer is one, though it keeps nothing.
+ANSWER: contextvars.ContextVar = contextvars.ContextVar("kelvin_answer", default=False)
 
 
 def session_key(outside: str = "") -> str:
@@ -87,6 +95,13 @@ class Provider:
     async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
         """Web results ({title, url, snippet}) through this service's own web search."""
         raise NotImplementedError
+
+    def end_answer(self) -> None:
+        """The answer of this task's chat (SESSION) is over, however it ended: anything kept between its steps goes
+        (the Claude Code bridge's run). Most providers keep nothing."""
+
+    def close(self) -> None:
+        """Kelvin is closing: anything still running goes."""
 
 
 def sees_images(provider: Any, model: str) -> bool:
