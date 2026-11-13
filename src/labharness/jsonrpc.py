@@ -14,6 +14,8 @@ The card says how its instrument speaks JSON-RPC, under jsonrpc:
       errors: first                    # where the instrument's own error number is in an answer's list: first
                                        # (default), none, or its position; 0 means fine, and it is not a value
       errors_at: { <method>: 2 }       # a method whose error number sits elsewhere
+      error_text: "<method> [arguments]"   # asked what an error number means, the number going last (attocube:
+                                       # com.attocube.system.errorNumberToString 0, the error's name): said with it
       identity: [<method>, ...]        # read for who it is: "<vendor>,<answer>,<answer>..."
       switches:                        # an on/off the instrument has two methods for
         <name>: { on: <method>, off: <method> }
@@ -122,6 +124,8 @@ class JsonRpcInstrument(DriverBackend):
         self.fields = dict(spec.get("fields") or {})
         self.errors = spec.get("errors", "first")
         self.errors_at = dict(spec.get("errors_at") or {})
+        self.error_text = str(spec.get("error_text") or "").strip()
+        self.said: Dict[int, str] = {}   # what it calls each error number it answered with: asked once a number
         self.switches: Dict[str, Dict[str, str]] = dict(spec.get("switches") or {})
         self.http = spec.get("transport") == "http"
         self.path = str(spec.get("path") or "/")
@@ -239,8 +243,9 @@ class JsonRpcInstrument(DriverBackend):
             raise AdapterError("%s: the instrument's answer is not JSON-RPC: %r" % (self.name, body[:80]))
         return answer
 
-    def call(self, method: str, params: List[Any]) -> List[Any]:
-        """One request; its answer's values, without the instrument's error number (raised when it isn't 0)."""
+    def call(self, method: str, params: List[Any], name_errors: bool = True) -> List[Any]:
+        """One request; its answer's values, without the instrument's error number (raised when it isn't 0, with what
+        the instrument calls it when the card says how to ask: named; name_errors=False for that question itself)."""
         self.next_id += 1
         request = dict(self.fields, jsonrpc="2.0", method=method, params=list(params), id=self.next_id)
         answer = self._over_http(request) if self.http else self._over_tcp(request)
@@ -261,8 +266,25 @@ class JsonRpcInstrument(DriverBackend):
         if not 0 <= i < len(result) or isinstance(result[i], bool) or not isinstance(result[i], int):
             return list(result)   # no error number where the card says: the values as they came
         if result[i] != 0:
-            raise AdapterError("%s: %s: the instrument answered with its error %d" % (self.name, method, result[i]))
+            raise AdapterError("%s: %s: the instrument answered with its error %d%s" % (
+                self.name, method, result[i], self.named(result[i]) if name_errors else ""))
         return result[:i] + result[i + 1:]
+
+    def named(self, code: int) -> str:
+        """", which it calls <its words>": what the instrument itself says an error number means, asked with the
+        card's error_text call once for each number (attocube's controllers: errorNumberToString, the error's name,
+        as attocube's own Python API asks it on every error). "" when the card names no such call or the instrument
+        doesn't say (another firmware): then the number alone, never a meaning Kelvin made up."""
+        if not self.error_text:
+            return ""
+        if code not in self.said:
+            method, _, rest = self.error_text.partition(" ")
+            try:
+                words = text_of(self.call(method, arguments(rest) + [code], name_errors=False)).strip()
+            except Exception:   # it can't say: the number is still the instrument's answer, said as it is
+                words = ""
+            self.said[code] = words[:120] if words and not words.lstrip("+-").isdigit() else ""
+        return ", which it calls %s" % self.said[code] if self.said[code] else ""
 
     def _step(self, text: str) -> None:
         method, _, rest = text.strip().partition(" ")

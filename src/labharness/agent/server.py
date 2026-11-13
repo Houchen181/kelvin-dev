@@ -64,9 +64,11 @@ You are connected to a physics lab through Kelvin.
 - Kelvin's card for an instrument is a start, not a rule. When it doesn't fit how this lab reaches its instrument
   (another interface or generation, library, firmware, or warnings for settings this lab doesn't use), make the card
   fit, never the person: learn how the lab talks to it from the lab's own scripts or the maker's examples
-  (survey_scripts, read_examples, library_api) and its manual, write this lab's version (card_guide, check_card,
-  try_card until its readings match what the person sees, save_card with version: true), then change_instrument
-  to it. Ask the person only for what no file says (where the scripts are, an address).
+  (survey_scripts, read_examples, library_api) and its manual, write this lab's version from Kelvin's card as it is
+  (card_text, card_guide, check_card, try_card until its readings match what the person sees, save_card with
+  version: true), then change_instrument to it. Ask the person only for what no file says (where the scripts are,
+  an address). A reading that fails for now (a sensor unplugged) needs no new card: a run that doesn't use it still
+  runs, told of it.
 - For sweeps, write a plan and call run_plan directly. It checks the plan, health-checks the instruments it uses,
   asks once for its drive ranges, runs, logs and analyses the data. Report its assessment and key numbers (with
   uncertainties) rather than raw rows. A dry run (simulate_plan, or run_plan with dry_run: true) is not a routine
@@ -495,6 +497,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
         writing a card: a card Kelvin has is used as it is, unless it doesn't fit this lab's instrument (then this
         lab's version of it: save_card with version: true). No query lists every card."""
         return rt.find_card(query)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def card_text(card: str) -> str:
+        """The text (YAML) of a card Kelvin has, its own, the instrument collection's or this lab's: card is its id
+        (find_card) or the name of an instrument in the lab that uses it. To make this lab's version of Kelvin's card,
+        start from this text and change only what doesn't fit this instrument (from the lab's scripts, the maker's
+        examples or its manual), then save_card with version: true; never write it again from memory. Only reads."""
+        return outside(rt, "an instrument card's text", rt.card_text(card))
 
     @server.tool(annotations=READ, structured_output=False)
     def check_card(card: str) -> str:

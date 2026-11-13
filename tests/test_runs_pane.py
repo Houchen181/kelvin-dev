@@ -378,7 +378,7 @@ def test_the_queue_column_is_special_measures_queue():
     assert 'act("Again",' in item and 'act("Open",' in item and 'act("Edit"' not in item and 'act("✕"' not in item
     assert "pickItem(on ? null : i.id)" in item and 'e.target.closest("button")' in item
     keys = _js("queueKeys")
-    for text in ('e.key === "u" && n > 1', 'e.key === "d" && n < count', '"Delete"', 'i.status !== "running") removeItem(i)',
+    for text in ('e.key === "u" && n > 1', 'e.key === "d" && n < count', '"Delete"', '!Q_ACTIVE.has(i.status)) removeItem(i)',
                  'e.key === "Enter") editQueued(i)', '"ArrowDown"', '"ArrowUp"', '"Home"', '"End"', 'e.key === " "',
                  '"Escape" && QUEUE.sel'):
         assert text in keys, text
@@ -387,8 +387,8 @@ def test_the_queue_column_is_special_measures_queue():
     assert "if (QUEUE.sel && !items.some((i) => i.id === QUEUE.sel)) QUEUE.sel = null" in render
     buttons = _js("queueButtons")
     for text in ('$("queue-start").disabled = q.state === "running" || q.state === "pausing" || !q.waiting || BUSY.has("start")',
-                 '$("queue-pause").disabled = q.state !== "running"', '!i || i.status === "running" || !!i.restores',
-                 '$("queue-remove").disabled = !i || i.status === "running"'):
+                 '$("queue-pause").disabled = q.state !== "running"', '!i || Q_ACTIVE.has(i.status) || !!i.restores',
+                 '$("queue-remove").disabled = !i || Q_ACTIVE.has(i.status)'):
         assert text in buttons, text
     init = _js("initSchedule")
     assert 'busyWhile(["start"], () => {' in init and 'queueOp({ op: "start" })' in init   # one start at a time
@@ -483,7 +483,7 @@ def test_edit_on_a_queued_item_opens_it_where_it_can_be_edited():
     library instead, with no Run or Add to queue); a step the row can show in the step row (Save to #n); anything else
     as written. A running item is fixed, as is a step that restores another's settings."""
     edit = _js("editQueued")
-    for text in ('if (i.status === "running" || i.restores) return;', 'if (i.kind === "plan") openEditor(null, i.id);',
+    for text in ('if (Q_ACTIVE.has(i.status) || i.restores) return;', 'if (i.kind === "plan") openEditor(null, i.id);',
                  'else if (i.kind === "step") editStep(i);', "else pasteOpen(true, i);"):
         assert text in edit, text
     step = _js("editStep")

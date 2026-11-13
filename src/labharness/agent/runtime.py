@@ -81,6 +81,8 @@ SETUP_STEPS = ("connecting", "scanning", "drafting", "reading")   # the instrume
 # a rehearsal is never a run (field tests: run_plan with dry_run: true went on to run for real)
 REHEARSAL = ("REHEARSAL ONLY, on the simulated lab: nothing was sent to the instruments. A real run is its own call "
              "(%s without dry_run), made when the person asks for it.")
+# the lab a run made of run_python's output reads (import_data): computed, never measured (_computed)
+COMPUTED = "computed by run_python, not measured"
 SCRIPTS_NEXT = ("Next, with the person (nothing above was sent to any instrument): add each instrument that is not in "
                 "the lab yet with add_instrument at its address, with the likely card and the connection settings "
                 "above (Kelvin checks who answers there first); one with no card fitting: draft_card, saying which "
@@ -3308,6 +3310,7 @@ class LabRuntime:
         about += ["device " + r["device_name"]] if r.get("device_name") else []
         about += ["project " + r["project_name"]] if r.get("project_name") else []
         about += ["simulated"] if r.get("simulated") else []
+        about += [COMPUTED] if r.get("lab") == COMPUTED else []   # run_python's output, imported: never measured
         about += ["flagged " + r["flag"]] if r.get("flag") else []
         about += ["#" + t for t in str(r.get("tags") or "").split(",") if t]
         lines = ["%s: %s, %s, %s points (%s)" % (r["run_id"], r.get("plan"), r.get("status"),
@@ -3407,7 +3410,41 @@ class LabRuntime:
             return "not imported: %s%s" % (e, held)
         except OSError as e:
             return "not imported: %s" % (e.strerror or e)
-        return self._do("importing data", lambda: self._imported(table, files, name, self.gate.operator)["text"])
+        made = []   # run_python's own output among them: the run says it was computed, by which code, from which runs
+        for f in files:
+            try:
+                m = self._python_made(Path(f).expanduser().resolve())
+            except (OSError, RuntimeError, ValueError):
+                m = None
+            if m is not None and all(m["folder"] != k["folder"] for k in made):
+                made.append(m)
+        return self._do("importing data", lambda: self._imported(table, files, name, self.gate.operator,
+                                                                 made=made)["text"])
+
+    def _computed(self, rec: Any, made: List[Dict[str, Any]]) -> str:
+        """A run made of run_python's output (_imported): marked computed, never measured. Its record keeps which code
+        made it (a copy beside it, and its SHA-256) from which runs, its lab reads COMPUTED, and the line returned is
+        its first warning, which its card, its reports and the chat show."""
+        import shutil
+        runs = sorted({rid for m in made for rid in m["runs"]})
+        kept: List[Dict[str, Any]] = []
+        for k, m in enumerate(made):
+            copy = "made_by.py" if len(made) == 1 else "made_by_%d.py" % (k + 1)
+            try:
+                digest = hashlib.sha256(Path(m["code"]).read_bytes()).hexdigest()
+                if rec.path is not None:
+                    shutil.copyfile(str(m["code"]), str(Path(rec.path) / copy))
+            except OSError:
+                digest, copy = None, None   # said as such: the folder it ran in is named below
+            kept.append({"folder": str(m["folder"]), "code": copy, "sha256": digest,
+                         "runs": sorted(m["runs"])})
+        rec.meta.update(lab=COMPUTED, computed={"by": "run_python", "from_runs": runs, "code": kept})
+        where = ", ".join(k["code"] or "its folder %s" % k["folder"] for k in kept)
+        if runs:
+            return ("computed by Python code (run_python) from run%s %s, not measured: the code that made it is kept "
+                    "beside it (%s)" % ("" if len(runs) == 1 else "s", ", ".join(runs), where))
+        return ("written by Python code (run_python) that read no run: its numbers are what that code wrote, not "
+                "measured by Kelvin; the code is kept beside it (%s)" % where)
 
     def _data_files(self, path: str) -> List[str]:
         """What a path given to import_data stands for: a file itself, a folder its data files (by name, at most 20).
@@ -3444,10 +3481,13 @@ class LabRuntime:
             return self._imported(table, [shown], "", by)
 
     def _imported(self, table: Any, files: List[str], name: str, by: str, when: Optional[float] = None,
-                  meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                  meta: Optional[Dict[str, Any]] = None, made: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """An imported table kept as a run: its x (and a 2-D scan's slow axis), its columns, and camera frames as a
         run keeps a camera's. {text: what Kelvin says of it, run: its id, points, frames}. when: the time the data
-        was taken (old runs imported), for the run's id; meta: what else its record says (where it came from)."""
+        was taken (old runs imported), for the run's id; meta: what else its record says (where it came from).
+        made: run_python's folders the files came from (_python_made): the run is marked computed (its lab, its
+        record's computed: the code and the runs it read, its first warning), the code that made it is kept beside
+        it, and its card, find_runs and its reports say so: never a run Kelvin measured."""
         from types import SimpleNamespace
         from ..analysis import analyze_run
         # a run's own i (its points' numbers) and t (its clock): an x named I (a current) or T (a temperature) would
@@ -3464,6 +3504,8 @@ class LabRuntime:
         whose.pop("_apart", None)
         rec.meta.update(whose)
         rec.meta.update(lab="imported", simulated=False, imported=files)
+        if made:
+            table.notes = [self._computed(rec, made)] + list(table.notes)
         axes = [{"key": table.x_key, "unit": table.x_unit, "kind": "imported"}]
         if table.outer:   # a 2-D scan: its slow axis first, as a plan's outer sweep
             axes.insert(0, {"key": table.outer[0], "unit": table.outer[1], "kind": "imported"})
@@ -3495,7 +3537,8 @@ class LabRuntime:
             analysis = None   # the fits are a convenience; the numbers are kept
         rec.finish(**meta)
         self.gate.log.write("run_imported", by=by, run=rec.run_id, files=len(files), uuid=rec.meta.get("uuid"),
-                            sha256=getattr(rec, "sha256", None))
+                            sha256=getattr(rec, "sha256", None),
+                            computed=(rec.meta.get("computed") or {}).get("from_runs") if made else None)
         try:
             self.catalog.add(rec.path)
         except Exception:
@@ -3512,6 +3555,8 @@ class LabRuntime:
         else:
             lines = ["imported %s as run %s: %d points of %s (%s), columns %s" % (
                 names, rec.run_id, len(rows), table.x_key, table.x_unit or "no unit", ", ".join(table.columns))]
+        if made:   # said first: what it is, before what it holds
+            lines[0] = lines[0].replace("imported", "kept run_python's", 1) + "; marked " + COMPUTED
         lines += ["saved in %s" % rec.path] + ["note: " + n for n in table.notes]
         if analysis:
             lines += self._analysis_lines(analysis)
@@ -4352,7 +4397,7 @@ class LabRuntime:
                 item = q.find(ref)
             except KeyError as e:
                 return "not changed: %s" % e.args[0]
-            running = item.status == "running"
+            running = item.status == "running" or q.status_of(item) == "starting"   # picked: its checks under way
             if running:
                 self._queue_skip = (item.id, by)
                 self.gate.request_abort()   # what runs now ends; the next item, picked after this, is not touched
@@ -4713,6 +4758,34 @@ class LabRuntime:
                 problems.append(self._item_line(n, item, e))
         return problems
 
+    def _queue_preflight(self, items: List[Item]) -> Tuple[Optional[str], List[str]]:
+        """The plans among these items checked now, as the queue checks each one as it starts it (RunEngine.checked):
+        (why the first item, a plan, would be refused if it started now; a line for each later plan its instruments
+        would refuse now, for what it needs of them). Only reads. A later item's preconditions aren't asked: what runs
+        before it may meet them; it is checked again when its turn comes."""
+        plans = []
+        for n, item in enumerate(items, 1):
+            if item.kind == "plan":
+                try:
+                    plans.append((n, item, self._plan(item.text)))
+                except PlanError:
+                    continue   # _queue_checked says why
+        first = None
+        if plans and plans[0][0] == 1:
+            _, item, plan = plans.pop(0)
+            why, _ = self.engine.checked(plan)
+            if why:
+                first = self._item_line(1, item, "refused: " + why)
+        later = []
+        names = sorted({name for _, _, plan in plans for name in plan.requires})
+        results = {r.instr: r for r in self.engine.preflight(names)} if names and first is None else {}
+        for n, item, plan in plans:
+            stop, _ = self.engine.judge([results[i] for i in plan.requires if i in results], self.engine.needs(plan))
+            if stop:
+                later.append(self._item_line(n, item, "would be refused if it started now: preflight failed: %s; it "
+                                                      "is checked again when its turn comes" % "; ".join(stop)))
+        return first, later
+
     def queue_start(self, by: str = "agent", dry_run: bool = False) -> str:
         """Check every waiting item, ask a person once for every drive range, then run the queue in the background.
         Returns at once after the approval; queue_show follows it. dry_run: only a rehearsal of the whole queue in
@@ -4722,7 +4795,10 @@ class LabRuntime:
         approved, as they were when it looked (copies: the card is built from these, and an edit while it waits is
         another text): an item changed since, or added since to a start of the whole queue, is asked about before it
         runs, if it drives anything. A person's Stop from the moment this is called (while it waits for the lab, is
-        rehearsed or approved) means the queue doesn't start."""
+        rehearsed or approved) means the queue doesn't start. Before anyone is asked, the first item, a plan, is
+        checked as it will be when it starts (its instruments, for what it needs of them, and its preconditions): one
+        it would refuse doesn't start the queue, and the answer says why; a later plan its instruments would refuse
+        now is said with the start (_queue_preflight). An item reads running only once its own checks passed."""
         since = self.gate.stop_generation
         with self.queue.lock:
             if self.queue.state in ("running", "pausing"):
@@ -4758,6 +4834,11 @@ class LabRuntime:
             with self.queue.lock:   # it may have started meanwhile, from another chat or the Runs panel
                 if self.queue.state in ("running", "pausing"):
                     return "the queue is already running\n" + self._queue_text()
+            # checked as the first item will be when it starts, before anyone is asked: a refusal is said now, and the
+            # queue doesn't start (it never shows running); a later item that would be refused now is said with it
+            first, later = (None, []) if self._queue_checked(items) else self._queue_preflight(items)
+            if first:
+                return "the queue did not start: %s" % first
             got = self._queue_approve(items, by, "the queue did not start", since=since)
             if not got["ok"]:
                 return got["said"]
@@ -4779,8 +4860,8 @@ class LabRuntime:
                 self._queue_thread.start()
             self.gate.log.write("queue_start", by=by, items=len(items),
                                 expected_s=round(got["duration"]) if got["duration"] else None)
-            return "queue started: %s\n%s\n%s" % (got["title"][len("Run the queue: "):], self._queue_text(),
-                                                  self.alarms_reach())
+            return "queue started: %s\n%s\n%s%s" % (got["title"][len("Run the queue: "):], self._queue_text(),
+                                                    "".join(line + "\n" for line in later), self.alarms_reach())
         return self._do("starting the queue", prepare, stoppable=True,
                         uses=self._uses("\n".join(item.text for item in items)))   # the rest stay readable
 
@@ -4972,7 +5053,13 @@ class LabRuntime:
                         del approved[item.id]
                     if left is not None:   # and in a start with a pause point, it doesn't run again
                         left.discard(item.id)
-                    q.mark(item, "running")
+                    # a plan or a script starting, not running: marked running once its checks passed (its
+                    # instruments, for what it needs of them), and a refusal never shows it running (_queue_item);
+                    # a step has no checks of its own (each change goes through the gate): running now
+                    if item.kind in ("plan", "script"):
+                        q.pick(item)
+                    else:
+                        q.mark(item, "running")
                     position = q.items.index(item) + 1
                     # a stop from here on ends it: one between two items once let the next one start (Stop sets the
                     # queue pausing under this lock, then stops)
@@ -5129,9 +5216,20 @@ class LabRuntime:
                         before = (self.live or {}).get("run_id")
                         try:
                             with self._device_protection(meta), self.lock.only(uses + self._involved(plan.requires)):
+                                # checked before it reads running: its instruments, for what it needs of them, and
+                                # its preconditions; a refusal says why and never showed it running
+                                checked = self.engine.checked(plan)
+                                if checked[0]:
+                                    report = self.engine._refuse(plan.name, checked[0])
+                                    q.mark(item, "failed", report.message)
+                                    return False, report.message
+                                if self.gate.stop_generation != stops:   # a Stop or a skip while it was checked
+                                    q.mark(item, "stopped", "a person pressed Stop before it started")
+                                    return False, "stopped before it started"
+                                q.mark(item, "running")
                                 report = self.engine.run(plan, meta=dict(meta, queue={
                                     "item": item.id, "position": position, "note": item.note}), folder=item.folder,
-                                    since=since)
+                                    since=since, checked=checked)
                         finally:   # one that ended on an error on its way out ends in the live view too
                             if (self.live or {}).get("run_id") != before:
                                 self._live_ended((self.live or {}).get("run_id"))
@@ -5212,7 +5310,8 @@ class LabRuntime:
         kept = self._kept_version(prep.path)
         queued = kept is not None and kept.approved and self._queue_covered.get(item.id) == kept.number
         text, report = self._script_run(prep, lambda t: t, {"queue": {
-            "item": item.id, "position": position, "note": item.note}}, told=False, queued=queued, since=gen)
+            "item": item.id, "position": position, "note": item.note}}, told=False, queued=queued, since=gen,
+            ready=lambda: q.mark(item, "running"))   # running once its preflight passed, as a plan is
         stopped = self.gate.stop_generation != gen
         if report is None:   # refused, declined or not ready: it never started
             q.mark(item, "stopped" if stopped else "failed", text[:300])
@@ -6970,16 +7069,10 @@ class LabRuntime:
         their manuals: what to look up before writing a card. Only reads Kelvin's files."""
         from ..collection import manuals
         from ..discovery import find_cards
-        from ..homelab import builtin_ids, lab_registry
+        from ..homelab import lab_registry
         registry = lab_registry(self.home, self.collection) if self.home is not None else self.lab.registry
         found = find_cards(query, registry, self.collection)
-        mine = str(self.cards_dir).replace("\\", "/") if self.cards_dir is not None else None
-
-        def origin(card: Any) -> str:
-            source = str(card.source).replace("\\", "/")
-            if mine and source.startswith(mine):
-                return "this lab's version of Kelvin's card" if card.id in builtin_ids() else "this lab's card"
-            return "the instrument collection's" if "/collection/" in source else "Kelvin's"
+        origin = self._card_origin
         lines = []
         if found["cards"]:
             lines.append("Cards Kelvin has%s:" % (" for %r" % query if query else ""))
@@ -7002,6 +7095,43 @@ class LabRuntime:
                 " (and the instrument collection is %s)" % ("switched off" if self.collection is None else
                                                              "not fetched yet")))
         return "\n".join(lines)
+
+    def _card_origin(self, card: Any) -> str:
+        """Whose a card is, in words: Kelvin's, the instrument collection's, this lab's, or this lab's version of
+        Kelvin's card."""
+        from ..homelab import builtin_ids
+        mine = str(self.cards_dir).replace("\\", "/") if self.cards_dir is not None else None
+        source = str(card.source).replace("\\", "/")
+        if mine and source.startswith(mine):
+            return "this lab's version of Kelvin's card" if card.id in builtin_ids() else "this lab's card"
+        return "the instrument collection's" if "/collection/" in source else "Kelvin's"
+
+    def card_text(self, ref: str) -> str:
+        """A card's text (its YAML) as Kelvin has it, by its id (find_card) or by the name of an instrument in the lab
+        that uses it: Kelvin's own, the instrument collection's or this lab's, saying whose it is. So this lab's version
+        of a card is made from what the card is (save_card with version: true), changed only where it doesn't fit,
+        never written again from memory. Only reads Kelvin's cards, never another file."""
+        from ..homelab import builtin_ids, lab_registry
+        ref = str(ref or "").strip()
+        if not ref:
+            return "name a card by its id (find_card lists them), or an instrument in the lab by its name"
+        inst = self.lab.instruments.get(ref)
+        try:
+            card = inst.card if inst is not None else (
+                lab_registry(self.home, self.collection) if self.home is not None else self.lab.registry).get(ref)
+        except KeyError:
+            return "Kelvin has no card %r (find_card lists the cards Kelvin has)" % ref
+        try:
+            text = Path(card.source).read_text(encoding="utf-8")
+        except (OSError, TypeError, ValueError):   # made from text, not a file: as it was read
+            text = yaml.safe_dump(card.data or {}, sort_keys=False, allow_unicode=True)
+        head = "%s: %s (%s card, %s)%s" % (card.id, card.model, self._card_origin(card).replace(" card", ""),
+                                            card.status, ", used by %s" % inst.name if inst is not None else "")
+        after = ("\n\nThis lab's version of it: the text above, changed only where it doesn't fit this instrument "
+                 "(from the lab's scripts, the maker's examples or its manual, never from memory), checked "
+                 "(check_card, try_card), then save_card with version: true; until a person reviews it, every output "
+                 "change on it asks them." if card.id in builtin_ids() else "")
+        return head + "\n" + text.rstrip() + after
 
     def check_card(self, text: str) -> str:
         card, problems, warnings = carddraft.check(text)
@@ -7029,14 +7159,20 @@ class LabRuntime:
     def _unreadable(self, path: Any, importing: bool = False) -> Optional[str]:
         """Why Kelvin's AI may not read this file a chat or an agent named (None: it may): it is in Kelvin's own
         folders, may hold sign-ins, or is in a run of unshared work the viewer of this thread may not see, wherever
-        that run is kept. importing (import_data): what a person put in the data folder's runs is theirs (_pasted)."""
+        that run is kept. importing (import_data): what a person put in the data folder's runs is theirs (_pasted),
+        and what run_python saved in its own folder is the code's (_python_made), when this chat may see every run
+        that code read."""
         from .. import folderfiles
         try:
             target = Path(str(path)).expanduser().resolve()
         except (OSError, RuntimeError, ValueError):
             return None
         folder = folderfiles.mine(target, self._kelvins())
-        if folder is not None and not (importing and self._pasted(target)):
+        made = self._python_made(target) if importing else None
+        if made is not None:   # run_python's own output: only from runs this chat may see
+            if any(not self.may_see(self._run_marks(d)) for d in made["runs"].values()):
+                return "run_python made %s from a run of unshared work this chat may not see" % path
+        elif folder is not None and not (importing and self._pasted(target)):
             return ("%s is in Kelvin's own folder (%s), which holds the lab config, the settings, the accounts, the "
                     "instrument cards, and everyone's chats and runs: Kelvin's AI never reads there (describe_run and "
                     "get_run_data read runs)%s" % (path, folder, "; another program's data that a person put in the "
@@ -7048,6 +7184,34 @@ class LabRuntime:
         if run is not None and not self.may_see(self._run_marks(run)):
             return "that is in a Kelvin run of unshared work this chat may not see"
         return None
+
+    def _python_made(self, target: Path) -> Optional[Dict[str, Any]]:
+        """What run_python saved, a file (resolved) in one of its folders (the data folder's python/<date-time>/), or
+        such a folder: {folder, code: its code.py, runs: the runs the code read, {id: folder}}. None for anything else,
+        and for what Kelvin itself wrote there (the code, its job and result, snapshots of runs still measured). The
+        one door from run_python to import_data: the run made of it says it was computed, by which code from which
+        runs, and is never taken for one Kelvin measured (_imported)."""
+        from ..sandbox import INTERNAL
+        if self.data_dir is None:
+            return None
+        try:
+            root = (Path(self.data_dir) / "python").resolve()
+            inner = target.relative_to(root).parts
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not inner or (len(inner) > 1 and (inner[1] in INTERNAL or inner[1] in ("runs", ".matplotlib"))):
+            return None
+        folder = root / inner[0]
+        try:
+            job = json.loads((folder / "job.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None   # not a folder run_python made
+        runs = job.get("runs") if isinstance(job, dict) else None
+        if not isinstance(runs, dict):
+            return None
+        return {"folder": folder, "code": folder / "code.py",
+                "runs": {str(rid): Path(str((item or {}).get("folder") or "")) for rid, item in runs.items()
+                         if isinstance(item, dict)}}
 
     def _pasted(self, target: Path) -> bool:
         """Whether a file or folder (resolved) is one a person put in this person's data folder's runs, where a chat's
@@ -8381,14 +8545,18 @@ class LabRuntime:
         return lines
 
     def _script_run(self, prep: Any, mark: Callable[[str], str], extra: Optional[Dict[str, Any]] = None,
-                    told: bool = True, queued: bool = False, since: Optional[int] = None) -> Tuple[str, Any]:
+                    told: bool = True, queued: bool = False, since: Optional[int] = None,
+                    ready: Optional[Callable[[], None]] = None) -> Tuple[str, Any]:
         """A prepared script, run after its one approval: (the answer, its ScriptReport; None when it never started:
         refused, declined, stopped, or an instrument it opens not ready). extra: more for its run's record (its place
         in the queue). told: a notice when it ends (a queue's account says it at the end instead). queued: an approved
         version of one of the lab's experiments the queue's approval covered, which runs without asking again. In
         auto mode an approved version is rehearsed first and covered as a plan is (_auto_experiment). since: the
         gate's stops when the run was asked for (the tool's call, the queue picking it; else now): a person's Stop
-        since then, while it was rehearsed, approved or starting, means it doesn't run, never that it runs anyway."""
+        since then, while it was rehearsed, approved or starting, means it doesn't run, never that it runs anyway.
+        ready: called once its preflight passed (the queue's item reads running from then). Its preflight stops it for
+        what the drives it sets need (their read-back, guards, interlocks and lab watches: RunEngine.drive_needs); a
+        reading that failed which they don't need is said on its card, as the script may never read it."""
         from .. import scriptrun
         gate, lab = self.gate, self.lab
         since = gate.stop_generation if since is None else since
@@ -8406,11 +8574,17 @@ class LabRuntime:
         if problems:
             gate.log.write("run_refused", by=gate.operator, plan=prep.name, reason="; ".join(problems))
             return "script not run: refused: " + "; ".join(problems), None
-        bad = [r for r in self.engine.preflight(names, fresh=bool(grants)) if not r.ok] if names else []
+        found = prep.found
+        needs = self.engine.drive_needs(list(found.drives) + list(found.open), [
+            tuple(a.split(".", 1)) for a in found.actions if "." in a], driving=bool(grants or found.actions))
+        checked = self.engine.preflight(names, fresh=bool(grants), needs=needs) if names else []
+        bad, unread = self.engine.judge(checked, needs, unused="if the script reads it, it gets that error")
         if bad:
-            return "script not run: preflight failed: " + "; ".join(str(r) for r in bad), None
+            return "script not run: preflight failed: " + "; ".join(bad), None
+        if ready is not None:
+            ready()
         # said right under what runs: the person approves the file, and what it imports beside it, as they are now
-        request.items[1:1] = self._changed_since(prep)
+        request.items[1:1] = self._changed_since(prep) + ["Can't be read now: %s" % u for u in unread]
         kept = self._kept_version(prep.path)
         if kept is not None:   # one of the lab's experiments: which version, and what changed in a new one
             if not kept.intact:
@@ -8486,7 +8660,7 @@ class LabRuntime:
                 if cols["axes"] else ""))
         if report.left:
             lines.append("left away from safe, as the script left them: " + ", ".join(report.left))
-        lines += ["warning: " + w for w in report.warnings]
+        lines += ["warning: " + w for w in unread + list(report.warnings)]   # a reading that failed as it started
         if report.files:
             lines.append("files it wrote beside the script: %s%s" % (", ".join(report.files[:10]),
                                                                      " …" if len(report.files) > 10 else ""))

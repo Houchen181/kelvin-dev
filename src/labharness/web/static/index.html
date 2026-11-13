@@ -795,6 +795,15 @@
             </select>
           </div>
           <div class="field">
+            <label for="wakes-per-day" title="How often Kelvin may continue one of your chats by itself (a wait it asked for, or a reply at once to the sequence). Each time is a model turn nobody started, on your model use. Readings at intervals need none: a plan with time: every, for takes them">Continue a chat by itself</label>
+            <select id="wakes-per-day" name="wakes_per_day">
+              <option value="12">Up to 12 times a day</option>
+              <option value="24">Up to 24 times a day</option>
+              <option value="48">Up to 48 times a day</option>
+              <option value="96">Up to 96 times a day</option>
+            </select>
+          </div>
+          <div class="field">
             <label for="reviewer" title="Another model reviews every plan before it runs">Second opinion on plans</label>
             <select id="reviewer" name="reviewer"></select>
           </div>

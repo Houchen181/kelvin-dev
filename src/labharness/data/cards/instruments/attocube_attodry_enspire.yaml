@@ -11,6 +11,7 @@ notes:
   - "Temperature and field act only while their control is on (Start in the WebApp's sample temperature and magnet panels). A field set point moves the magnet at once while field control is on."
   - "Make safe sets the field set point to zero and waits for the field, stops field control, sets the temperature set point to the lowest limit and stops temperature control. Check that this is how your system should be left before marking the card reviewed."
   - "Left out: going to base temperature, sample exchange, the pumps and valves, ramp rates and the magnet's ramp zones. Run them from the WebApp."
+  - "A reading the controller answers with an error number (one attoDRY2100 answered its sample temperature with 31 while that sensor was unplugged) shows with the controller's own name for it, which Kelvin asks it for (com.attocube.system.errorNumberToString, as attocube's Python API for the attoDRY2100 asks on every error), or with the number alone when it doesn't say. A run that doesn't use that reading still runs."
 identify:
   idn: "^attocube,\\s*atto\\s*DRY"
   example: "attocube,attoDRY2100XL,<serial number>,<firmware>"
@@ -23,6 +24,7 @@ jsonrpc:
   fields: { api: 2 }
   errors: first
   errors_at: { com.attocube.cryostat.interface.system.isCryostatSane: 2 }
+  error_text: "com.attocube.system.errorNumberToString 0"   # language 0: the error's name, as attocube's API asks it
   identity: [com.attocube.cryostat.interface.system.getDeviceType, com.attocube.system.getSerialNumber,
              com.attocube.system.getFirmwareVersion]
   switches:
