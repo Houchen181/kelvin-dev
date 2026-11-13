@@ -30,6 +30,18 @@ def run(coro):
     return asyncio.run(coro)
 
 
+@pytest.fixture(autouse=True)
+def no_runs_left_over():
+    """Each test starts and ends with no bridge run going (claudecode_native keeps them module-wide)."""
+    from labharness.web.providers import claudecode_native
+    yield
+    for live in list(claudecode_native.RUNS):
+        live.close()
+    claudecode_native.RUNS.clear()
+    claudecode_native.CLAIMED.clear()
+    claudecode_native.RECORDS.clear()
+
+
 def test_tool_markup_never_reaches_the_page():
     s = Shown()
     pieces = ["Checking", " the gate.\n<tool", '_call name="get_value">{"a"', ': 1}</tool_c', "all>", " Done <", "b>"]
@@ -239,8 +251,8 @@ def test_a_turn_with_markup_but_nothing_to_run_is_asked_once_more(tmp_path, monk
 
     async def emit(e):
         events.append(e)
-    result = run(ClaudeCodeProvider(["claude"], tmp_path).stream("sonnet", "You are Kelvin.",
-                                                                  [{"role": "user", "text": "is the queue done?"}],
+    result = run(ClaudeCodeProvider(["claude"], tmp_path, native_tools=False).stream(
+        "sonnet", "You are Kelvin.", [{"role": "user", "text": "is the queue done?"}],
                                                                   LOOKUPS, emit))
     assert len(runs) == 2 and "a tool result you wrote yourself" in runs[1] and "<kelvin_note>" not in runs[0]
     assert runs[1].startswith(runs[0])   # the same conversation, then Kelvin's note
@@ -256,9 +268,8 @@ def test_asked_once_only_then_said_plainly(tmp_path, monkeypatch):
 
     async def emit(e):
         pass
-    result = run(ClaudeCodeProvider(["claude"], tmp_path).stream("sonnet", "You are Kelvin.",
-                                                                  [{"role": "user", "text": "all off?"}], LOOKUPS,
-                                                                  emit))
+    result = run(ClaudeCodeProvider(["claude"], tmp_path, native_tools=False).stream(
+        "sonnet", "You are Kelvin.", [{"role": "user", "text": "all off?"}], LOOKUPS, emit))
     assert len(runs) == 2 and result.stop_reason == "end" and result.blocks == []
     assert "nothing ran" in result.note
     # with no tools to call (a summary, a second opinion's plain answer) there is nothing to ask again for
@@ -275,8 +286,8 @@ def test_a_recorded_invoke_turn_works_the_lab(parts, monkeypatch):
     runs = replies(monkeypatch, "Switching both off.\n" + ALL_OFF, "Both are off now.")
 
     async def main():
-        agent = ChatAgent(runtime, store, build_server(runtime), {"claudecode": ClaudeCodeProvider(["claude"],
-                                                                                                    store.root)})
+        agent = ChatAgent(runtime, store, build_server(runtime),
+                          {"claudecode": ClaudeCodeProvider(["claude"], store.root, native_tools=False)})
         await agent.start()
         try:
             chat = store.create("claudecode:sonnet")
@@ -336,7 +347,7 @@ def test_the_bridge_passes_pictures_to_claude(parts, monkeypatch, tmp_path):
     from test_web import client_for
     log = tmp_path / "calls.jsonl"
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
-    client, headers = client_for(parts, {"claudecode": ClaudeCodeProvider(FAKE, parts[2].root)})
+    client, headers = client_for(parts, {"claudecode": ClaudeCodeProvider(FAKE, parts[2].root, native_tools=False)})
     events = send_photo(client, headers, "claudecode:sonnet")
     assert not [e for e in events if e["type"] == "note"]                 # no "can't see pictures" any more
     assert "I see 1 picture." in "".join(e.get("delta") or "" for e in events if e["type"] == "text")
@@ -378,11 +389,12 @@ def test_kelvins_own_plots_reach_the_bridge_model(tmp_path, monkeypatch):
     assert call["stdin"].startswith("<conversation>")
 
 
-def test_a_chat_turn_through_claude_code(tmp_path, monkeypatch):
+def test_a_chat_turn_through_claude_code_by_the_text_protocol(tmp_path, monkeypatch):
+    """The text protocol (the fallback for a `claude` that can't take Kelvin's tools as its own)."""
     log = tmp_path / "calls.jsonl"
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-not-for-claude-code")
-    provider = ClaudeCodeProvider(FAKE, tmp_path)
+    provider = ClaudeCodeProvider(FAKE, tmp_path, native_tools=False)
     events = []
 
     async def emit(e):
@@ -643,3 +655,530 @@ def test_screen_tools(monkeypatch):
             return names, [b.type for b in shot.content]
     names, kinds = run(listed())
     assert {"screenshot", "click_at", "type_into", "press_keys"} <= set(names) and kinds == ["image", "text"]
+
+
+# ---------------------------------------------------------------------- native tool calls (claudecode_native.py)
+
+from labharness.web.providers import claudecode_native as native  # noqa: E402
+from labharness.web.providers.base import ANSWER, EFFORT, RESUMABLE, SESSION  # noqa: E402
+
+GET_VALUE = [{"name": "get_value", "description": "Read a value.", "schema": {"type": "object"}}]
+
+
+async def ignore(e):
+    pass
+
+
+def script(tmp_path, monkeypatch, *messages):
+    """The fake model's messages, in order across its runs (fake_claude.py, FAKE_CLAUDE_SCRIPT); its log."""
+    path = tmp_path / "script.json"
+    path.write_text(json.dumps(list(messages)), encoding="utf-8")
+    monkeypatch.setenv("FAKE_CLAUDE_SCRIPT", str(path))
+    log = tmp_path / "claude.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    monkeypatch.setenv("FAKE_CLAUDE_HOME", str(tmp_path / "sessions"))
+    return log
+
+
+def entries(log, key):
+    return [e for e in (json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()) if key in e]
+
+
+def first_messages(log):
+    """The first message of each run (after Kelvin's handshake), as text."""
+    out = {}
+    for e in entries(log, "stdin"):
+        line = e["stdin"]
+        if line["type"] == "user" and e["pid"] not in out:
+            out[e["pid"]] = "\n".join(b.get("text", "") for b in line["message"]["content"] if b["type"] == "text")
+    return list(out.values())
+
+
+def bridge_chat(parts, texts, model="claudecode:sonnet", incognito=False, on_event=None):
+    """Answers through the bridge's native way with the fake `claude`: (the provider, each answer's events, the
+    chat). on_event(agent, chat_id, event): as each event is emitted (to steer or stop at a moment)."""
+    runtime, _, store = parts
+    provider = ClaudeCodeProvider(FAKE, store.root)
+
+    async def main():
+        agent = ChatAgent(runtime, store, build_server(runtime), {"claudecode": provider})
+        await agent.start()
+        try:
+            chat = store.create(model, incognito=incognito)
+            answers = []
+            for text in texts:
+                events = []
+
+                async def emit(e):
+                    events.append(e)
+                    if on_event:
+                        on_event(agent, chat["id"], e)
+                await asyncio.wait_for(agent.run_turn(chat["id"], text, model, agent.claim(chat["id"], model), emit),
+                                       60)
+                answers.append(events)
+            return answers, store.load(chat["id"])
+        finally:
+            await agent.close()
+    answers, chat = anyio.run(main)
+    return provider, answers, chat
+
+
+def test_a_bridge_answer_calls_kelvins_tools_natively_and_keeps_its_thinking(parts, tmp_path, monkeypatch):
+    """The comparison of 2026-11-12: the same Claude was weaker through the bridge, its calls written as text and its
+    thinking lost at every step. Now one `claude` run lasts the whole answer, Kelvin's tools are its own (an MCP server
+    inside Kelvin), every call still runs through Kelvin's own path, and the model's thinking carries on."""
+    log = script(tmp_path, monkeypatch,
+                 [{"think": "The gate is on the smu."}, {"text": "Checking the gate."},
+                  {"call": "get_value", "input": {"instrument": "smu", "parameter": "V"}}],
+                 [{"text": "It reads {result}. (I thought: {thought})"}])
+    provider, answers, chat = bridge_chat(parts, ["Where is the gate?"])
+    events = answers[0]
+    start = next(e for e in events if e["type"] == "tool_start")
+    end = next(e for e in events if e["type"] == "tool_end")
+    assert start["name"] == "get_value" and start["id"].startswith("toolu_fake") and not end["is_error"]
+    assert any(e["type"] == "thinking" for e in events)
+    user, step, results, final = chat["messages"]
+    assert step["blocks"] == [{"type": "text", "text": "Checking the gate."},
+                              {"type": "tool_call", "id": start["id"], "name": "get_value",
+                               "input": {"instrument": "smu", "parameter": "V"}}]
+    assert results["results"][0]["id"] == start["id"]
+    assert final["blocks"][0]["text"] == "It reads %s. (I thought: The gate is on the smu.)" % end["content"]
+    assert step["raw"]["bridge"] == "native" and step["raw"]["session"] == final["raw"]["session"]
+    assert len(entries(log, "args")) == 1                      # one run for the whole answer: its thinking goes on
+    got = entries(log, "result_for")                           # Kelvin's result, as the call's own answer
+    assert [(g["result_for"], g["tool"], g["content"], g["is_error"]) for g in got] == [
+        (start["id"], "get_value", [{"type": "text", "text": end["content"]}], False)]
+    args, system = entries(log, "args")[0]["args"], entries(log, "args")[0]["system"]
+    assert args[args.index("--mcp-config") + 1] == native.CONFIG and args[args.index("--tools") + 1] == ""
+    assert args[args.index("--allowedTools") + 1] == "mcp__kelvin" and "--strict-mcp-config" in args
+    assert args[args.index("--system-prompt-snapshot") + 1] == "off"   # a resumed session takes today's prompt
+    assert "--replay-user-messages" in args and "--no-session-persistence" not in args   # a chat's session is kept
+    assert "How to call Kelvin's tools here" not in system and "## get_value" not in system   # no text protocol
+    listed = entries(log, "tools")[0]["tools"]
+    assert "get_value" in listed and "find_tools" in listed
+    assert not provider.live and provider.native               # the run ended with the answer
+
+
+def test_the_next_answer_goes_on_in_the_same_session(parts, tmp_path, monkeypatch):
+    log = script(tmp_path, monkeypatch,
+                 [{"think": "Gate first."}, {"call": "get_value", "input": {"instrument": "smu", "parameter": "V"}}],
+                 [{"text": "Done."}],
+                 [{"text": "Still here; I thought: {thought}"}])
+    _, answers, chat = bridge_chat(parts, ["Where is the gate?", "And what did you think?"])
+    runs = entries(log, "session")
+    assert len(runs) == 2 and runs[1]["resumed"] == runs[0]["session"] and not runs[1]["forked"]
+    second = first_messages(log)[1]
+    assert "And what did you think?" in second and "earlier_conversation" not in second   # only what's new
+    assert "Where is the gate?" not in second
+    assert chat["messages"][-1]["blocks"][0]["text"] == "Still here; I thought: Gate first."
+
+
+def test_an_incognito_chat_keeps_no_session(parts, tmp_path, monkeypatch):
+    log = script(tmp_path, monkeypatch, [{"text": "Hello."}], [{"text": "Again."}])
+    bridge_chat(parts, ["hi", "and again"], incognito=True)
+    runs = entries(log, "args")
+    assert all("--no-session-persistence" in r["args"] and "--resume" not in r["args"] for r in runs)
+    assert not (tmp_path / "sessions").exists()
+    second = first_messages(log)[1]   # a new session each answer, with the conversation so far
+    assert second.startswith("<earlier_conversation>") and "hi" in second and "Hello." in second
+
+
+def test_a_new_session_when_another_model_answers(parts, tmp_path, monkeypatch):
+    """Another Claude model now (thinking is a model's own), or another model answered meanwhile: a new session, with
+    the conversation so far as a record, its calls as lines of it, not markup to copy."""
+    log = script(tmp_path, monkeypatch,
+                 [{"call": "get_value", "input": {"instrument": "smu", "parameter": "V"}}], [{"text": "0 V."}],
+                 [{"text": "Opus here."}])
+    runtime, _, store = parts
+    provider = ClaudeCodeProvider(FAKE, store.root)
+
+    async def main():
+        agent = ChatAgent(runtime, store, build_server(runtime), {"claudecode": provider})
+        await agent.start()
+        try:
+            chat = store.create("claudecode:sonnet")
+            for text, model in (("gate?", "claudecode:sonnet"), ("and now, Opus?", "claudecode:opus")):
+                await agent.run_turn(chat["id"], text, model, agent.claim(chat["id"], model), ignore)
+        finally:
+            await agent.close()
+    anyio.run(main)
+    runs = entries(log, "args")
+    assert "--resume" not in runs[1]["args"] and runs[1]["args"][runs[1]["args"].index("--model") + 1] == "opus"
+    second = first_messages(log)[1]
+    assert '(called get_value {"instrument": "smu", "parameter": "V"})' in second and "<tool_call" not in second
+    assert "and now, Opus?" in second.split("</earlier_conversation>")[1]   # the message itself after the record
+
+
+def test_steering_reaches_the_model_with_the_results(parts, tmp_path, monkeypatch):
+    """A message the person sends while a call runs goes to the running `claude` before the call's result, and Claude
+    Code takes it in with the result, in the same answer."""
+    log = script(tmp_path, monkeypatch,
+                 [{"call": "get_value", "input": {"instrument": "smu", "parameter": "V"}}],
+                 [{"text": "Heard: {said}"}])
+
+    def on_event(agent, chat_id, e):
+        if e["type"] == "tool_start":
+            assert agent.steer(chat_id, "Also tell me the laser power.")
+    _, answers, chat = bridge_chat(parts, ["gate?"], on_event=on_event)
+    assert [m["role"] for m in chat["messages"]] == ["user", "assistant", "tool", "user", "assistant"]
+    assert "Also tell me the laser power." in entries(log, "taken")[0]["taken"]
+    assert "Also tell me the laser power." in chat["messages"][-1]["blocks"][0]["text"]
+    assert len(entries(log, "args")) == 1
+
+
+def test_a_message_a_claude_answers_in_a_turn_of_its_own_still_belongs_to_the_answer(parts, tmp_path, monkeypatch):
+    """A `claude` that doesn't take the person's message in with the result answers it after the answer, in a turn of
+    its own: its words still come with this answer (the echo of the message says it hadn't been taken in)."""
+    monkeypatch.setenv("FAKE_CLAUDE_QUEUE", "1")
+    log = script(tmp_path, monkeypatch,
+                 [{"call": "get_value", "input": {"instrument": "smu", "parameter": "V"}}],
+                 [{"text": "The gate is at 0 V."}],
+                 [{"text": "Then: {said}"}])
+
+    def on_event(agent, chat_id, e):
+        if e["type"] == "tool_start":
+            assert agent.steer(chat_id, "Also tell me the laser power.")
+    _, answers, chat = bridge_chat(parts, ["gate?"], on_event=on_event)
+    final = chat["messages"][-1]["blocks"][0]["text"]
+    assert final.startswith("The gate is at 0 V.\n\nThen: ") and "Also tell me the laser power." in final
+    assert not entries(log, "taken") and len(entries(log, "args")) == 1
+
+
+def test_a_stopped_answer_isnt_sent_again_what_its_session_took_in(parts, tmp_path, monkeypatch):
+    """Stop while the model wrote on after its results: they reached it. Stop while it answered a message: the message
+    reached it. The next answer goes on in the session without either again (a request the person stopped must not
+    arrive twice), saying the answer was stopped."""
+    log = script(tmp_path, monkeypatch,
+                 [{"call": "get_value", "input": {"instrument": "smu", "parameter": "V"}}],
+                 [{"text": "Thinking it over", "slow": True}],
+                 [{"text": "Back."}],
+                 [{"text": "Ramping", "slow": True}],
+                 [{"text": "OK."}])
+
+    def on_event(agent, chat_id, e):
+        if e["type"] == "text" and e["delta"] in ("Thinkin", "Ramping"):
+            agent.stop(chat_id)
+    provider, answers, chat = bridge_chat(parts, ["gate?", "what now?", "RAMP THE MAGNET TO 5 T", "what happened?"],
+                                          on_event=on_event)
+    assert [a[-1]["reason"] for a in answers] == ["stopped", "end", "stopped", "end"]
+    runs = entries(log, "session")
+    assert all(r["resumed"] == runs[0]["session"] for r in runs[1:])          # one session all along
+    heard = [e["heard"] for e in entries(log, "heard")]
+    assert heard.count(heard[0]) == 1 and len(heard) == 4                     # each message reached it once
+    second, fourth = first_messages(log)[1], first_messages(log)[3]
+    assert native.MISSED not in second and "<tool_result" not in second and "what now?" in second
+    assert second.startswith(native.STOPPED % "after writing: “Thinking it over”")
+    assert "RAMP THE MAGNET" not in fourth and "what happened?" in fourth
+    assert fourth.startswith(native.STOPPED % "after writing: “Ramping”")
+    assert (provider.cwd / "bridge-sessions.json").exists()
+
+
+def test_a_message_still_waiting_when_the_answer_ends_goes_with_the_next(parts, tmp_path, monkeypatch):
+    """A `claude` that would answer the person's message in a turn of its own, and doesn't begin it within QUEUED_S:
+    the answer ends, the run with it (so it never answers unseen), and the message goes with the next answer."""
+    monkeypatch.setenv("FAKE_CLAUDE_QUEUE", "1")
+    monkeypatch.setenv("FAKE_CLAUDE_QUEUE_DELAY", "5")
+    monkeypatch.setattr(native, "QUEUED_S", 0.3)
+    log = script(tmp_path, monkeypatch,
+                 [{"call": "get_value", "input": {"instrument": "smu", "parameter": "V"}}],
+                 [{"text": "The gate is at 0 V."}],
+                 [{"text": "Now: {said}"}])
+
+    def on_event(agent, chat_id, e):
+        if e["type"] == "tool_start":
+            assert agent.steer(chat_id, "Also tell me the laser power.")
+    provider, answers, chat = bridge_chat(parts, ["gate?", "and?"], on_event=on_event)
+    assert chat["messages"][4]["blocks"][0]["text"] == "The gate is at 0 V."
+    second = first_messages(log)[1]
+    assert "Also tell me the laser power." in second and "and?" in second
+    assert len([h for h in entries(log, "heard") if "laser power" in h["heard"]]) == 1
+
+
+def test_a_call_claude_code_gives_up_never_runs(parts, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_EARLY", "1")
+    monkeypatch.setenv("FAKE_CLAUDE_CANCEL", "1")
+    log = script(tmp_path, monkeypatch,
+                 [{"call": "get_value", "input": {"instrument": "smu", "parameter": "V"}}],
+                 [{"text": "Never mind."}])
+    _, answers, chat = bridge_chat(parts, ["gate?"])
+    assert not [e for e in answers[0] if e["type"] == "tool_start"] and not entries(log, "result_for")
+    assert [m["role"] for m in chat["messages"]] == ["user", "assistant"]
+    assert chat["messages"][-1]["blocks"] == [{"type": "text", "text": "Never mind."}]
+
+
+def bridge_step(provider, history, own):
+    """One step of the provider's, as a chat's answer (own) or an analysis in the same chat would take it (a task,
+    which keeps the context it was made in, as agent.py's steps do)."""
+    token, held = ANSWER.set(own), SESSION.set("chat1")
+    try:
+        return asyncio.ensure_future(provider.stream("opus", "You are Kelvin.", history, GET_VALUE, ignore))
+    finally:
+        ANSWER.reset(token)
+        SESSION.reset(held)
+
+
+def with_result(history, result):
+    call = result.tool_calls[0]
+    return history + [{"role": "assistant", "provider": "claudecode", "blocks": result.blocks, "raw": result.raw},
+                      {"role": "tool", "results": [{"id": call["id"], "name": "get_value", "content": "0 V",
+                                                    "is_error": False}]}]
+
+
+def test_long_calls_keep_their_run(tmp_path, monkeypatch):
+    """A chat's answer's run waits as long as its calls take (a person deciding, a run going); a second opinion's or
+    an analysis's run left waiting ends after ADRIFT_S, but never under the step that goes on in it."""
+    log = script(tmp_path, monkeypatch, [{"call": "get_value", "input": {}}], [{"call": "get_value", "input": {}}],
+                 [{"text": "Analysis done."}], [{"text": "Answer done."}])
+    monkeypatch.setattr(native, "ADRIFT_S", 0.2)
+    provider = ClaudeCodeProvider(FAKE, tmp_path)
+
+    async def main():
+        chat, analysis = [{"role": "user", "text": "gate?"}], [{"role": "user", "text": "look at run 7"}]
+        mine = await bridge_step(provider, chat, True)            # a chat's answer: waits on its call
+        theirs = await bridge_step(provider, analysis, False)     # an analysis: waits on its call
+        await asyncio.sleep(0.5)                                  # both calls take longer than ADRIFT_S
+        done = await bridge_step(provider, with_result(analysis, theirs), False)   # goes on in its run
+        assert len(provider.live) == 1 and provider.live[0].owned   # the chat's run is still there
+        one = await bridge_step(provider, with_result(chat, mine), True)
+        return done, one
+    done, one = run(main())
+    assert done.blocks == [{"type": "text", "text": "Analysis done."}]
+    assert one.blocks == [{"type": "text", "text": "Answer done."}]
+    assert len(entries(log, "args")) == 2 and not native.RUNS        # two runs, each went on to its end
+
+
+def test_a_chats_answer_ending_leaves_an_analysis_in_it_going(tmp_path, monkeypatch):
+    log = script(tmp_path, monkeypatch, [{"call": "get_value", "input": {}}], [{"call": "get_value", "input": {}}],
+                 [{"text": "Analysis done."}])
+    provider = ClaudeCodeProvider(FAKE, tmp_path)
+
+    async def main():
+        analysis = [{"role": "user", "text": "look at run 7"}]
+        await bridge_step(provider, [{"role": "user", "text": "gate?"}], True)
+        theirs = await bridge_step(provider, analysis, False)
+        held = SESSION.set("chat1")
+        try:
+            provider.end_answer()                                 # the chat's answer ends (Stop during its call)
+        finally:
+            SESSION.reset(held)
+        assert len(provider.live) == 1 and not provider.live[0].owned   # its run went, the analysis's didn't
+        return await bridge_step(provider, with_result(analysis, theirs), False)
+    assert run(main()).blocks == [{"type": "text", "text": "Analysis done."}]
+    assert len(entries(log, "args")) == 2 and not native.RUNS
+
+
+def test_what_sessions_took_in_is_one_record_for_every_provider_object(tmp_path):
+    """A Settings save makes new provider objects while an answer runs on an old one: they share one record (and its
+    file), so the next answer, on the new one, isn't sent again what the old one saw taken in."""
+    old, new = ClaudeCodeProvider(FAKE, tmp_path), ClaudeCodeProvider(FAKE, tmp_path)
+    new.record.taken("s_b")
+    old.record.add("s_a", {"u:ramp", "r:c1"})
+    new.record.add("s_b", {"u:b"}, {"u:late"})
+    assert new.record.taken("s_a") == {"u:ramp", "r:c1"} and new.record.unheard("s_b") == {"u:late"}
+    native.RECORDS.clear()                                                    # Kelvin starts again
+    again = ClaudeCodeProvider(FAKE, tmp_path).record
+    assert again.taken("s_a") == {"u:ramp", "r:c1"} and again.taken("s_b") == {"u:b"}
+    again.add("s_b", {"u:late"})                                              # taken in at last
+    assert again.unheard("s_b") == set()
+
+
+def test_tools_that_dont_reach_claude_code_mean_the_text_protocol(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(tmp_path / "calls.jsonl"))
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_FAILED", "1")
+    provider = ClaudeCodeProvider(FAKE, tmp_path)
+    result = run(provider.stream("opus", "You are Kelvin.", [{"role": "user", "text": "gate?"}], GET_VALUE, ignore))
+    assert result.tool_calls[0]["name"] == "get_value" and result.raw is None and provider.native is False
+    assert "didn't reach Claude Code (failed)" in result.note and not provider.live
+
+
+def test_stop_during_a_call_ends_the_run_and_the_next_answer_hears_kelvins_result(parts, tmp_path, monkeypatch):
+    log = script(tmp_path, monkeypatch,
+                 [{"call": "get_value", "input": {"instrument": "smu", "parameter": "V"}}],
+                 [{"text": "Back: {said}"}])
+    stopped = []
+
+    def on_event(agent, chat_id, e):
+        if e["type"] == "tool_start" and not stopped:
+            stopped.append(agent.stop(chat_id))
+    provider, answers, chat = bridge_chat(parts, ["gate?", "what happened?"], on_event=on_event)
+    assert answers[0][-1] == {"type": "turn_end", "reason": "stopped"} and not provider.live
+    runs = entries(log, "session")
+    assert runs[1]["resumed"] == runs[0]["session"]       # the session kept the call, marked unfinished
+    second = first_messages(log)[1]
+    kept = chat["messages"][2]["results"][0]                 # as Kelvin recorded it (done, or stopped mid-way)
+    assert second.startswith(native.MISSED) and kept["content"] in second and '<tool_result name="get_value"' in second
+    assert second.index("</tool_result>") < second.index("what happened?")
+
+
+@pytest.mark.parametrize("early", [False, True])
+def test_a_message_with_several_calls_is_one_step(parts, tmp_path, monkeypatch, early):
+    """Claude Code asks for an MCP server's calls one at a time unless they may run together: Kelvin's tools say so,
+    so a message's calls are one step of Kelvin's, as with every model (a second opinion's 8 rounds stay 8 messages).
+    early: Claude Code asks for a call while the model is still writing its message; the step still waits for all of
+    it."""
+    if early:
+        monkeypatch.setenv("FAKE_CLAUDE_EARLY", "1")
+    log = script(tmp_path, monkeypatch,
+                 [{"text": "Reading both."}, {"call": "get_value", "input": {"instrument": "smu", "parameter": "V"}},
+                  {"call": "get_value", "input": {"instrument": "smu", "parameter": "output"}},
+                  {"text": "Both asked for."}],
+                 [{"text": "Done."}])
+    _, answers, chat = bridge_chat(parts, ["the smu?"])
+    user, step, results, final = chat["messages"]
+    assert step["blocks"][0] == {"type": "text", "text": "Reading both.Both asked for."}
+    assert [(b["name"], b["input"]["parameter"]) for b in step["blocks"][1:]] == [("get_value", "V"),
+                                                                                   ("get_value", "output")]
+    assert [r["id"] for r in results["results"]] == [b["id"] for b in step["blocks"][1:]]
+    assert len(entries(log, "result_for")) == 2 and entries(log, "tools")[0]["always_loaded"]
+
+
+def test_tools_loaded_mid_answer_reach_the_running_claude(parts, tmp_path, monkeypatch):
+    log = script(tmp_path, monkeypatch,
+                 [{"call": "find_tools", "input": {"query": "watches"}}],
+                 [{"call": "watches", "input": {}}],
+                 [{"text": "Watching: {result}"}])
+    _, answers, chat = bridge_chat(parts, ["what are you watching?"])
+    lists = [e["tools"] for e in entries(log, "tools")]
+    assert "watches" not in lists[0] and "watches" in lists[-1]   # told of the new list, it fetched it again
+    assert [e["name"] for e in answers[0] if e["type"] == "tool_start"] == ["find_tools", "watches"]
+    assert [e["tool"] for e in entries(log, "result_for")] == ["find_tools", "watches"]
+
+
+def test_an_old_claude_gets_the_text_protocol(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(tmp_path / "calls.jsonl"))
+    monkeypatch.setenv("FAKE_CLAUDE_NO_NATIVE", "1")
+    provider = ClaudeCodeProvider(FAKE, tmp_path)
+    result = run(provider.stream("opus", "You are Kelvin.", [{"role": "user", "text": "gate?"}], GET_VALUE, ignore))
+    assert result.tool_calls[0]["name"] == "get_value" and result.raw is None    # read from the text protocol
+    assert provider.native is False and "can't take Kelvin's tools as its own" in result.note
+    result = run(provider.stream("opus", "You are Kelvin.", [{"role": "user", "text": "gate?"}], GET_VALUE, ignore))
+    assert not result.note                                                       # said once
+    assert not list(tmp_path.glob("system-*"))
+
+
+def test_a_claude_without_some_flags_still_goes_natively(tmp_path, monkeypatch):
+    log = script(tmp_path, monkeypatch, [{"text": "Fine."}], [{"text": "Fine again."}])
+    monkeypatch.setenv("FAKE_CLAUDE_NO_SNAPSHOT", "1")
+    monkeypatch.setenv("FAKE_CLAUDE_OLD", "1")
+    provider = ClaudeCodeProvider(FAKE, tmp_path)
+
+    async def answer():
+        effort = EFFORT.set("high")
+        try:
+            return await provider.stream("opus", "You are Kelvin.", [{"role": "user", "text": "hi"}], GET_VALUE, ignore)
+        finally:
+            EFFORT.reset(effort)
+    result = run(answer())
+    assert result.raw["bridge"] == "native" and provider.native
+    assert provider.effort is False and provider.snapshot is False
+    args = entries(log, "args")[-1]["args"]
+    assert "--effort" not in args and "--system-prompt-snapshot" not in args
+    run(answer())
+    assert len(entries(log, "args")) == 2                    # no more tries with them
+
+
+def test_sign_in_problems_are_said_as_ever(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_FAIL", "1")
+    provider = ClaudeCodeProvider(FAKE, tmp_path)
+    with pytest.raises(RuntimeError, match="Not logged in"):
+        run(provider.stream("opus", "x", [{"role": "user", "text": "hi"}], GET_VALUE, ignore))
+    assert provider.native and not provider.live              # not a reason to leave the native way
+
+
+def test_compare_lanes_going_on_from_one_session_each_get_their_own(tmp_path, monkeypatch):
+    log = script(tmp_path, monkeypatch, [{"text": "First."}], [{"text": "Lane."}], [{"text": "Lane."}])
+    provider = ClaudeCodeProvider(FAKE, tmp_path)
+
+    async def main():
+        SESSION.set("chat1")
+        RESUMABLE.set(True)
+        history = [{"role": "user", "text": "hi"}]
+        first = await provider.stream("opus", "You are Kelvin.", history, GET_VALUE, ignore)
+        history += [{"role": "assistant", "provider": "claudecode", "model": "opus", "blocks": first.blocks,
+                     "raw": first.raw}, {"role": "user", "text": "compare"}]
+        return await asyncio.gather(*(provider.stream("opus", "You are Kelvin.", history, GET_VALUE, ignore)
+                                      for _ in range(2)))
+    lanes = run(main())
+    runs = entries(log, "session")
+    assert runs[1]["resumed"] == runs[2]["resumed"] == runs[0]["session"]
+    assert sorted([runs[1]["forked"], runs[2]["forked"]]) == [False, True]       # one goes on in it, one in a copy
+    assert lanes[0].raw["session"] != lanes[1].raw["session"]
+    assert not provider.claimed
+
+
+def test_resumable_only_when_the_chat_is_as_the_session_left_it():
+    raw = {"bridge": "native", "session": "s1", "model": "opus", "kept": True}
+    history = [{"role": "user", "text": "hi", "sent": "<sent>1</sent>"}]
+    raw["first"] = native.first_mark(history)
+    said = {"role": "assistant", "provider": "claudecode", "model": "opus", "blocks": [], "raw": raw}
+    nxt = {"role": "user", "text": "next"}
+    assert native.resumable(history + [said, nxt], "opus") == ("s1", 1)
+    halted = {"role": "assistant", "provider": "claudecode", "raw": None,
+              "blocks": [{"type": "text", "text": "Ramping … (stopped)"}]}
+    assert native.resumable(history + [said, halted, nxt], "opus") == ("s1", 1)   # a stopped answer: said with it
+    parts, keys = native.since(history + [said, halted, nxt], 1, set())
+    assert parts[0] == native.STOPPED % "after writing: “Ramping”" and keys == [native.entry_key(nxt)]
+    assert native.since(history + [said, halted, nxt], 1, {native.entry_key(nxt)})[1] == []   # taken in already
+    other = {"role": "assistant", "provider": "anthropic", "raw": [], "blocks": [{"type": "text", "text": "x"}]}
+    assert native.resumable(history + [said, nxt, other, nxt], "opus") is None     # another model answered since
+    assert native.resumable(history + [said, nxt], "sonnet") is None                # another model now
+    summed = [dict(history[0], handoff="earlier turns, summarised")]
+    assert native.resumable(summed + [said, nxt], "opus") is None                   # earlier turns summarised since
+    assert native.resumable(history + [dict(said, raw=dict(raw, kept=False)), nxt], "opus") is None   # incognito
+
+
+def test_results_claude_code_would_put_in_a_file_are_cut_by_kelvin():
+    """claude 2.1.304 puts a tool result over 50,000 characters in a file the bridge's model can't open, unless the
+    tool allows more (up to 500,000); Kelvin's tools say so, and an older `claude` gets them cut, saying so."""
+    small = native.mcp_result({"content": "0.25 V", "is_error": False,
+                               "images": [{"mime": "image/png", "data": "iVBORw0KGgo="}]})
+    assert small == {"content": [{"type": "text", "text": "0.25 V"}, {"type": "image", "data": "iVBORw0KGgo=",
+                                                                       "mimeType": "image/png"}], "isError": False}
+    rows = "\n".join("%d, %.4f, µA" % (i, i / 7) for i in range(20000))
+    cut = native.mcp_result({"content": rows, "is_error": False})["content"][0]["text"]
+    assert len(json.dumps(cut, ensure_ascii=False)) <= native.RESULT_CHARS < len(json.dumps(rows, ensure_ascii=False))
+    assert rows.startswith(cut[:cut.index("\n… (Kelvin cut")]) and "%d characters in all" % len(rows) in cut
+    assert native.mcp_result({"content": "", "is_error": True})["content"][0]["text"] == "(empty)"
+    whole, half = native.whole_chars("2.1.304"), rows[:len(rows) // 2]   # a `claude` that takes more: these whole
+    assert whole == native.WHOLE_CHARS and native.mcp_result({"content": half}, whole)["content"][0]["text"] == half
+    assert native.whole_chars("2.0.77") == native.whole_chars("") == native.RESULT_CHARS
+    listed = native.mcp_tool({"name": "get_value", "description": "Read.", "schema": {"properties": {}}})
+    assert listed["inputSchema"] == {"properties": {}, "type": "object"}
+    assert listed["_meta"] == {"anthropic/alwaysLoad": True, "anthropic/maxResultSizeChars": native.ALLOWED_CHARS}
+
+
+@pytest.mark.parametrize("version,whole", [("2.1.304", True), ("2.0.77", False)])
+def test_long_results_go_whole_to_a_claude_that_takes_them(tmp_path, monkeypatch, version, whole):
+    log = script(tmp_path, monkeypatch, [{"call": "get_value", "input": {}}], [{"text": "Got it."}])
+    monkeypatch.setenv("FAKE_CLAUDE_VERSION", version)
+    provider = ClaudeCodeProvider(FAKE, tmp_path)
+    rows = "\n".join("%d, %.4f" % (i, i / 7) for i in range(9000))   # about 120,000 characters
+
+    async def main():
+        history = [{"role": "user", "text": "the data?"}]
+        step = await provider.stream("opus", "You are Kelvin.", history, GET_VALUE, ignore)
+        call = step.tool_calls[0]
+        history += [{"role": "assistant", "provider": "claudecode", "model": "opus", "blocks": step.blocks,
+                     "raw": step.raw},
+                    {"role": "tool", "results": [{"id": call["id"], "name": "get_value", "content": rows,
+                                                  "is_error": False}]}]
+        return await provider.stream("opus", "You are Kelvin.", history, GET_VALUE, ignore)
+    end = run(main())
+    got = entries(log, "result_for")[0]["content"][0]["text"]
+    assert (got == rows) is whole and (whole or "\n… (Kelvin cut this result here" in got)
+    assert end.blocks == [{"type": "text", "text": "Got it."}] and len(entries(log, "args")) == 1   # one run
+
+
+def test_a_new_session_gets_the_pictures_where_they_came():
+    plot = {"mime": "image/png", "data": "iVBORw0KGgo="}
+    history = [{"role": "user", "text": "look"},
+               {"role": "assistant", "blocks": [{"type": "tool_call", "id": "c1", "name": "look_at", "input": {}}]},
+               {"role": "tool", "results": [{"id": "c1", "name": "look_at", "content": "a plot", "is_error": False,
+                                             "images": [plot]}]},
+               {"role": "user", "text": "/compare these", "images": [plot]}]
+    blocks = native.content(native.opening(history)[0])
+    assert [b["type"] for b in blocks] == ["text", "image", "text", "image"]
+    assert blocks[1]["source"] == {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}
+    assert blocks[2]["text"].endswith("/compare these")
+    alone = native.content(native.opening(history[3:])[0])   # never "/...": Claude Code's own commands
+    assert alone[0]["text"].startswith("The person wrote:\n/compare these")

@@ -1,19 +1,22 @@
 """TEMPORARY, to be removed: Kelvin through the Claude Code on this computer (the person's own signed-in `claude`).
 
 Two uses:
-- chats on the person's Claude plan (web/providers/claudecode_provider.py), with Kelvin's own tools;
+- chats on the person's Claude plan (web/providers/claudecode_provider.py, claudecode_native.py), with Kelvin's own
+  tools;
 - operate_computer: Claude Code works the screen, mouse and keyboard through Kelvin's screen tools (screen.py), for
   programs without an API (vendor software, web pages, dialogs).
 
 Every Kelvin has it since 0.3.50: from source, the private build and the published app. Kelvin starts the unmodified
 `claude` program the person installed and signed in to themselves, and never reads, stores or passes on Claude
-credentials. Removing it: delete this file, screen.py, the provider, and the code marked "Claude Code bridge"
-(web/app.py, web/agent.py, web/settings.py, the Settings section, packaging/kelvin_app.py)."""
+credentials. Removing it: delete this file, screen.py, the provider and claudecode_native.py, and the code marked
+"Claude Code bridge" (web/app.py, web/agent.py, web/settings.py, web/providers/base.py, the Settings section,
+packaging/kelvin_app.py)."""
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import queue
 import shutil
 import signal
 import subprocess
@@ -190,6 +193,81 @@ async def stream(cmd: List[str], args: List[str], stdin_text: str, cwd: Path,
     finally:
         if not finished or proc.poll() is None:   # stopped, out of time or cancelled: nothing it started goes on
             kill_tree(proc)
+
+
+class Running:
+    """`claude <args>` kept running with its standard input open, for as long as its user needs it (a chat's answer:
+    web/providers/claudecode_native.py), where stream() gives one run its input at once. Each event it writes goes to
+    `handle` on the reading thread first, for what can't wait for the user (Claude Code asking Kelvin's MCP server
+    for its tool list); the rest waits in order for next(). The last event is {"type": "exit", "code", "stderr"}.
+    Threads, not asyncio subprocesses, so it works on any event loop, and between the user's turns on none."""
+
+    def __init__(self, cmd: List[str], args: List[str], cwd: Path,
+                 handle: Optional[Callable[[Dict[str, Any]], bool]] = None, env: Optional[Dict[str, str]] = None):
+        self.proc = subprocess.Popen(cmd + args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     cwd=str(cwd), env=env or child_env(), **_started())
+        self.handle = handle
+        self.events: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+        self._err: List[bytes] = []
+        self._lock = threading.Lock()
+        self._errs = threading.Thread(target=lambda: self._err.append(self.proc.stderr.read()), daemon=True)
+        self._errs.start()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self) -> None:
+        try:
+            for line in self.proc.stdout:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                try:
+                    handled = self.handle is not None and self.handle(event)
+                except Exception:   # never the end of the reading: the event goes on to the user
+                    handled = False
+                if not handled:
+                    self.events.put(event)
+        except (OSError, ValueError):
+            pass
+        code = self.proc.wait()
+        self._errs.join(2.0)
+        text = b"".join(self._err).decode("utf-8", "replace").strip()
+        self.events.put({"type": "exit", "code": code, "stderr": text[-500:]})
+
+    def send(self, message: Dict[str, Any]) -> bool:
+        """One line of stream-json to the program; False when it no longer reads any."""
+        line = (json.dumps(message) + "\n").encode("utf-8")
+        with self._lock:
+            try:
+                self.proc.stdin.write(line)
+                self.proc.stdin.flush()
+                return True
+            except (OSError, ValueError):
+                return False
+
+    def next(self) -> Optional[Dict[str, Any]]:
+        """Its next event, if one has come."""
+        try:
+            return self.events.get_nowait()
+        except queue.Empty:
+            return None
+
+    def end_input(self) -> None:
+        """No more input: the program finishes what it is doing and ends."""
+        with self._lock:
+            try:
+                self.proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+    def alive(self) -> bool:
+        return self.proc.poll() is None
+
+    def stop(self) -> None:
+        """Ends it now, with everything it started."""
+        kill_tree(self.proc)
 
 
 class StopRequested(Exception):
