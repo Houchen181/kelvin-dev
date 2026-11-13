@@ -1,0 +1,77 @@
+card: 1
+id: bench/lock-in
+model: Bench Lock-in Amplifier
+vendor: Kelvin bench
+kind: lock-in
+status: community
+twin: kbench.physics:LockInTwin
+identify:
+  idn: "^BENCHLAB,LOCK-IN"
+  example: "BENCHLAB,LOCK-IN,SN0002,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  amplitude:
+    label: Excitation
+    kind: drive
+    unit: V
+    set: "SOURce:VOLTage[:AMPLitude] {value}"
+    get: "SOURce:VOLTage[:AMPLitude]?"
+    limits: [0, 5]
+    safe: 0
+    ramp: gate
+    max_rate: 1
+    ramp_step: 0.01
+    description: Sine output amplitude (excitation through the sample)
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: Hz
+    set: "SOURce:FREQuency {value}"
+    get: "SOURce:FREQuency?"
+    limits: [0.001, 102000]
+    default: 17.777
+  tc:
+    label: Time constant
+    kind: measure
+    unit: s
+    set: "SENSe:TCONstant {value}"
+    get: "SENSe:TCONstant?"
+    limits: [1.0e-5, 30000]
+    default: 0.1
+    description: Time constant
+  sensitivity:
+    label: Sensitivity
+    kind: measure
+    unit: V
+    set: "SENSe:SENSitivity {value}"
+    get: "SENSe:SENSitivity?"
+    limits: [2.0e-9, 1]
+    default: 1
+  X:
+    label: X
+    kind: measure
+    unit: V
+    get: "MEASure:X?"
+  Y:
+    label: Y
+    kind: measure
+    unit: V
+    get: "MEASure:Y?"
+  R:
+    label: Magnitude R
+    kind: measure
+    unit: V
+    get: "MEASure:R?"
+
+display:
+  headline: R
+
+health:
+  - query: "SYSTem:ERRor?"
+    expect: "^\\+?0,"
+raw:
+  reset: ["*RST"]
+  blocked: ["CALibration", "SYSTem:FIRMware"]
+notes:
+  - "The sine output drives the sample through a 10 MOhm series resistor, so the excitation current is amplitude / 10 MOhm and the sample's resistance is R = X * 10 MOhm / amplitude (X in V, amplitude in V rms)."

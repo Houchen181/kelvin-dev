@@ -1,0 +1,7 @@
+# The project envelope the PI signed: inside it, drive increases on instruments with `trust: envelope` run without
+# asking (as in Kelvin's own test lab).
+project: device-B7
+envelope:
+  lockin.amplitude: [0, 0.1]
+  vna.power: [-90, -10]
+  vna.rf: [on, off]

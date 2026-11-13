@@ -1,0 +1,60 @@
+card: 1
+id: bench/laser
+model: Bench CW Laser with Shutter
+vendor: Kelvin bench
+kind: laser
+status: community
+twin: kbench.physics:LaserTwin
+identify:
+  idn: "^BENCHLAB,LASER"
+  example: "BENCHLAB,LASER,SN0006,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  emission:
+    label: Emission
+    kind: drive
+    type: bool
+    set: "OUTPut[:STATe] {value}"
+    get: "OUTPut[:STATe]?"
+    safe: off
+    enables: [power]
+  power:
+    label: Power
+    applies_when: emission
+    kind: drive
+    unit: mW
+    set: "SOURce:POWer[:LEVel] {value}"
+    get: "SOURce:POWer[:LEVel]?"
+    limits: [0, 100]
+    safe: 0
+    ramp: gate
+    max_rate: 20
+    ramp_step: 0.5
+  shutter:
+    label: Shutter
+    applies_when: emission
+    words: [open, closed]
+    kind: drive
+    type: bool
+    set: "SHUTter[:STATe] {value}"
+    get: "SHUTter[:STATe]?"
+    bool_text: ["OPEN", "CLOSE"]
+    safe: off
+    description: on = open (light reaches the sample)
+  P_detected:
+    label: Detected power
+    kind: measure
+    unit: mW
+    get: "MEASure:POWer?"
+
+safe_sequence: [shutter, power, emission]
+display:
+  headline: P_detected
+
+health:
+  - query: "SYSTem:ERRor?"
+    expect: "^\\+?0,"
+raw:
+  reset: ["*RST"]
+  blocked: ["CALibration", "SYSTem:FIRMware"]

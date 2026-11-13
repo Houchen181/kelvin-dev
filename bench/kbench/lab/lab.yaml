@@ -1,0 +1,71 @@
+# The benchmark's lab: a gated device in a cryostat with a magnet, a lock-in, a laser, a resonator on a VNA, and an
+# NV-centre set-up (pulse generator, microwave source, photon counter). The instruments are twins (kbench.physics)
+# that Kelvin drives through these cards and its gate as if they were the real thing. Tasks may change this file
+# (Task.lab_patch); physics.LIMITS must agree with the limits here.
+lab: Cryo Lab B
+
+instruments:
+  smu:
+    card: bench/source-meter
+    address: GPIB0::24::INSTR
+    trust: ask
+    limits: { V: [-15, 15], compliance_I: [1.0e-9, 1.0e-4] }
+    rates: { V: 0.5 }
+    guards:
+      V: [{ read: I, max_abs: 1.0e-9 }]       # gate leakage above 1 nA stops the ramp
+    auto: { V: [-5, 5] }
+  lockin:
+    card: bench/lock-in
+    address: GPIB0::8::INSTR
+    trust: envelope
+    limits: { amplitude: [0, 1] }
+  tc:
+    card: bench/temperature-controller
+    address: GPIB0::12::INSTR
+    limits: { setpoint: [0, 300] }
+  magnet:
+    card: bench/magnet-supply
+    address: GPIB0::22::INSTR
+    limits: { B: [-3, 3], rate: [0, 0.5] }
+  vna:
+    card: bench/vna
+    address: TCPIP0::192.168.1.30::inst0::INSTR
+    trust: envelope
+    limits: { power: [-90, 0] }
+  laser:
+    card: bench/laser
+    address: ASRL3::INSTR
+    auto: never                                # a person approves every laser change
+    limits: { power: [0, 50] }
+    rates: { power: 5 }
+    guards:
+      power: [{ read: tc.T_sample, max_abs: 20 }]   # stop if the sample heats above 20 K
+  stage:
+    card: bench/motion-stage
+    address: ASRL5::INSTR
+  pg:
+    card: bench/pulse-generator
+    address: USB0::0x0A2B::0x0001::PG0042::INSTR
+  mw:
+    card: bench/microwave-source
+    address: TCPIP0::192.168.1.31::inst0::INSTR
+    limits: { power: [-60, 10] }                # dBm into the antenna
+    auto: { power: [-60, -10] }
+  counter:
+    card: bench/photon-counter
+    address: USB0::0x0A2B::0x0002::PC0017::INSTR
+    trust: envelope
+
+interlocks:
+  - drive: magnet.B
+    require: "tc.T_sample < 10"
+
+watch:
+  - read: tc.T_sample
+    above: 20
+    for: 10
+    then: { laser.emission: off }
+    note: The sample must stay cold; the laser is the usual culprit.
+
+safe_actions:
+  magnet.B: hold     # when a run is stopped, hold the field instead of ramping it to zero

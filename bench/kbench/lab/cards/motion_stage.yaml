@@ -1,0 +1,49 @@
+card: 1
+id: bench/motion-stage
+model: Bench Linear Stage (delay line)
+vendor: Kelvin bench
+kind: motion-stage
+status: community
+twin: kbench.physics:MotionStageTwin
+identify:
+  idn: "^BENCHLAB,STAGE"
+  example: "BENCHLAB,STAGE,SN0007,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  position:
+    label: Target position
+    kind: measure
+    unit: mm
+    set: "MOVE:ABSolute {value}"
+    get: "MOVE:TARGet?"
+    limits: [0, 300]
+    default: 0
+    ramp: instrument
+    readback: position_actual
+    tol: 0.001
+    rate_param: velocity
+    description: Delay-line position; moving it is part of the measurement
+  velocity:
+    label: Velocity
+    kind: measure
+    unit: mm/s
+    set: "MOVE:VELocity {value}"
+    get: "MOVE:VELocity?"
+    limits: [0.01, 50]
+    default: 10
+  position_actual:
+    label: Position
+    kind: measure
+    unit: mm
+    get: "POSition?"
+    default: 0
+
+display:
+  headline: position_actual
+
+health:
+  - query: "SYSTem:ERRor?"
+    expect: "^\\+?0,"
+raw:
+  blocked: ["SYSTem:FIRMware"]
