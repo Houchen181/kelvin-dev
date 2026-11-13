@@ -96,20 +96,21 @@ final class AppTests: XCTestCase {
     """
 
     /// A computer this phone reaches directly with a token of its own: paired by an app before 0.1.8, kept until
-    /// removed.
-    func direct(_ transport: Transport) throws -> (AppModel, Computer) {
+    /// removed. allowing: the AI companies the person already let this phone's chats go to (these chats use Claude).
+    func direct(_ transport: Transport, allowing: [String] = ["Anthropic"]) throws -> (AppModel, Computer) {
         var list = ComputerList.decode(nil)
         _ = list.add(Computer(lab: "Cryostat lab", host: "LAB-PC", phoneName: "Ana's phone", role: "control",
                               addresses: [lan, tail]))
         let c = try XCTUnwrap(list.computers.first)
         defaults.set(list.encoded(), forKey: "kelvin.computers")
+        defaults.set(allowing, forKey: "kelvin.aiAllowed")
         tokens.save("secret-token", for: c.id)
         return (AppModel(transport: transport, defaults: defaults, tokens: tokens), c)
     }
 
-    func paired(_ script: Script) async throws -> (AppModel, Computer) {
+    func paired(_ script: Script, allowing: [String] = ["Anthropic"]) async throws -> (AppModel, Computer) {
         script.on("GET /api/me", me)
-        return try direct(script)
+        return try direct(script, allowing: allowing)
     }
 
     func testAwayFromTheLabItGoesThroughTailscale() async throws {
@@ -472,8 +473,79 @@ final class AppTests: XCTestCase {
 
     // ------------------------------------------------------------------ the chat, Stop, files, the account
 
-    func summary(_ id: String) throws -> ChatSummary {
-        try JSONDecoder().decode(ChatSummary.self, from: Data("{\"id\": \"\(id)\", \"title\": \"Field ramp\", \"model\": \"m\"}".utf8))
+    func summary(_ id: String, model: String = "anthropic:claude-opus-5-5") throws -> ChatSummary {
+        try JSONDecoder().decode(ChatSummary.self,
+                                 from: Data("{\"id\": \"\(id)\", \"title\": \"Field ramp\", \"model\": \"\(model)\"}".utf8))
+    }
+
+    let answer = "{\"type\": \"turn_start\"}\n{\"type\": \"text\", \"delta\": \"1 bar is 100 kPa.\"}\n"
+        + "{\"type\": \"turn_end\", \"reason\": \"end\"}"
+
+    func testAChatAsksBeforeItsFirstMessageGoesToAnAICompany() async throws {
+        let script = Script()
+        let (app, c) = try await paired(script, allowing: [])
+        script.on("GET /api/bootstrap", "{\"models\": {\"groups\": [{\"provider\": \"hub-openai\", \"label\": \"GPT · Kelvin hub\","
+                  + " \"models\": [{\"key\": \"hub-openai:gpt-5.5\", \"label\": \"GPT-5.5\"}]}]}, \"default_model\": \"hub-openai:gpt-5.5\"}")
+        script.on("POST /api/chats", "{\"id\": \"c9\", \"title\": \"New chat\", \"model\": \"hub-openai:gpt-5.5\", \"messages\": []}")
+        script.on("POST /api/chats/c9/turn", answer)
+        let session = app.session(for: c)
+        let chat = ChatModel(session: session, chat: nil)
+        chat.draft = "How many kPa is a bar?"
+        await chat.send()?.value
+        XCTAssertEqual(chat.asking?.service, AIService(name: "OpenAI", viaHub: true))
+        XCTAssertEqual(chat.asking?.question, "Send your chats to OpenAI?")
+        XCTAssertTrue(chat.asking?.explanation.hasPrefix("Kelvin on LAB-PC answers with GPT-5.5, from OpenAI, through the "
+                                                         + "Kelvin hub.") ?? false)
+        XCTAssertFalse(script.asked.contains("192.168.1.50 POST /api/chats"))   // nothing reached Kelvin: no chat made
+        XCTAssertEqual(chat.draft, "How many kPa is a bar?")                     // it waits in the box
+        XCTAssertTrue(chat.transcript.lines.isEmpty)
+        XCTAssertNil(chat.problem)
+
+        await chat.allow()?.value                                              // Allow: kept, and the message goes
+        XCTAssertNil(chat.asking)
+        XCTAssertEqual(chat.transcript.lines.map(\.text), ["How many kPa is a bar?", "1 bar is 100 kPa."])
+        XCTAssertEqual(app.aiAllowed, ["OpenAI"])
+        XCTAssertEqual(AppModel(transport: script, defaults: defaults, tokens: tokens).aiAllowed, ["OpenAI"])   // kept
+
+        let next = ChatModel(session: session, chat: try summary("c9", model: "hub-openai:gpt-5.5"))
+        next.draft = "And a psi?"
+        await next.send()?.value                                               // asked once, for every chat
+        XCTAssertNil(next.asking)
+        XCTAssertEqual(script.asked.filter { $0 == "192.168.1.50 POST /api/chats/c9/turn" }.count, 2)
+
+        app.forgetAIAllowed()                                                  // Computers: Ask again before sending
+        let again = ChatModel(session: session, chat: try summary("c9", model: "hub-openai:gpt-5.5"))
+        again.draft = "And a torr?"
+        await again.send()?.value
+        XCTAssertEqual(again.asking?.service.name, "OpenAI")
+    }
+
+    func testNotNowKeepsTheMessageUnsent() async throws {
+        let script = Script()
+        let (app, c) = try await paired(script, allowing: ["Anthropic"])
+        let chat = ChatModel(session: app.session(for: c), chat: try summary("c1", model: "hub-gemini:gemini-3-pro"))
+        chat.draft = "Ramp B to 1 T"
+        await chat.send()?.value
+        XCTAssertEqual(chat.asking?.service.name, "Google")                    // Claude's allowed, not Gemini's
+        XCTAssertTrue(chat.asking?.explanation.contains("gemini-3-pro") ?? false)   // Kelvin's list didn't answer
+        chat.decline()
+        XCTAssertNil(chat.asking)
+        XCTAssertEqual(chat.draft, "Ramp B to 1 T")
+        XCTAssertEqual(chat.problem, "Not sent. This chat's answers come from Google.")
+        XCTAssertFalse(script.asked.contains("192.168.1.50 POST /api/chats/c1/turn"))
+        XCTAssertEqual(app.aiAllowed, ["Anthropic"])
+    }
+
+    func testAModelServerOfYourOwnNeverAsks() async throws {
+        let script = Script()
+        let (app, c) = try await paired(script, allowing: [])
+        script.on("POST /api/chats/c1/turn", answer)
+        let chat = ChatModel(session: app.session(for: c), chat: try summary("c1", model: "local:llama3.1"))
+        chat.draft = "How many kPa is a bar?"
+        await chat.send()?.value
+        XCTAssertNil(chat.asking)
+        XCTAssertTrue(script.asked.contains("192.168.1.50 POST /api/chats/c1/turn"))
+        XCTAssertTrue(app.aiAllowed.isEmpty)
     }
 
     func testAMessageKelvinRefusedGoesBackInTheBox() async throws {

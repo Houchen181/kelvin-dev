@@ -128,6 +128,14 @@ struct ChatView: View {
         .onChange(of: model.answeringElsewhere) { now in   // the answer Kelvin went on with is over: show it
             if !now { Task { await model.load() } }
         }
+        // before a chat's first message goes to an AI company (App Review 5.1.2(i)); the buttons decide, not dismissal
+        .alert(model.asking?.question ?? "", isPresented: Binding(get: { model.asking != nil }, set: { _ in }),
+               presenting: model.asking) { _ in
+            Button("Allow") { model.allow() }
+            Button("Not now", role: .cancel) { model.decline() }
+        } message: { ask in
+            Text(ask.explanation)
+        }
     }
 }
 

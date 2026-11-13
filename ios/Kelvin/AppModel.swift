@@ -13,6 +13,11 @@ final class AppModel: ObservableObject {
     @Published var teamName: String {
         didSet { defaults.set(teamName, forKey: "kelvin.teamName") }
     }
+    /// The AI companies the person let this phone's chats go to: each asked once, before a chat's first message
+    /// would go there.
+    @Published private(set) var aiAllowed: [String] {
+        didSet { defaults.set(aiAllowed, forKey: "kelvin.aiAllowed") }
+    }
 
     let transport: Transport
     let tokens: TokenStore
@@ -32,8 +37,18 @@ final class AppModel: ObservableObject {
         list = kept
         account = Account.decode(defaults.data(forKey: accountKey))
         teamName = defaults.string(forKey: "kelvin.teamName") ?? ""
+        aiAllowed = defaults.stringArray(forKey: "kelvin.aiAllowed") ?? []
         if !older.isEmpty { save() }
     }
+
+    func allowsAI(_ s: AIService) -> Bool { aiAllowed.contains(s.name) }
+
+    func allowAI(_ s: AIService) {
+        if !allowsAI(s) { aiAllowed.append(s.name) }
+    }
+
+    /// Ask again before a chat goes to any AI company.
+    func forgetAIAllowed() { aiAllowed = [] }
 
     /// The account's Kelvins removed on this phone (their ids on the hub): not listed again until the phone signs in
     /// to the account again.
@@ -254,6 +269,10 @@ final class LabSession: ObservableObject {
 
     var role: Role { computer.access }
     var route: Route? { connected.map { computer.route($0) } }
+
+    func allowsAI(_ s: AIService) -> Bool { app?.allowsAI(s) ?? false }
+
+    func allowAI(_ s: AIService) { app?.allowAI(s) }
 
     /// Team chat messages written since this phone last showed the chat.
     var teamUnread: Int {
@@ -487,12 +506,24 @@ final class LabSession: ObservableObject {
     }
 }
 
+/// What the app asks before a chat's first message goes to an AI company: which company, which model, which computer.
+struct AIAsk: Error, Equatable {
+    let service: AIService
+    let model: String
+    let computer: String
+
+    var question: String { service.question }
+    var explanation: String { service.explanation(model: model, computer: computer) }
+}
+
 /// One conversation on the phone.
 @MainActor
 final class ChatModel: ObservableObject {
     @Published private(set) var transcript: Transcript
     @Published var draft = ""
     @Published private(set) var problem: String?
+    /// The message would go to an AI company this phone hasn't been allowed to send chats to: the app asks first.
+    @Published private(set) var asking: AIAsk?
 
     let session: LabSession
     private(set) var id: String?
@@ -548,13 +579,16 @@ final class ChatModel: ObservableObject {
         var reached = false   // Kelvin has the message
         defer { sending = false }
         do {
+            var models: Models?
             if id == nil || model == nil {
-                let models = try await session.models()
-                guard let m = model ?? models.defaultModel ?? models.all.first?.key else {
+                let list = try await session.models()
+                guard let m = model ?? list.defaultModel ?? list.all.first?.key else {
                     throw KelvinError(.server, "Kelvin has no model to answer with. Add a model's key on the Kelvin computer.")
                 }
                 model = m
+                models = list
             }
+            try await mayGo(models)
             if id == nil {
                 id = try await session.newChat(model: model ?? "", incognito: transcript.incognito).id
             }
@@ -570,6 +604,10 @@ final class ChatModel: ObservableObject {
             }
             transcript.finish()
             ended = Date()
+        } catch let wait as AIAsk {   // asked first: the message waits in the box
+            transcript.unsay()
+            if draft.isEmpty { draft = text }
+            asking = wait
         } catch let e as KelvinError where e.kind == .unreachable && reached {
             transcript.lost()   // Kelvin goes on without this phone: what it has of the answer now, or once it's over
             if !answeringElsewhere { await load() }
@@ -583,6 +621,37 @@ final class ChatModel: ObservableObject {
             transcript.apply(.error(error.localizedDescription))
             transcript.finish()
         }
+    }
+
+    /// Throws (an AIAsk) when this chat's model would take the message to an AI company the person hasn't let this
+    /// phone's chats go to: nothing reaches Kelvin before they say so. models: Kelvin's list, if already asked.
+    private func mayGo(_ known: Models?) async throws {
+        let key = model ?? ""
+        guard let first = AIService.of(model: key, service: known?.service(of: key)), !session.allowsAI(first) else {
+            return
+        }
+        var models = known
+        if models == nil { models = try? await session.models() }   // the model's name; a service the person added
+        let service = AIService.of(model: key, service: models?.service(of: key)) ?? first
+        guard !session.allowsAI(service) else { return }
+        throw AIAsk(service: service, model: models?.label(key) ?? key,
+                    computer: session.computer.host ?? session.computer.lab)
+    }
+
+    /// The person allowed the company: kept on this phone, and the message goes.
+    @discardableResult
+    func allow() -> Task<Void, Never>? {
+        guard let ask = asking else { return nil }
+        asking = nil
+        session.allowAI(ask.service)
+        return send()
+    }
+
+    /// Not now: the message stays in the box, unsent.
+    func decline() {
+        guard let ask = asking else { return }
+        asking = nil
+        problem = "Not sent. This chat's answers come from \(ask.service.name)."
     }
 
     func stop() async {

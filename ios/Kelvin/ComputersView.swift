@@ -59,6 +59,17 @@ struct ComputersView: View {
                        + "Tailscale: plain Wi-Fi traffic is not encrypted.")
             }
             }
+            if !app.aiAllowed.isEmpty {
+                Section {
+                    Text(app.aiAllowed.joined(separator: ", "))
+                    Button("Ask again before sending") { app.forgetAIAllowed() }
+                } header: {
+                    Text("Chats may go to")
+                } footer: {
+                    Text("Kelvin answers with the AI model chosen on the Kelvin computer. Before a chat first goes to "
+                         + "a company, this phone asks.")
+                }
+            }
             Section("Notifications") {
                 Text("Kelvin tells you about new requests and alarms while this app is open. For alerts when it is "
                      + "closed, set up ntfy under Notifications on the Kelvin computer.")

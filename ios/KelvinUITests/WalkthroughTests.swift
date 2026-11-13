@@ -112,6 +112,8 @@ final class WalkthroughTests: XCTestCase {
         launch([])
         let signIn = must(app.buttons["Sign in with your Kelvin account"], "see the welcome screen")
         XCTAssertFalse(app.buttons["Pair with a code"].exists, "pairing is gone: the Kelvin account only")
+        must(app.descendants(matching: .any).matching(identifier: "privacy-notice").firstMatch,
+             "find the privacy notice on the welcome screen")   // App Review: reachable inside the app
         signIn.tap()
         must(app.navigationBars["Kelvin account"], "open the account sheet")
         must(app.textFields["Email"], "find the email field").tap()

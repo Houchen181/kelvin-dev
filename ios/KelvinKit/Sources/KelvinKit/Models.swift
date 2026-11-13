@@ -580,6 +580,7 @@ public struct Models: Decodable, Equatable, Sendable {
     public struct Model: Decodable, Equatable, Identifiable, Hashable, Sendable {
         public var key: String
         public var label: String
+        public var service: String?      // its group's label: the service, as Kelvin names it ("Claude · Kelvin hub")
         public var id: String { key }
     }
 
@@ -593,7 +594,7 @@ public struct Models: Decodable, Equatable, Sendable {
         let models: JSONValue = c.value(.models, or: .null)
         all = (models["groups"]?.array ?? []).flatMap { group in
             (group["models"]?.array ?? []).compactMap { m in
-                m["key"]?.string.map { Model(key: $0, label: m["label"]?.string ?? $0) }
+                m["key"]?.string.map { Model(key: $0, label: m["label"]?.string ?? $0, service: group["label"]?.string) }
             }
         }
         defaultModel = c.maybe(.defaultModel)
@@ -603,4 +604,7 @@ public struct Models: Decodable, Equatable, Sendable {
         guard let key else { return nil }
         return all.first { $0.key == key }?.label ?? key.split(separator: ":").last.map(String.init)
     }
+
+    /// The service a model belongs to, as Kelvin's list names it.
+    public func service(of key: String?) -> String? { all.first { $0.key == key }?.service }
 }

@@ -68,6 +68,11 @@ struct AccountView: View {
                          + "reaches the computer directly: on the lab network or through Tailscale.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    if let url = chosen {
+                        Link("Privacy notice", destination: Account.privacyNotice(url)).font(.footnote)
+                        Link("Terms", destination: Account.terms(url)).font(.footnote)
+                            .accessibilityIdentifier("terms")
+                    }
                 }
             }
             .navigationTitle("Kelvin account")
@@ -133,6 +138,8 @@ struct AccountSection: View {
                     }
                 }
                 .disabled(looking)
+                Link("Privacy notice", destination: Account.privacyNotice(a.hub))
+                Link("Terms", destination: Account.terms(a.hub))
                 Button("Sign out", role: .destructive) { confirming = true }
                 Button("Delete Kelvin account…", role: .destructive) {
                     password = ""
@@ -169,6 +176,7 @@ struct AccountSection: View {
                 } label: {
                     Label("Sign in with your Kelvin account", systemImage: "person.crop.circle")
                 }
+                Link("Privacy notice", destination: Account.privacyNotice(app.lastHub))
             } footer: {
                 Text("Your phone reaches every Kelvin where you are signed in with that account, from any network.")
             }
