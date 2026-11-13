@@ -47,6 +47,14 @@ class AdapterError(RuntimeError):
     pass
 
 
+class ErrorAnswer(AdapterError):
+    """The instrument answered this request with an error of its own for it (a controller's error number, a JSON-RPC
+    error): it is there and answering, so it is never taken for a lost instrument, whatever its words say ("sensor not
+    connected", "no response from sensor" are a sensor's state, not the link's: lost_kind, session_dead and
+    timed_out never read its text). A reading answered so is the one reading a run that doesn't need it may set aside
+    (Lab.health_check)."""
+
+
 class LinkLost(AdapterError, ConnectionError):
     """A maker's link to an instrument broke: its socket closed, its port went away, its program or helper ended.
     lost_kind calls it gone. A driver raises it with the error it came from as its cause, and its link is made anew
@@ -60,7 +68,9 @@ class NoAnswer(AdapterError, TimeoutError):
 
 def timed_out(e: BaseException) -> bool:
     """A read that ran out of time (PyVISA's VI_ERROR_TMO), not a broken connection; also when Kelvin said it in
-    words (instrument.InstrumentLost), from the error it came from."""
+    words (instrument.InstrumentLost), from the error it came from. Never the instrument's own error answer."""
+    if isinstance(e, ErrorAnswer):
+        return False
     if isinstance(e, TimeoutError) or getattr(e, "error_code", None) == -1073807339 or "VI_ERROR_TMO" in str(e):
         return True
     return e.__cause__ is not None and e.__cause__ is not e and timed_out(e.__cause__)
@@ -115,7 +125,10 @@ def lost_kind(e: BaseException) -> Optional[str]:
     on GPIB, a pulled USB cable or USB-serial adapter, a dropped connection, a server that refuses it), "silent" when
     it didn't answer in time; None for any other error (a command it refused, a card's mistake), which is not a lost
     instrument. The errors it came from count too: a maker's driver and pyvisa-py say a lost device in their own
-    words over the system's (review of 0.3.45, 4.4: eleven such went by as no loss at all)."""
+    words over the system's (review of 0.3.45, 4.4: eleven such went by as no loss at all). The instrument's own error
+    answer (ErrorAnswer) is never a loss: its words name a sensor's state, not the link's."""
+    if isinstance(e, ErrorAnswer):
+        return None
     chain = list(_errors(e))
     for err in chain:
         kind = _lost_type(err)
@@ -135,7 +148,10 @@ def lost_kind(e: BaseException) -> Optional[str]:
 def session_dead(e: BaseException) -> str:
     """Whether an exchange's error says its VISA session is dead (the instrument was power-cycled or replugged, its
     LAN connection dropped, its USB-serial adapter pulled): what said so, in a few words; "" for any other error,
-    a timeout, or GPIB's NLISTENERS (its session still works once the instrument is back)."""
+    a timeout, or GPIB's NLISTENERS (its session still works once the instrument is back), or the instrument's own
+    error answer (ErrorAnswer), whatever its words."""
+    if isinstance(e, ErrorAnswer):
+        return ""
     for err in _errors(e):
         code = getattr(err, "error_code", None)
         if code in DEAD:

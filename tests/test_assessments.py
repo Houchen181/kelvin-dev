@@ -226,6 +226,9 @@ def test_a_fit_of_noise_says_it_found_nothing():
 
 
 def test_a_failed_fit_says_so_and_is_kept_only_when_asked_marked_failed(rt):
+    # about a fit, not the lab's watch: a run that drives reads what such a watch reads before it starts, and that
+    # read would change the simulated trace's noise, which this fit's failing depends on
+    rt.lab.config.watches[:] = []
     assert "done" in rt.run("plan: vna\nsetup: {vna.rf: on, vna.power: -20, vna.f_start: 3.9985e9, "
                             "vna.f_stop: 4.0015e9, vna.points: 601}\nmeasure: [vna.S21]")
     run_id = rt.pick_runs(last=1)[-1]

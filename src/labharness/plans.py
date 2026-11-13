@@ -968,7 +968,9 @@ def load_plan(source: Any, names: Optional[Dict[str, str]] = None) -> Plan:
         + [a.read[0] for a in axes if a.read] \
         + [a.stabilize.instr for a in axes if a.stabilize] + [i for i, _ in measure] + [c.instr for c in preconditions] \
         + [i for i, _ in trigger] + [k.split(".")[0] for r in plan.rules() for k in r.keys]
-    plan.requires = [str(r) for r in data.get("requires") or []] or list(dict.fromkeys(used))
+    # the instruments it must have: those it names in requires: and every one it uses, never only the ones named (an
+    # instrument it sets or reads but left out of requires: was never health-checked)
+    plan.requires = list(dict.fromkeys([str(r) for r in data.get("requires") or []] + used))
     if errors:
         raise PlanError(errors)
     return plan

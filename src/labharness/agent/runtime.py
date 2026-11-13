@@ -3416,27 +3416,28 @@ class LabRuntime:
                 m = self._python_made(Path(f).expanduser().resolve())
             except (OSError, RuntimeError, ValueError):
                 m = None
-            if m is not None and all(m["folder"] != k["folder"] for k in made):
+            if m is not None and not m.get("problem") and all(m["folder"] != k["folder"] for k in made):
                 made.append(m)
         return self._do("importing data", lambda: self._imported(table, files, name, self.gate.operator,
                                                                  made=made)["text"])
 
     def _computed(self, rec: Any, made: List[Dict[str, Any]]) -> str:
         """A run made of run_python's output (_imported): marked computed, never measured. Its record keeps which code
-        made it (a copy beside it, and its SHA-256) from which runs, its lab reads COMPUTED, and the line returned is
-        its first warning, which its card, its reports and the chat show."""
-        import shutil
+        made it (a copy beside it, and its SHA-256 as Kelvin recorded it when it ran) from which runs (Kelvin's record
+        of the call, _python_made), its lab reads COMPUTED, and the line returned is its first warning, which its
+        card, its reports and the chat show."""
         runs = sorted({rid for m in made for rid in m["runs"]})
         kept: List[Dict[str, Any]] = []
         for k, m in enumerate(made):
-            copy = "made_by.py" if len(made) == 1 else "made_by_%d.py" % (k + 1)
-            try:
-                digest = hashlib.sha256(Path(m["code"]).read_bytes()).hexdigest()
-                if rec.path is not None:
-                    shutil.copyfile(str(m["code"]), str(Path(rec.path) / copy))
+            copy: Optional[str] = "made_by.py" if len(made) == 1 else "made_by_%d.py" % (k + 1)
+            try:   # the code as read now, kept only if it is the code that ran
+                code = Path(m["code"]).read_bytes()
+                if hashlib.sha256(code).hexdigest() != m["code_sha256"] or rec.path is None:
+                    raise OSError("changed since it was checked, or no folder to keep it in")
+                (Path(rec.path) / copy).write_bytes(code)
             except OSError:
-                digest, copy = None, None   # said as such: the folder it ran in is named below
-            kept.append({"folder": str(m["folder"]), "code": copy, "sha256": digest,
+                copy = None   # said as such: the folder it ran in is named below
+            kept.append({"folder": str(m["folder"]), "code": copy, "sha256": m["code_sha256"],
                          "runs": sorted(m["runs"])})
         rec.meta.update(lab=COMPUTED, computed={"by": "run_python", "from_runs": runs, "code": kept})
         where = ", ".join(k["code"] or "its folder %s" % k["folder"] for k in kept)
@@ -4780,7 +4781,9 @@ class LabRuntime:
         names = sorted({name for _, _, plan in plans for name in plan.requires})
         results = {r.instr: r for r in self.engine.preflight(names)} if names and first is None else {}
         for n, item, plan in plans:
-            stop, _ = self.engine.judge([results[i] for i in plan.requires if i in results], self.engine.needs(plan))
+            needs = self.engine.needs(plan)
+            stop, _ = self.engine.judge([results[i] for i in plan.requires if i in results], needs)
+            stop += self.engine.read_needed([i for i in needs if i not in plan.requires], needs)
             if stop:
                 later.append(self._item_line(n, item, "would be refused if it started now: preflight failed: %s; it "
                                                       "is checked again when its turn comes" % "; ".join(stop)))
@@ -7169,7 +7172,9 @@ class LabRuntime:
             return None
         folder = folderfiles.mine(target, self._kelvins())
         made = self._python_made(target) if importing else None
-        if made is not None:   # run_python's own output: only from runs this chat may see
+        if made is not None:   # run_python's own output: as Kelvin recorded its call, from runs this chat may see
+            if made.get("problem"):
+                return made["problem"]
             if any(not self.may_see(self._run_marks(d)) for d in made["runs"].values()):
                 return "run_python made %s from a run of unshared work this chat may not see" % path
         elif folder is not None and not (importing and self._pasted(target)):
@@ -7187,10 +7192,13 @@ class LabRuntime:
 
     def _python_made(self, target: Path) -> Optional[Dict[str, Any]]:
         """What run_python saved, a file (resolved) in one of its folders (the data folder's python/<date-time>/), or
-        such a folder: {folder, code: its code.py, runs: the runs the code read, {id: folder}}. None for anything else,
-        and for what Kelvin itself wrote there (the code, its job and result, snapshots of runs still measured). The
-        one door from run_python to import_data: the run made of it says it was computed, by which code from which
-        runs, and is never taken for one Kelvin measured (_imported)."""
+        such a folder: {folder, code: its code.py, code_sha256, runs: the runs the code read, {id: folder}}, as Kelvin's
+        own record of that call has them (_python_record), never as the folder says: the code could write anything
+        there, job.json and code.py too. {folder, problem} when that can't be vouched for: no record of the call, or a
+        code.py that isn't the code that ran. None for anything else, and for what Kelvin itself wrote there (the
+        code, its job and result, snapshots of runs still measured). The one door from run_python to import_data: the
+        run made of it says it was computed, by which code from which runs, and is never taken for one Kelvin measured
+        (_imported)."""
         from ..sandbox import INTERNAL
         if self.data_dir is None:
             return None
@@ -7202,16 +7210,36 @@ class LabRuntime:
         if not inner or (len(inner) > 1 and (inner[1] in INTERNAL or inner[1] in ("runs", ".matplotlib"))):
             return None
         folder = root / inner[0]
+        record = self._python_record(folder)
+        if record is None or not record.get("code_sha256"):
+            return {"folder": folder, "problem": "Kelvin has no record of the run_python call that made %s (the code "
+                                                 "it ran and the runs it read), so it can't say how it was made"
+                                                 % target}
         try:
-            job = json.loads((folder / "job.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None   # not a folder run_python made
-        runs = job.get("runs") if isinstance(job, dict) else None
-        if not isinstance(runs, dict):
-            return None
-        return {"folder": folder, "code": folder / "code.py",
-                "runs": {str(rid): Path(str((item or {}).get("folder") or "")) for rid, item in runs.items()
-                         if isinstance(item, dict)}}
+            now = hashlib.sha256((folder / "code.py").read_bytes()).hexdigest()
+        except OSError:
+            now = None
+        if now != record["code_sha256"]:
+            return {"folder": folder, "problem": "the code.py beside %s isn't the code that ran (it changed after Kelvin "
+                                                 "wrote it), so Kelvin can't say how it was made" % target}
+        runs: Dict[str, Path] = {}
+        for rid in record.get("runs") or []:   # whose each is, from its own record (may_see judges it)
+            # one gone since: whose it was can't be read, so it is kept apart (_run_marks)
+            runs[str(rid)] = self.runs.find(str(rid)) or Path(self.data_dir) / "runs" / ".gone" / str(rid)
+        return {"folder": folder, "code": folder / "code.py", "code_sha256": record["code_sha256"], "runs": runs}
+
+    def _python_record(self, folder: Path) -> Optional[Dict[str, Any]]:
+        """Kelvin's own record of the run_python call that made this folder (its run_python event: the runs it read,
+        its code's SHA-256 as Kelvin wrote it before it ran), the latest; None when the record has none."""
+        for event in reversed(self.gate.log.events()):
+            if event.get("type") != "run_python" or not event.get("folder"):
+                continue
+            try:
+                if Path(str(event["folder"])).resolve() == folder:
+                    return event
+            except (OSError, RuntimeError, ValueError):
+                continue
+        return None
 
     def _pasted(self, target: Path) -> bool:
         """Whether a file or folder (resolved) is one a person put in this person's data folder's runs, where a chat's
@@ -8575,14 +8603,17 @@ class LabRuntime:
             gate.log.write("run_refused", by=gate.operator, plan=prep.name, reason="; ".join(problems))
             return "script not run: refused: " + "; ".join(problems), None
         found = prep.found
+        driving = bool(grants or found.drives or found.open or found.actions)
         needs = self.engine.drive_needs(list(found.drives) + list(found.open), [
-            tuple(a.split(".", 1)) for a in found.actions if "." in a], driving=bool(grants or found.actions))
+            tuple(a.split(".", 1)) for a in found.actions if "." in a], driving=driving)
         checked = self.engine.preflight(names, fresh=bool(grants), needs=needs) if names else []
         bad, unread = self.engine.judge(checked, needs, unused="if the script reads it, it gets that error")
+        bad += self.engine.read_needed([i for i in needs if i not in names], needs)   # what protects its drives
+        if unread and driving and not bad:   # it may decide by any reading it asks for: none is set aside for it
+            bad = ["%s; a script that drives the sample may decide by any reading of the instruments it opens, so it "
+                   "doesn't start while one can't be read" % "; ".join(u.rsplit("; ", 1)[0] for u in unread)]
         if bad:
             return "script not run: preflight failed: " + "; ".join(bad), None
-        if ready is not None:
-            ready()
         # said right under what runs: the person approves the file, and what it imports beside it, as they are now
         request.items[1:1] = self._changed_since(prep) + ["Can't be read now: %s" % u for u in unread]
         kept = self._kept_version(prep.path)
@@ -8635,8 +8666,11 @@ class LabRuntime:
             job = scriptrun.ScriptRun(gate, prep, self.engine.store, grants,
                                       set(prep.found.unknown) | set(prep.found.libraries), meta,
                                       self.attribution.get("folder"), busy, self.engine.progress, since=since)
+            job.told = list(unread)   # its record says what couldn't be read as it started
             self._live_run = job   # set_live reaches it while it runs
             try:
+                if ready is not None:   # its checks, its approval and the Stop check passed: it starts now
+                    ready()
                 report = job.execute()
             finally:
                 self._live_run = None
@@ -8660,7 +8694,7 @@ class LabRuntime:
                 if cols["axes"] else ""))
         if report.left:
             lines.append("left away from safe, as the script left them: " + ", ".join(report.left))
-        lines += ["warning: " + w for w in unread + list(report.warnings)]   # a reading that failed as it started
+        lines += ["warning: " + w for w in report.warnings]   # a reading that failed as it started too (job.told)
         if report.files:
             lines.append("files it wrote beside the script: %s%s" % (", ".join(report.files[:10]),
                                                                      " …" if len(report.files) > 10 else ""))

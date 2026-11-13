@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Set, Tuple
 
-from .adapters import AdapterError, LinkLost, NoAnswer
+from .adapters import AdapterError, ErrorAnswer, LinkLost, NoAnswer
 from .cards import RPC_CALL, Card
 from .drivers import DriverBackend, link_failed
 
@@ -253,7 +253,7 @@ class JsonRpcInstrument(DriverBackend):
         if error is not None:
             message = error.get("message") if isinstance(error, dict) else error
             code = error.get("code") if isinstance(error, dict) else None
-            raise AdapterError("%s: %s was refused: %s%s" % (self.name, method, message,
+            raise ErrorAnswer("%s: %s was refused: %s%s" % (self.name, method, message,   # its answer: not lost
                                                              " (%s)" % code if code is not None else ""))
         result = answer.get("result")
         if not isinstance(result, list):
@@ -266,7 +266,7 @@ class JsonRpcInstrument(DriverBackend):
         if not 0 <= i < len(result) or isinstance(result[i], bool) or not isinstance(result[i], int):
             return list(result)   # no error number where the card says: the values as they came
         if result[i] != 0:
-            raise AdapterError("%s: %s: the instrument answered with its error %d%s" % (
+            raise ErrorAnswer("%s: %s: the instrument answered with its error %d%s" % (   # its answer: not lost
                 self.name, method, result[i], self.named(result[i]) if name_errors else ""))
         return result[:i] + result[i + 1:]
 

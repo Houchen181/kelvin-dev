@@ -45,6 +45,12 @@ class SensorError(RuntimeError):
     run stops rather than taking it for a value."""
 
 
+class SensorFlagged(SensorError):
+    """The instrument's own status query says this reading isn't valid (a Lake Shore's RDGST? for an open sensor): its
+    answer for that reading alone, which work that doesn't need the reading may set aside (Lab.health_check). A value
+    Kelvin only judges impossible (SensorError: outside plausible) is not the instrument's say, and isn't set aside."""
+
+
 class InstrumentLost(RuntimeError):
     """The instrument didn't answer, or can't be reached at all, said in plain words: which one, on which bus, and what
     to check ("nvm (Keithley 2182A) doesn't answer on GPIB (address 7): cable or power? [VI_ERROR_NLISTENERS]").
@@ -526,8 +532,9 @@ class Instrument:
         if spec.status_cmd is not None:
             reply = self._io(self.backend.query, spec.status_cmd.render()).strip()
             if not re.search(spec.status_ok, reply):
-                raise SensorError("%s.%s: the instrument flags this reading (%s → %s): the sensor may be open, shorted "
-                                  "or out of its range" % (self.name, spec.name, spec.status_cmd.render(), reply))
+                raise SensorFlagged("%s.%s: the instrument flags this reading (%s → %s): the sensor may be open, "
+                                    "shorted or out of its range" % (self.name, spec.name, spec.status_cmd.render(),
+                                                                     reply))
         lim = spec.plausible
         if lim is not None and not (isinstance(value, (int, float)) and lim[0] <= value <= lim[1]):
             raise SensorError("%s.%s reads %s, which it can't really be (%s to %s): the sensor may be open or shorted"

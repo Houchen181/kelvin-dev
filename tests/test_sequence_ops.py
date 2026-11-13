@@ -169,7 +169,7 @@ def test_skipping_a_script_declines_its_own_card(tmp_path, scripts):
     assert rt.queue_start("human").startswith("queue started")   # a script asks for itself as it starts
     card = rt.approver.wait_for_pending(timeout=20)
     assert card and card["title"] == "Run script sweep.py?"
-    assert script.status == "running"
+    assert rt.queue.status_of(script) == "starting"   # running only once it starts, after its card (review of ddb955c)
     t0 = time.time()
     rt.queue_skip(script.id, "human")
     finish(rt, 30)

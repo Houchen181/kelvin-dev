@@ -1194,6 +1194,7 @@ class ScriptRun:
         self.pid: Optional[int] = None
         self.bye_at = 0.0     # when its main script said it ended (bye): its process should end soon after
         self.store, self.grants, self.meta, self.folder = store, grants, dict(meta or {}), folder
+        self.told: List[str] = []   # what its preflight couldn't read (a script that drives nothing): its record's warnings
         # unknown addresses a person allowed, as VISA resources however they are spelled (the approval's serial://COM5
         # is the script's COM5 or ASRL5::INSTR), and makers' libraries, by name
         self.allowed = {a if a in OPAQUE else canonical(a) for a in allowed}
@@ -2131,6 +2132,7 @@ class ScriptRun:
         report = ScriptReport(status, "", self.rec.run_id, str(self.rec.path) if self.rec.path else str(run_dir),
                               self.rows, self._columns(), self.n_commands, output, files,
                               list(self.bye.get("figures") or []), left, cleanup, duration_s=duration)
+        report.warnings.extend(self.told)   # readings its preflight couldn't read, said first
         if self.passed:
             report.warnings.append("past the gate, as a person allowed: " + ", ".join(self.passed))
         if self.through:
