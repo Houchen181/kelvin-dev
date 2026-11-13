@@ -107,7 +107,7 @@ The App Store takes the same build as TestFlight: a tag `ios-v*` uploads it, and
 
 ### Once: before the first submission
 
-1. **Finish the hub's terms and privacy notice.** Both still open with "Draft". The app links the privacy notice (the welcome screen, the sign-in sheet, Computers → Kelvin account) and so does the store page, so it must be final, and the hub must be up while Apple reviews.
+1. **The hub's terms and privacy notice** are final since 2026-11-13, and the privacy notice covers this app. The app links it (the welcome screen, the sign-in sheet, Computers → Kelvin account) and so does the store page. Before submitting, set `contact` in the hub's `hub.json` to the email for questions about people's data, update the live hub to this code, and keep it up while Apple reviews.
 2. **A review account:** a Kelvin account on the hub, for Apple. The reviewer may try **Delete Kelvin account…** on it; make another if so.
 3. **App Information:** subtitle and category (below); content rights: no third-party content; the age rating questions: Messaging and Chat, and User-Generated Content, yes (the team chat); a social feed and unrestricted web access, no; and, as Apple asks, count what an AI model could write in a chat when answering the content questions. Apple works out the rating.
 4. **App Privacy:** the privacy policy URL is the hub's `/privacy` (`https://kelvin.tail269ee5.ts.net/privacy` while the hub runs on the workstation). The data, from the hub's privacy notice, all linked to the person and none used for tracking:

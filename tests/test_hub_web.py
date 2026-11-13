@@ -806,3 +806,31 @@ def test_kelvin_agrees_to_new_terms_in_kelvin_itself(tmp_path):
     hub.config["consent_version"] = "2099-01-01"                        # the terms change again
     r = client.post("/api/sync", headers=auth, json=one)
     assert r.status_code == 403 and r.json()["consent_version"] == "2099-01-01" and "in Kelvin" in r.json()["error"]
+
+
+def test_the_terms_and_privacy_notice_are_final_and_name_whom_to_write_to(tmp_path):
+    """Asked for 2026-11-13 ("what is still missing to send the kelvin ios app for review?", then "Yes, draft them"):
+    no Draft mark; the privacy notice, which the App Store links, covers Kelvin for iPhone, the phone's way through
+    the hub and the AI companies chats go to; hub.json contact names whom to write to, and nothing while unset."""
+    for sharing in (True, False):
+        home = tmp_path / ("sharing" if sharing else "accounts")
+        home.mkdir()
+        hub, client = make(home, sharing=sharing)
+        terms, privacy = client.get("/terms").text, client.get("/privacy").text
+        assert "Draft" not in terms + privacy and "mailto:" not in terms + privacy
+        for part in ("{contact}", "{phone}", "{models}", "{runs}", "{labs}", "{who}", "{files}", "{changed}"):
+            assert part not in terms + privacy, part
+        assert "Kelvin for iPhone" in terms
+        for part in ("covers the Kelvin hub and the apps that use it", "Your phone, through the hub",
+                     "keeps none of them", "The AI models your chats use", "names the company and asks",
+                     "at least as well as this notice", "Kelvin for iPhone deletes it too", "<b>Changes:</b>"):
+            assert part in privacy, part
+        hub.config["contact"] = "privacy@hub.test"
+        link = '<a href="mailto:privacy@hub.test">privacy@hub.test</a>'
+        assert "Questions about these terms: %s." % link in client.get("/terms").text
+        assert "Questions, and requests about your data: %s." % link in client.get("/privacy").text
+        hub.config["contact"] = 'a"b@hub.test'                         # escaped where it could break out
+        privacy = client.get("/privacy").text
+        assert "mailto:a&quot;b@hub.test" in privacy and 'mailto:a"b' not in privacy
+        hub.config["contact"] = "not an email"
+        assert "mailto:" not in client.get("/terms").text + client.get("/privacy").text

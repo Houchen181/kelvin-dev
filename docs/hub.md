@@ -10,12 +10,13 @@ The hub is the Kelvin team's server for **Kelvin accounts**: one email and passw
 - **`"sharing": true`** (the default): Kelvins share work here. With `false`, the hub keeps Kelvin accounts only: shared work's pages and API calls answer 404, the account page and owner console leave it out, and the terms and privacy notice are the accounts-only ones. **A `hub.json` written by an older hub says `"sharing": false`: set it to `true`.**
 - **`"labs": false`** (the default): no labs. Shared work is seen by its person and the Kelvin team only, and labs' pages, join codes and API calls answer 404. With `true`, people make and join labs, whose members see each other's shared work ([Accounts and labs](#accounts-and-labs)).
 - **`"run_files": false`** (the default): the hub keeps runs' records only, and refuses their data files (403), which stay on people's computers. With `true`, it takes them too, from Kelvins that still send them.
+- **`"contact"`**: an email address, which the terms and privacy notice name for questions and requests about people's data. Unset (the default), they leave it out.
 
 Changing `labs` or `run_files` changes the built-in terms: raise `consent_version` with it, so everyone agrees again.
 
 **Status:**
 - **Built and tested:** the server, its database, a Kelvin's client (`hub/client.py`), Kelvin's sign-in with Kelvin accounts (`central.py`), sharing (syncing in the background: `web/hubsync.py`), and the owner console's pages for shared work.
-- **Drafts:** the terms and privacy notice.
+- **The terms and privacy notice:** final since 2026-11-13, for the App Store: the privacy notice covers Kelvin for iPhone too (the phone's way through the hub, and the AI companies chats go to). Set `contact` so they name whom to write to.
 - **To do:** moving the hub to a server for good ([Moving the hub to a server](#moving-the-hub-to-a-server)); Kelvin's built-in address (`central.DEFAULT_HUB`) then changes with an update.
 
 ## What is shared
@@ -217,7 +218,7 @@ The hub's folder:
 | Path | What it is |
 |---|---|
 | `hub.sqlite3` | Accounts, labs, connected Kelvins and what they share (SQLite, WAL). An older database is brought up to date when the hub starts (schema 3) |
-| `hub.json` | Settings: `base_url`, `consent_version`, `require_confirmed_email`, `sharing` (true), `labs` (false), `run_files` (false), `max_file_mb` (200), `quota_gb_per_user` (5), `backups_kept` (30), `client_ip_header`, `mail`, and the operator key's hash. No secrets. The hub writes it with the defaults at its first start, so one written by an older hub keeps that hub's: `"sharing": false` and `"consent_version": "2026-10-29"` |
+| `hub.json` | Settings: `base_url`, `consent_version`, `require_confirmed_email`, `sharing` (true), `labs` (false), `run_files` (false), `contact` (unset), `max_file_mb` (200), `quota_gb_per_user` (5), `backups_kept` (30), `client_ip_header`, `mail`, and the operator key's hash. No secrets. The hub writes it with the defaults at its first start, so one written by an older hub keeps that hub's: `"sharing": false` and `"consent_version": "2026-10-29"` |
 | `operator-key.txt` | The operator key, written once. Move it to a password manager, then delete the file |
 | `files/<user_id>/<run_id>/` | Run files, while `run_files` is on (or from before) |
 | `backups/hub-YYYY-MM-DD.sqlite3` | One copy of the database a day, made while the hub runs (SQLite's online backup) |

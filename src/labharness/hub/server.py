@@ -123,11 +123,12 @@ ul.plain{padding-left:1.1rem}
 # changes what people agreed to, so raise consent_version with them. Beside the box that agrees (Kelvin's screens,
 # the hub's own Create account and consent page) nothing more: these say it all, the terms what changed and when
 # ({changed}: CONSENT_VERSION, when sharing came; since Kelvin 0.3.51 it is off unless switched on, which shares less
-# than the terms of that version said, so nobody had to agree again).
-TERMS = """<p class="note"><b>Draft.</b> The Kelvin team must review these terms before the hub opens to the public.</p>
-<p><b>Changed on {changed}:</b> Kelvin can share your work here, if you switch sharing on.</p>
+# than the terms of that version said, so nobody had to agree again). Final since 2026-11-13, for the App Store: the
+# privacy notice covers Kelvin for iPhone too, and {contact} is hub.json contact, whom to write to (left out unset).
+TERMS = """<p><b>Changed on {changed}:</b> Kelvin can share your work here, if you switch sharing on.</p>
 <ul class="plain">
-<li>The hub keeps your Kelvin account, so the same email and password sign you in to Kelvin on any computer.</li>
+<li>The hub keeps your Kelvin account, so the same email and password sign you in to Kelvin on any computer and in
+Kelvin for iPhone.</li>
 <li><b>Kelvin shares your work here only if you switch sharing on,</b> in Kelvin's Settings → Account: your normal
 projects, your unfiled chats with their whole conversations, and {runs}.
 The Kelvin team, who run the hub, can read what is shared, to help you and to improve Kelvin.</li>
@@ -140,30 +141,37 @@ Kelvin team decides which models are offered and how large budgets are, and may 
 <li>The Kelvin team may disable an account that abuses the hub.</li>
 <li>The hub is provided as it is, without warranty. Keep your own copies of your data; Kelvin keeps them on your
 computer anyway.</li>
-</ul>"""
+</ul>{contact}"""
 
-PRIVACY = """<p class="note"><b>Draft.</b> The Kelvin team must review this notice before the hub opens to the public.</p>
+PRIVACY = """<p>This notice covers the Kelvin hub and the apps that use it: Kelvin on your computer and Kelvin for
+iPhone. The Kelvin team runs the hub.{contact}</p>
 <ul class="plain">
+<li><b>What stays with you:</b> Kelvin keeps your chats, projects, runs and data on your computer, and Kelvin for
+iPhone keeps its settings and sign-in on the phone. Only what this notice names reaches the hub.</li>
 <li><b>What the hub keeps:</b> your name, email, optional ORCID iD, a hash of your password (never the password), the
-computers you sign in to Kelvin on (their name, operating system and Kelvin version, and when), and what your Kelvin
-shares if you switch sharing on: normal projects, unfiled chats with their whole conversations, and {runs}.</li>
+computers and phones you sign in to Kelvin on (their name, operating system and Kelvin version, and when), and what
+your Kelvin shares if you switch sharing on: normal projects, unfiled chats with their whole conversations, and
+{runs}.</li>
 <li><b>What never reaches it:</b> incognito chats; unpublished, confidential or model-limited projects, with their
 chats and runs; {files}API keys; and ChatGPT or Claude Code sign-ins.</li>
 <li><b>Who sees your shared work:</b> {who}</li>
 <li><b>Switching it off:</b> in Kelvin, Settings → Account. Kelvin stops sending, and removes from the hub what it
 shared. A chat or run you delete in Kelvin goes from the hub too.</li>
-<li><b>PDF pages to draw:</b> when your chat's model sees pictures but can't read PDFs, Kelvin sends the hub the
+{phone}{models}<li><b>PDF pages to draw:</b> when your chat's model sees pictures but can't read PDFs, Kelvin sends the hub the
 pages it needs (never from incognito chats or unpublished, confidential or model-limited projects) and gets them back
 as pictures. The hub keeps nothing of them.</li>
 <li><b>The hub's models:</b> when your chat uses one of them (Claude, GPT, Gemini or OpenCode with the Kelvin team's
 keys), your messages pass through the hub to that model's service: Anthropic, OpenAI, Google or OpenCode. Of these
 calls the hub keeps who used which model, how many tokens and what it cost, never the text. Confidential projects
-never use them.</li>
+never use them. The Kelvin team uses only services that protect your messages at least as well as this notice
+does.</li>
 <li><b>Records:</b> the hub logs sign-ins, connections and changes, with the IP address, for security; and each time
 the Kelvin team opens one of your chats or runs, which your <b>Export</b> shows.</li>
 <li><b>Your rights:</b> download everything with <b>Export</b>, and delete your account and all it shared with
-<b>Delete account</b>, both on your account page. Daily database backups are kept for up to 30 days, then
-removed.</li>
+<b>Delete account</b>, both on your account page; Kelvin for iPhone deletes it too (Computers → Kelvin account).
+Daily database backups are kept for up to 30 days, then removed.</li>
+<li><b>Changes:</b> if this notice changes what reaches the hub, Kelvin asks you to agree again before anything new
+goes.</li>
 </ul>"""
 
 RUNS_SHARED = ("the records of your finished runs (plan, status, settings, results and assessment), never their data "
@@ -177,25 +185,52 @@ WHO_SEES = ("you, and the Kelvin team, who run the hub. They read it to help you
 WHO_SEES_LABS = ("you; the members of the lab your Kelvin shares into, while you are a member too (leaving a lab takes "
                  "your work out of its view); and the Kelvin team, who run the hub, who read it to help you and to "
                  "improve Kelvin.")
+PHONE_PRIVACY = """<li><b>Your phone, through the hub:</b> away from the lab's network, Kelvin for iPhone reaches
+your Kelvin through the hub. The phone's requests and Kelvin's answers pass through it as they happen, and the hub
+keeps none of them. Incognito chats and unpublished, confidential or model-limited projects never go this way. On
+the lab's network or through Tailscale, the phone reaches your computer directly. Kelvin's Settings → Account
+switches this off.</li>
+"""
+MODELS_PRIVACY = """<li><b>The AI models your chats use:</b> to answer, Kelvin sends a chat's messages, with what it
+needs from your lab, to the company whose model the chat uses: through the hub for the hub's models, or straight
+from your computer for a model you set up yourself, under your own key or plan with that company. A model server of
+your own keeps them on your network. Kelvin for iPhone names the company and asks before a chat's first message goes
+to it.</li>
+"""
 
 
-def terms_text(labs: bool, run_files: bool) -> str:
+def mail_link(contact: str) -> str:
+    return '<a href="mailto:%s">%s</a>' % (html.escape(contact, quote=True), html.escape(contact))
+
+
+def terms_contact(contact: str) -> str:
+    """The terms' last line: whom to ask (hub.json contact), or nothing while it is unset."""
+    return "\n<p>Questions about these terms: %s.</p>" % mail_link(contact) if contact else ""
+
+
+def privacy_contact(contact: str) -> str:
+    """The end of the privacy notice's first paragraph: whom to write to (hub.json contact), or nothing while unset."""
+    return " Questions, and requests about your data: %s." % mail_link(contact) if contact else ""
+
+
+def terms_text(labs: bool, run_files: bool, contact: str = "") -> str:
     """The built-in terms while Kelvins share work here."""
     return TERMS.replace("{runs}", RUNS_SHARED_WITH_FILES if run_files else RUNS_SHARED) \
-        .replace("{labs}", LABS_TERMS if labs else "").replace("{changed}", CONSENT_VERSION)
+        .replace("{labs}", LABS_TERMS if labs else "").replace("{changed}", CONSENT_VERSION) \
+        .replace("{contact}", terms_contact(contact))
 
 
-def privacy_text(labs: bool, run_files: bool) -> str:
+def privacy_text(labs: bool, run_files: bool, contact: str = "") -> str:
     """The built-in privacy notice while Kelvins share work here."""
     return PRIVACY.replace("{runs}", RUNS_SHARED_WITH_FILES if run_files else RUNS_SHARED) \
         .replace("{files}", "" if run_files else "runs' data files (run.h5, plots, reports); ") \
-        .replace("{who}", WHO_SEES_LABS if labs else WHO_SEES)
+        .replace("{who}", WHO_SEES_LABS if labs else WHO_SEES).replace("{phone}", PHONE_PRIVACY) \
+        .replace("{models}", MODELS_PRIVACY).replace("{contact}", privacy_contact(contact))
 
 
-TERMS_ACCOUNTS = """<p class="note"><b>Draft.</b> The Kelvin team must review these terms before the hub opens to the
-public.</p>
-<ul class="plain">
-<li>The hub keeps your Kelvin account, so the same email and password sign you in to Kelvin on any computer.</li>
+TERMS_ACCOUNTS = """<ul class="plain">
+<li>The hub keeps your Kelvin account, so the same email and password sign you in to Kelvin on any computer and in
+Kelvin for iPhone.</li>
 <li>Your work stays on your computers: the hub keeps no chats, projects, runs or data. Chats with the hub's
 models pass through it to the model's service, and PDF pages Kelvin asks it to draw as pictures; it keeps none of
 their text. Confidential projects never use the hub's models.</li>
@@ -203,27 +238,41 @@ their text. Confidential projects never use the hub's models.</li>
 Kelvin team decides which models are offered and how large budgets are, and may change both.</li>
 <li>The Kelvin team runs the hub and may disable an account that abuses it.</li>
 <li>The hub is provided as it is, without warranty.</li>
-</ul>"""
+</ul>{contact}"""
 
-PRIVACY_ACCOUNTS = """<p class="note"><b>Draft.</b> The Kelvin team must review this notice before the hub opens to
-the public.</p>
+PRIVACY_ACCOUNTS = """<p>This notice covers the Kelvin hub and the apps that use it: Kelvin on your computer and
+Kelvin for iPhone. The Kelvin team runs the hub.{contact}</p>
 <ul class="plain">
 <li><b>What the hub keeps:</b> your name, email, optional ORCID iD, a hash of your password (never the password), and
-the computers you sign in to Kelvin on: their name, operating system and Kelvin version, and when.</li>
+the computers and phones you sign in to Kelvin on: their name, operating system and Kelvin version, and when.</li>
 <li><b>What it never keeps:</b> your work (chats, projects, runs, data), which stays on your computers. Your API
 keys and ChatGPT or Claude Code sign-ins never reach it.</li>
-<li><b>The hub's models:</b> when your chat uses one of them (Claude, GPT, Gemini or OpenCode with the Kelvin
+{phone}{models}<li><b>The hub's models:</b> when your chat uses one of them (Claude, GPT, Gemini or OpenCode with the Kelvin
 team's keys), your messages pass through the hub to that model's service: Anthropic, OpenAI, Google or OpenCode. The
 hub keeps who used which model, how many tokens and what it cost, never the text. Confidential projects never use
-them.</li>
+them. The Kelvin team uses only services that protect your messages at least as well as this notice does.</li>
 <li><b>PDF pages to draw:</b> when your chat's model sees pictures but can't read PDFs, Kelvin sends the hub the
 pages it needs (never from incognito chats or unpublished, confidential or model-limited projects) and gets them back
 as pictures. The hub keeps nothing of them.</li>
 <li><b>Who sees your account:</b> you, and the Kelvin team, who run the hub. No other user does.</li>
 <li><b>Records:</b> the hub logs sign-ins and changes, with the IP address, for security.</li>
 <li><b>Your rights:</b> download your account with <b>Export</b>, and delete it with <b>Delete account</b>, both on
-your account page. Daily database backups are kept for up to 30 days, then removed.</li>
+your account page; Kelvin for iPhone deletes it too (Computers → Kelvin account). Daily database backups are kept for
+up to 30 days, then removed.</li>
+<li><b>Changes:</b> if this notice changes what reaches the hub, Kelvin asks you to agree again before anything new
+goes.</li>
 </ul>"""
+
+
+def terms_accounts_text(contact: str = "") -> str:
+    """The built-in terms while the hub keeps Kelvin accounts only (hub.json sharing off)."""
+    return TERMS_ACCOUNTS.replace("{contact}", terms_contact(contact))
+
+
+def privacy_accounts_text(contact: str = "") -> str:
+    """The built-in privacy notice while the hub keeps Kelvin accounts only."""
+    return PRIVACY_ACCOUNTS.replace("{phone}", PHONE_PRIVACY).replace("{models}", MODELS_PRIVACY) \
+        .replace("{contact}", privacy_contact(contact))
 
 PAGE_SIZE = 200   # people per page on the operator page
 STAT_NAMES = {"kelvins": "computers", "connections": "signed in on computers", "active_30d": "active in 30 days"}
@@ -646,13 +695,14 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     async def terms(request: Request) -> Response:
         custom = hub.home / "terms.html"
         return page("Terms", custom.read_text(encoding="utf-8") if custom.exists() else
-                    terms_text(hub.labs, hub.run_files) if hub.sharing else TERMS_ACCOUNTS, await session_of(request))
+                    terms_text(hub.labs, hub.run_files, hub.contact) if hub.sharing else
+                    terms_accounts_text(hub.contact), await session_of(request))
 
     async def privacy(request: Request) -> Response:
         custom = hub.home / "privacy.html"
         return page("Privacy", custom.read_text(encoding="utf-8") if custom.exists() else
-                    privacy_text(hub.labs, hub.run_files) if hub.sharing else PRIVACY_ACCOUNTS,
-                    await session_of(request))
+                    privacy_text(hub.labs, hub.run_files, hub.contact) if hub.sharing else
+                    privacy_accounts_text(hub.contact), await session_of(request))
 
     def register_form(values: Dict[str, str], error: Optional[str] = None) -> HTMLResponse:
         return page("Create your account", (

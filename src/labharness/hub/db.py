@@ -76,6 +76,7 @@ DEFAULTS: Dict[str, Any] = {
     "labs": False,                      # labs with join codes, whose members see each other's shared work; off: only
                                         # its person and the Kelvin team see shared work
     "run_files": False,                 # runs' data files from Kelvins; off: the hub keeps runs' records only
+    "contact": "",                      # whom the terms and privacy notice name for questions about people's data
     "max_file_mb": 200,
     "quota_gb_per_user": 5,
     "backups_kept": 30,
@@ -1603,6 +1604,13 @@ class Hub:
         """Does the hub take runs' data files? Off (the default), it keeps runs' records only, and the files stay on
         people's computers."""
         return bool(self.config.get("run_files"))
+
+    @property
+    def contact(self) -> str:
+        """The email the terms and privacy notice give for questions and requests about people's data (hub.json
+        contact); "" while it is unset or not an email."""
+        value = str(self.config.get("contact") or "").strip()
+        return value if EMAIL.match(value) else ""
 
     def _seen_by(self) -> str:
         """The rule for what a person sees of shared work (alias x, parameter :me)."""
