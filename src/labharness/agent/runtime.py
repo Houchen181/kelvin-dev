@@ -851,6 +851,9 @@ class LabRuntime:
         self.home_board: Any = None   # the person's Home (homeboard.py), in the portal; its tools say so without it
         self.auto_report = "both"   # after each run (in its folder) and each queue (in reports/): both, pdf, pptx, off
         self.mounted: Dict[str, Any] = self._load_mounted()   # the sample in the setup now (project, device, since)
+        # a sample another person left in the setup (Kelvin's own folder keeps it for everyone): its protection holds
+        # while it is there, whoever is signed in (sample_held); the runs are filed as this person's own
+        self.setup_other: Dict[str, Any] = {}
         # a person's hands on the sample (who, since): every drive held at safe; the app keeps it across restarts
         self.hands: Optional[Dict[str, Any]] = None
         self.owner: Any = None   # the lab owner's PIN when one is set (accounts.OwnerPin); set by the app
@@ -1002,11 +1005,15 @@ class LabRuntime:
         with self._viewers_lock:
             self._viewers.pop(token, None)
 
+    MCP_AGENT = "an agent over MCP"   # the AI kelvin-mcp's other clients are, as the lab's record names it
+
     def viewer_of(self, token: Any) -> Viewer:
-        """The viewer a token names; any other caller is an agent over MCP: no chat, so it sees shared work only."""
+        """The viewer a token names; any other caller is an agent over MCP: no chat, so it sees shared work only, and
+        an AI all the same, so what it writes in the lab's records is kept as an AI's (never a person's) and is held
+        for a person after text from outside the lab, as a chat's is."""
         with self._viewers_lock:
             found = self._viewers.get(str(token or ""))
-        return found if found is not None else Viewer()
+        return found if found is not None else Viewer(model=self.MCP_AGENT)
 
     def _info(self, pid: Optional[str], cache: Optional[Dict[Any, Any]] = None) -> Dict[str, Any]:
         """project_info, kept in cache for one look through many runs."""
@@ -1798,14 +1805,15 @@ class LabRuntime:
                 "card princeton/lightfield" % folder]
 
     def _protection_lines(self) -> List[str]:
-        m = self.mounted or {}
+        m = self.sample_held()
         prot = m.get("protection") or {}
         if not prot:
             return []
-        name = m.get("device_name") if self.may_see({"project": m.get("project")}) else \
-            "(a sample of another project's unshared work)"   # its limits hold for every chat; its name is its own
+        name = self.shown_sample() if self.mounted else self._other_sample()
         out = ["mounted device %s is protected (a person set this; it can't be changed or passed): %s" % (
             name, "; ".join(protection.summary(prot, self.lab)))]
+        if self.lab.protection_lost:
+            out.append(self.lab.protection_lost)
         if self.protection_missing:
             out.append("this lab lacks %s, named in %s's protection" % (", ".join(self.protection_missing), name))
         return out
@@ -2075,10 +2083,13 @@ class LabRuntime:
             self.gate.log = self._new_log()
             self.engine.store = self._store()
             self.queue = ScanQueue(new / "queue.json")
+            self._sample_now()   # first: their watches made for the sample compare with it
             self._restore_watches()   # theirs come back, and the ones watched now are kept for them too
             self._save_watches()
+            was_on = self._restore_alarms(merge=True)   # theirs come back beside the lab's, never written over
+            if was_on and self._incident_due:   # the restart's card, not made yet, says them
+                self.alarms_before = list(self.alarms_before) + was_on
             self._save_alarms()
-            self.mounted = self._load_mounted()
             self._apply_protection(recheck=True)
             self.attribution = {}
             self.data_problem = problem
@@ -2834,7 +2845,7 @@ class LabRuntime:
         if str(procedure or "").strip():
             from ..procedures import ProcedureBook, parse, step_of
             try:
-                text_v, version = ProcedureBook(Path(self.home) / "procedures").text(procedure)
+                text_v, version = ProcedureBook(self._kelvin_dir() / "procedures").text(procedure)
                 doc = parse(text_v)
                 s = step_of(doc, step) if str(step or "").strip() else None
             except (KeyError, ValueError) as e:
@@ -2859,7 +2870,11 @@ class LabRuntime:
 
     def _procedures(self) -> Any:
         from ..procedures import ProcedureBook
-        return ProcedureBook(Path(self.home) / "procedures")
+        return ProcedureBook(self._kelvin_dir() / "procedures")
+
+    def _kelvin_dir(self) -> Path:
+        """Kelvin's own folder (the app's home, the MCP server's lab memory), else the data folder (a script)."""
+        return Path(self.home or getattr(self, "lab_memory_dir", None) or self.data_dir)
 
     def save_procedure(self, text: str) -> str:
         """Keep a procedure (SOP) as its next version (procedures.py): an edit is a new version, every version kept.
@@ -3846,11 +3861,114 @@ class LabRuntime:
     # ------------------------------------------------------------------ the sample in the setup
 
     def _load_mounted(self) -> Dict[str, Any]:
+        """The sample this person's data folder keeps as mounted (mounted.json), {} when none."""
         try:
             data = json.loads((self.data_dir / "mounted.json").read_text(encoding="utf-8"))
             return data if isinstance(data, dict) and data.get("device_name") else {}
         except (OSError, ValueError):
             return {}
+
+    SETUP_SAMPLES = "mounted_samples.json"   # Kelvin's own folder: the sample in each lab's setup, whoever mounted it
+
+    def _setup_file(self) -> Optional[Path]:
+        base = getattr(self, "lab_memory_dir", None) or getattr(self, "home", None)
+        return Path(base) / self.SETUP_SAMPLES if base is not None else None
+
+    def _setup_sample(self) -> Dict[str, Any]:
+        """The sample in this lab's setup as Kelvin's own folder keeps it for everyone here, whoever mounted it and
+        in whichever data folder: {} when none is kept (nothing mounted, or no such folder: a script, a test)."""
+        path = self._setup_file()
+        if path is None:
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            kept = (data.get("labs") or {}).get(self.lab.config.name) if isinstance(data, dict) else None
+        except (OSError, ValueError, AttributeError):
+            return {}
+        return dict(kept) if isinstance(kept, dict) and kept.get("device_name") else {}
+
+    def _keep_setup_sample(self, record: Dict[str, Any]) -> None:
+        """The sample in this lab's setup is record now ({}: none), kept in Kelvin's own folder: its protection holds
+        whoever signs in next, before anyone has after a restart, and after the data folder changes. A person's
+        mounted.json alone left a protected device unprotected the moment another person signed in."""
+        path = self._setup_file()
+        if path is None:
+            return
+        try:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                labs = data.get("labs") if isinstance(data, dict) and isinstance(data.get("labs"), dict) else {}
+            except (OSError, ValueError):
+                labs = {}
+            if record:
+                labs[self.lab.config.name] = dict(record, user=self.user)
+            else:
+                labs.pop(self.lab.config.name, None)
+            _write_json(path, {"labs": labs})
+        except OSError as e:   # in force here all the same; said in Kelvin's log
+            logging.getLogger("kelvin").warning("the sample in the setup could not be kept for everyone: %s", e)
+
+    def _held_keys(self, prot: Dict[str, Any]) -> List[str]:
+        """What a protection names that this lab has now: what it holds on. One of them gone later (renamed, taken
+        out) holds every drive (protection_lost)."""
+        held = []
+        for key in protection.named(prot or {}):
+            try:
+                self.lab.resolve(key)
+                held.append(key)
+            except (KeyError, ValueError):
+                continue
+        return held
+
+    def _sample_now(self) -> None:
+        """Which sample is in the setup, as Kelvin starts or a person signs in: the one this person's folder keeps,
+        unless the lab's own record (Kelvin's folder) says another went in since. That one, mounted by this person
+        in another data folder, is theirs; another person's holds as setup_other: its protection holds for everyone
+        while it is in the setup, and the runs are filed as this person's own."""
+        own, setup = self._load_mounted(), self._setup_sample()
+        self.setup_other = {}
+        if not setup:
+            self.mounted = own
+        elif setup.get("user") == self.user or (own and own.get("device") == setup.get("device")
+                                                and own.get("since") == setup.get("since")):
+            self.mounted = {k: v for k, v in setup.items() if k != "user"}   # the lab's copy is the newest (a rename)
+            if self.mounted != own:
+                try:
+                    _write_json(self.data_dir / "mounted.json", self.mounted)
+                except OSError:
+                    pass
+        elif own and str(own.get("since") or "") > str(setup.get("since") or ""):   # theirs went in after (a Kelvin
+            self.mounted = own                                                    # that kept no lab copy mounted it)
+            self._keep_setup_sample(own)
+        else:
+            if own:   # theirs was taken out since: another sample went in
+                self.gate.log.write("unmount", by="kelvin", device=own.get("device_name"),
+                                    project=own.get("project_name"), note="another sample went into the setup since")
+                try:
+                    (self.data_dir / "mounted.json").unlink()
+                except OSError:
+                    pass
+            self.mounted = {}
+            self.setup_other = setup
+        for rec in (self.mounted, self.setup_other):
+            if rec and "held" not in rec:   # kept by an earlier Kelvin: what it holds on is what this lab has now
+                rec["held"], rec["lab"] = self._held_keys(rec.get("protection") or {}), self.lab.config.name
+
+    def sample_in_setup(self) -> None:
+        """Kelvin's own folder is known now (the app and the MCP server set it after the runtime is made): the sample
+        the lab's record keeps in the setup holds from now on, before anyone signs in."""
+        self._sample_now()
+        self._apply_protection(recheck=True)
+
+    def _other_sample(self) -> str:
+        """Another person's sample in the setup, as everyone here may read it: whose, not its name or project."""
+        user = (self.setup_other or {}).get("user")
+        return "%s's sample" % user if user else "another person's sample"
+
+    def sample_held(self) -> Dict[str, Any]:
+        """The sample whose protection holds now: the one mounted for this person, else one another person left in
+        the setup."""
+        return self.mounted or self.setup_other or {}
 
     def mount(self, project: Optional[str], device: Dict[str, Any], by: str = "human") -> Dict[str, Any]:
         """Record which sample is in the setup now. Every run from here on belongs to it (and to its project), and
@@ -3862,8 +3980,11 @@ class LabRuntime:
         self.mounted = {"project": project or None, "project_name": info.get("name") or "General",
                         "device": device.get("id"), "device_name": device.get("name"),
                         "since": datetime.now().isoformat(timespec="seconds"), "by": by,
-                        "protection": device.get("protection") or {}}
+                        "protection": device.get("protection") or {},
+                        "held": self._held_keys(device.get("protection") or {}), "lab": self.lab.config.name}
+        self.setup_other = {}   # whatever was in the setup is out: this one is
         (self.data_dir / "mounted.json").write_text(json.dumps(self.mounted, indent=1), encoding="utf-8")
+        self._keep_setup_sample(self.mounted)
         self.gate.log.write("mount", by=by, device=self.mounted["device_name"], project=self.mounted["project_name"],
                             protection=protection.summary(self.mounted["protection"]) or None)
         self._apply_protection()
@@ -3876,7 +3997,10 @@ class LabRuntime:
         if not self.mounted or self.mounted.get("device") != device.get("id"):
             return []
         self.mounted["protection"] = device.get("protection") or {}
+        self.mounted["held"] = self._held_keys(self.mounted["protection"])
+        self.mounted["lab"] = self.lab.config.name
         (self.data_dir / "mounted.json").write_text(json.dumps(self.mounted, indent=1), encoding="utf-8")
+        self._keep_setup_sample(self.mounted)
         self.gate.log.write("protection", by=by, device=self.mounted.get("device_name"),
                             protection=protection.summary(self.mounted["protection"]) or None)
         self._apply_protection()
@@ -3888,7 +4012,10 @@ class LabRuntime:
         if self.mounted:
             self.gate.log.write("unmount", by=by, device=self.mounted.get("device_name"),
                                 project=self.mounted.get("project_name"))
-        self.mounted = {}
+        elif self.setup_other:   # another person's sample: a person says it is out of the setup
+            self.gate.log.write("unmount", by=by, device=self._other_sample(), note="another person's sample")
+        self.mounted, self.setup_other = {}, {}
+        self._keep_setup_sample({})
         self._apply_protection()
         try:
             (self.data_dir / "mounted.json").unlink()
@@ -3900,9 +4027,19 @@ class LabRuntime:
         """Hold this lab's instruments to the mounted device's protection, and to a person's hands-on lock.
         recheck: other instruments (Kelvin started, another lab, another person's sample), so the caps are checked
         and written again when Kelvin is next idle, in case an instrument was reset meanwhile."""
-        prot = (self.mounted or {}).get("protection") or {}
-        self.protection_missing = protection.apply(self.lab, prot, (self.mounted or {}).get("device_name") or "")
-        self._name_protection([{"project": (self.mounted or {}).get("project")}])
+        held = self.sample_held()
+        prot = held.get("protection") or {}
+        self.protection_missing = protection.apply(self.lab, prot, (held.get("device_name") or "") if self.mounted
+                                                   else self._other_sample())
+        self._name_protection([{"project": held.get("project") if self.mounted else None}])
+        # what the protection held on when it was mounted, gone now (renamed, taken out and added again): every drive
+        # stays where it is or goes toward safe until a person gives the protection the new name or takes it out
+        same_lab = held.get("lab", self.lab.config.name) == self.lab.config.name   # another lab's: as before
+        lost = [k for k in held.get("held") or [] if k in self.protection_missing] if same_lab else []
+        self.lab.protection_lost = None if not lost else (
+            "the mounted device's protection names %s, which this lab no longer has (renamed, or taken out): every "
+            "drive stays where it is or goes toward safe until a person gives its protection the new name (Samples) "
+            "or takes it out of the setup (Lab panel)" % ", ".join(lost))
         self.lab.hands_on = self.hands
         if recheck:
             self.caps_waiting = bool(prot)
@@ -3927,7 +4064,7 @@ class LabRuntime:
         """Write the mounted device's caps into the instruments. What can't be written yet (a plan holds the
         instruments, a source isn't at 0, an instrument is switched off) waits: Kelvin writes it when it is next
         idle (_caps_if_waiting)."""
-        prot = (self.mounted or {}).get("protection") or {}
+        prot = self.sample_held().get("protection") or {}
         self.caps_waiting = False
         if not prot:
             return []
@@ -3948,7 +4085,7 @@ class LabRuntime:
             self.lock.release()
 
     def _caps_if_waiting(self) -> None:
-        if self.caps_waiting and self.mounted:
+        if self.caps_waiting and self.sample_held():
             self._write_caps("sample protection")
 
     @contextlib.contextmanager
@@ -3994,11 +4131,20 @@ class LabRuntime:
                     pass
 
     def mounted_view(self) -> Optional[Dict[str, Any]]:
-        """The mounted sample with its protection in words (the Lab panel and the phone)."""
-        if not self.mounted:
+        """The mounted sample with its protection in words (the Lab panel and the phone). Another person's, still in
+        the setup, shows as theirs: its protection holds; its project is theirs to name."""
+        m = self.sample_held()
+        if not m:
             return None
-        return dict(self.mounted, protection_lines=protection.summary(self.mounted.get("protection") or {}, self.lab),
-                    protection_missing=self.protection_missing)
+        lost = getattr(self.lab, "protection_lost", None)
+        if self.mounted:
+            return dict(self.mounted, protection_lines=protection.summary(self.mounted.get("protection") or {},
+                                                                          self.lab),
+                        protection_missing=self.protection_missing, protection_lost=lost)
+        return {"device": None, "device_name": self._other_sample(), "project": None, "project_name": "",
+                "since": m.get("since"), "by": m.get("by"), "another_person": True,
+                "protection": m.get("protection") or {}, "protection_missing": self.protection_missing,
+                "protection_lines": protection.summary(m.get("protection") or {}, self.lab), "protection_lost": lost}
 
     def keep_hands(self, hands: Optional[Dict[str, Any]]) -> None:
         """At start: a hands-on lock that was on when Kelvin closed is on again."""
@@ -4202,7 +4348,9 @@ class LabRuntime:
         pid = m.get("project") if m else chat_pid
         in_chat = bool(whose.get("chat") or incognito or whose.get("unshared") or chat_pid)
         apart = ""
-        if m and in_chat and (pid or None) != (chat_pid or None):   # the sample in the setup is another project's
+        # the sample in the setup is another project's; an incognito chat's run goes under none, General's too (its
+        # project was None as General's is, and the run went under the General sample)
+        if m and in_chat and (incognito or (pid or None) != (chat_pid or None)):
             if incognito:
                 apart = "an incognito chat's runs go under no project or sample"
             elif whose.get("unshared") or self.project_info(chat_pid).get("unshared"):
@@ -7037,6 +7185,17 @@ class LabRuntime:
         and caps, which a rename must never lift) and this lab's kept watches (which _restore_watches would drop as
         naming nothing)."""
         from ..discovery import renamed_keys
+        setup = self._setup_sample()
+        if setup:   # the lab's own record: whoever signs in next, the protection holds under the new name
+            moved = renamed_keys(setup, old, new)
+            if moved != setup:
+                user, self.user = self.user, setup.get("user")
+                try:
+                    self._keep_setup_sample({k: v for k, v in moved.items() if k != "user"})
+                finally:
+                    self.user = user
+        if self.setup_other:
+            self.setup_other = renamed_keys(self.setup_other, old, new)
         if self.mounted:
             moved = renamed_keys(self.mounted, old, new)
             if moved != self.mounted:
@@ -7055,6 +7214,44 @@ class LabRuntime:
                     _write_json(self.data_dir / self.WATCHES, {"labs": labs})
                 except OSError:
                     pass
+
+    def renamed_in_folder(self, folder: Any, old: str, new: str) -> bool:
+        """Another person's data folder after a rename (the app gives each one): their mounted sample's protection,
+        their watches for this lab, their waiting and saved sequences take the new name, so nothing they keep holds on
+        a name the lab no longer has at their next sign-in. True when something there changed."""
+        from ..discovery import renamed_keys, renamed_plan_text
+        folder = Path(folder)
+        if not folder.is_dir() or folder.resolve() == Path(self.data_dir).resolve():
+            return False
+        changed = False
+        for name, part in (("mounted.json", None), (self.WATCHES, self.lab.config.name), ("queue.json", None)):
+            path = folder / name
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if part is not None:   # watches are kept by lab: only this lab's
+                labs = data.get("labs") if isinstance(data, dict) else None
+                if not isinstance(labs, dict) or part not in labs:
+                    continue
+                moved = dict(data, labs=dict(labs, **{part: renamed_keys(labs[part], old, new)}))
+            else:
+                moved = renamed_keys(data, old, new)
+            if moved != data:
+                try:
+                    _write_json(path, moved)
+                    changed = True
+                except OSError:
+                    continue
+        for path in sorted((folder / "queues").glob("*.yaml")):   # sequences saved to load again
+            try:
+                text = path.read_text(encoding="utf-8")
+                if renamed_plan_text(text, old, new) != text:
+                    path.write_text(renamed_plan_text(text, old, new), encoding="utf-8")
+                    changed = True
+            except OSError:
+                continue
+        return changed
 
     def instrument_renamed(self, old: str, new: str, by: str = "human") -> List[str]:
         """After a person renamed one of the lab's instruments (its lab config and the lab say new now), what Kelvin
@@ -7379,6 +7576,9 @@ class LabRuntime:
                     "manual.pdf" % (instrument, profiles.folder(self.home, instrument)))
         except (ValueError, RuntimeError) as e:
             return str(e)
+        except Exception as e:   # a damaged PDF (pypdf's own errors): said, never a bare tool error
+            return ("the %s manual in %s can't be read (%s): a person puts a whole copy there as manual.pdf"
+                    % (instrument, profiles.folder(self.home, instrument), profiles._first_line(e)))
         if not hits:
             return "nothing in the %s manual matches %r; try other words (the manual's own terms)" % (instrument, query)
         return "\n\n".join("[%s manual, p. %d]\n%s" % (instrument, h["page"], h["text"]) for h in hits)
@@ -9423,6 +9623,10 @@ class LabRuntime:
             source = str(pdfs[0])
         if re.match(r"^https?://", source) and not self.literature.enabled:
             return "searching outside the lab (literature and web) is switched off in Settings"
+        if not re.match(r"^https?://", source):   # a file here: what the file tools may read, no more
+            refused = self._unreadable(source)
+            if refused:
+                return "not kept: %s" % refused
         if instrument and instrument not in self.lab.instruments:
             return "no instrument %r in this lab" % instrument
         try:
@@ -9733,10 +9937,14 @@ class LabRuntime:
             if resource_name(ic.address) == resource_name(address):
                 return "%s is %s's, in the lab: Kelvin leaves its connection alone" % (name, inst)
         query = (query or "*IDN?").strip()
-        if "?" not in query or len(query) > 40:
-            return "only an identity query (with a ?, as the manual gives it) is sent to an instrument Kelvin doesn't know"
+        # one query, as a manual gives it (*IDN?, ID?, ?ID, SYST:VERS?): no second command after a ; or a line
+        # break, no spaces (a value), nothing for a Prologix adapter (++addr): those once went out with no gate
+        if "?" not in query or not re.fullmatch(r"\??\*?[A-Za-z][A-Za-z0-9_:.*]{0,30}\??", query):
+            return ("only an identity query (with a ?, as the manual gives it: one word, nothing after it) is sent "
+                    "to an instrument Kelvin doesn't know")
         if self._take_lab() is not None:   # one thing at a time on the ports, never waiting out a run
             return self._busy_answer()
+        self.gate.log.write("inspect_serial", by=self.gate._who(), port=name, query=query, baud=baud or None)
         try:   # on a thread of its own: a USB-serial adapter's driver that never returns can't hold the lab (_aside)
             res = self._aside("the look at %s" % name, lambda step: probe.inspect_serial(
                 name, query, [baud] if baud else None), stall_s=90.0)
@@ -9998,7 +10206,7 @@ class LabRuntime:
             else:   # a run has the lab: holding the protection again clears its limits first, never beside work that
                 # sets values against them; they hold for these instruments already (set as the lab opened, kept by a
                 # reconnect), and the caps are written into the instruments when Kelvin is next idle
-                self.caps_waiting = bool((self.mounted or {}).get("protection"))
+                self.caps_waiting = bool(self.sample_held().get("protection"))
             self._look_after(started, also=done)
         finally:
             if got:
@@ -10672,13 +10880,24 @@ class LabRuntime:
             elif not inst.enabled:
                 notes.append("Kelvin's connection to it was off, so Kelvin didn't read it: its outputs stay as they "
                              "are.")
+            # what a person set for it goes with its entry: added again, it would start from the maker's limits
+            ic = inst.config
+            theirs = [w for w, has in (("its limits", ic.limits and not (ic.added_by or self.lab.config.observe_only)),
+                                       ("ramp rates", ic.rates), ("guards", ic.guards), ("auto rules", ic.auto),
+                                       ("its connection settings", ic.connection), ("its card's settings", ic.vars))
+                      if has]
+            persons = bool(theirs)   # card and address alone: added again, it is as it was (or stricter)
+            if persons and not twins:
+                notes.append("A person set %s for it: they go with its entry. Added again, it starts from the "
+                             "maker's limits, asking about every change until a person reviews them."
+                             % ", ".join(theirs))
             request = ApprovalRequest(("Remove %s from the lab while it is on?" if on else "Remove %s from the lab?")
                                       % name, [
                 "%s (%s at %s) leaves the lab config, and Kelvin lets go of its connection without sending it "
                 "anything." % (name, inst.card.model, inst.config.address)] + notes + [
                 "Its folder, its past runs and the lab config history stay: it can be put back."])
-            if on:   # the person's call: Kelvin gives up what it could still do for the sample
-                approved = self.gate.ask(request)
+            if on or (persons and not twins):   # the person's call: Kelvin gives up what it could still do for the
+                approved = self.gate.ask(request)   # sample, or what a person set for the instrument
             else:
                 approved = self.gate.auto_simple(request, "taking an instrument out of the lab sends it nothing") \
                     or self.gate.ask(request)
@@ -11437,10 +11656,12 @@ class LabRuntime:
         except (OSError, ValueError, TypeError):
             pass
 
-    def _restore_alarms(self) -> List[Dict[str, Any]]:
+    def _restore_alarms(self, merge: bool = False) -> List[Dict[str, Any]]:
         """The alarm history as Kelvin kept it (who said Got it, how often each went up), back in the monitor. One
         still on when Kelvin stopped can't be known to be on now: it shows as ended by the stop (its watch raises it
-        again if it still holds). Returns those."""
+        again if it still holds). Returns those. merge: a person signing in, their folder's alarms beside the ones
+        the monitor has (one it has already is its own, newer); one on when Kelvin stopped that the restart's card
+        can't say any more waits for their Got it. Signing in once wrote the monitor's list over theirs, unread."""
         from ..monitor import Alarm
         try:
             from ..scanqueue import _written
@@ -11449,18 +11670,27 @@ class LabRuntime:
         except (OSError, ValueError):
             return []
         kept, was_on = [], []
+        known = {(a.id.replace("was-", ""), a.raised) for a in list(self.monitor.alarms)} if merge else set()
         for v in (data.get("alarms") if isinstance(data, dict) else None) or []:
             try:
                 a = Alarm.restore(dict(v, id="was-" + str(v["id"]).replace("was-", "")))
             except (KeyError, TypeError, ValueError):
                 continue
+            if (a.id.replace("was-", ""), a.raised) in known:
+                continue
             if a.cleared is None:
                 was_on.append(a.view())
-                a.cleared, a.acknowledged = time.time(), True
-                a.cleared_text, a.acknowledged_by = "Kelvin stopped", a.acknowledged_by or "the restart's card"
+                a.cleared, a.cleared_text = time.time(), "Kelvin stopped"
                 a.text += " (on when Kelvin stopped)"
+                if not merge or self._incident_due:   # the restart's card says it: that is the Got it
+                    a.acknowledged, a.acknowledged_by = True, a.acknowledged_by or "the restart's card"
             kept.append(a)
-        self.monitor.alarms[:] = kept
+        with self.monitor._lock:
+            if merge:
+                self.monitor.alarms[:] = sorted(list(self.monitor.alarms) + kept, key=lambda a: a.latest,
+                                                reverse=True)
+            else:
+                self.monitor.alarms[:] = kept
         self.monitor.trim()
         return was_on
 
@@ -12196,6 +12426,8 @@ class LabRuntime:
             self.engine = RunEngine(self.gate, self._store())
             self.engine.progress = self._on_progress
             self.engine.files_only = self.lock.aside
+            setup = self._setup_sample()   # this lab's setup: a sample another person left there holds here
+            self.setup_other = setup if setup and setup.get("user") != self.user else {}
             self._apply_protection(recheck=True)
             self.lab_info = dict(info)
             running = self.monitor._thread is not None

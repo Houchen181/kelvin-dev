@@ -142,7 +142,7 @@ class NIDAQ(DriverBackend):
             return "National Instruments,%s,%s" % (dev.product_type, "%X" % dev.dev_serial_num
                                                    if isinstance(dev.dev_serial_num, int) else dev.dev_serial_num)
         except Exception:
-            return "National Instruments,DAQ,%s" % self.device
+            return "National Instruments,DAQ,?,%s" % self.device   # its serial unread: no made-up one
 
 
 def discover_nidaq(module: Any = None) -> List[Tuple[str, str]]:

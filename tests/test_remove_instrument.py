@@ -72,7 +72,7 @@ def test_the_entry_goes_with_its_own_comments_and_the_rest_stays():
 
 
 def test_kelvin_takes_an_instrument_out_and_lets_its_connection_go(tmp_path, bench):
-    rt = runtime_on(tmp_path, LAB)   # no answers: Kelvin approves it itself, never asking anyone
+    rt = runtime_on(tmp_path, LAB, answers=[True])   # a person's limits go with smu: they say yes (audit R1)
     rt.add_watch("smu.I", above=1e-6)
     said = rt.remove_instrument("smu")
     assert said.startswith("removed smu (keithley/2400 at GPIB0::24::INSTR) from the lab config; its connection is "
@@ -92,7 +92,8 @@ def test_kelvin_takes_an_instrument_out_and_lets_its_connection_go(tmp_path, ben
     from labharness.agent.runtime import event_line
     assert event_line(removed).endswith(" agent: took smu (keithley/2400 at GPIB0::24::INSTR) out of the lab")
     assert "no instrument 'smu'" in rt.remove_instrument("smu")
-    assert rt.remove_instrument("lockin").startswith("removed lockin")   # the last one too
+    assert rt.remove_instrument("lockin").startswith("removed lockin")   # the last one too: card and address
+    # alone, so Kelvin approves it itself (the scripted approver has no answer left)
     assert rt.lab.instruments == {} and load_lab_config(tmp_path / "lab.yaml", lab_registry(tmp_path)).instruments == {}
 
 
@@ -116,9 +117,9 @@ def test_an_output_on_is_the_persons_call(tmp_path, bench):
 
 
 def test_one_that_doesnt_answer_goes_with_a_word_to_check_it(tmp_path, bench):
-    rt = runtime_on(tmp_path, LAB)
+    rt = runtime_on(tmp_path, LAB, answers=[True])   # a person's limits go with it: they say yes
     bench.devices["GPIB0::24::INSTR"].silent = True   # unplugged since Kelvin connected it
-    said = rt.remove_instrument("smu")   # no answers: Kelvin approves it itself
+    said = rt.remove_instrument("smu")
     assert said.startswith("removed smu") and "smu didn't answer, so Kelvin can't tell whether its outputs are on: " \
                                               "check it at the instrument." in said, said
 

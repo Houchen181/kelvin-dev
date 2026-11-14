@@ -541,8 +541,15 @@ class PulseGeneratorDriver(DriverBackend):
         self.state[path] = value
         playing = bool(int(self.state["running"]))
         if not playing:
-            if old.get("running"):
-                self.stop()
+            # a stop asked for is sent every time (one that failed once, a network blip, left the generator
+            # streaming while the next stop found nothing to do); one that fails leaves running as it was, so the
+            # Lab panel and what is still on say it may still play
+            if old.get("running") or path == "running":
+                try:
+                    self.stop()
+                except Exception:
+                    self.state = dict(old, running=old.get("running") or 1)
+                    raise
             return
         try:
             seq = self.sequence()
@@ -557,7 +564,11 @@ class PulseGeneratorDriver(DriverBackend):
         if problems:
             self.state = old
             raise AdapterError("%s: refused: %s" % (self.name, problems[0]))
-        self.play(seq)
+        try:
+            self.play(seq)
+        except Exception:   # what plays now is not known: running stays on (a stop is sent), the rest as it was
+            self.state = dict(old, running=1)
+            raise
 
     def get(self, path: str) -> Any:
         if path == "period":

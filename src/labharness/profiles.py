@@ -15,12 +15,15 @@ instrument's own manual rather than from memory. Fetching a manual sends only it
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import json
 import logging
 import math
 import os
 import re
+import socket
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -33,9 +36,46 @@ PAGE = "\f"   # manual.txt keeps one page per form feed
 Fetch = Callable[[str], bytes]
 
 
+def public_host(host: str, port: int = 443) -> None:
+    """ValueError unless every address host resolves to is on the internet: never this computer, the lab's network
+    or a link-local device. The model's read_web_page once reached a relay's web switch on 127.0.0.1 with a GET (an
+    instrument's web page may act on what it is sent), and a public page's redirect could send it there too."""
+    host = (host or "").strip("[]")
+    if not host:
+        raise ValueError("a web address with no host")
+    try:
+        infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError) as e:
+        raise ValueError("%s can't be found (%s)" % (host, e))
+    for info in infos:
+        ip = ipaddress.ip_address(str(info[4][0]).split("%")[0])
+        mapped = getattr(ip, "ipv4_mapped", None)
+        ip = mapped if mapped is not None else ip
+        if not ip.is_global or ip.is_multicast:
+            raise ValueError("%s is %s: Kelvin reads web pages on the internet only" % (
+                host, "this computer" if ip.is_loopback else "on a local network (%s)" % ip))
+
+
+class _InternetOnly(urllib.request.BaseHandler):
+    """Every request, and every redirect it is sent on, goes to the internet only (public_host)."""
+    handler_order = 100
+
+    def http_request(self, req: urllib.request.Request) -> urllib.request.Request:
+        parts = urllib.parse.urlsplit(req.full_url)
+        if parts.scheme not in ("http", "https"):
+            raise ValueError("Kelvin reads http and https addresses only, not %s" % (parts.scheme or "this"))
+        public_host(parts.hostname or "", parts.port or (443 if parts.scheme == "https" else 80))
+        return req
+
+    https_request = http_request
+
+    def ftp_open(self, req: urllib.request.Request) -> None:   # a redirect to ftp:// goes nowhere
+        raise ValueError("Kelvin reads http and https addresses only")
+
+
 def http_get(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "Kelvin/%s (lab assistant)" % __version__})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.build_opener(_InternetOnly()).open(req, timeout=60) as r:
         data = r.read(MAX_MANUAL + 1)
     if len(data) > MAX_MANUAL:
         raise ValueError("the manual is larger than %d MB" % (MAX_MANUAL // 2 ** 20))
@@ -84,7 +124,7 @@ def write_profile(home: Any, name: str, card: Any, address: str, connection: Opt
                     "connection": dict(card.connection, **(connection or {})), "updated": time.time()})
     if idn:
         profile.update({"identity": idn, "parsed": parse_idn(idn), "identified_by": how or "identity reply"})
-        serial = parse_idn(idn).get("serial", "")
+        serial = real_serial(parse_idn(idn).get("serial", ""))
         if serial and not _kept_for(profile, card.id, address):   # the first set-up's, kept (6.2): see kept_serial
             profile["serial_number"] = {"serial": serial, "card": card.id, "address": address, "since": time.time()}
     if framing:   # the serial settings the instrument answered with
@@ -94,9 +134,21 @@ def write_profile(home: Any, name: str, card: Any, address: str, connection: Opt
     return profile
 
 
+PLACEHOLDERS = {"?", "unknown", "n/a", "none", "-"}   # what a driver answers when it couldn't read the serial
+
+
+def real_serial(serial: Any) -> str:
+    """A serial number as an instrument answered it, '' for none or a driver's placeholder: a read that failed once
+    (a network blip) answered "?", which differed from the kept serial, and the healthy instrument was set aside, a
+    stop included; kept, "?" then set the real one aside."""
+    s = str(serial or "").strip()
+    return "" if s.lower() in PLACEHOLDERS else s
+
+
 def _kept_for(profile: Dict[str, Any], card: str, address: str) -> str:
     kept = profile.get("serial_number")
-    if isinstance(kept, dict) and kept.get("serial") and kept.get("card") == card and kept.get("address") == address:
+    if isinstance(kept, dict) and real_serial(kept.get("serial")) and kept.get("card") == card \
+            and kept.get("address") == address:
         return str(kept["serial"])
     return ""
 
@@ -123,6 +175,8 @@ def hold_serials(home: Any, lab: Any) -> None:
 def accept_serial(home: Any, name: str, serial: str, card: str, address: str) -> None:
     """A person said the instrument that answers now is the one to use as `name` (a replacement, a repaired one):
     its serial number is kept from now on."""
+    if not real_serial(serial):   # nothing to tell it by: none is kept
+        return
     path = folder(home, name) / "instrument.json"
     profile = _read_json(path)
     profile["serial_number"] = {"serial": serial, "card": card, "address": address, "since": time.time(),
@@ -268,9 +322,23 @@ def save_manual(home: Any, name: str, card: Any, data: bytes) -> Dict[str, Any]:
     return _store(home, name, card, data, "manual.pdf", url="")
 
 
+def _searchable(data: bytes, file: str) -> None:
+    """ValueError when a manual has too little text to search (index_manual's rule), before anything is replaced."""
+    if file.endswith(".pdf"):
+        pages = pdf_pages(data)
+    else:
+        from .literature import html_to_text
+        pages = [html_to_text(data.decode("utf-8", errors="replace"))]
+    if sum(len(p) for p in pages) < 2000:
+        raise ValueError("the maker's site sent a page with almost no text (it may want a sign-in), not the manual; "
+                         "choose the PDF yourself" if not file.endswith(".pdf") else
+                         "the PDF has almost no text (a scan?), so Kelvin cannot search it")
+
+
 def _store(home: Any, name: str, card: Any, data: bytes, file: str, url: str) -> Dict[str, Any]:
     base = folder(home, name)
     base.mkdir(parents=True, exist_ok=True)
+    _searchable(data, file)   # a sign-in page in its place once deleted the manual kept before
     for old in ("manual.pdf", "manual.html", "manual.txt"):   # one manual per folder
         if old != file and (base / old).exists():
             (base / old).unlink()

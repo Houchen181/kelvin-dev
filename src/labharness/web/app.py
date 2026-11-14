@@ -379,6 +379,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     runtime.experiments = expstore.Store(home / "experiments")   # the lab's experiments, from its VIs: everyone's
     runtime.labview_map = home / "labview-map.yaml"       # what the lab's LabVIEW calls become (vimap.py)
     runtime.lab_memory_dir = home                         # the lab's memory, everyone's (labmemory.py)
+    runtime.sample_in_setup()                             # the sample in the setup, whoever mounted it
     runtime.home_board = HomeBoard(lambda: runtime.data_dir / HOME_FILE)   # each person's Home, beside their queue
 
     def queue_now() -> Dict[str, Any]:
@@ -1793,7 +1794,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         else:
             if role_of(request) == "watch":
                 return error(403, "This phone can lock, not unlock. Unlock on the Kelvin computer.")
-            m = runtime.mounted or {}   # unlocking with another sample takes a protected one out, as Mount does
+            m = runtime.sample_held()   # unlocking with another sample takes a protected one out, as Mount does
             swap = "device" in body and m.get("protection") and body.get("device") not in (m.get("device"),
                                                                                          m.get("device_name"))
             refused = needs_owner(body, "Taking out a protected device" if swap else None)   # before anything changes
@@ -1877,7 +1878,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if request.method == "POST":
             body = await request.json()
             pid = body.get("project") or None
-            if (runtime.mounted or {}).get("protection"):   # taking out a protected device lifts its protection
+            if runtime.sample_held().get("protection"):   # taking out a protected device lifts its protection
                 refused = needs_owner(body, "Taking out a protected device")
                 if refused:
                     return refused
@@ -3264,6 +3265,24 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(409, str(e))
         made = await asyncio.to_thread(runtime.config_changed, by, "renamed %s to %s" % (old, new), "renamed")
         notes = await asyncio.to_thread(runtime.instrument_renamed, old, new, by)
+        # each person's data folder: their mounted sample's protection, watches and sequences (their chats' below)
+        followed = 0
+        folders = [nobody] if accounts is not None else []
+        for person in (accounts.list() if accounts is not None else []):
+            try:   # the folder they chose in Settings (kept as it is: only keys are encrypted), and their default
+                chosen = json.loads(accounts.settings_path(person).read_text(encoding="utf-8")).get("data_dir")
+            except (OSError, ValueError, AttributeError):
+                chosen = None
+            folders += [Path(chosen)] if isinstance(chosen, str) and chosen.strip() else []
+            folders.append(accounts.data_dir(person))
+        for folder in dict.fromkeys(folders):
+            try:
+                followed += bool(await asyncio.to_thread(runtime.renamed_in_folder, folder, old, new))
+            except OSError:
+                continue
+        if followed:
+            notes.append("It follows in %d other person%s data folder%s too." % (
+                followed, "'s" if followed == 1 else "s'", "" if followed == 1 else "s"))
         # each person's folder on this computer: their devices' protection, recipes and chats waiting for a reading
         people = accounts.list() if accounts is not None else []
         roots = [Path(agent.store.root)] + [Path(accounts.chats_dir(a)) for a in people] + [home / "lab" / "chats"]             + ([Path(accounts.home) / "lab" / "chats"] if accounts is not None else [])   # nobody signed in's

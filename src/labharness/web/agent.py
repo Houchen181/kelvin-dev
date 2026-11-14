@@ -1716,7 +1716,7 @@ class ChatAgent:
                 d = self.store.add_device(pid, args.get("name"), args.get("material") or "", args.get("description") or "")
                 return "added device %s to %s" % (d["name"], self.project_info(pid)["name"]), False
             if name == "mount_device":
-                now = self.runtime.mounted or {}
+                now = self.runtime.sample_held()
                 if now.get("protection"):   # taking it out would lift its protection: a person's call
                     return ("not changed: %s is mounted with protection a person set, so only a person changes "
                             "what is mounted (Lab panel)" % self.runtime.shown_sample(what="a sample")), True

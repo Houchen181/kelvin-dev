@@ -318,9 +318,9 @@ def identity_problem(inst: Instrument, idn: str) -> Optional[str]:
     # pass the model check, and Kelvin drove the other cryostat's controller
     kept = getattr(inst, "kept_serial", None)
     if kept:
-        from .profiles import parse_idn
-        now = parse_idn(idn).get("serial", "")
-        if now and now.strip().lower() != str(kept).strip().lower():
+        from .profiles import parse_idn, real_serial
+        now = real_serial(parse_idn(idn).get("serial", ""))   # a driver's placeholder ("?") is compared with nothing
+        if now and real_serial(kept) and now.lower() != str(kept).strip().lower():
             return SWAPPED % (inst.name, now, kept, inst.config.address, inst.name)
     return None
 

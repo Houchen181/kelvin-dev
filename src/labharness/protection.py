@@ -139,6 +139,14 @@ def device_limits(protection: Dict[str, Any]) -> Dict[str, Tuple[float, float]]:
     return out
 
 
+def named(protection: Dict[str, Any]) -> List[str]:
+    """Every instrument.parameter a device's protection names: its limits, its gates' drives and leakage readings."""
+    out = list(device_limits(protection))
+    for g in protection.get("gates") or []:
+        out += [g[k] for k in ("drive", "leak") if g.get(k)]
+    return list(dict.fromkeys(out))
+
+
 def range_for(spec: ParamSpec, need: float) -> Optional[float]:
     """The smallest of a source's ranges that still covers `need`; None when none does."""
     for step in spec.range_steps:

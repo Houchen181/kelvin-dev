@@ -366,12 +366,19 @@ def _base_shape(spec: Any, path: str, errors: List[str]) -> Optional[Made]:
         sign = 1.0 if stop >= start else -1.0
         short = not math.isclose(start + sign * step * n, stop, rel_tol=1e-9, abs_tol=1e-12)   # `to` itself after
 
-        def stepped() -> List[Any]:
-            return [start + sign * step * i for i in range(n + 1)] + ([stop] if short else [])
+        def stepped() -> List[Any]:   # without the float noise of start + i*step: 0 was sent as 5.55e-17
+            return [_on_grid(start + sign * step * i, step) for i in range(n + 1)] + ([stop] if short else [])
         return n + 1 + short, stepped
     except (KeyError, TypeError, ValueError, OverflowError):   # OverflowError: an endless number (.inf)
         errors.append("%s: needs from, to and a nonzero step or points (log sweeps: points ≥ 2 and positive ends)" % path)
         return None
+
+
+def _on_grid(x: float, step: float) -> float:
+    """A sweep's point as it is meant: 0.3 for 0.30000000000000004, 0 for 5.55e-17 (12 significant digits)."""
+    if abs(x) < abs(step) * 1e-9:
+        return 0.0
+    return float("%.12g" % x)
 
 
 def _seconds(value: Any, path: str, errors: List[str], positive: bool = False, unit: str = "seconds") \

@@ -45,6 +45,9 @@ class Stopped(RuntimeError):
     """A person's stop ended a wait on the instrument (an acquisition it was still taking)."""
 
 
+SCPI_OVERFLOW = 9.9e37   # an SCPI instrument's answer for over range (9.9E37) and not-a-number (9.91E37)
+
+
 class SensorError(RuntimeError):
     """The instrument answered, but the reading isn't one: its card's status query flags it, or it is outside what it
     can be (an open thermometer's 0 K). Raised instead of returning it, so a guard trips, an interlock fails and a
@@ -597,6 +600,11 @@ class Instrument:
                 raise self._garbled(command, reply) from None
             raise
         self._read_ok.add(spec.name)
+        if spec.numeric and isinstance(value, (int, float)) and not isinstance(value, bool) \
+                and abs(value) >= SCPI_OVERFLOW:   # the instrument's own word that this is no reading
+            raise SensorFlagged("%s.%s is over its range: %s answered %s, SCPI's overflow value, not a reading (a "
+                                "larger range or autorange reads it)" % (self.name, spec.name, command.strip(),
+                                                                         str(reply).strip()[:20]))
         return value
 
     @property
@@ -639,7 +647,10 @@ class Instrument:
         self._guard(spec)
         if spec.get_before:
             with self._turn():   # the whole sequence, or (the monitor) Busy before any of it
-                return self._saw(param, self._acquire(spec))
+                value = self._acquire(spec)
+                if (spec.status_cmd is not None or spec.plausible is not None) and spec.type not in ("trace", "image"):
+                    self._vouch(spec, value)   # an acquisition's reading is checked as any other's
+                return self._saw(param, value)
         if spec.type == "trace":
             return self._trace(spec)
         command = spec.get_cmd.render()

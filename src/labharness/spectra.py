@@ -347,7 +347,7 @@ class AndorSpectrograph(DriverBackend):
             self._call("ShamrockGetSerialNumber", self.idx, buf)
             return "Andor,Shamrock,%s" % buf.value.decode(errors="replace")
         except AdapterError:
-            return "Andor,Shamrock,%d" % self.idx
+            return "Andor,Shamrock,?,%d" % self.idx   # its serial unread: no made-up one
 
     def close(self) -> None:
         close_shamrock(self.lib)

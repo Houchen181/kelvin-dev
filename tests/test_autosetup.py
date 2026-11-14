@@ -158,7 +158,9 @@ def test_a_sign_in_page_is_not_kept_as_the_manual(tmp_path, pdf):
     with pytest.raises(ValueError, match="almost no text"):
         profiles.fetch_manual(tmp_path, "lockin", card, lambda url: gate_page)
     base = tmp_path / "instruments" / "lockin"
-    assert not (base / "manual.html").exists() and "manual" not in json.loads((base / "instrument.json").read_text())
+    profile = base / "instrument.json"   # refused before anything is written (audit R7: a manual kept is never lost)
+    assert not (base / "manual.html").exists() and (not profile.exists() or
+                                                    "manual" not in json.loads(profile.read_text()))
     with pytest.raises(ValueError, match="did not return"):
         profiles.fetch_manual(tmp_path, "lockin", card, lambda url: b"\x00binary")
     assert profiles.fetch_manual(tmp_path, "lockin", card, lambda url: pdf)["pages"] == 3   # the next try works

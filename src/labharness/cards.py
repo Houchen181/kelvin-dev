@@ -123,6 +123,16 @@ def si(x: float, unit: str) -> str:
     return num(v) + (" " + u if u else "")
 
 
+def plain_number(x: Any) -> str:
+    """A number as an instrument is sent it: digits and a point, never an exponent, to 12 significant digits (an
+    instrument that reads digits and a point took 5e-05 for 5)."""
+    text = "%.12g" % x
+    if "e" not in text and "E" not in text:
+        return text
+    from decimal import Decimal
+    return format(Decimal(text), "f")
+
+
 @dataclass
 class ParamSpec:
     name: str
@@ -243,7 +253,7 @@ class ParamSpec:
 
     def to_wire(self, value: Any) -> str:
         if self.type == "float":
-            return "%.12g" % value
+            return plain_number(value)
         if self.type == "int":
             return str(int(value))
         if self.type == "bool":
@@ -937,7 +947,22 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         err("connection.greeting_lines", "how many lines the instrument sends when a connection opens (0 to 20)")
     connection = serial_settings(connection)
     on_connect = [as_sent(c) for c in data.get("on_connect") or []]
+    from .scpi import split_compound
     for c in on_connect:  # connecting leaves the instrument as it is: it may only set up the connection itself
+        # never a reset, a recalled setup or a blocked command: sent at every connection, outside the gate (one card
+        # reset its source and switched its function and terminals each time it connected)
+        for part in split_compound(re.sub(r"\{[A-Za-z_][A-Za-z0-9_]*\}", "0", c)) or [c]:
+            if re.match(r"^\s*(\*RST|\*RCL|\*TST|\*CAL|:?SYST(EM)?:PRES(ET)?|:?SYST(EM)?:REC(ALL)?)\b", part, re.I) or \
+                    any(t.match(part) is not None for t in reset):
+                err("on_connect", "%r resets the instrument or recalls a setup; connecting leaves every setting as it "
+                    "is" % c)
+            elif any(t.match(part) is not None for t in blocked):
+                err("on_connect", "%r is blocked on this card (raw.blocked)" % c)
+            else:
+                from .gate import RESTRICTED, _restricted
+                kind = _restricted(part)
+                if kind:
+                    err("on_connect", "%r changes %s; connecting leaves every setting as it is" % (c, RESTRICTED[kind]))
         for spec in params.values():
             if spec.set_cmd is not None and spec.family().match(c) is not None:
                 err("on_connect", "%r would set %s; connecting leaves every setting as it is (on_connect may only set "

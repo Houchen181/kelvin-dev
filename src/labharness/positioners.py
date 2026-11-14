@@ -416,7 +416,7 @@ class ANC350(_Controller):
         try:
             return "attocube,ANC350,%s" % self.dev.get_hardware_id()
         except Exception:
-            return "attocube,ANC350,%s" % (self.target or "0")
+            return "attocube,ANC350,?,%s" % (self.target or "0")   # its serial unread: no made-up one
 
 
 def discover_attocube(module: Any = None) -> List[Tuple[str, str]]:

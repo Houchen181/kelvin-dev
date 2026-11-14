@@ -868,7 +868,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         computer's own networks. Takes up to half a minute, and about 12 s more for each Prologix; only looks."""
         return outside(rt, "what addresses on the network answered", rt.find_on_network(network))
 
-    @server.tool(annotations=READ, structured_output=False)
+    @server.tool(annotations=ACT, structured_output=False)   # it sends a query to an instrument nobody set up
     @cancellable   # it may hold the lab a while: the chat's Stop or a cancel ends it
     def inspect_serial(port: str, query: str = "*IDN?", baud: int = 0) -> str:
         """What an instrument on a serial port is, when the scan didn't identify it: what it sends by itself (some
@@ -1584,6 +1584,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     runtime.owner = OwnerPin(home)   # the lab owner's PIN, when one is set in the app
     runtime.roles = LabRoles(home)   # the lab's roles: nobody signs in here, so with roles a yes takes the PIN
     runtime.lab_memory_dir = home    # the lab's memory, the same notes the app's chats have (labmemory.py)
+    runtime.sample_in_setup()        # the sample the app's people left in the setup: its protection holds here too
     from .. import expstore
     runtime.experiments = expstore.Store(home / "experiments")   # the lab's experiments, the app's too
     runtime.labview_map = home / "labview-map.yaml"

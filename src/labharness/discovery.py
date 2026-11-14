@@ -459,6 +459,8 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
             except Exception:
                 pass
     else:
+        if queries is None and re.match(r"^GPIB\d*::", address, re.I):   # an unknown GPIB instrument: *IDN? only
+            queries = ["*IDN?"]
         queries = queries or ["*IDN?"] + sorted({c.idn_query for c in registry if c.idn_query != "*IDN?"})
         for query in queries:
             try:
@@ -474,8 +476,16 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
             card = cards[0]
             found.card_id, found.model, found.kind, found.how = card.id, card.model, card.kind, "USB ID %s" % vid_pid
             return found
-    found.how = "no answer (it may be write-only, use other settings, or be switched off)"
+    found.how = UNKNOWN_GPIB if re.match(r"^GPIB\d*::", address, re.I) else \
+        "no answer (it may be write-only, use other settings, or be switched off)"
     return found
+
+
+# a GPIB instrument that listens and doesn't answer *IDN?: a scan sends an instrument nobody set up nothing else (a
+# device clear and every card's identity query once went to it: 1VE, AYT, Q, ver...)
+UNKNOWN_GPIB = ("listens, but didn't answer *IDN? (an older instrument?): a scan asks an instrument nobody set up "
+                "nothing else; its manual's identity query names it (inspect_address with that query), or try its card "
+                "(try_card)")
 
 
 def _ask_board(found: Found, rm: Any, registry: CardRegistry, vid_pid: str, timeout_ms: int, catalog: Any) -> Found:
@@ -568,11 +578,10 @@ def gpib_listeners(rm: Any, board: str, skip: Iterable[str] = (), timeout_ms: in
                     if hung is not None:
                         hung.append(board)
                     return [(n, r) for n, r in out if r]   # what answered; the silent ones were the hung bus
-                reply = ""   # it listens, and says nothing (an older instrument): its query dropped
-                try:
-                    res.clear()
-                except Exception:
-                    pass
+                # it listens, and says nothing (an older instrument): nothing more is sent to it, a device clear least
+                # of all (it aborts what another program does with the instrument, and an older one may go back to
+                # its power-on settings), nor any other card's identity query (UNKNOWN_GPIB)
+                reply = ""
             else:
                 answered, row = answered + 1, 0
             out.append((name, reply))
@@ -729,6 +738,9 @@ def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[st
             continue
         if swept.get(name):   # asked already, on the sweep: not again
             out.append(_from_reply(name, swept[name], registry, catalog))
+            continue
+        if name in swept:   # it listened and didn't answer *IDN?: asked nothing else
+            out.append(Found(name, how=UNKNOWN_GPIB))
             continue
         if name.upper() in bluetooth:
             out.append(Found(name, how=BLUETOOTH))
@@ -959,7 +971,10 @@ def instrument_text(text: str, name: str) -> str:
 def instrument_token(name: str) -> "re.Pattern[str]":
     """An instrument's name as the start of an instrument.parameter (lockin.X, in YAML or a condition), never inside
     another word or an address (TCPIP0::lockin.lab::INSTR, sim://lockin.x): what a rename changes."""
-    return re.compile(r"(?<![\w.:/\\-])%s\.(?=[A-Za-z_])" % re.escape(name))
+    # after / or - only as an expression's operator (smu.V/smu.I, tc.T-smu.I): never in an address, where more of
+    # the address follows (lab-smu.local::INSTR, http://host/smu.json/...)
+    n = re.escape(name)
+    return re.compile(r"(?:(?<![\w.:/\\-])%s\.(?=[A-Za-z_])|(?<=[\w)\]][/-])%s\.(?=[A-Za-z_]\w*(?![\w.:/])))" % (n, n))
 
 
 def rename_in_config(text: str, old: str, new: str) -> str:

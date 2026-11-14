@@ -1253,7 +1253,12 @@ class SafetyGate:
             if bigger is not None else "")
 
     def _hands_problem(self, what: str) -> Optional[str]:
-        """While a person has their hands on the sample, nothing moves away from safe."""
+        """While a person has their hands on the sample, nothing moves away from safe; nor while the mounted device's
+        protection names what the lab no longer has (renamed, or taken out and added again: its limits would hold
+        on nothing)."""
+        lost = getattr(self.lab, "protection_lost", None)
+        if lost:
+            return "%s: %s" % (what, lost)
         hands = getattr(self.lab, "hands_on", None)
         if not hands:
             return None
