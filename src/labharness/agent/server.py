@@ -1237,12 +1237,11 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.export_crate(runs, entries, figures, samples, title, license, orcid)
 
     @server.tool(annotations=ACT, structured_output=False)
-    def backup_records(folder: str) -> str:
-        """Copy the lab's records into a folder the person names (a NAS, a OneDrive folder, a second disk), under
-        Kelvin backup/<lab>: runs as they were sealed (each run.h5 checked against its seal once copied), the lab's
-        record, the notebook, samples, procedures and figures. Only what is new or grew is copied; nothing there is
-        deleted, and a run.h5 there that differs is never written over."""
-        return rt.backup_records(folder)
+    def backup_records(folder: str = "") -> str:
+        """A second copy of the records (a NAS, a OneDrive folder, a second disk) is made only by a person, who
+        chooses its folder in Kelvin's portal: Settings → Data & reports → Back up. This tool copies nothing: it
+        says so, for you to tell the person where to do it."""
+        return rt.backup_records(folder)   # refused: no person's `by` here (LabRuntime.backup_records)
 
     @server.tool(annotations=READ, structured_output=False)
     def search_records(text: str, kinds: str = "", limit: int = 20) -> str:

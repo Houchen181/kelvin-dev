@@ -3187,9 +3187,21 @@ class LabRuntime:
         """Keep a notebook entry (notebook.py), or a new version of one: its title, aim and Markdown body citing each
         run it rests on as [run:<id>], its runs, samples and procedure, and its day. Every number in it is checked
         against the records it cites (numbercheck.py); the check is kept with it. A version after a signed one is an
-        amendment. Drives nothing, so nobody is asked; a person signs it in the Analysis pane's Notebook."""
+        amendment. Drives nothing, so nobody is asked; a person signs it in the Analysis pane's Notebook. A new
+        version of an entry only from where that entry may be seen (it keeps the entry's marks: notebook.marks), and
+        of a signed one only by a person, in the Notebook: a chat of another project "amended" a confidential entry
+        with a title alone, which copied its text without its marks for every chat to read, and an AI could amend a
+        person's signed entry (audit 0.3.52, R11)."""
         from .. import notebook, numbercheck
         by = by or ("agent" if self._actor_now() else "human")
+        entry = str(entry or "").strip()
+        if entry:
+            e = notebook.read(self.data_dir).get(entry)
+            if e is None or not self.may_see(notebook.marks(e)):
+                return "not kept: no entry %s (notebook lists them)" % entry
+            if _VIEWER.get() is not None and notebook.signed_version(e) is not None:
+                return ("not kept: %s is signed, and only a person amends a signed entry (Edit, in the Analysis pane's "
+                        "Notebook); keep what you have as a new entry instead" % entry)
         as_list = lambda v: [x.strip() for x in v.split(",")] if isinstance(v, str) else list(v or [])  # noqa: E731
         runs_given = [r for r in as_list(runs) if r]
         day = str(day or "").strip()[:10] or datetime.now().date().isoformat()
@@ -3205,12 +3217,12 @@ class LabRuntime:
         try:
             v = notebook.write(self.data_dir, {"title": title, "body": body, "aim": aim, "runs": runs_given,
                                                "samples": as_list(samples), "procedure": procedure, "day": day},
-                               by, entry=str(entry or "").strip(), account=self.user, ai=self._actor_now(),
+                               by, entry=entry, account=self.user, ai=self._actor_now(),
                                check=check, whose=self._whose_now())
         except ValueError as e:
             return "not kept: %s" % e
         self.gate.log.write("entry", by=by, entry=v["entry"], version=v["version"], title=v["title"], day=v["day"],
-                            amends=v.get("amends"))
+                            amends=v.get("amends"), whose=v.get("whose"))   # the line is the entry's, marks and all
         return "kept %s %s v%d, %s: %s. Numbers: %s.%s" % (
             "an amendment of" if v.get("amends") else "entry", v["entry"], v["version"], v["day"], v["title"],
             numbercheck.said(check), " Say where each one not found comes from, or take it out." if check["missing"]
@@ -3220,8 +3232,7 @@ class LabRuntime:
         """The notebook: one entry (its latest version, its number check, signatures and versions), or the entries
         of a day, or the latest ones. Never an entry about unshared work the viewer of this thread may not see."""
         from .. import notebook
-        entries = {k: e for k, e in notebook.read(self.data_dir).items()
-                   if self.may_see(notebook.latest(e).get("whose") or {})}
+        entries = {k: e for k, e in notebook.read(self.data_dir).items() if self.may_see(notebook.marks(e))}
         if str(entry or "").strip():
             e = entries.get(str(entry).strip())
             if e is None:
@@ -3244,15 +3255,19 @@ class LabRuntime:
             return "no entries%s yet (write_entry keeps one)" % (" for %s" % day if day else "")
         return "\n".join(notebook.summary(k, e) for k, e in rows[-20:])
 
-    def sign_entry(self, entry: str, role: str = "author") -> Dict[str, Any]:
+    def sign_entry(self, entry: str, role: str = "author", version: Optional[int] = None) -> Dict[str, Any]:
         """A person signs an entry in the Analysis pane's Notebook (author), or witnesses it (another person): never Kelvin's
-        AI, so this is no tool. ValueError says why not."""
+        AI, so this is no tool. version: the one the page showed them (notebook.sign). ValueError says why not."""
         from .. import notebook
         if _VIEWER.get() is not None and getattr(_VIEWER.get(), "model", None):
             raise ValueError("only a person signs an entry, in the Analysis pane's Notebook")
-        sig = notebook.sign(self.data_dir, entry, self.user or "", role)
+        e = notebook.read(self.data_dir).get(entry)
+        if e is not None and not self.may_see(notebook.marks(e)):
+            raise ValueError("no entry %s" % entry)
+        sig = notebook.sign(self.data_dir, entry, self.user or "", role, version)
+        # the line keeps the entry's marks: it named a confidential entry's id to every chat (audit 0.3.52, R11)
         self.gate.log.write("entry_signed", by="human", entry=entry, version=sig["version"], role=role,
-                            sha256=sig["sha256"])
+                            sha256=sig["sha256"], whose=notebook.marks(e or {}) or None)
         return sig
 
     def export_crate(self, runs: Any = None, entries: Any = None, figures: Any = None, samples: Any = None,
@@ -3278,13 +3293,19 @@ class LabRuntime:
         return "wrote %s: %d files, %.1f MB, %d run%s, described in ro-crate-metadata.json (RO-Crate 1.1)" % (
             out["path"], out["files"], out["bytes"] / 1e6, out["runs"], "" if out["runs"] == 1 else "s")
 
-    def backup_records(self, folder: str) -> str:
-        """A second copy of the lab's records (backup.py) in a folder the person names: runs as sealed (each run.h5
-        checked against its seal once copied), the lab's record, the notebook, samples, procedures and figures. Only
-        what is new or grew is copied. Not into Kelvin's own folders, nor one that may hold keys. Kelvin approves it
-        itself (it drives nothing), unless the chat read text from outside the lab: then the person answers."""
-        from .. import backup
+    def backup_records(self, folder: str, by: str = "") -> str:
+        """A second copy of the records (backup.py) in a folder a person names, when they ask for it in Settings
+        (Data & reports, Back up); by: who. Only a person starts one and chooses where it goes: a chat's tool call
+        is refused, as any chat could copy everyone's unshared work into its own folder and read it there (audit
+        0.3.52, R12). Copied: runs as sealed (each run.h5 checked against its seal once copied), the lab's
+        instrument log and config history, the procedures, and this person's own record, notebook, samples with their
+        pictures, and figures, under their name (D1, D7). Only what is new or grew is copied. Not into Kelvin's own
+        folders, nor one that may hold keys."""
+        from .. import backup, notebook
         from ..folderfiles import secret
+        if _VIEWER.get() is not None or not str(by or "").strip():
+            return ("not backed up: only a person backs up the records and chooses where they go. Ask them to do it "
+                    "in Kelvin's portal: Settings → Data & reports → Back up.")
         raw = str(folder or "").strip().strip('"')
         if not raw or not Path(raw).is_absolute():
             return "not backed up: give the backup folder's full path (a NAS, a OneDrive folder, a second disk)"
@@ -3298,26 +3319,18 @@ class LabRuntime:
             return "not backed up: %s is Kelvin's own folder, or holds it: a backup goes somewhere else" % target
         if not target.exists():
             return "not backed up: %s doesn't exist (connect the drive, or make the folder first)" % target
-        request = ApprovalRequest("Back up the lab's records into %s?" % target, [
-            "runs as they were sealed, the lab's record, the notebook, samples, procedures and figures",
-            "into %s" % (target / "Kelvin backup")])
-        if self._actor_now() and not self.gate.auto_simple(request, "copying the records to a folder the person "
-                                                                     "named drives nothing") \
-                and not self.gate.ask(request):
-            return "declined: the person did not want the records copied there"
         versions = getattr(self.versions, "audit", None)
-        records = {"events.jsonl": self.events_path,
-                   "instrument-log.jsonl": Path(self.shared_log) if self.shared_log else None,
-                   "entries.jsonl": Path(self.data_dir) / "notebook" / "entries.jsonl",
-                   "samples.json": Path(self.data_dir) / "samples.json",
+        records = {"instrument-log.jsonl": Path(self.shared_log) if self.shared_log else None,
                    "config-audit.jsonl": Path(versions) if versions else None}
-        folders = {"procedures": Path(self.home) / "procedures" if self.home else None,
-                   "figures": Path(self.data_dir) / "figures"}
+        own = {"events.jsonl": self.events_path, "entries.jsonl": notebook.path_of(self.data_dir),
+               "samples.json": Path(self.data_dir) / "samples.json"}
+        own_folders = {"samples": Path(self.data_dir) / "samples", "figures": Path(self.data_dir) / "figures"}
+        folders = {"procedures": Path(self.home) / "procedures" if self.home else None}
         out = backup.backup(list(self.runs.iterdir()), records, folders, target,
-                            getattr(self.lab.config, "name", "") or "lab")
+                            getattr(self.lab.config, "name", "") or "lab", self.user, own, own_folders)
         text, trouble = backup.said(out)
-        self.gate.log.write("backup", by="agent" if self._actor_now() else "human", folder=str(target),
-                            copied=out["copied"], problems=out["problems"][:20] or None)
+        self.gate.log.write("backup", by=by, folder=str(target), copied=out["copied"],
+                            problems=out["problems"][:20] or None)
         return text
 
     def search_records(self, text: str, kinds: str = "", limit: int = 20) -> str:
@@ -3357,7 +3370,7 @@ class LabRuntime:
                 str(s[k]) for k in ("kind", "material", "location") if s.get(k))), _json.dumps(s, ensure_ascii=False))
         for eid, e in notebook.read(self.data_dir).items():
             v = notebook.latest(e)
-            if self.may_see(v.get("whose") or {}):
+            if self.may_see(notebook.marks(e)):
                 consider("entries", v.get("at"), notebook.summary(eid, e),
                          " ".join(str(v.get(k) or "") for k in ("title", "aim", "body", "day")))
         for e in self.seen_events(self.gate.log.events()):
@@ -3433,8 +3446,7 @@ class LabRuntime:
                 "; deviations: " + "; ".join(e["deviation"] for e in steps if e.get("deviation"))
                 if any(e.get("deviation") for e in steps) else ""))
         entries = [(k, e) for k, e in notebook.read(self.data_dir).items()
-                   if str(notebook.latest(e).get("at", "")) >= start and self.may_see(notebook.latest(e).get("whose")
-                                                                                       or {})]
+                   if str(notebook.latest(e).get("at", "")) >= start and self.may_see(notebook.marks(e))]
         if entries:
             drafts = [k for k, e in entries if notebook.status(e) in ("draft", "amended")]
             lines.append("- %d notebook entr%s, %d still to sign%s" % (

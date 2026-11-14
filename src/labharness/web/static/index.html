@@ -888,6 +888,12 @@
             <span class="hint" hidden>The lab record, reports, and the runs of chats without a folder of their own.</span>
           </div>
           <div class="field">
+            <span class="field-label">Back up</span>
+            <div class="key-row"><input id="backup-path" spellcheck="false" autocomplete="off" aria-label="Backup folder" placeholder="A NAS, a OneDrive folder, a second disk"><button id="backup-choose" class="btn small" type="button">Choose…</button><button id="backup-run" class="btn small" type="button">Back up now</button></div>
+            <span id="backup-msg" class="hint"></span>
+            <span class="hint" hidden>A second copy of your records, under Kelvin backup: runs as they were sealed, your record, notebook, samples with their pictures and figures, with the lab's log and procedures. Only what is new or grew is copied; nothing there is deleted. Only you start one: Kelvin's chats can't.</span>
+          </div>
+          <div class="field">
             <span class="field-label">Chats' folders</span>
             <div class="checks"><label class="check wrap"><input id="ask-folder" name="ask_folder" type="checkbox" checked> Ask for a folder when I start a new chat</label></div>
           </div>

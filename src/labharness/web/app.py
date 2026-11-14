@@ -2739,7 +2739,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
         def look() -> Dict[str, Any]:
             entries = {k: e for k, e in nb.read(runtime.data_dir).items()   # never another project's unshared work
-                       if runtime.may_see(nb.latest(e).get("whose") or {})}
+                       if runtime.may_see(nb.marks(e))}
             events = runtime.seen_events(runtime.gate.log.events())
             from ..eln import DAY_TYPES
             days = sorted({str(nb.latest(e).get("day")) for e in entries.values()} |
@@ -2762,15 +2762,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return JSONResponse(await asyncio.to_thread(look))
 
     async def notebook_sign(request: Request) -> Response:
-        """POST {entry, role}: the person signed in signs an entry (author) or witnesses it (another person)."""
+        """POST {entry, role, version}: the person signed in signs an entry (author) or witnesses it (another
+        person): the version the page showed them, never one written since (notebook.sign)."""
         body = await request.json()
         if not isinstance(body, dict) or not str(body.get("entry") or "").strip():
-            return error(400, "send {entry, role}")
+            return error(400, "send {entry, role, version}")
         if not runtime.user:
             return error(400, "Sign in to Kelvin to sign entries: a signature names the person.")
+        version = body.get("version")
+        if version is not None and not (isinstance(version, int) and not isinstance(version, bool)):
+            return error(400, "version is the number of the version shown")
         try:
             sig = await asyncio.to_thread(runtime.sign_entry, str(body["entry"]).strip(),
-                                          "witness" if body.get("role") == "witness" else "author")
+                                          "witness" if body.get("role") == "witness" else "author", version)
         except ValueError as e:
             return error(400, str(e))
         return JSONResponse({"signed": sig})
@@ -3160,6 +3164,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return JSONResponse(dict(result, default=str(user_default_data()), problem=None))
         return JSONResponse(dict(await asyncio.to_thread(runtime.data_summary), default=str(user_default_data()),
                                  problem=getattr(runtime, "data_problem", None)))
+
+    async def backup_view(request: Request) -> Response:
+        """POST {folder}: the person backs up the records into a folder they chose (backup.py): {said}.
+        Only a person does, from this computer's own browser: no chat's tool can, nor choose the folder (audit
+        0.3.52, R12); a phone doesn't name folders on this computer."""
+        if (request.scope.get("kelvin") or {}).get("device") is not None:
+            return error(403, "Back up from a browser on the Kelvin computer.")
+        body = await request.json()
+        folder = str((body or {}).get("folder") or "").strip() if isinstance(body, dict) else ""
+        said = await asyncio.to_thread(runtime.backup_records, folder, who(request))
+        if said.startswith("not backed up"):
+            return error(400, said)
+        return JSONResponse({"said": said})
 
     async def terminal(request: Request) -> Response:
         """A command a person typed in the terminal pane: {instrument, op: raw|get|set|describe|manual, arg, value}.
@@ -4788,6 +4805,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/instruments/setup", setup_view, methods=["GET", "POST"]),
         Route("/api/terminal", terminal, methods=["POST"]),
         Route("/api/data-folder", data_folder, methods=["GET", "POST"]),
+        Route("/api/backup", backup_view, methods=["POST"]),
         Route("/api/folder", folder_view, methods=["GET", "POST"]),
         Route("/api/browse", browse_view),
         Route("/api/instruments/{name}/manual", instrument_manual, methods=["POST", "PUT"]),
