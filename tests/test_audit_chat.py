@@ -5,11 +5,8 @@ the way into a running queue, notes kept after outside text without asking, and 
 itself forgotten at a restart."""
 import asyncio
 import json
-import os
 import sys
-import tempfile
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
