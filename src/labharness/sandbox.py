@@ -173,6 +173,42 @@ def _limits(memory_mb: int) -> Optional[Callable[[], None]]:
     return apply
 
 
+def _label_low(folder: Path) -> Optional[str]:
+    """The folder labelled Windows' low integrity level, its files and folders after it too: the one place a child at
+    that level may write. None when done; else why not (not Windows, or the call failed), in words."""
+    if os.name != "nt":
+        return "not Windows"
+    try:
+        import ctypes
+        from ctypes import wintypes
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+        advapi32.GetSecurityDescriptorSacl.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL),
+                                                        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL)]
+        advapi32.SetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD, ctypes.c_void_p,
+                                                   ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        sd = ctypes.c_void_p()
+        # a mandatory label: low, no write up, inherited by what is made inside
+        if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW("S:(ML;OICI;NW;;;LW)", 1,
+                                                                             ctypes.byref(sd), None):
+            return "its label could not be made (%d)" % ctypes.get_last_error()
+        try:
+            sacl, present, defaulted = ctypes.c_void_p(), wintypes.BOOL(), wintypes.BOOL()
+            if not advapi32.GetSecurityDescriptorSacl(sd, ctypes.byref(present), ctypes.byref(sacl),
+                                                      ctypes.byref(defaulted)):
+                return "its label could not be read (%d)" % ctypes.get_last_error()
+            rc = advapi32.SetNamedSecurityInfoW(str(folder), 1, 0x10, None, None, None, sacl)   # a file, LABEL_
+            return None if rc == 0 else "it could not be labelled (%d)" % rc                   # SECURITY_INFORMATION
+        finally:
+            kernel32.LocalFree(sd)
+    except Exception as e:
+        return "%s: %s" % (type(e).__name__, e)
+
+
 def run(code: str, runs: Dict[str, Path], base: Path, timeout_s: float = TIME_LIMIT,
         stopped: Optional[Callable[[], bool]] = None, memory_mb: int = MEMORY_MB) -> Outcome:
     """Run code with runs' data readable (run id -> its folder); its files go to a new folder in base."""
@@ -202,14 +238,20 @@ def run(code: str, runs: Dict[str, Path], base: Path, timeout_s: float = TIME_LI
             item["npz"] = str(write_npz(run_dir, path=folder / "runs" / (run_id + ".npz")))
             out.notes.append("%s is still being measured: the code read a snapshot of its points so far" % run_id)
         given[run_id] = item
+    # the operating system's own restriction (Windows): the folder labelled low integrity, and the child lowered to
+    # it, so nothing it runs, natively either, writes or deletes anywhere else
+    low = _label_low(folder)
     job = {"code": str(folder / "code.py"), "scratch": str(folder), "runs": given, "path": list(sys.path),
-           "result": str(folder / "result.json")}
+           "result": str(folder / "result.json"), "low_integrity": low is None}
+    if low is not None and os.name == "nt":
+        out.notes.append("note: Windows' restriction couldn't be set on its folder (%s): the audit hook alone "
+                         "guards what it writes" % low)
     (folder / "job.json").write_text(json.dumps(job), encoding="utf-8")
     env = clean_environ()
     for k in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT"):
         env.pop(k, None)
     env.update({"MPLBACKEND": "Agg", "MPLCONFIGDIR": str(folder / ".matplotlib"), "PYTHONIOENCODING": "utf-8",
-                "PYTHONDONTWRITEBYTECODE": "1"})
+                "PYTHONDONTWRITEBYTECODE": "1", "TEMP": str(folder), "TMP": str(folder)})   # its own folder only
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
     try:
         proc = subprocess.Popen(command(folder / "job.json"), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -268,6 +310,10 @@ def run(code: str, runs: Dict[str, Path], base: Path, timeout_s: float = TIME_LI
     except (OSError, ValueError):
         result = {}
     out.available = result.get("available") or {}
+    restricted = result.get("restricted")
+    if restricted and restricted not in ("not asked", "not Windows: the audit hook alone"):
+        out.notes.append("note: Windows' restriction couldn't be applied to it (%s): the audit hook alone guarded "
+                         "what it wrote" % restricted)
     if status:
         out.status = status
         out.output += "\n(stopped after %.1f s%s)" % (out.seconds, ": the time limit is %g s" % timeout

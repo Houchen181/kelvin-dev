@@ -20,7 +20,7 @@ import traceback
 DENIED_IMPORTS = ("pyvisa", "pyvisa_py", "serial", "usb", "libusb_package", "libusb1", "nidaqmx", "zhinst",
                   "MultiPyVu", "pypylon", "seabreeze", "pylablib", "TimeTagger", "Swabian", "pulsestreamer", "spinapi",
                   "qick", "Pyro4", "cffi", "_cffi_backend", "win32api", "win32com", "pythoncom", "pywintypes", "clr",
-                  "pythonnet", "labharness.gate", "labharness.lab", "labharness.instrument", "labharness.adapters",
+                  "pythonnet", "_overlapped", "asyncio.windows_events", "asyncio.windows_utils", "labharness.gate", "labharness.lab", "labharness.instrument", "labharness.adapters",
                   "labharness.drivers", "labharness.engine", "labharness.agent", "labharness.web",
                   "labharness.library", "labharness.envs", "labharness.screen", "labharness.desktop")
 DENIED_EVENTS = ("socket.", "subprocess.", "os.system", "os.exec", "os.spawn", "os.posix_spawn", "os.fork",
@@ -38,6 +38,52 @@ WRITES = {"os.remove": (0,), "os.rmdir": (0,), "os.mkdir": (0,), "os.rename": (0
           "shutil.move": (0, 1), "shutil.chown": (0,), "shutil.make_archive": (0,), "shutil.unpack_archive": (1,),
           "tempfile.mkstemp": (0,), "tempfile.mkdtemp": (0,), "sqlite3.connect": (0,)}
 LISTS = {"os.listdir": (0,), "os.scandir": (0,), "os.listdrives": (), "os.listvolumes": (), "os.listmounts": (0,)}
+
+
+def _low_integrity():
+    """This process at Windows' low integrity level, once what it uses is loaded: from then on the operating system
+    itself refuses it any write or delete outside its own folder (Kelvin labels that one low), whatever the code does
+    natively (h5py's C code, a library the audit hook can't see), as Chromium's sandbox lowers its renderers. Reading
+    stays as the person may. None when done; else why not, in words."""
+    if os.name != "nt":
+        return "not Windows: the audit hook alone"
+    try:
+        import ctypes
+        from ctypes import wintypes
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+        advapi32.GetLengthSid.argtypes = [ctypes.c_void_p]
+        advapi32.GetLengthSid.restype = wintypes.DWORD
+        advapi32.SetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        class SidAndAttributes(ctypes.Structure):
+            _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+        class TokenMandatoryLabel(ctypes.Structure):
+            _fields_ = [("Label", SidAndAttributes)]
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0080 | 0x0008, ctypes.byref(token)):
+            return "its token could not be opened (%d)" % ctypes.get_last_error()
+        sid = ctypes.c_void_p()
+        try:
+            if not advapi32.ConvertStringSidToSidW("S-1-16-4096", ctypes.byref(sid)):   # the low mandatory level
+                return "the low level's SID could not be made (%d)" % ctypes.get_last_error()
+            label = TokenMandatoryLabel(SidAndAttributes(sid, 0x20))   # SE_GROUP_INTEGRITY
+            size = ctypes.sizeof(label) + advapi32.GetLengthSid(sid)
+            if not advapi32.SetTokenInformation(token, 25, ctypes.byref(label), size):   # TokenIntegrityLevel
+                return "its integrity level could not be lowered (%d)" % ctypes.get_last_error()
+        finally:
+            if sid:
+                kernel32.LocalFree(sid)
+            kernel32.CloseHandle(token)
+        return None
+    except Exception as e:   # the code still runs, under the audit hook alone
+        return "%s: %s" % (type(e).__name__, e)
 
 
 def _preload():
@@ -116,7 +162,9 @@ def _install_hook(scratch, reads):
     full, fold, sep = _canon_factory(scratch)
     writable = _roots([scratch], full, fold)
     readable = _roots(list(reads) + [scratch], full, fold)
-    write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC | getattr(os, "O_EXCL", 0)
+    # a file opened to be deleted when it is closed (O_TEMPORARY) is a write too: one the code may only read was gone
+    write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC | getattr(os, "O_EXCL", 0) | \
+        getattr(os, "O_TEMPORARY", 0) | getattr(os, "O_SHORT_LIVED", 0)
 
     def hook(event, args, _sw=str.startswith, _fspath=os.fspath, _isinstance=isinstance, _str=str, _bytes=bytes,
              _int=int, _decode=bytes.decode, _full=full, _fold=fold, _sep=sep, _w=writable, _r=readable,
@@ -208,6 +256,51 @@ def _guard_h5py(scratch, runs):
             raise PermissionError("run_python writes only in its own folder, not %s" % os.fsdecode(name))
         return create(name, *a, **k)
     h5f.open, h5f.create = guarded_open, guarded_create
+    # a dataset whose bytes live in another file (external storage), and a link into another file: HDF5 opens those
+    # itself, past every check (one read a settings file with a key in it, and rewrote a lab config's limits to
+    # +-210 V; a link read and changed a run the code was not given). None is made, opened or followed
+    try:
+        import h5py.h5d as h5d
+        import h5py.h5l as h5l
+        import h5py.h5o as h5o
+    except ImportError:
+        return
+    why = ("run_python keeps an HDF5 file's data inside it: external storage, and links into other files, would "
+           "reach files it may not")
+    d_create, d_open, o_open, external = h5d.create, h5d.open, h5o.open, h5l.TYPE_EXTERNAL
+
+    def guarded_d_create(*a, **k):
+        dcpl = k.get("dcpl", a[4] if len(a) > 4 else None)
+        if dcpl is not None and dcpl.get_external_count() > 0:
+            raise PermissionError(why)
+        return d_create(*a, **k)
+
+    def walked(loc, name):
+        """Each link on the way to name, looked at before HDF5 follows it."""
+        path = name if isinstance(name, bytes) else str(name).encode("utf-8")
+        parts = [p for p in path.split(b"/") if p and p != b"."]
+        here = o_open(loc, b"/") if path.startswith(b"/") else loc
+        for i, part in enumerate(parts):
+            try:
+                kind = here.links.get_info(part).type
+            except Exception:   # not there (or not a group): HDF5's own open says so
+                return
+            if kind == external:
+                raise PermissionError(why)
+            if i < len(parts) - 1:
+                here = o_open(here, part)
+
+    def guarded_o_open(loc, name, *a, **k):
+        walked(loc, name)
+        return o_open(loc, name, *a, **k)
+
+    def guarded_d_open(loc, name, *a, **k):
+        walked(loc, name)
+        ds = d_open(loc, name, *a, **k)
+        if ds.get_create_plist().get_external_count() > 0:   # a file made by hand with one in it
+            raise PermissionError(why)
+        return ds
+    h5d.create, h5d.open, h5o.open = guarded_d_create, guarded_d_open, guarded_o_open
 
 
 def _value(v):
@@ -409,6 +502,8 @@ def main():
                          os.path.dirname(sys.executable), getattr(sys, "_MEIPASS", "")]:
         if p and os.path.isdir(p):
             reads.append(p)
+    sys.modules.pop("_overlapped", None)   # imported again only through the hook, which refuses it
+    restricted = _low_integrity() if job.get("low_integrity") else "not asked"
     _install_hook(scratch, reads)
     if sys.stdin.readline().strip() != "go":   # Kelvin puts the process in its job object first
         os._exit(3)
@@ -426,7 +521,7 @@ def main():
     sys.stdout.flush()
     sys.stderr.flush()
     with open(job["result"], "w", encoding="utf-8") as f:
-        json.dump({"status": status, "available": have}, f)
+        json.dump({"status": status, "available": have, "restricted": restricted}, f)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ from .autocard import ACTION_READ
 from .cards import Card
 from .instrument import Instrument
 from .labconfig import InstrumentConfig
-from .scpi import is_query
+from .scpi import is_query, split_compound
 
 
 def _clone_without_connect(card: Card) -> Card:
@@ -65,10 +65,15 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
     def unsafe(command: str) -> Optional[str]:
         if not text:
             return None
-        if ACTION_READ.match(command):
-            return "this read may start a measurement or a test; try it with the instrument in the lab"
-        if not is_query(command, bool(card.connection.get("enq"))):   # on an ENQ instrument, PR1 is a read
-            return "not a query (no ?), so it might change something; check it in the manual"
+        # every part of it, each line too: a reading drafted as "...RANG?;:SOUR:VOLT 150;:OUTP ON" was judged a query
+        # by its first word and sent whole, leaving a source at 150 V with its output on
+        parts = split_compound(command) or [command]
+        for part in parts:
+            if ACTION_READ.match(part):
+                return "this read may start a measurement or a test; try it with the instrument in the lab"
+            if not is_query(part, bool(card.connection.get("enq"))):   # on an ENQ instrument, PR1 is a read
+                return ("not a query (no ?)%s, so it might change something; check it in the manual"
+                        % (": %r" % part if len(parts) > 1 else ""))
         return None
 
     try:

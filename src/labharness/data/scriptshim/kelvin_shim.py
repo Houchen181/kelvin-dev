@@ -472,6 +472,8 @@ def _patch_pyvisa(module):
 
     open_resource.kelvin = True
     rm_class.open_resource = open_resource
+    if getattr(rm_class, "get_instrument", None) is not None:   # an older pyvisa's alias, bound to the original
+        rm_class.get_instrument = open_resource
     rm_class.resource_info = resource_info
     rm_class.__new__ = staticmethod(__new__)
 
@@ -668,6 +670,25 @@ def _patch_socket():
         _SOCKETS[sock] = _Lines(_LINK, name, address)
         return sock
 
+    def refuse_loop_connect(real):
+        """asyncio's own connect (on Windows the proactor's ConnectEx, below the socket's connect): refused for a lab
+        instrument, whose commands go through Kelvin's gate only by pyvisa or a plain socket; once they reached the
+        instrument's own port, past the gate."""
+        def loop_connect(self, conn, address, *args, **kwargs):
+            where = _socket_address(address)
+            name = _LINK.open(where, "socket") if where and _LINK is not None else None
+            if name is not None:
+                raise ConnectionRefusedError(
+                    "Kelvin: %s is %s, an instrument of the lab: open it with pyvisa or a plain socket, whose commands "
+                    "go through the safety gate; asyncio's own connection would go past it" % (where, name))
+            return real(self, conn, address, *args, **kwargs)
+        loop_connect.kelvin = True
+        return loop_connect
+    try:
+        import asyncio.windows_events as _windows_events
+        _windows_events.IocpProactor.connect = refuse_loop_connect(_windows_events.IocpProactor.connect)
+    except (ImportError, AttributeError):
+        pass
     for fn in (connect, connect_ex, send, sendall, recv, recv_into, close, getpeername, create_connection):
         fn.kelvin = True
     for name, fn in (("connect", connect), ("connect_ex", connect_ex), ("send", send), ("sendall", sendall),

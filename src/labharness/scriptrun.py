@@ -1199,13 +1199,20 @@ def canonical(address: str) -> str:
     a = (address or "").strip()
     if a.lower().startswith("sim://"):
         return a.lower()
+    # a serial port as Windows names it (\\.\COM7, COM7:) or as some write it in VISA (ASRLCOM7::INSTR)
+    m = re.match(r"^(?:\\\\\.\\)?(?:ASRL)?COM(\d+):?(?:::INSTR)?$", a, re.I)
+    if m:
+        return "ASRL%s::INSTR" % m.group(1)
     a = resource_name(lab_scripts.normalize(a)).upper()
+    if re.match(r"^TCPIP\d*::[^:]+::(INST|HISLIP)\d+$", a):   # a LAN instrument's way in, ::INSTR left out
+        a += "::INSTR"
     m = re.match(r"^USB(\d*)::(\w+)::(\w+)::([^:]+)(?:::(\d+))?(?:::(INSTR|RAW))?$", a)
     if m:
         try:
-            return "USB%s::0X%04X::0X%04X::%s%s::%s" % (m.group(1) or "0", int(m.group(2), 0), int(m.group(3), 0),
-                                                       m.group(4), "::" + m.group(5) if m.group(5) not in (None, "0")
-                                                       else "", m.group(6) or "INSTR")
+            # ::RAW reaches the same device as ::INSTR: one instrument, whichever way the script opens it
+            return "USB%s::0X%04X::0X%04X::%s%s::INSTR" % (m.group(1) or "0", int(m.group(2), 0), int(m.group(3), 0),
+                                                         m.group(4), "::" + m.group(5) if m.group(5) not in (None, "0")
+                                                         else "")
         except ValueError:
             return a
     m = re.match(r"^TCPIP::(.+)$", a)   # VISA's board 0, left out
@@ -1251,7 +1258,9 @@ def same_device(lab: Any, address: str) -> Optional[str]:
         return None
     for name, ic in lab.config.instruments.items():
         have = _way(ic.address)
-        if have is None or have[:2] != want[:2] or have == want:   # another device, or the lab's own way in
+        if have is None or have[0] != want[0] or have[2] == want[2] and have[1] == want[1]:   # the lab's own way in
+            continue
+        if have[1] != want[1] and not (want[0] == "LAN" and _same_host(have[1], want[1])):   # another device
             continue
         if want[0] == "LAN" and not (have[2].startswith("itself") or want[2].startswith("itself")):
             continue   # two ports of a terminal server, or two devices behind a gateway: two instruments
@@ -1260,12 +1269,56 @@ def same_device(lab: Any, address: str) -> Optional[str]:
 
 
 def lab_name(lab: Any, address: str) -> Optional[str]:
-    """The lab instrument at this address, if any."""
+    """The lab instrument at this address, if any: also by another name of its host (localhost for 127.0.0.1, a DNS
+    name for its IP address), which was once taken for an address outside the lab, the script's own socket then
+    going past the gate."""
     want = canonical(address)
     for name, ic in lab.config.instruments.items():
         if canonical(ic.address) == want or (want.startswith("sim://") and want == "sim://" + name.lower()):
             return name
+    w = _lan(want)
+    if w is not None:
+        for name, ic in lab.config.instruments.items():
+            h = _lan(canonical(ic.address))
+            if h is not None and h[1] == w[1] and _same_host(h[0], w[0]):
+                return name
     return None
+
+
+def _lan(address: str) -> Optional[Tuple[str, str]]:
+    """A LAN address's (host, the rest), or None."""
+    m = re.match(r"^TCPIP\d+::([^:]+)::(.+)$", address)
+    return (m.group(1), m.group(2)) if m else None
+
+
+_HOSTS: Dict[str, frozenset] = {}
+HOST_LOOK_S = 2.0   # how long a host's name is looked up for (a slow DNS): past it, only its spelling compares
+
+
+def _addresses(host: str) -> frozenset:
+    """The IP addresses a host's name stands for (itself for an address), looked up once."""
+    key = host.lower()
+    if key in _HOSTS:
+        return _HOSTS[key]
+    box: Dict[str, Any] = {}
+
+    def look() -> None:
+        try:
+            box["found"] = frozenset(i[4][0] for i in socket.getaddrinfo(host, None))
+        except (OSError, UnicodeError):
+            box["found"] = frozenset()
+    t = threading.Thread(target=look, name="kelvin-host-look", daemon=True)
+    t.start()
+    t.join(HOST_LOOK_S)
+    found = box.get("found", frozenset()) | {key}
+    if len(_HOSTS) > 200:
+        _HOSTS.clear()
+    _HOSTS[key] = found
+    return found
+
+
+def _same_host(a: str, b: str) -> bool:
+    return a.lower() == b.lower() or bool(_addresses(a) & _addresses(b))
 
 
 def behind(lab: Any, address: str) -> List[str]:
@@ -2346,7 +2399,12 @@ class ScriptRun:
             return {"reply": None}
         replies: List[str] = []
         enq = bool(inst.card.connection.get("enq"))
-        for part in split_compound(text) or [text]:
+        parts = split_compound(text) or [text]
+        if len(parts) > 1 and not re.search(r"[\r\n]", text) and any(
+                ";" in s.set_cmd.text and s.set_cmd.match(text) is not None for s in inst.card.setters):
+            parts = [text]   # the card's own setting is a chain: split, its first part asked as unlisted, its second
+            # rewritten to a command the script never sent
+        for part in parts:
             held = self.held.get(inst.name)
             if held and inst.card.error_query is not None and inst.card.error_query.match(part) is not None:
                 replies.append(held.pop(0))   # an error Kelvin read after the script's command: the script's to read
@@ -2414,8 +2472,13 @@ class ScriptRun:
         return str(data).strip()
 
     def _classify(self, inst: Any, command: str) -> Optional[str]:
-        """For a command whose value Kelvin can't read (a binary block): why it can't go, or None."""
+        """For a command whose value Kelvin can't read (a binary block): why it can't go, or None. Only one command:
+        a block's command chained to others (SOUR:VOLT:RANG?;:SOUR:VOLT 150;:OUTP ON, or after a line break) was
+        judged by its first and sent whole, the source ending at 150 V on a lab limited to 10 V."""
         card = inst.card
+        if len(split_compound(command)) > 1 or re.search(r"[\x00-\x1f\x7f]", command.strip()):
+            return ("%r holds more than one command: a binary block's goes alone (send the others as plain writes, "
+                    "each checked)" % command)
         for b in card.blocked:
             if b.match(command) is not None:
                 return "%r is blocked on %s" % (command, inst.name)
@@ -2876,9 +2939,10 @@ class ScriptRun:
         self.rec_id = self.rec.run_id
         run_dir = Path(self.rec.path) if self.rec.path else Path(tempfile.mkdtemp(prefix="kelvin-script-"))
         (run_dir / "script.py").write_text(prep.source, encoding="utf-8")
-        # values set, a notebook, or an earlier run's version of the file: the text in script.py runs, not the file
-        changed = prep.source != prep.original or prep.path.suffix.lower() != ".py" or prep.version is not None
-        source_file = run_dir / "script.py" if changed else None
+        # the text in script.py runs, always: the one the person approved (its values set, a notebook's, an earlier
+        # run's version), never the file read again (one saved between the card and the start ran in its new form,
+        # while the run kept the approved text "as it ran", with its fingerprint)
+        source_file = run_dir / "script.py"
         start = lab.snapshot(needed=list(prep.found.instruments))   # the others only looked at
         self.rec.snapshot("start", start)
         gate.log.write("run_start", by=gate.operator, run=self.rec.run_id, plan=prep.name, points=0,
