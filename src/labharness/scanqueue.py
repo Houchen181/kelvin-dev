@@ -228,6 +228,8 @@ class Item:
     #                                 that item is skipped, never run in conditions it didn't run in
     restored_by: Optional[str] = None   # and that item: it starts only once step <id> has finished (else skipped)
     library: Optional[str] = None   # the library's entry its runs are noted under (a scan run again, restored)
+    outside: Optional[str] = None   # the text from outside the lab the chat that queued it had read since its person
+    #                                 last wrote (web/agent.py): auto mode never approves it itself, as with its calls
 
     def view(self) -> Dict[str, Any]:
         return asdict(self)
@@ -470,14 +472,14 @@ class ScanQueue:
             project: Optional[str] = None, incognito: bool = False, unshared: bool = False,
             folder: Optional[str] = None, chat: Optional[str] = None, rules: Optional[Dict[str, Any]] = None,
             confidential: bool = False, unpublished: bool = False, then_pause: bool = False, legacy: bool = False,
-            library: Optional[str] = None) -> Item:
+            library: Optional[str] = None, outside: Optional[str] = None) -> Item:
         kind, name = parse_item(text)
         if kind == "script" and not note.strip():   # a script item's own note: line, kept with its run
             note = load_script_item(text).note
         item = Item(uuid.uuid4().hex[:8], kind, name, text.strip() + "\n", note=note.strip(), by=by, added=time.time(),
                     project=project, incognito=incognito, unshared=unshared, folder=folder, chat=chat, rules=rules,
                     confidential=confidential, unpublished=unpublished, then_pause=bool(then_pause),
-                    legacy=bool(legacy), library=library)
+                    legacy=bool(legacy), library=library, outside=outside or None)
         with self.lock:
             self._first_in()
             if position is None or position > len(self.items):

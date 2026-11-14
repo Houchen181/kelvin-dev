@@ -184,7 +184,9 @@ def test_sharing_goes_over_the_sign_in_and_never_sends_unshared_work(tmp_path, m
     (rt.data_dir / "runs" / "20261020-100500-running").mkdir()        # not finished yet
 
     calls.clear()
-    assert k.link.sync_once() is None and calls == []                  # off: not a single request
+    assert k.link.sync_once() is None and calls == [("GET", "/api/me")]   # off: the hub is asked once what it holds,
+    calls.clear()
+    assert k.link.sync_once() is None and calls == []                     # then not a single request
     share(k)
     assert k.client.get("/api/settings", headers=k.h).json()["settings"]["hub_share"] is True
     st = k.client.post("/api/hub/sync", headers=k.h).json()

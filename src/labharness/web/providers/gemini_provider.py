@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Optional
 from google import genai
 from google.genai import types
 
-from .base import Emit, ModelInfo, Provider, TurnResult, text_of, user_text
+from .base import Emit, ModelInfo, Provider, TurnResult, own_call_id, text_of, user_text
 
 _SKIP = ("image", "tts", "embedding", "live", "audio", "aqa", "learnlm")
-_OWN_ID = "lh_call_"
+_OWN_ID = "lh_call_"   # own_call_id's: never sent back to Gemini as its own
 
 
 def to_contents(history: List[Dict[str, Any]], own: str = "gemini") -> List[types.Content]:
@@ -135,12 +135,10 @@ class GeminiProvider(Provider):
             blocks.append({"type": "thinking", "text": thought})
         if text:
             blocks.append({"type": "text", "text": text})
-        n = 0
         for p in parts:
             if p.function_call is not None:
-                n += 1
                 args = p.function_call.args
-                blocks.append({"type": "tool_call", "id": p.function_call.id or "%s%d" % (_OWN_ID, n),
+                blocks.append({"type": "tool_call", "id": p.function_call.id or own_call_id(),
                                "name": p.function_call.name, "input": dict(args) if isinstance(args, dict) else {}})
         result = TurnResult(blocks, raw, model=model)
         if finish == "MAX_TOKENS":

@@ -231,6 +231,7 @@ class HubLink:
         self.terms: Optional[Dict[str, str]] = None   # the hub's new terms while it waits for them (terms_of, brief())
         self.syncing = False
         self.stopping = False
+        self.asked: Optional[int] = None  # the gen in which an older hub couldn't say what it holds (_held)
         self.wake: Any = None             # an asyncio.Event the portal's sync loop waits on
 
     def use(self, folder: Optional[Any], person: Optional[str] = None) -> None:
@@ -325,6 +326,11 @@ class HubLink:
             except NETWORK:
                 out["problem"] = "Kelvin can't reach the hub at %s now." % url
             else:
+                held = me.get("on_hub")
+                if not sharing and isinstance(held, dict) and state.get("asked") != connection_of(place):
+                    # what the hub itself holds of the person, also what hub-sync.json can't name (_held)
+                    out["on_hub"] = {k: held[k] if isinstance(held.get(k), int) else 0 for k in ("chats", "runs")}
+                    out["taking_back"] = out["taking_back"] or any(held.values())
                 consent, terms = bool(me.get("needs_consent")), terms_of(url, me)
                 self._terms_now(gen, terms if consent else None)
                 out["account"] = dict(terms, name=me.get("name"), email=me.get("email"),
@@ -348,13 +354,37 @@ class HubLink:
                         "old_runs": self.settings.get("hub_old_runs") == "on", "share": self.sharing}
             if not snap["share"]:
                 state = load_state(snap["folder"], snap["url"])
-                if state.get("connection") != connection_of(snap["place"]) or not any(state["sent"].values()):
+                if (state.get("connection") != connection_of(snap["place"]) or not any(state["sent"].values())) \
+                        and not self._held(snap, state):
                     return None   # nothing of theirs there to take back
             self.syncing = True
             try:
                 return self._sync_person(snap)
             finally:
                 self.syncing = False
+
+    def _held(self, snap: Dict[str, Any], state: Dict[str, Any]) -> bool:
+        """Switched off, with nothing Kelvin remembers sending from here: does the hub still hold the person's work?
+        It does when Kelvin shared it under the hub's earlier address or an earlier id of this computer. Asked once
+        for each sign-in, hub and choice: an older hub, which can't say, is asked again at the next sign-in or start."""
+        here = connection_of(snap["place"])
+        if state.get("asked") == here or self.asked == snap["gen"]:
+            return False
+        try:
+            there = HubClient(snap["url"], snap["token"], http=self.http).me().get("on_hub")
+        except HubClientError:
+            self.asked = snap["gen"]
+            return False
+        except NETWORK:
+            return False   # asked again at the next sync
+        if not isinstance(there, dict):
+            self.asked = snap["gen"]
+            return False
+        if any(there.values()):
+            return True
+        state["asked"] = here
+        save_state(snap["folder"], state)
+        return False
 
     def _check(self, snap: Dict[str, Any]) -> None:
         if self.stopping or snap["gen"] != self.gen:
@@ -370,6 +400,8 @@ class HubLink:
             state["connection"] = connection_of(snap["place"])
             state.pop("last", None)
             state.pop("synced_at", None)
+        if snap["share"]:
+            state.pop("asked", None)   # switched off again later, the hub is asked again what it holds (_held)
         last: Dict[str, Any] = {"at": time.time(), "ok": False, "sharing": snap["share"], "sent": {k: 0 for k in KINDS},
                                 "withheld": 0, "removed": 0, "refused": [], "older_runs": 0, "error": None}
         try:
@@ -448,4 +480,12 @@ class HubLink:
                     state["sent"][k].pop(i, None)
             last["removed"] += int(done.get("removed") or 0)
             gone = {k: ids[MAX_BATCH:] for k, ids in gone.items()}
+            save_state(snap["folder"], state)
+        if not snap["share"]:
+            # and whatever else the hub holds of the person: shared under its earlier address or an earlier id of this
+            # computer, which hub-sync.json can't name (an older hub keeps that)
+            self._check(snap)
+            done = client.push(removed={"everything": True}, version=__version__)
+            last["removed"] += int(done.get("removed") or 0)
+            state["asked"] = connection_of(snap["place"])
             save_state(snap["folder"], state)

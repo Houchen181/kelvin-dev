@@ -21,7 +21,7 @@ import openai
 
 from . import responses
 from .base import (DOCUMENTS_NOTE, EFFORT, PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url,
-                   opencode_session, safe_id, session_key, text_of, user_text)
+                   opencode_session, own_call_id, safe_id, session_key, text_of, user_text)
 
 _SKIP = ("audio", "realtime", "tts", "transcribe", "image", "search", "embedding", "instruct", "moderation",
          "dall-e", "whisper", "davinci", "babbage")
@@ -301,7 +301,7 @@ class OpenAIProvider(Provider):
                 args = args if isinstance(args, dict) else None
             except ValueError:
                 args = None
-            blocks.append({"type": "tool_call", "id": c["id"] or "lh_call_%d" % i, "name": c["name"], "input": args})
+            blocks.append({"type": "tool_call", "id": c["id"] or own_call_id(), "name": c["name"], "input": args})
         result = TurnResult(blocks, None, model=answered_by)
         if finish == "length":
             result.stop_reason, result.note = "max_tokens", "The answer hit the length limit."

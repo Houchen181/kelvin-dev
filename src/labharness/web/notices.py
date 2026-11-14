@@ -15,7 +15,9 @@ the line in its thread (role "event"), which goes to the model with the chat's n
 Nothing calls a model for a change unless the person switched on Settings → "Kelvin answers sequence changes": then a
 stop or a failure continues each chat it concerns at once (wakeups.py, within that chat's daily wake-ups).
 
-    _events.jsonl, in the person's chat folder: {"id", "at", "text", "about": "sequence" | "home", "chats": [ids]}
+    _events.jsonl, in the person's chat folder: {"id", "at", "text", "about": "sequence" | "home", "chats": [ids],
+    "whose": [the marks of the work it names]}: a line naming unshared work (a confidential project's block) reaches
+    only the chats that may see that work.
 """
 from __future__ import annotations
 
@@ -184,13 +186,17 @@ class Notices:
     # ------------------------------------------------------------------ a change
 
     def tell(self, text: str, chats: Iterable[Optional[str]] = (), about: str = "sequence",
-             urgent: bool = False) -> Dict[str, Any]:
+             urgent: bool = False, whose: Iterable[Optional[Dict[str, Any]]] = ()) -> Dict[str, Any]:
         """A person's change, in one line, for the chats it concerns (see the module's note). urgent: a stop or a
-        failure, which continues those chats at once when the person asked Kelvin to answer such changes."""
+        failure, which continues those chats at once when the person asked Kelvin to answer such changes. whose: the
+        marks of the work the line names (runtime.WHOSE): a chat hears it only if it may see that work (_may_see)."""
         event = {"id": "e-" + uuid.uuid4().hex[:8], "at": time.time(), "text": str(text).strip(), "about": about,
-                 "chats": sorted({str(c) for c in chats if c})}
+                 "chats": sorted({str(c) for c in chats if c}),
+                 "whose": [dict(w) for w in whose if isinstance(w, dict) and any(w.values())]}
         self._append(event)
         for chat_id in event["chats"]:
+            if not self._may_see(chat_id, event):
+                continue
             if self.agent.answering(chat_id):
                 self.pending.setdefault(chat_id, []).append(event)
                 continue
@@ -198,6 +204,23 @@ class Notices:
             if urgent and self._react():
                 self.agent.waker.soon(chat_id, event["text"])
         return event
+
+    def _may_see(self, chat: Any, event: Dict[str, Any]) -> bool:
+        """May this chat's model read this change? Unshared work it names (a confidential project's block) only from
+        inside that work, with a model its rules allow (runtime.may_see), as the chat's own tools see it."""
+        whose = [w for w in event.get("whose") or [] if isinstance(w, dict)]
+        if not whose:
+            return True
+        rt = self.agent.runtime
+        if not any(rt.unshared_work(w) for w in whose):
+            return True
+        if not isinstance(chat, dict):
+            try:
+                chat = self.agent.store.load(chat)
+            except (KeyError, OSError, ValueError):
+                return False
+        with rt.viewing(self.agent.viewer_for(chat)):
+            return all(rt.may_see(w) for w in whose)
 
     def _react(self) -> bool:
         settings = getattr(self.agent, "settings", None)
@@ -245,7 +268,7 @@ class Notices:
         last = max([float(m.get("at") or 0) for m in chat["messages"] if m.get("role") == "user"] +
                    [float(chat.get("created") or 0)])
         since = max(last, time.time() - DIGEST_S)
-        others = [e for e in self.recent(since) if e.get("id") not in seen]
+        others = [e for e in self.recent(since) if e.get("id") not in seen and self._may_see(chat, e)]
         ids = [e["id"] for e in others]
         events += [e["text"] for e in others]
         message["at"] = time.time()

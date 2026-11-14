@@ -48,8 +48,14 @@ def has_legacy(home: Any) -> bool:
             or (old / "reports").is_dir())
 
 
+DEVICES = re.compile(r"(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?", re.IGNORECASE)   # Windows' device names
+
+
 def folder_name(name: str) -> str:
-    return re.sub(r"[^\w.-]+", "_", name.strip()).strip("._")[:40] or "user"
+    """A person's folder, from their name: never a name Windows keeps for a device (Con, Nul, Com1...), which makes
+    no folder, or something that isn't one."""
+    folder = re.sub(r"[^\w.-]+", "_", name.strip()).strip("._")[:40] or "user"
+    return re.sub(r"^([^.]+)", r"\1_", folder, count=1) if DEVICES.fullmatch(folder) else folder
 
 
 class Cipher:

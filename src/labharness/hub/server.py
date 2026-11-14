@@ -47,7 +47,7 @@ from . import drawing, llm
 from . import relay as relaying
 from .catalog import Catalog
 from .db import (CONSENT_VERSION, DEFAULTS, NEW_TERMS, NO_RUN_FILES, SESSION_TTL, Busy, Hub, HubError, NeedsConsent,
-                 TooMuch,
+                 Taken, TooMuch,
                  installation, loopback, log, previous_ids)
 
 COOKIE = "kelvin_hub"
@@ -361,7 +361,7 @@ def render_message(m: Any, depth: int = 0) -> str:
         return '<div class="msg user"><div class="who">%s</div>%s</div>' % (e(who), "".join(parts))
     if role == "assistant":
         parts = []
-        for b in m.get("blocks") or []:
+        for b in m.get("blocks") if isinstance(m.get("blocks"), list) else []:
             if not isinstance(b, dict):
                 continue
             if b.get("type") == "text":
@@ -375,7 +375,7 @@ def render_message(m: Any, depth: int = 0) -> str:
             " · " + e(m["model"]) if m.get("model") else "", "".join(parts))
     if role == "tool":
         out = []
-        for r in m.get("results") or []:
+        for r in m.get("results") if isinstance(m.get("results"), list) else []:
             if not isinstance(r, dict):
                 continue
             also = []
@@ -427,6 +427,19 @@ def found_rows(card: Any) -> str:
     rest = {k: v for k, v in card.items() if k not in dict(FOUND)}
     return ('<div class="scroll"><table>%s</table></div>' % "".join(rows) if rows else "") + (
         record_rows(rest) if rest else "")
+
+
+def parsed(raw: bytes) -> Any:
+    """A request's JSON, refused (HubError) when it nests too deep to read or holds text the database can't keep (a
+    lone surrogate, \\ud800)."""
+    try:
+        body = json.loads(raw)
+        json.dumps(body, ensure_ascii=False).encode("utf-8")
+    except RecursionError:
+        raise HubError("The request nests too deep.")
+    except UnicodeError:
+        raise HubError("The request has text that isn't valid Unicode.")
+    return body
 
 
 async def read_body(request: Request, limit: int) -> bytes:
@@ -732,6 +745,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             user = await call(hub.register, f.get("email"), f.get("name"), f.get("password"),
                               f.get("consent") == "yes", f.get("orcid"), ip)
         except HubError as err:
+            if isinstance(err, Taken):   # says the account exists: limited as registrations are
+                form_tries.hit("register:" + who(request))
             return register_form(f, str(err))
         form_tries.hit("register:" + who(request))
         await call(hub.send_confirmation, user)
@@ -1299,7 +1314,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         if token_tries.blocked("token:" + who(request)):
             return api_error("too many tries; wait 15 minutes", 429)
         try:
-            body = json.loads(await read_body(request, MAX_TOKEN))
+            body = parsed(await read_body(request, MAX_TOKEN))
             if not isinstance(body, dict) or body.get("grant_type", "authorization_code") != "authorization_code":
                 raise HubError("grant_type must be authorization_code")
             result = await call(hub.connect_app, body.get("code"), body.get("code_verifier"), body.get("redirect_uri"),
@@ -1314,7 +1329,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     # ------------------------------------------------------------------ Kelvin's own sign-in (central accounts)
 
     async def json_body(request: Request) -> Dict[str, Any]:
-        body = json.loads(await read_body(request, MAX_TOKEN))
+        body = parsed(await read_body(request, MAX_TOKEN))
         if not isinstance(body, dict):
             raise HubError("send a JSON object")
         return body
@@ -1378,6 +1393,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             user = await call(hub.register, body.get("email"), body.get("name"), body.get("password"),
                               body.get("consent") is True, body.get("orcid") or "", ip)
         except HubError as err:
+            if isinstance(err, Taken):   # says the account exists: limited as registrations are
+                form_tries.hit("register:" + who(request))
             return api_error(str(err))
         form_tries.hit("register:" + who(request))
         await call(hub.send_confirmation, user)
@@ -1481,6 +1498,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         lab = next((lab["name"] for lab in labs if lab["id"] == app["lab_id"]), None)
         return JSONResponse({"name": user["name"], "email": user["email"], "orcid": user["orcid"],
                              "email_confirmed": bool(user["email_confirmed_at"]), "shares_into": lab,
+                             "on_hub": await call(hub.on_hub, user["id"]),
                              "labs": [lab["name"] for lab in labs], "needs_consent": hub.needs_consent(user),
                              "consent_url": hub.base_url + "/consent", "account_url": hub.base_url + "/account",
                              "run_files": hub.run_files, **terms_in_force()})
@@ -1510,6 +1528,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         try:
             body = await read_body(request, MAX_SYNC)
             return JSONResponse(await heavy(hub.sync, app, await heavy(json.loads, body or b"{}")))
+        except RecursionError:
+            return api_error("The request nests too deep.")
         except NeedsConsent:
             return new_terms()
         except HubError as err:

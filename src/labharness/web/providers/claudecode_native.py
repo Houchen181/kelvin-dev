@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -86,6 +87,43 @@ class NoStart(RuntimeError):
         found = UNKNOWN.search(why)
         self.option = found.group(1) if found else ""
         self.unable = unable or bool(self.option and self.option not in TUNABLE)
+
+
+SESSION_ID = re.compile(r"[0-9A-Fa-f][0-9A-Fa-f-]{7,63}")   # Claude Code's session ids (UUIDs): never a path
+
+
+def sessions_of(messages: Any) -> List[str]:
+    """The Claude Code sessions the bridge kept for a chat's answers (none for an incognito chat)."""
+    out: List[str] = []
+    for m in messages if isinstance(messages, list) else []:
+        raw = m.get("raw") if isinstance(m, dict) else None
+        if isinstance(raw, dict) and raw.get("bridge") == "native" and raw.get("kept") and \
+                SESSION_ID.fullmatch(str(raw.get("session") or "")) and str(raw["session"]) not in out:
+            out.append(str(raw["session"]))
+    return out
+
+
+def forget(sessions: List[str], home: Optional[Path] = None) -> int:
+    """A deleted chat's Claude Code sessions go from this computer too: Claude Code keeps each in its own folder of
+    projects (~/.claude, or CLAUDE_CONFIG_DIR), as <session>.jsonl, with a folder of that name for some. How many
+    went."""
+    base = Path(home) if home is not None else Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    gone = 0
+    for session in sessions:
+        if not SESSION_ID.fullmatch(str(session)):
+            continue
+        for path in (base / "projects").glob("*/%s*" % session):
+            if path.name not in (session + ".jsonl", session):
+                continue
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                gone += 1
+            except OSError:
+                pass
+    return gone
 
 
 def first_mark(history: List[Dict[str, Any]], system: str = "") -> str:

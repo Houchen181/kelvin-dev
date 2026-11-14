@@ -8,9 +8,11 @@ with the keys the hub's owner set in the owner console, so nobody needs keys of 
 - **Keys** stay on the hub, sealed with gateway.key in its folder (back that file up apart from the database:
   without it the keys must be set again). They never go to anyone's computer.
 - **What is recorded:** who, which lab, which service and model, the tokens and what they cost (prices from
-  models.dev, catalog.py). Never the text.
+  models.dev, catalog.py). Never the text. An answer that ends without the service's own counts (its client went
+  away before the last event, or it broke off) is recorded by what passed through (Meter.estimate).
 - **Budgets:** each person has a monthly budget in dollars (the owner's default, or their own); a lab may have one
   too. A request past it is refused (402) with a reason the chat shows; at 80% the person gets a mail, once a month.
+  While an answer streams, its prompt's likely cost is held back from the budget, so answers at once can't overrun it.
 - **Limits:** requests per minute and answers at once, per person (hub.json "llm"); 40 MB a request."""
 from __future__ import annotations
 
@@ -109,6 +111,20 @@ def refusal(status: int, message: str, headers: Optional[Dict[str, str]] = None)
                         status_code=status, headers=headers)
 
 
+TEXT_KEYS = ("text", "content", "delta", "thinking", "partial_json", "arguments", "reasoning_content", "refusal")
+
+
+def text_in(obj: Any, depth: int = 0) -> int:
+    """Characters of an answer's text, thinking and tool input in one of its streamed events."""
+    if depth > 8:
+        return 0
+    if isinstance(obj, dict):
+        return sum(len(v) if isinstance(v, str) and k in TEXT_KEYS else text_in(v, depth + 1) for k, v in obj.items())
+    if isinstance(obj, list):
+        return sum(text_in(v, depth + 1) for v in obj)
+    return 0
+
+
 def cost(price: Dict[str, Any], used: Dict[str, int]) -> float:
     """Dollars for these tokens at this price (per million tokens; the dearer tier once the prompt is past its size).
     The cache writes Claude keeps an hour (cache_write_1h, part of cache_write) cost twice the input price, not the
@@ -134,6 +150,7 @@ class Meter:
     def __init__(self, service: str, streamed: bool):
         self.service, self.streamed = service, streamed
         self.used = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cache_write_1h": 0, "searches": 0}
+        self.text = 0   # characters of the answer that passed: its text in streamed events, else the whole answer
         self._line = b""
         self._body = bytearray()
 
@@ -143,8 +160,20 @@ class Meter:
             self._line = lines.pop()
             for line in lines:
                 self._event(line)
-        elif len(self._body) < MAX_METERED:
-            self._body += chunk
+        else:
+            self.text += len(chunk)
+            if len(self._body) < MAX_METERED:
+                self._body += chunk
+
+    def estimate(self, asked: int) -> Dict[str, int]:
+        """What an answer is taken to have used when it ended without the service's totals (the client went away
+        before its last event, or the stream broke off): what the service told so far, and at least the request's
+        size (asked, in bytes) for the prompt and the answer that passed for the output, at about 4 a token."""
+        used = dict(self.used)
+        if not used["input"] + used["cache_read"] + used["cache_write"]:
+            used["input"] = asked // 4
+        used["output"] = max(used["output"], self.text // 4)
+        return used
 
     def close(self) -> None:
         if self.streamed and self._line:
@@ -160,9 +189,11 @@ class Meter:
         line = line.strip()
         if line.startswith(b"data:") and line[5:].strip() not in (b"", b"[DONE]"):
             try:
-                self._take(json.loads(line[5:].strip()))
+                obj = json.loads(line[5:].strip())
             except ValueError:
-                pass
+                return
+            self.text += text_in(obj)
+            self._take(obj)
 
     def _set(self, latest: bool = False, **counts: Any) -> None:
         """Anthropic's counts only grow along a stream (the largest seen); Gemini's and OpenAI's last ones are the
@@ -194,7 +225,8 @@ class Meter:
                 self._set(True, input=(u.get("promptTokenCount") or 0) - cached, cache_read=cached,
                           output=(u.get("candidatesTokenCount") or 0) + (u.get("thoughtsTokenCount") or 0))
         else:   # OpenAI's Chat Completions and Responses, and services in its format
-            done = obj.get("type") == "response.completed"   # the Responses API's last event
+            # the Responses API's last event: completed, cut short (max_output_tokens) or failed
+            done = obj.get("type") in ("response.completed", "response.incomplete", "response.failed")
             u = (obj.get("response") or {}).get("usage") if done else obj.get("usage")
             if isinstance(u, dict):   # the prompt's tokens include those read from and written to the cache
                 chat = "prompt_tokens" in u   # Chat Completions; else the Responses API
@@ -215,6 +247,9 @@ class Gateway:
         self._client: Optional[Tuple[Any, Any]] = None   # (event loop, httpx.AsyncClient)
         self._recent: Dict[int, Deque[float]] = {}        # each person's requests in the last minute
         self._running: Dict[int, Dict[str, float]] = {}    # each person's answers streaming now
+        # what the answers streaming now are likely to cost, held back from budgets until they are recorded:
+        # ticket -> (person, lab, dollars, since)
+        self._held: Dict[str, Tuple[int, Optional[int], float, float]] = {}
         self._lock = threading.Lock()
         with hub.connect() as con:
             con.executescript(TABLES)
@@ -377,15 +412,33 @@ class Gateway:
             out["lab"] = {"spent": round(self.lab_spent(lab_id, month), 4), "budget": lab}
         return out
 
+    def held_back(self, user_id: Optional[int] = None, lab_id: Optional[int] = None) -> float:
+        """Dollars held back for a person's (or a lab's) answers streaming now."""
+        now = time.time()
+        with self._lock:
+            return sum(usd for who, lab, usd, at in self._held.values() if now - at < STREAM_S and (
+                who == user_id if user_id is not None else lab == lab_id))
+
+    def hold(self, ticket: str, user_id: int, lab_id: Optional[int], usd: float) -> None:
+        with self._lock:
+            self._held[ticket] = (user_id, lab_id, usd, time.time())
+
+    def likely(self, service: str, model: str, asked: int) -> float:
+        """What an answer to a request of this size (bytes) is likely to cost at least: its prompt, at about 4 bytes
+        a token."""
+        price = self.catalog.price(service, model) or self.limits()["fallback_price"]
+        return cost(price, {"input": asked // 4, "output": 0, "cache_read": 0, "cache_write": 0})
+
     def over_budget(self, user_id: int, lab_id: Optional[int]) -> Optional[str]:
-        """Why a person can't use the models now (None: they can)."""
+        """Why a person can't use the models now (None: they can): what they spent, with what their answers streaming
+        now hold back, reached their budget or their lab's."""
         month = month_of()
         budget, _ = self.budget_of(user_id)
-        if self.spent(user_id, month) >= budget:
+        if self.spent(user_id, month) + self.held_back(user_id) >= budget:
             return ("This month's model budget on the Kelvin hub ($%.2f) is used up. It renews on %s; the hub's owner "
                     "can raise it." % (budget, renews(month)))
         lab = self.lab_budget(lab_id)
-        if lab is not None and self.lab_spent(lab_id, month) >= lab:
+        if lab is not None and self.lab_spent(lab_id, month) + self.held_back(lab_id=lab_id) >= lab:
             return ("Your lab's model budget on the Kelvin hub this month ($%.2f) is used up. It renews on %s." % (
                 lab, renews(month)))
         return None
@@ -458,6 +511,8 @@ class Gateway:
             while recent and now - recent[0] > 60:
                 recent.popleft()
             running = {t: at for t, at in self._running.get(user_id, {}).items() if now - at < STREAM_S}
+            for t in [t for t, held in self._held.items() if now - held[3] >= STREAM_S]:
+                del self._held[t]
             if len(recent) >= lim["per_minute"] or len(running) >= lim["at_once"]:
                 return None
             recent.append(now)
@@ -469,6 +524,7 @@ class Gateway:
     def release(self, user_id: int, ticket: str) -> None:
         with self._lock:
             self._running.get(user_id, {}).pop(ticket, None)
+            self._held.pop(ticket, None)
 
     # ------------------------------------------------------------------ passing a request on
 
@@ -522,6 +578,7 @@ class Gateway:
             return refusal(403, "The Kelvin hub doesn't offer %s. Pick another model." % model)
         user, lab_id = app["user"], app.get("lab_id")
         ticket = None
+        answering = method == "POST" and not path.endswith(("count_tokens", ":countTokens"))   # counting is free
         if method == "POST":
             why = await call(self.over_budget, user["id"], lab_id)
             if why:
@@ -530,6 +587,8 @@ class Gateway:
             if ticket is None:
                 return refusal(429, "Too many requests at once from your Kelvin account; wait a moment.",
                                {"retry-after": "10"})
+            if answering:   # held back from the budget until the answer is recorded
+                self.hold(ticket, user["id"], lab_id, self.likely(service, model, len(body or b"")))
             asyncio.get_running_loop().run_in_executor(None, self.catalog.refresh)   # prices, read once a day
         sent = {k: v for k, v in headers.items() if k in ("content-type", "accept") + tuple(spec["keep"])}
         sent.update({spec["header"]: spec["form"].format(key), "accept-encoding": "identity",
@@ -563,21 +622,27 @@ class Gateway:
         meter = Meter(service, "text/event-stream" in kind)
 
         async def stream() -> Any:
+            ended = False
             try:
                 async for chunk in answer.aiter_bytes():
                     meter.feed(chunk)
                     yield chunk
+                ended = True
             finally:
                 with anyio.CancelScope(shield=True):
                     await answer.aclose()
                 if ticket:
-                    self.release(user["id"], ticket)
                     meter.close()
+                    used = meter.used
+                    if answering and answer.status_code < 400 and not (ended and any(used.values())):
+                        # the client went away before the service's totals, or the stream broke off: what passed
+                        used = meter.estimate(len(body or b""))
                     try:   # a few milliseconds of SQLite, here because a cancelled stream can't await
-                        if any(meter.used.values()):   # not a token count or a refusal: they cost nothing
-                            self.record(user, lab_id, service, model or "?", meter.used, answer.status_code)
+                        if any(used.values()):   # not a token count or a refusal: they cost nothing
+                            self.record(user, lab_id, service, model or "?", used, answer.status_code)
                     except Exception as e:
                         log.error("model gateway: usage not recorded (%s)", type(e).__name__)
+                    self.release(user["id"], ticket)
         return StreamingResponse(stream(), status_code=answer.status_code, media_type=kind, headers=kept)
 
     @staticmethod
@@ -596,8 +661,9 @@ class Gateway:
             return "", body
         model = str(request.get("model") or "")
         chat = service in ("openai", "opencode", "opencode-go") and found.re.pattern.endswith("chat/completions")
-        if chat and request.get("stream") is True and not (request.get("stream_options") or {}).get("include_usage"):
-            request["stream_options"] = dict(request.get("stream_options") or {}, include_usage=True)
+        options = request.get("stream_options") if isinstance(request.get("stream_options"), dict) else {}
+        if chat and request.get("stream") is True and not options.get("include_usage"):
+            request["stream_options"] = dict(options, include_usage=True)
             body = json.dumps(request).encode("utf-8")
         return model, body
 
