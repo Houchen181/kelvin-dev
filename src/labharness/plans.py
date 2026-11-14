@@ -805,6 +805,8 @@ def _axes(data: Dict[Any, Any], errors: List[str], make: bool = True) -> Tuple[L
                 path, ", ".join(map(str, sorted(set(spec) - _STEPPED, key=str))), ", ".join(sorted(_STEPPED))))
             continue
         shape = _axis_shape(spec, path, errors)
+        if ip and shape and not shape[0]:   # once dropped without a word: the plan ran one point and said done
+            errors.append("%s: the sweep has no values" % path)
         if ip and shape and shape[0]:
             settle = spec.get("settle") if isinstance(spec, dict) else None
             settles, settle_s = None, None

@@ -888,15 +888,19 @@ class RunEngine:
         stop += self.read_needed([i for i in needs if i not in plan.requires], needs)
         if stop:
             return "preflight failed: " + "; ".join(stop), told
+        return self._preconditions_problem(plan), told
+
+    def _preconditions_problem(self, plan: Plan) -> Optional[str]:
+        """Why the plan's preconditions don't hold now, in words; None when they do."""
         for cond in plan.preconditions:
             try:
                 ok, actual = cond.check(self.lab.read)
             except Exception as e:   # a reading that failed since its instrument's check
-                return "precondition %s can't be checked: %s" % (cond.text, error_words(cond.instr, e)), told
+                return "precondition %s can't be checked: %s" % (cond.text, error_words(cond.instr, e))
             if not ok:
                 _, spec = self.lab.resolve(cond.key)
-                return "precondition %s not met (now %s)" % (cond.text, spec.show(actual)), told
-        return None, told
+                return "precondition %s not met (now %s)" % (cond.text, spec.show(actual))
+        return None
 
     # ------------------------------------------------------------------ dry run and run
 
@@ -990,6 +994,11 @@ class RunEngine:
                 report = RunReport("declined", plan.name, "declined: plan %s not run%s" % (plan.name, why), dry_run=sim)
                 self.gate.log.write("run_declined", by=self.gate.operator, plan=plan.name)
                 return report
+            # its preconditions again, as it starts: they held when it was checked, before its card's wait (a run
+            # whose sample had to be below 2.5 K ran at 33 K, the sample having warmed while the card waited)
+            late = self._preconditions_problem(plan)
+            if late:
+                return self._refuse(plan.name, late + ", since its card was answered")
         # the time left counts from the dry run's duration, else the card's estimate (timing.py), not points alone
         expected = sim.duration_s if sim is not None and sim.ok else forecast.seconds or None
         with self.gate.log.holding():   # the record's files stay open while it measures (EventLog.holding)

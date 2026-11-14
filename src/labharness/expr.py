@@ -116,7 +116,18 @@ class _Point:
     point without numpy (Kelvin's core runs without it). A function of a whole column (mean, smooth, deriv...) has
     no meaning at one point and says so."""
     float64 = float
-    add, subtract, multiply, power = operator.add, operator.sub, operator.mul, operator.pow
+    add, subtract, multiply = operator.add, operator.sub, operator.mul
+
+    @staticmethod
+    def power(a: float, b: float) -> float:
+        out = operator.pow(a, b)
+        if isinstance(out, complex):   # -8 ** 0.5: once a complex number, which abs() then made a plausible 2.83
+            raise ExprError("%g to the power %g has no real value" % (a, b))
+        return out
+
+    @staticmethod
+    def ndim(x: Any) -> int:
+        return 0
     mod, floor_divide = operator.mod, operator.floordiv
     less, less_equal, greater, greater_equal = operator.lt, operator.le, operator.gt, operator.ge
     equal, not_equal, negative = operator.eq, operator.ne, operator.neg
@@ -305,7 +316,13 @@ def _build(tree: Any, np: Any, funcs: Dict[str, Callable[..., Any]]) -> Callable
             return compared
         if isinstance(node, ast.IfExp):
             test, body, orelse = build(node.test), build(node.body), build(node.orelse)
-            return lambda named: np.where(test(named), body(named), orelse(named))
+
+            def chosen(named: Callable[[str], Any]) -> Any:
+                t = test(named)
+                if np.ndim(t) == 0:   # one point: only the branch it takes (one guarding its own division by zero)
+                    return body(named) if bool(t) else orelse(named)
+                return np.where(t, body(named), orelse(named))   # a column: each point its own branch
+            return chosen
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name):
                 raise ExprError("call a function by its name, e.g. deriv(lockin.X, smu.V)")

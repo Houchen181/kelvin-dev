@@ -211,17 +211,21 @@ def is_query(command: str, enq: bool = False) -> bool:
 
 def split_compound(command: str) -> List[str]:
     """Split "SOUR:VOLT 1;CURR 2" into absolute commands, following the SCPI
-    rule that a relative command continues the previous command's path."""
-    out, path = [], ""
-    for part in command.split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        if part.startswith("*"):
-            out.append(part)
-            continue
-        full = part.lstrip(":") if part.startswith(":") or not path else path + ":" + part
-        head = re.split(r"[\s?]", full, maxsplit=1)[0]
-        path = head.rsplit(":", 1)[0] if ":" in head else ""
-        out.append(full)
+    rule that a relative command continues the previous command's path. A line break ends a program message: the
+    instrument takes each line as commands of its own, from the root, and so does this (a raw "*IDN?" with a line
+    break and ":OUTP ON" after it was judged by its first line alone, and sent whole: the output went on, unasked)."""
+    out = []
+    for line in re.split(r"[\r\n]+", command):
+        path = ""
+        for part in line.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            if part.startswith("*"):
+                out.append(part)
+                continue
+            full = part.lstrip(":") if part.startswith(":") or not path else path + ":" + part
+            head = re.split(r"[\s?]", full, maxsplit=1)[0]
+            path = head.rsplit(":", 1)[0] if ":" in head else ""
+            out.append(full)
     return out

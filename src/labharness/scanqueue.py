@@ -460,9 +460,11 @@ class ScanQueue:
                     return i
             try:
                 n = int(str(ref).strip().lstrip("#"))
-                return self.items[n - 1] if n >= 1 else self.items[n]
+                if n < 1:   # 0 was the first item and -1 the last: a call off by one removed a real item
+                    raise IndexError(n)
+                return self.items[n - 1]
             except (ValueError, IndexError):
-                raise KeyError("no queue item %r (the queue has %d)" % (ref, len(self.items)))
+                raise KeyError("no queue item %r (the queue has %d, numbered from 1)" % (ref, len(self.items)))
 
     def add(self, text: str, position: Optional[int] = None, note: str = "", by: str = "",
             project: Optional[str] = None, incognito: bool = False, unshared: bool = False,
