@@ -60,8 +60,8 @@ def signature(path: Path) -> Tuple[str, str]:
     """A file's Authenticode signature as Windows judges it, asked of PowerShell's Get-AuthenticodeSignature (as
     release.yml checks its builds): (its status, "Valid" only for an intact signature by a trusted certificate; the
     signer's subject, "" for none). Raises when PowerShell can't be asked or its answer read."""
-    script = ("$s = Get-AuthenticodeSignature -LiteralPath '%s'; [Console]::Out.Write((@{status = [string]$s.Status; "
-              "subject = [string]$s.SignerCertificate.Subject} | ConvertTo-Json -Compress))"
+    script = ("$s = Get-AuthenticodeSignature -LiteralPath '%s'; @{status = [string]$s.Status; "
+              "subject = [string]$s.SignerCertificate.Subject} | ConvertTo-Json -Compress"
               % str(path).replace("'", "''"))
     p = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True,
                        encoding="utf-8", errors="replace", timeout=120, creationflags=_flags())
