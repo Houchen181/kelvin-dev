@@ -27,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import json
+import keyword
 import math
 import os
 import re
@@ -55,6 +56,9 @@ from .scpi import is_query, split_compound
 
 SHIM_DIR = Path(__file__).parent / "data" / "scriptshim"
 SHIM = SHIM_DIR / "kelvin_shim.py"
+# what Kelvin's stand-in has loaded before a script runs, besides the standard library: no package of the lab's may
+# be called so, to run as python -m runs it
+SHIM_LOADS = ("pyvisa", "serial", "kelvin", "kelvin_shim", "kelvin_api", "sitecustomize")
 RUNNABLE = (".py", ".ipynb")
 # makers' libraries that reach instruments through their own protocols or DLLs, past the gate: named in the run's
 # approval, or, loaded on the way, let through with the run and said in the chat (Kelvin's built-in drivers use some of
@@ -85,6 +89,9 @@ PAST_THE_LAB = ("ctypes", "_ctypes", "cffi", "_cffi_backend", "subprocess", "mul
                 "libusb1", "hid", "ftd2xx", "pyftdi", "pylibftdi")
 PROGRAMS = ("system", "popen", "startfile", "posix_spawn", "posix_spawnp", "fork", "forkpty", "kill", "killpg")
 _PLACE = re.compile(r"\{([^{}]*)\}")
+# a script named as python -m names a module: "-m nvpulse", "python -m nvpulse.cli" (its arguments go in args)
+_DASH_M = re.compile(r"^\s*(?:(?:python[\w.]*|py)(?:\.exe)?\s+(?:-[\d.]+\s+)?)?-m\s+(\S+)\s*$", re.I)
+MAX_PACKAGE = 300   # a package's .py files read ahead and hashed, at most
 
 
 @contextlib.contextmanager
@@ -119,12 +126,44 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+NO_FOLDER = ("this lab has no scripts folder: a person adds them in Settings (Instruments → Your lab's scripts → Add "
+             "folder…) or Set up, and Kelvin runs only the scripts in them, or those they import in the Runs panel")
+
+
+def _identifier(name: str) -> bool:
+    return name.isidentifier() and not keyword.iskeyword(name)
+
+
+def _dotted(name: str) -> bool:
+    """A module's name as python -m takes one: nvpulse, nvpulse.cli."""
+    return bool(name) and all(_identifier(part) for part in name.split("."))
+
+
+def module_name(text: Any) -> Optional[str]:
+    """The module a script's name asks for as python -m names one ("-m nvpulse", "python -m nvpulse.cli"), or None."""
+    m = _DASH_M.match(str(text or ""))
+    return m.group(1) if m and _dotted(m.group(1)) else None
+
+
+def shown(module: str) -> str:
+    """A module as python -m names it: a package's __main__ by the package (nvpulse.__main__ is nvpulse)."""
+    return module[:-len(".__main__")] if module.endswith(".__main__") else module
+
+
 def locate(path: str, folders: Sequence[Any], chosen: Sequence[Any] = (), missing: bool = False) -> Path:
     """The script to run: inside one of the lab's scripts folders (a person named them), or one of the files a person
     imported into their library (chosen: each one a person picked, in the Runs panel), never elsewhere. A path in the
     folders names one script (the same path in two of them: say which); a bare file name may be in a sub-folder, if it
-    is there once, or name an imported file. missing: its path in full may name a file that is gone, in a folder that
-    is still there (an earlier run's copy of it runs there, as it ran then)."""
+    is there once, or name an imported file. A package's folder names its __main__.py, which python -m runs; so does
+    "-m nvpulse", and a name that is no file's (nvpulse, nvpulse.cli) is looked for as python -m looks for a module
+    (locate_module). missing: its path in full may name a file that is gone, in a folder that is still there (an
+    earlier run's copy of it runs there, as it ran then)."""
+    asked = module_name(path)
+    if asked is not None:
+        return locate_module(asked, folders)[0]
+    if re.match(r"^\s*(?:(?:python[\w.]*|py)(?:\.exe)?\s+(?:-[\d.]+\s+)?)?-m\s", str(path or ""), re.I):
+        raise ScriptError("%s: name the module alone (-m nvpulse, or module: nvpulse) and give its arguments in "
+                          "args" % path)
     roots = [Path(f).expanduser().resolve() for f in folders if f]
     picked: Dict[str, Path] = {}
     for c in chosen:
@@ -132,9 +171,7 @@ def locate(path: str, folders: Sequence[Any], chosen: Sequence[Any] = (), missin
             p = Path(str(c)).expanduser().resolve()
             picked[os.path.normcase(str(p))] = p
     if not roots and not picked:
-        raise ScriptError("this lab has no scripts folder: a person adds them in Settings (Instruments → Your lab's "
-                          "scripts → Add folder…) or Set up, and Kelvin runs only the scripts in them, or those they "
-                          "import in the Runs panel")
+        raise ScriptError(NO_FOLDER)
     where = ", ".join(str(r) for r in roots) or "none named"
     noun = "scripts folder" if len(roots) == 1 else "scripts folders"
     p = Path(str(path).strip().strip('"')).expanduser()
@@ -142,6 +179,8 @@ def locate(path: str, folders: Sequence[Any], chosen: Sequence[Any] = (), missin
     found: List[Path] = []
     for t in tries:
         t = t.resolve()
+        if t.is_dir() and (t / "__main__.py").is_file():   # a package: python -m runs its __main__.py
+            t = (t / "__main__.py").resolve()
         here = t.is_file() or (missing and p.is_absolute() and not t.exists() and t.parent.is_dir())
         if here and (any(_inside(t, r) for r in roots) or os.path.normcase(str(t)) in picked) and t not in found:
             found.append(t)
@@ -149,6 +188,10 @@ def locate(path: str, folders: Sequence[Any], chosen: Sequence[Any] = (), missin
         return _runnable(found[0])
     if found:
         raise ScriptError("there are several %s in the %s: %s; say which" % (p, noun, ", ".join(map(str, found))))
+    folder = next((t.resolve() for t in tries if t.is_dir() and any(_inside(t.resolve(), r) for r in roots)), None)
+    if folder is not None:
+        raise ScriptError("%s is a folder: name a script in it, or a package with a __main__.py (python -m runs that)"
+                          % folder)
     if p.is_absolute():
         if p.exists():
             raise ScriptError("%s is outside the lab's %s (%s): Kelvin runs only the scripts a person put there, or "
@@ -173,6 +216,13 @@ def locate(path: str, folders: Sequence[Any], chosen: Sequence[Any] = (), missin
             raise ScriptError("there are several %s in the %s%s: %s; say which" % (
                 p.name, noun, " and the scripts imported" if any(r is None for r, _ in hits) else "",
                 ", ".join(str(h.relative_to(r)) if r is not None and len(roots) == 1 else str(h) for r, h in hits)))
+    name = str(path).strip().strip('"')
+    if roots and _dotted(name) and p.suffix.lower() not in RUNNABLE:   # no file's name: a module's, as python -m has it
+        modules = _find_modules(name.split("."), roots)
+        if modules:
+            return locate_module(name, roots)[0]
+        raise ScriptError("no script %s in the lab's %s (%s), nor a package or module of that name"
+                          % (path, noun, where))
     raise ScriptError("no script %s in the lab's %s (%s)" % (path, noun, where))
 
 
@@ -200,11 +250,262 @@ def _runnable(path: Path) -> Path:
     return path
 
 
-def beside(script: Path, most: int = 200) -> Dict[str, str]:
+# ------------------------------------------------------------------ a package's modules, as python -m runs them
+
+def _module_in(home: Path, parts: List[str]) -> Optional[Path]:
+    """The file python -m runs for a module's name (its parts) from home, as Python finds it: a package's __main__.py
+    (a package with an __init__.py before a module of its name, a module before a folder without one), else the
+    module's own .py; None: not there, or a package with no __main__.py (python -m can't run that either)."""
+    folder = home.joinpath(*parts[:-1])
+    if not folder.is_dir():
+        return None
+    package, module = folder / parts[-1], folder / (parts[-1] + ".py")
+    if (package / "__init__.py").is_file():
+        return package / "__main__.py" if (package / "__main__.py").is_file() else None
+    if module.is_file():
+        return module
+    if (package / "__main__.py").is_file():
+        return package / "__main__.py"
+    return None
+
+
+def _holding(root: Path, parts: List[str]) -> Iterator[Path]:
+    """The sub-folders of root from which python -m finds this module (environments, caches and hidden folders left
+    out), each as the walk comes to it."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        here = Path(dirpath)
+        if here != root and (parts[0] in dirnames or parts[0] + ".py" in filenames) and \
+                _module_in(here, parts) is not None:
+            yield here
+        dirnames[:] = [d for d in dirnames if d not in lab_scripts.SKIP_DIRS and not d.startswith(".")]
+
+
+def _find_modules(parts: List[str], roots: Sequence[Path], most: int = 6) -> List[Tuple[Path, Path]]:
+    """Where python -m finds a module, in the lab's scripts folders: (its file, the folder it runs from), from the top
+    of a folder, else from the sub-folders of theirs that hold it (all of them looked at, so a second copy is never
+    missed; at most `most` named); each file once, and only one inside the folders with its links followed."""
+    hits: List[Tuple[Path, Path]] = []
+    seen: Set[str] = set()
+    for homes in (lambda: iter(roots), lambda: (h for r in roots for h in _holding(r, parts))):
+        for home in homes():   # the sub-folders are walked only when no folder has it at its top
+            found = _module_in(home, parts)
+            real = found.resolve() if found is not None else None
+            if real is not None and os.path.normcase(str(real)) not in seen and any(_inside(real, r) for r in roots):
+                seen.add(os.path.normcase(str(real)))
+                hits.append((real, home.resolve()))
+                if len(hits) >= most:
+                    return hits
+        if hits:
+            break
+    return hits
+
+
+def locate_module(name: str, folders: Sequence[Any]) -> Tuple[Path, str, Path]:
+    """What python -m <name> runs, in the lab's scripts folders, found as python -m finds it from the folder that holds
+    its top package (a scripts folder, else the one sub-folder of theirs that has it): (its file, the module that file
+    runs as, that folder). nvpulse is nvpulse/__main__.py (a package's) or nvpulse.py; nvpulse.cli is
+    nvpulse/cli/__main__.py or nvpulse/cli.py. Never a module installed in a Python: only the lab's own code runs, and
+    it runs in the folders (one that is the package itself is said: python -m runs from above it)."""
+    if not _dotted(name):
+        raise ScriptError("%s is not a module's name as python -m takes one (such as nvpulse, or nvpulse.cli)" % name)
+    roots = [Path(f).expanduser().resolve() for f in folders if f]
+    if not roots:
+        raise ScriptError(NO_FOLDER)
+    noun = "scripts folder" if len(roots) == 1 else "scripts folders"
+    parts = name.split(".")
+    hits = _find_modules(parts, roots)
+    if len(hits) > 1:
+        raise ScriptError("there are several modules %s in the lab's %s: %s; give the path of the one to run" % (
+            name, noun, ", ".join(str(f) for f, _ in hits)))
+    if not hits:
+        itself = next((r for r in roots if r.name == parts[0] and _module_in(r.parent, parts) is not None), None)
+        if itself is not None:
+            raise ScriptError(_ABOVE % (name, itself, itself.parent))
+        raise ScriptError("no module %s in the lab's %s (%s), as python -m would find it from one of them: a package "
+                          "%s with a __main__.py, or %s.py. Kelvin runs only the lab's own code there, not a module "
+                          "installed in a Python" % (name, noun, ", ".join(map(str, roots)), name.replace(".", "/"),
+                                                     name.replace(".", "/")))
+    file, home = hits[0]
+    module = name + ".__main__" if file.name == "__main__.py" and not name.endswith("__main__") else name
+    return _runnable(file), module, home
+
+
+# python -m runs a package from the folder above it, which must be one of the lab's scripts folders too
+_ABOVE = ("%s's package is the scripts folder %s itself: python -m runs it from the folder above, %s, which is not one "
+          "of the lab's scripts folders, and Kelvin runs nothing from outside them. A person adds that folder in "
+          "Settings (Instruments → Your lab's scripts → Add folder…), and it runs from there")
+
+
+def package_asked(path: Any, folders: Sequence[Any]) -> Optional[Tuple[Path, str, Path]]:
+    """A script named by its package, as python -m names one: a package's folder (by its path in a scripts folder, or
+    in full: python -m <its name> from the folder above it), or a module's name that no file has (nvpulse,
+    nvpulse.cli: locate_module). (its file, the module it runs as, the folder it runs from); None: a script's path, or
+    nothing there (locate says what). It runs as python -m runs it whatever it imports: that is how it was named."""
+    text = str(path or "").strip().strip('"')
+    roots = [Path(f).expanduser().resolve() for f in folders if f]
+    if not text or not roots or module_name(text) is not None:
+        return None
+    p = Path(text).expanduser()
+    if p.suffix.lower() in RUNNABLE:
+        return None
+    tries = [p] if p.is_absolute() else [r / p for r in roots]
+    found = list(dict.fromkeys(t.resolve() for t in tries if t.is_dir() and (t / "__main__.py").is_file()))
+    if len(found) > 1:
+        return None   # in two folders: locate says which
+    if found:
+        folder = found[0]
+        main = (folder / "__main__.py").resolve()
+        if not _identifier(folder.name) or not any(_inside(main, r) for r in roots):
+            return None   # no name python -m takes, or outside the folders: locate says what
+        if not any(_inside(folder.parent, r) for r in roots):
+            raise ScriptError(_ABOVE % (folder.name, folder, folder.parent))
+        return _runnable(main), folder.name + ".__main__", folder.parent
+    if _dotted(text) and _find_modules(text.split("."), roots):
+        return locate_module(text, roots)
+    return None
+
+
+def package_name(path: Path) -> str:
+    """The module a file in a package is, as python -m names it from the folder above its top package (its folders
+    with an __init__.py; a __main__.py's own folder needs none), or "": in no package."""
+    parts, folder = [path.stem], path.parent
+    while _identifier(folder.name) and ((folder / "__init__.py").is_file() or
+                                        (path.name == "__main__.py" and folder == path.parent)):
+        parts.insert(0, folder.name)
+        folder = folder.parent
+    return shown(".".join(parts)) if len(parts) > 1 and (_identifier(path.stem) or path.name == "__main__.py") else ""
+
+
+def _code_imports(tree: ast.AST, functions: bool = True) -> Iterator[Tuple[Any, bool]]:
+    """Each import statement in a module, with whether it is inside a function (which may never run; a class's body
+    runs as the module loads). functions=False: those inside functions left out."""
+    todo: List[Tuple[ast.AST, bool]] = [(tree, False)]
+    while todo:
+        node, inside = todo.pop()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.Import, ast.ImportFrom)):
+                yield child, inside
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                if functions:
+                    todo.append((child, True))
+            else:
+                todo.append((child, inside))
+
+
+_HOW_IT_RUNS = {"__name__", "__package__", "__spec__"}
+
+
+def _both_ways(tree: ast.AST) -> Set[int]:
+    """The relative imports (their ids) that a script written to run as a file too has a way around: in one branch of
+    an if on how it runs (__name__, __package__, __spec__), or in one part of a try (its body, or a handler, whatever it
+    catches), where another branch or part imports by name instead (if __package__: from . import helpers / else:
+    import helpers; try: from . import helpers / except Exception: import helpers; and the other way round)."""
+    out: Set[int] = set()
+    tries = tuple(t for t in (getattr(ast, "Try", None), getattr(ast, "TryStar", None)) if t is not None)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)} & _HOW_IT_RUNS:
+            parts = [node.body, node.orelse]
+        elif isinstance(node, tries):
+            parts = [node.body + node.orelse] + [h.body for h in node.handlers]
+        else:
+            continue
+        found = [[n for stmt in part for n in ast.walk(stmt) if isinstance(n, (ast.Import, ast.ImportFrom))]
+                 for part in parts]
+        for k, here in enumerate(found):
+            if any(not getattr(n, "level", 0) for j, there in enumerate(found) if j != k for n in there):
+                out.update(id(n) for n in here if getattr(n, "level", 0))
+    return out
+
+
+def _relative_depth(tree: ast.AST, functions: bool) -> int:
+    """How far up its package a module's relative imports reach as it runs (from . import x: 1, from .. import y: 2;
+    0: it has none): those it goes on without (a try whose except names a failed import, if TYPE_CHECKING:, a branch on
+    how it runs whose other branch imports by name: _both_ways) left out, and those inside functions too unless
+    functions."""
+    skip = _optional(tree) | _both_ways(tree)
+    return max([n.level for n, _ in _code_imports(tree, functions)
+                if isinstance(n, ast.ImportFrom) and n.level and id(n) not in skip] or [0])
+
+
+def module_of(path: Path, source: str, roots: Sequence[Any] = ()) -> Tuple[str, Path]:
+    """How a script runs: ("", its own folder) as a file, as python script.py runs it, which is how every script ran
+    before; or (the module it is, the folder above its top package) as python -m runs it, only when it can't run as a
+    file: a package's module whose relative imports run as it loads (from .cli.main import main), or a package's
+    __main__.py with one anywhere. Its package is the folders above it with an __init__.py (a __main__.py's own folder
+    needs none), within the lab's scripts folder it is in, never the folder itself: python -m runs from inside the
+    folders. ScriptError: it needs its package, and its package is the scripts folder itself (_ABOVE)."""
+    main = path.name == "__main__.py"
+    if path.suffix.lower() != ".py" or not (main or _identifier(path.stem)):
+        return "", path.parent
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return "", path.parent
+    need = _relative_depth(tree, functions=main)
+    if not need:   # nothing of its package as it runs: a file, as before (a fallback import guarded by a try too)
+        return "", path.parent
+    resolved = [Path(r).expanduser().resolve() for r in roots if r]
+    root = min((r for r in resolved if _inside(path, r)), key=lambda r: len(r.parts), default=None)   # the outermost
+
+    def level(folder: Path) -> bool:   # a package python -m can import
+        return _identifier(folder.name) and ((folder / "__init__.py").is_file() or (main and folder == path.parent))
+    parts, folder = [path.stem], path.parent
+    while folder != root and level(folder):
+        parts.insert(0, folder.name)
+        folder = folder.parent
+    if len(parts) - 1 < need and root is not None and folder == root and level(root):
+        raise ScriptError(_ABOVE % (".".join([root.name] + parts) if len(parts) > 1 else path.name, root,
+                                    root.parent))
+    if len(parts) == 1:   # in no package: as a file (its relative import fails as it would anywhere)
+        return "", path.parent
+    return ".".join(parts), folder
+
+
+# what a package's own folders may hold that is no part of it
+_NOT_PACKAGE = {"__pycache__", "site-packages", "dist-packages", "node_modules"}
+
+
+def package_files(top: Path, most: int = MAX_PACKAGE) -> Tuple[List[Path], bool]:
+    """A package's .py files, its sub-packages' too, whatever their folders are called (a sub-package lib is code
+    too): caches, hidden folders and Python environments left out. (at most `most` of them, whether there were more)."""
+    out: List[Path] = []
+    for dirpath, dirnames, filenames in os.walk(top):
+        here = Path(dirpath)
+        dirnames[:] = sorted(d for d in dirnames if d.lower() not in _NOT_PACKAGE and not d.startswith(".")
+                             and not (here / d / "pyvenv.cfg").is_file() and not (here / d / "conda-meta").is_dir())
+        for f in sorted(filenames):
+            if f.lower().endswith(".py"):
+                if len(out) >= most:
+                    return out, True
+                out.append(here / f)
+    return out, False
+
+
+def _short_hash(path: Path) -> str:
+    """A file's short sha256 (its size and time, over 4 MB). OSError: it can't be read."""
+    st = path.stat()
+    if st.st_size > 4 * 2 ** 20:
+        return "%d bytes, %d" % (st.st_size, st.st_mtime_ns)
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def beside(script: Path, most: int = 200, package: Optional[Path] = None) -> Dict[str, str]:
     """The Python files beside a script, which it may import (its folder comes first on sys.path): each of its
     folder's own .py, .pyw, .pyc and .pyd files, with a short sha256 of its bytes (its size and time, over 4 MB), so
-    a card can say which of them changed since the script's last run."""
+    a card can say which of them changed since the script's last run. package: the top package of a module that runs as
+    python -m runs it: its other .py files instead, by their paths from the folder above it (nvpulse/cli/main.py)."""
     out: Dict[str, str] = {}
+    if package is not None:
+        for f in package_files(package)[0]:
+            if len(out) >= most:
+                break
+            if os.path.normcase(str(f)) == os.path.normcase(str(script)):
+                continue
+            try:
+                out[f.relative_to(package.parent).as_posix()] = _short_hash(f)
+            except (OSError, ValueError):
+                continue
+        return out
     try:
         found = sorted(os.scandir(script.parent), key=lambda e: e.name.lower())
     except OSError:
@@ -217,9 +518,7 @@ def beside(script: Path, most: int = 200) -> Dict[str, str]:
         try:
             if not e.is_file():
                 continue
-            size = e.stat().st_size
-            out[e.name] = ("%d bytes, %d" % (size, e.stat().st_mtime_ns) if size > 4 * 2 ** 20 else
-                           hashlib.sha256(Path(e.path).read_bytes()).hexdigest()[:16])
+            out[e.name] = _short_hash(Path(e.path))
         except OSError:
             continue
     return out
@@ -400,20 +699,59 @@ def with_params(source: str, values: Dict[str, Any]) -> Tuple[str, List[str]]:
 
 # ------------------------------------------------------------------ the Python that runs it
 
-def imports(source: str) -> List[str]:
-    """The top-level modules the script imports, anywhere in it (standard library left out where Python knows it)."""
+# what an except names to go on without a module: a broader one (Exception, a bare except) may be a whole script's
+# clean-up, which would swallow the missing module and end the run as done, having done nothing
+_FAILED_IMPORT = ("ImportError", "ModuleNotFoundError")
+
+
+def _catches_import(handler_type: Optional[ast.AST]) -> bool:
+    if handler_type is None:
+        return False
+    if isinstance(handler_type, ast.Tuple):
+        return any(_catches_import(t) for t in handler_type.elts)
+    name = handler_type.id if isinstance(handler_type, ast.Name) else getattr(handler_type, "attr", "")
+    return name in _FAILED_IMPORT
+
+
+def _optional(tree: ast.AST) -> Set[int]:
+    """The import statements a script goes on without (their ids): those in a try whose except names a failed import
+    (try: import cupy / except ImportError: ...), and those under if TYPE_CHECKING:, which never run."""
+    out: Set[int] = set()
+    tries = tuple(t for t in (getattr(ast, "Try", None), getattr(ast, "TryStar", None)) if t is not None)
+    for node in ast.walk(tree):
+        body: List[ast.AST] = []
+        if isinstance(node, tries) and any(_catches_import(h.type) for h in node.handlers):
+            body = node.body
+        elif isinstance(node, ast.If) and (getattr(node.test, "id", None) == "TYPE_CHECKING" or
+                                           getattr(node.test, "attr", None) == "TYPE_CHECKING"):
+            body = node.body
+        for stmt in body:
+            out.update(id(n) for n in ast.walk(stmt) if isinstance(n, (ast.Import, ast.ImportFrom)))
+    return out
+
+
+def imports(source: str, tried: bool = True) -> List[str]:
+    """The top-level modules the script imports, anywhere in it (standard library left out where Python knows it).
+    tried=False: only those it can't go on without (_optional: not one it tries in a try that catches a failed
+    import)."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
+    skip = set() if tried else _optional(tree)
     names: List[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names += [a.name.partition(".")[0] for a in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            names.append(node.module.partition(".")[0])
+        if id(node) in skip:
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names += _top_names(node)
+    return _not_std(names)
+
+
+def _not_std(names: Sequence[str]) -> List[str]:
+    """Each module once, the standard library's left out where Python knows them (and __main__, always there)."""
     std = getattr(sys, "stdlib_module_names", frozenset())
-    return [n for n in dict.fromkeys(names) if n not in std and n not in ("__future__",)]
+    return [n for n in dict.fromkeys(names) if n not in std and n not in ("__future__", "__main__")]
 
 
 @dataclass
@@ -462,6 +800,105 @@ def _candidates(script: Path, roots: Sequence[Path]) -> List[Tuple[List[str], st
     return out
 
 
+# ------------------------------------------------------------------ this computer's conda environments
+
+CONDA_INSTALLS = ("anaconda3", "miniconda3", "miniforge3", "mambaforge", "micromamba")
+MAX_CONDA = 40
+
+
+def _env_python(prefix: Path) -> Path:
+    return prefix / "python.exe" if os.name == "nt" else prefix / "bin" / "python"
+
+
+def conda_prefix(executable: Any) -> Optional[Path]:
+    """The conda environment a Python is the Python of (the folder with its conda-meta), or None."""
+    try:
+        p = Path(str(executable)).expanduser()
+        prefix = p.parent if os.name == "nt" else p.parent.parent
+        return prefix if p.is_file() and (prefix / "conda-meta").is_dir() else None
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _env_name(prefix: Path) -> str:
+    """A conda environment's name as conda says it: base for an install's own, its folder's name in an envs folder,
+    else its path."""
+    if (prefix / "condabin").is_dir():
+        return "base"
+    return prefix.name if prefix.parent.name.lower() == "envs" else str(prefix)
+
+
+def conda_envs() -> List[Tuple[str, Path]]:
+    """The conda environments this person's own conda knows: those it lists for them (~/.conda/environments.txt, which
+    only they write), the installs in their own folders (Anaconda, Miniconda, Miniforge: base and envs/*) and the base
+    of the one their CONDA_EXE names: (its name, its folder), each once, only those with a Python, at most MAX_CONDA.
+    Never a folder another person on the computer could have made (an envs folder of a shared install in ProgramData,
+    a folder in C:\\) that their own conda doesn't list. Two of one name are each named by their folder. A run may name
+    one (python_named)."""
+    home = Path.home()
+    listed: List[Path] = []
+    try:
+        text = (home / ".conda" / "environments.txt").read_text(encoding="utf-8", errors="replace")
+        listed += [Path(line.strip()) for line in text.splitlines() if line.strip()]
+    except OSError:
+        pass
+    places = [home]
+    if os.environ.get("LOCALAPPDATA"):
+        places += [Path(os.environ["LOCALAPPDATA"]), Path(os.environ["LOCALAPPDATA"]) / "Continuum"]
+    names = CONDA_INSTALLS + tuple(n.capitalize() for n in CONDA_INSTALLS)
+    bases = [(place / name, True) for place in places for name in names]   # (an install, whether its envs are theirs)
+    if os.environ.get("CONDA_EXE"):   # <base>/Scripts/conda.exe, <base>/bin/conda
+        base = Path(os.environ["CONDA_EXE"]).parent.parent
+        bases.insert(0, (base, any(base == p or p in base.parents for p in places)))
+    for base, own in bases:
+        try:
+            if (base / "conda-meta").is_dir():
+                listed.append(base)
+                if own and (base / "envs").is_dir():
+                    listed += sorted((d for d in (base / "envs").iterdir() if d.is_dir()),
+                                     key=lambda d: d.name.lower())
+        except OSError:
+            continue
+    found: List[Tuple[str, Path]] = []
+    seen: Set[str] = set()
+    for prefix in listed:
+        try:
+            key = os.path.normcase(str(prefix.resolve()))
+            if key in seen or not (prefix / "conda-meta").is_dir() or not _env_python(prefix).is_file():
+                continue
+        except OSError:
+            continue
+        seen.add(key)
+        found.append((_env_name(prefix), prefix))
+        if len(found) >= MAX_CONDA:
+            break
+    names_seen = [name for name, _ in found]
+    return [(name if names_seen.count(name) == 1 else str(prefix), prefix) for name, prefix in found]
+
+
+def _conda_text(name: str, prefix: Path) -> str:
+    return "%s (the conda environment %s)" % (_env_python(prefix), name)
+
+
+def activated(command: Sequence[str], env: Dict[str, str]) -> Dict[str, str]:
+    """env as conda activate leaves it for a conda environment's Python: its folders first on PATH (on Windows some
+    packages' libraries load only so), CONDA_PREFIX its folder. Any other Python's: env as it is."""
+    prefix = conda_prefix(command[0]) if command else None
+    if prefix is None:
+        return env
+    if os.name == "nt":
+        library = prefix / "Library"
+        dirs = [prefix, library / "mingw-w64" / "bin", library / "usr" / "bin", library / "bin", prefix / "Scripts",
+                prefix / "bin"]
+    else:
+        dirs = [prefix / "bin"]
+    out = dict(env)
+    key = next((k for k in out if k.upper() == "PATH"), "PATH")
+    out[key] = os.pathsep.join([str(d) for d in dirs] + ([out[key]] if out.get(key) else []))
+    out.update(CONDA_PREFIX=str(prefix), CONDA_DEFAULT_ENV=_env_name(prefix))
+    return out
+
+
 def _probe(command: List[str], folder: Path, wanted: List[str]) -> Dict[str, Any]:
     key = (tuple(command), str(folder), tuple(sorted(wanted)))
     hit = _PROBED.get(key)
@@ -469,9 +906,9 @@ def _probe(command: List[str], folder: Path, wanted: List[str]) -> Dict[str, Any
         return hit[1]
     from .envs import clean_environ
     try:
-        proc = subprocess.run(command + [str(SHIM), "--probe"] + wanted, cwd=str(folder), env=clean_environ(),
-                              stdin=subprocess.DEVNULL, capture_output=True, timeout=PROBE_S,
-                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        proc = subprocess.run(command + [str(SHIM), "--probe"] + wanted, cwd=str(folder),
+                              env=activated(command, clean_environ()), stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=PROBE_S, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         found = json.loads(proc.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
     except (OSError, subprocess.SubprocessError, ValueError, IndexError) as e:
         found = {"error": str(e) or type(e).__name__}
@@ -484,40 +921,153 @@ def _configured(configured: str) -> Tuple[List[str], str]:
     return [str(p), "-u"], "%s (set for the lab's scripts)" % p
 
 
+def _same_path(a: Any, b: Any) -> bool:
+    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(os.path.normpath(str(b)))
+
+
 def python_named(script: Path, roots: Sequence[Path], configured: str, named: str) -> Optional[Tuple[List[str], str]]:
     """The Python named (a path, or as a run's record names it: "C:/lab/.venv/Scripts/python.exe (the environment
     beside the scripts), Python 3.11"), if it is one Kelvin runs the lab's scripts with here: the one set for them,
-    or one it finds (an environment beside the script, this computer's, its own). Never any other program."""
-    named = str(named or "").strip()
+    one it finds (an environment beside the script, this computer's, its own), or one of the conda environments this
+    person's conda knows (conda_envs: by its name, its folder or its Python). Never any other program: Kelvin starts it
+    to see what it has before anyone is asked."""
+    named = str(named or "").strip().strip('"')
     if not named:
         return None
     bare = re.sub(r", Python \d+\.\d+$", "", named)
     found = ([_configured(configured)] if configured else []) + _candidates(script, roots)
     for command, text in found:
-        if bare == text or os.path.normcase(bare) == os.path.normcase(command[0]):
+        if bare == text or _same_path(bare, command[0]):
             return command, text
+    for name, prefix in conda_envs():
+        text = _conda_text(name, prefix)
+        if bare in (text, name) or _same_path(bare, prefix) or _same_path(bare, _env_python(prefix)):
+            return [str(_env_python(prefix)), "-u"], text
     return None
 
 
-def python_for(script: Path, source: str, roots: Sequence[Path], configured: str = "", named: str = "") -> Python:
+def _others() -> str:
+    """The conda environments a run may name with python, for a message: "; ..." or ""."""
+    envs = conda_envs()
+    if not envs:
+        return ""
+    return ("; a run may name another with python, such as one of this computer's conda environments: %s"
+            % ", ".join(name for name, _ in envs[:10]))
+
+
+def _top_names(node: Any) -> List[str]:
+    """The top-level modules an import statement imports by name (none for a relative one)."""
+    if isinstance(node, ast.Import):
+        return [a.name.partition(".")[0] for a in node.names]
+    return [node.module.partition(".")[0]] if node.module and not node.level else []
+
+
+def _own_targets(node: Any, name: str, package: bool, top: str) -> List[str]:
+    """The modules of its own package (top) that an import statement in the module `name` imports, by their full
+    names, the packages on their way too (package: `name` is a package's __init__): in nvpulse.__main__, from
+    .cli.main import main imports nvpulse, nvpulse.cli and nvpulse.cli.main; what it takes from a module may be a
+    module too (from . import soc)."""
+    if isinstance(node, ast.Import):
+        out: List[str] = []
+        for a in node.names:
+            bits = a.name.split(".")
+            if bits[0] == top:
+                out += [".".join(bits[:i]) for i in range(1, len(bits) + 1)]
+        return out
+    if node.level:
+        base = name.split(".") if package else name.split(".")[:-1]
+        if node.level - 1 >= len(base):   # past its top package: Python refuses it
+            return []
+        base = base[:len(base) - (node.level - 1)]
+    elif node.module and node.module.split(".")[0] == top:
+        base = []
+    else:
+        return []
+    target = base + (node.module.split(".") if node.module else [])
+    out = [".".join(target[:i]) for i in range(1, len(target) + 1)]
+    return out + [".".join(target + [a.name]) for a in node.names if a.name != "*"]
+
+
+def _run_imports(script: Path, source: str, module: str, home: Path) -> Tuple[List[str], List[str]]:
+    """What a package's module needs of its Python as it runs, and what it may also use: (needed, tried). Its
+    package's modules are followed from it as python -m runs it (its packages' __init__ first). One it imports for sure
+    (as it loads, not in a try that catches a failed import) needs what it imports by name anywhere, as a script does;
+    one it may import (from a function, or in such a try) is only tried, and so is what it imports. Modules of the
+    package it never imports (its tests, a GUI) need nothing."""
+    top = module.split(".")[0]
+    files: Dict[str, Path] = {}
+    for f in package_files(home / top)[0]:
+        try:
+            bits = list(f.relative_to(home).parts)
+        except ValueError:
+            continue
+        bits[-1] = bits[-1][:-3]
+        if bits[-1] == "__init__":
+            bits.pop()
+        files[".".join(bits)] = f
+    needed: List[str] = []
+    tried: List[str] = []
+    sure: Dict[str, bool] = {}
+    parts = module.split(".")
+    todo = [(".".join(parts[:i]), True) for i in range(1, len(parts) + 1)]   # its packages first, then itself
+    while todo:
+        name, certain = todo.pop(0)
+        if sure.get(name) or (name in sure and not certain):
+            continue
+        sure[name] = certain
+        f = files.get(name)
+        try:
+            text = source if name == module else f.read_text(encoding="utf-8", errors="replace") if f else None
+            tree = ast.parse(text) if text is not None else None
+        except (OSError, SyntaxError, ValueError):
+            tree = None
+        if tree is None:
+            continue
+        optional = _optional(tree)
+        package = f is not None and f.name == "__init__.py"
+        for node, inside in _code_imports(tree):
+            loads = certain and id(node) not in optional
+            for target in _own_targets(node, name, package, top):
+                if target in files or target == module:
+                    todo.append((target, loads and not inside))
+            (needed if loads else tried).extend(n for n in _top_names(node) if n != top)
+    return needed, tried
+
+
+def python_for(script: Path, source: str, roots: Sequence[Path], configured: str = "", named: str = "",
+               module: str = "", home: Optional[Path] = None) -> Python:
     """The Python that runs the script: the one named (python_named), when given; else the one a person set for the
     lab's scripts; else the first, best first (an environment beside the scripts, this computer's, Kelvin's own),
-    that has every module the script imports (kelvin, Kelvin's experiment API, comes with Kelvin's stand-in)."""
-    wanted = [m for m in imports(source) if m != experiment.API]
+    that has every module the script needs (kelvin, Kelvin's experiment API, comes with Kelvin's stand-in). What it
+    needs: what it imports by name, but for an import it only tries (in a try that catches a failed import, or under
+    if TYPE_CHECKING:); a package's module (module, run from home as python -m runs it) also what the modules of its
+    package that it imports for sure import (_run_imports). Of those that have it, the first that also has what it
+    only tries."""
+    top = module.split(".")[0] if module else ""
+    if module and home is not None:
+        needs, tries = _run_imports(script, source, module, home)
+    else:
+        needs, tries = imports(source, tried=False), imports(source)
+
+    def keep(names: List[str]) -> List[str]:
+        return [m for m in _not_std(names) if m not in (experiment.API, top)]
+    needed, wanted = keep(needs), keep(needs + tries)
     if named:
         pick = python_named(script, roots, configured, named)
         if pick is None:
             raise ScriptError("%s is not a Python Kelvin runs the lab's scripts with here (the one set in Settings, an "
-                              "environment beside the script, this computer's, or Kelvin's own): leave python out to "
-                              "use the one Kelvin picks" % named)
+                              "environment beside the script, this computer's, one of the conda environments its "
+                              "conda knows%s, or Kelvin's own): leave python out to use the one Kelvin picks"
+                              % (named, " (%s)" % ", ".join(n for n, _ in conda_envs()[:10]) if conda_envs() else ""))
         candidates = [pick]
     elif configured:
         candidates = [_configured(configured)]
     else:
         candidates = _candidates(script, roots)
     lacking = []
+    enough: Optional[Python] = None   # the first that has what it needs, though not every module it tries
     for command, text in candidates:
-        found = _probe(command, script.parent, wanted)
+        found = _probe(command, home or script.parent, wanted)
         if "error" in found:
             lacking.append("%s: it did not start (%s)" % (text, found["error"]))
             continue
@@ -526,11 +1076,19 @@ def python_for(script: Path, source: str, roots: Sequence[Path], configured: str
             lacking.append("%s: Python %s.%s is too old (3.6 or later)" % ((text,) + version))
             continue
         missing = found.get("missing") or []
+        python = Python(command, "%s, Python %d.%d" % ((text,) + version), version)
         if not missing:
-            return Python(command, "%s, Python %d.%d" % ((text,) + version), version)
-        lacking.append("%s lacks %s" % (text, ", ".join(missing)))
+            return python
+        short = [m for m in missing if m in needed]
+        if short:
+            lacking.append("%s lacks %s" % (text, ", ".join(short)))
+        elif enough is None:
+            enough = python
+    if enough is not None:
+        return enough
     raise ScriptError("no Python here has everything %s imports: %s. A person sets the Python for the lab's scripts "
-                      "in Settings (or installs what is missing)" % (script.name, "; ".join(lacking)))
+                      "in Settings (or installs what is missing)%s"
+                      % (shown(module) if module else script.name, "; ".join(lacking), _others()))
 
 
 # ------------------------------------------------------------------ what the script will do, read before it runs
@@ -705,36 +1263,87 @@ def _all_values(spec: Any, inst: Any) -> Optional[List[Any]]:
     return None
 
 
-def _local_modules(path: Path, source: str) -> List[Path]:
+def _local_modules(path: Path, source: str, folder: Optional[Path] = None) -> List[Path]:
+    """The lab's own modules a script imports by name, from its folder (folder: the one it runs from, when that is
+    another: a package's module's)."""
     out = []
+    base = folder or path.parent
     for name in imports(source):
-        for p in (path.parent / (name + ".py"), path.parent / name / "__init__.py"):
+        for p in (base / (name + ".py"), base / name / "__init__.py"):
             if p.is_file():
                 out.append(p.parent if p.name == "__init__.py" else p)
     return out
 
 
-def read_ahead(lab: Any, path: Path, source: str, action: str = "") -> Found:
+def _package_of(module: str, home: Optional[Path]) -> Optional[Path]:
+    """The top package's folder of a module that runs as python -m runs it, from home; None for a script."""
+    return home / module.split(".")[0] if module and home is not None else None
+
+
+def _readable(parts: Sequence[str]) -> List[str]:
+    """A package file's path, as the reading ahead copies it: a folder the survey of a scripts folder leaves out
+    (lib, build, env: a sub-package may be called so) is renamed, so its modules are read too."""
+    return [("_" + p if p.lower() in lab_scripts.SKIP_DIRS or p.startswith(".") else p) for p in parts[:-1]] + \
+        [parts[-1]]
+
+
+def read_ahead(lab: Any, path: Path, source: str, action: str = "", module: str = "",
+               home: Optional[Path] = None) -> Found:
     """What a script will do, read from its text and the lab's own modules it imports (scripts.py; nothing is run):
     the lab instruments it opens, the drive values it sets, and what Kelvin can't check. An experiment's use of
-    kelvin.lab too (experiment.py), for the action that runs (action; "": all of it)."""
+    kelvin.lab too (experiment.py), for the action that runs (action; "": all of it). A package's module (module, run
+    from home): its whole package is read, with this module's text as it runs."""
     found = Found()
     found.libraries = [m for m in imports(source) if m in OPAQUE]
+    package = _package_of(module, home)
+    local = _local_modules(path, source, home if package is not None else None)
     with tempfile.TemporaryDirectory(prefix="kelvin-read-") as tmp:
-        here = Path(tmp)
-        (here / "script.py").write_text(source, encoding="utf-8")
-        for m in _local_modules(path, source):
+        here = rest = Path(tmp)
+        read = [here]
+        if package is not None and home is not None:
+            # the module that runs is read on its own, so however big its package is, it is never left out of the
+            # most a survey reads; the rest of the package, and the lab's modules beside it, beside that
+            here, rest = Path(tmp) / "runs", Path(tmp) / "package"
+            rest.mkdir()
+            read = [here, rest]
+            files, more = package_files(package)
+            for f in files:
+                if _same_path(f, path):
+                    continue
+                try:
+                    text = f.read_text(encoding="utf-8", errors="replace")
+                    to = rest.joinpath(*_readable(f.relative_to(home).parts))
+                    to.parent.mkdir(parents=True, exist_ok=True)
+                    to.write_text(text, encoding="utf-8")
+                except (OSError, ValueError):
+                    continue
+                found.libraries += [x for x in imports(text) if x in OPAQUE]
+                local += [m for m in _local_modules(f, text, home) if m not in local]
+            try:
+                own = here.joinpath(*_readable(path.relative_to(home).parts))
+            except ValueError:   # reached through a link
+                own = here / path.name
+            own.parent.mkdir(parents=True, exist_ok=True)
+            own.write_text(source, encoding="utf-8")   # as it runs, with its settings
+            found.notes.append("Read ahead: its whole package %s (%d files%s), so the drive ranges are those any of "
+                               "its commands use" % (package.name, len(files), ", the first %d: the gate checks the "
+                               "rest's commands as they are sent" % len(files) if more else ""))
+        else:
+            (here / "script.py").write_text(source, encoding="utf-8")
+        for m in local:
+            if package is not None and _same_path(m, package):
+                continue
             try:
                 if m.is_dir():
-                    shutil.copytree(m, here / m.name, ignore=shutil.ignore_patterns("__pycache__"))
+                    shutil.copytree(m, rest / m.name, ignore=shutil.ignore_patterns("__pycache__"))
                 else:
-                    shutil.copy2(m, here / m.name)
+                    shutil.copy2(m, rest / m.name)
                     found.libraries += [x for x in imports(m.read_text(encoding="utf-8", errors="replace"))
                                         if x in OPAQUE]
             except OSError:
                 pass
         try:
-            survey = lab_scripts.survey(here)
+            survey = lab_scripts.survey(read if len(read) > 1 else read[0])
         except Exception as e:   # reading is a help: the gate checks every command as it is sent anyway
             found.notes.append("Kelvin could not read the script ahead (%s); it checks each command as it is sent"
                                % e)
@@ -877,10 +1486,20 @@ class Prepared:
     # one of the lab's kept experiments (expstore): its process is fenced in its real run too (kelvin_shim._fence)
     fenced: bool = False
     title: str = ""   # what its run is called instead of its file's name (one of the lab's experiments: its name)
+    # a package's module, run as python -m runs it (module_of: nvpulse.__main__ for python -m nvpulse), from home, the
+    # folder above its top package; "" and None: a script, run as a file from its own folder
+    module: str = ""
+    home: Optional[Path] = None
 
     @property
     def name(self) -> str:
-        return (self.title or self.path.name) + (" (%s)" % self.action if self.action else "")
+        return (self.title or (shown(self.module) if self.module else self.path.name)) + (
+            " (%s)" % self.action if self.action else "")
+
+    @property
+    def folder(self) -> Path:
+        """The folder it runs in, as at the bench: its own, or for python -m the one above its top package."""
+        return self.home if self.module and self.home is not None else self.path.parent
 
     def drive_values(self, lab: Any) -> Tuple[Dict[str, List[Any]], Dict[str, str], List[str]]:
         """Every drive value the run may use, for the approval; for each drive whose values aren't known before the
@@ -935,8 +1554,19 @@ def prepare(lab: Any, path: str, folders: Sequence[Any], params: Optional[Dict[s
     read it), in the file's own folder and under its own name, which may be gone by now. named: the Python to run it
     in (python_named). params: only those that change the file's own values count (changed_params); a version's
     text has its run's values in it already. action: the experiment's action to run (experiment.choose: the one marked
-    main when none is named)."""
-    script = locate(path, folders, chosen, missing=source is not None)
+    main when none is named). A package's module runs as python -m runs it: one asked for so ("-m nvpulse":
+    locate_module), or named by its package (nvpulse, its folder: package_asked), or one that can't run as a file
+    (module_of)."""
+    asked = module_name(path)
+    module, home = "", None
+    if asked is not None:
+        script, module, home = locate_module(asked, folders)
+    else:
+        named_so = package_asked(path, folders)
+        if named_so is not None:
+            (script, module, home), asked = named_so, named_so[1]
+        else:
+            script = locate(path, folders, chosen, missing=source is not None)
     original = source if source is not None else source_of(script)
     params = dict(params or {}) if source is not None else changed_params(original, dict(params or {}))
     text, changes = with_params(original, params)
@@ -955,11 +1585,24 @@ def prepare(lab: Any, path: str, folders: Sequence[Any], params: Optional[Dict[s
     elif action:
         raise ScriptError("%s doesn't use kelvin, so it has no actions" % script.name)
     roots = [Path(f).expanduser().resolve() for f in folders if f]
-    py = choose_python(script, text, roots, python, named) if named else choose_python(script, text, roots, python)
+    if asked is None:
+        module, found_home = module_of(script, text, roots)
+        home = found_home if module else None
+    if module and "." not in module:   # a module with no package (python -m sweep): as python sweep.py runs it
+        module, home = "", None
+    top = module.split(".")[0]
+    if module and (top in SHIM_LOADS or top in getattr(sys, "stdlib_module_names", ())):
+        whose = "a module Kelvin's stand-in loads first" if top in SHIM_LOADS else "a module of Python's own"
+        raise ScriptError("%s's package is called %s, as %s is: Python takes that %s, not the lab's, so it can't run as "
+                          "python -m %s here (renamed, it can)" % (shown(module), top, whose, top, shown(module)))
+    package = {"module": module, "home": home} if module else {}   # (a test's own choose_python takes neither)
+    py = choose_python(script, text, roots, python, named, **package) if named or package else \
+        choose_python(script, text, roots, python)
     return Prepared(script, original, text, changes, [str(a) for a in (args or [])], py,
-                    read_ahead(lab, script, text, action),
+                    read_ahead(lab, script, text, action, module, home),
                     sha256 or hashlib.sha256(original.encode("utf-8")).hexdigest(),
-                    declared_drives(lab, drives), params, version, beside(script), action, live)
+                    declared_drives(lab, drives), params, version,
+                    beside(script, package=_package_of(module, home)), action, live, module=module, home=home)
 
 
 def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[str, Allowed], List[str]]:
@@ -975,8 +1618,12 @@ def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[st
             items[k] = "%s, %s%s%s" % (head, why, sep, rest)
     found = prep.found
     head = "%s runs with %s" % (prep.name, prep.python.text)
+    if prep.module:
+        head += "; as python -m %s in %s, the folder above its package" % (shown(prep.module), prep.folder)
     if prep.version:
         head += "; as it ran in run %s (its script.py), not the file as it is now" % prep.version
+        if prep.module:
+            head += " (the rest of its package as it is now)"
     if prep.changes:
         head += "; with " + "; ".join(prep.changes)
     if prep.args:
@@ -2064,11 +2711,14 @@ class ScriptRun:
         line = list(self.prep.python.command) + [str(SHIM)]
         if source_file is not None:
             line += ["--source", str(source_file)]
+        if self.prep.module and self.prep.home is not None:   # a package's module, run as python -m runs it: by
+            line += ["--module", self.prep.module]          # its path from the folder it runs in, as Python finds it
+            return line + [str(self.prep.home.joinpath(*self.prep.module.split("."))) + ".py"] + self.prep.args
         return line + [str(self.prep.path)] + self.prep.args
 
     def _environ(self, port: int, run_dir: Path) -> Dict[str, str]:
         from .envs import clean_environ
-        env = clean_environ()
+        env = activated(self.prep.python.command, clean_environ())   # a conda environment's, as conda activate has it
         env.update(KELVIN_IPC="127.0.0.1:%d" % port, KELVIN_IPC_TOKEN=self.token, KELVIN_RUN_DIR=str(run_dir),
                    KELVIN_SCRIPT=str(self.prep.path), KELVIN_ACTION=self.prep.action, MPLBACKEND="Agg",
                    PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
@@ -2080,11 +2730,12 @@ class ScriptRun:
         return env
 
     def _files_now(self) -> Dict[str, float]:
-        """The files in the script's folder (to see what it wrote), up to a few thousand, run folders left out."""
+        """The files in the folder the script runs in (to see what it wrote: its own, or the one above its package),
+        up to a few thousand, run folders left out."""
         out: Dict[str, float] = {}
         if self.rehearsal:   # it works in a folder of its own, thrown away after
             return out
-        root = self.prep.path.parent
+        root = self.prep.folder
         own = os.path.normcase(str(self.rec.path)) if self.rec is not None and self.rec.path else None
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames if d not in lab_scripts.SKIP_DIRS and not d.startswith(".")
@@ -2106,8 +2757,8 @@ class ScriptRun:
         # never lost
         self.gen = gate.stop_generation if self.since is None else self.since
         plan = {"plan": prep.name, "script": str(prep.path), "sha256": prep.sha256, "python": prep.python.text,
-                "changes": prep.changes or None, "params": prep.params or None, "args": prep.args or None,
-                "version": prep.version, "action": prep.action or None}
+                "module": shown(prep.module) or None, "changes": prep.changes or None, "params": prep.params or None,
+                "args": prep.args or None, "version": prep.version, "action": prep.action or None}
         # script_sha256: the text that runs (script.py), kept in the record from its start, so a run again "as it
         # ran" runs exactly that text, or nothing; beside: the Python files beside it then, for the next card
         meta = dict({"lab": lab.config.name, "simulated": all(i.simulated for i in lab.instruments.values())},
@@ -2152,7 +2803,7 @@ class ScriptRun:
             else:
                 try:
                     proc = subprocess.Popen(self._command_line(run_dir, source_file),
-                                            cwd=str(run_dir if self.rehearsal else prep.path.parent),
+                                            cwd=str(run_dir if self.rehearsal else prep.folder),
                                             env=self._environ(server.getsockname()[1], run_dir),
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                             stderr=subprocess.STDOUT,
@@ -2244,6 +2895,11 @@ class ScriptRun:
         elif code not in (0, None):
             status = "aborted"
             reason = self.bye.get("error") or "it ended with exit code %s" % code
+            name = package_name(prep.path) if not prep.module else ""   # a package's module, run as a file
+            if name and ("attempted relative import" in reason or "No module named '%s'" % name.split(".")[0]
+                         in reason):
+                reason += " (it is the module %s of a package: run_script with module: %s runs it as python -m does)" \
+                          % (name, name)
         else:
             status, reason = "done", None
         lingered = self.lingered and not self.failed and not self.bye.get("error")
@@ -2442,8 +3098,12 @@ def rehearsal_problem(prep: Prepared) -> Optional[str]:
     if prep.found.libraries:
         return "it uses %s, which reaches instruments past the gate" % ", ".join(prep.found.libraries)
     texts = [prep.source]
-    for m in _local_modules(prep.path, prep.source):
+    package = _package_of(prep.module, prep.home)   # a package's module: every module of its package too
+    modules = ([package] if package is not None else []) + _local_modules(prep.path, prep.source, prep.home)
+    for m in modules:
         for f in (sorted(m.rglob("*.py")) if m.is_dir() else [m]):
+            if _same_path(f, prep.path):
+                continue
             try:
                 texts.append(f.read_text(encoding="utf-8", errors="replace"))
             except OSError:

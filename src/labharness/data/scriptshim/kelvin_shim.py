@@ -2,12 +2,13 @@
 
 Kelvin starts the lab's Python with this file first:
 
-    python -u kelvin_shim.py [--source FILE] SCRIPT [ARGS...]
+    python -u kelvin_shim.py [--source FILE] [--module NAME] SCRIPT [ARGS...]
 
 and the script runs as it always does (__name__ == "__main__", its folder first on sys.path, its arguments in
-sys.argv; --source: the text to run instead of the file's own, with the values Kelvin was asked to change), then an
-experiment's action, the one KELVIN_ACTION names (kelvin_api.action), with
-stand-ins for the instruments in Kelvin's lab:
+sys.argv; --source: the text to run instead of the file's own, with the values Kelvin was asked to change; --module:
+SCRIPT is that module of a package, run as python -m runs it: its package imported first, the folder above the top
+package first on sys.path, so its relative imports work), then an experiment's action, the one KELVIN_ACTION names
+(kelvin_api.action), with stand-ins for the instruments in Kelvin's lab:
 
     pyvisa      ResourceManager.open_resource of a lab instrument's address gives a stand-in resource that sends each
                 command to Kelvin, which passes it through its safety gate on its own connection and answers with the
@@ -692,6 +693,54 @@ class _Libraries(importlib.abc.MetaPathFinder):
         return None
 
 
+_PATCHES = {"pyvisa": _patch_pyvisa, "serial": _patch_serial}
+
+
+class _Patching(object):
+    """The loader of a pyvisa or pyserial imported after the stand-in loaded: it loads as it would, then gets the
+    stand-in put into it. Anything else is asked of the real loader."""
+
+    def __init__(self, loader, patch):
+        self._loader, self._patch = loader, patch
+
+    def create_module(self, spec):
+        create = getattr(self._loader, "create_module", None)
+        return create(spec) if create is not None else None
+
+    def exec_module(self, module):
+        self._loader.exec_module(module)
+        try:
+            self._patch(module)
+        except Exception as e:   # never let a script reach the instruments unwatched
+            raise ImportError("Kelvin could not put its stand-in into %s (%s: %s)" % (module.__name__,
+                                                                                    type(e).__name__, e))
+
+    def __getattr__(self, name):
+        return getattr(self._loader, name)
+
+
+class _Late(importlib.abc.MetaPathFinder):
+    """pyvisa or pyserial that the script's Python could not import when the stand-in loaded, and that the script
+    imports later (a copy kept beside the lab's scripts): patched as it loads, so its instruments reach Kelvin all the
+    same. One that can't be patched doesn't load."""
+
+    def find_spec(self, fullname, path=None, target=None):
+        patch = _PATCHES.get(fullname)
+        if patch is None or fullname in sys.modules:
+            return None
+        for finder in sys.meta_path:
+            find = getattr(finder, "find_spec", None) if not isinstance(finder, (_Late, _Libraries)) else None
+            spec = find(fullname, path, target) if find is not None else None
+            if spec is None:
+                continue
+            if spec.loader is None or not hasattr(spec.loader, "exec_module"):
+                raise ImportError("Kelvin can't put its stand-in into the %s here, so the script can't use it"
+                                  % fullname, name=fullname)
+            spec.loader = _Patching(spec.loader, patch)
+            return spec
+        return None
+
+
 def install():
     """Connect to Kelvin and put the stand-ins in place (once per process)."""
     global _LINK
@@ -701,11 +750,11 @@ def install():
     if not address:
         raise RuntimeError("KELVIN_IPC is not set: Kelvin starts this, to run one of the lab's scripts")
     _LINK = _Link(address, os.environ.get("KELVIN_IPC_TOKEN", ""))
-    for name, patch in (("pyvisa", _patch_pyvisa), ("serial", _patch_serial)):
+    for name, patch in _PATCHES.items():
         try:
             module = __import__(name)
         except ImportError:
-            continue   # the script can't import it either
+            continue   # the script can't import it from here; one it finds later is patched as it loads (_Late)
         try:
             patch(module)
         except Exception as e:   # never let a script reach the instruments unwatched
@@ -713,6 +762,7 @@ def install():
     _patch_socket()
     _no_input()
     sys.meta_path.insert(0, _Libraries())
+    sys.meta_path.insert(0, _Late())
     time.sleep = _LINK.sleep
     if os.environ.get("KELVIN_REHEARSAL"):
         _rehearsing()
@@ -891,14 +941,57 @@ def _probe(names):
     return 0
 
 
+def _home(script, name):
+    """The folder python -m NAME runs SCRIPT from: the one above its top package (nvpulse.__main__ is
+    <home>/nvpulse/__main__.py)."""
+    home = os.path.dirname(script)
+    for _ in name.split(".")[1:]:
+        home = os.path.dirname(home)
+    return home
+
+
+def _same_file(a, b):
+    return bool(a) and bool(b) and os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _as_module(module, name, script, home):
+    """Ready the __main__ module to run SCRIPT as the module NAME of its package, as python -m does (runpy): the
+    package (each one on the way down) imported first, so its __init__ runs as it always does, then __package__ and
+    __spec__ set, so `from .cli import main` finds the package's own modules. Only the lab's own package, in HOME: one
+    of that name that Python has already, or finds first elsewhere, is never imported in its place."""
+    import importlib
+    import importlib.util
+    top = name.split(".")[0]
+    found = importlib.util.find_spec(top)   # a top package is looked for, not imported
+    where = list(getattr(found, "submodule_search_locations", None) or []) or [getattr(found, "origin", None)]
+    inside = os.path.normcase(os.path.realpath(home)).rstrip("\\/") + os.sep
+    if found is None or not any(w and os.path.normcase(os.path.realpath(w)).startswith(inside) for w in where):
+        raise ImportError("Kelvin: the package %s is %s here, not the lab's in %s: Python found another %s first"
+                          % (top, where[0] if found is not None and where[0] else "nowhere", home, top), name=top)
+    package = name.rpartition(".")[0]
+    if package:
+        importlib.import_module(package)
+    spec = importlib.util.find_spec(name)
+    origin = getattr(spec, "origin", None)
+    if not _same_file(origin, script):
+        raise ImportError("Kelvin: the module %s is %s here, not %s: Python found another %s first"
+                          % (name, origin or "nowhere", script, top), name=name)
+    module.__dict__.update(__package__=package, __spec__=spec, __loader__=spec.loader,
+                           __cached__=getattr(spec, "cached", None))
+
+
 def main(argv):
     if argv[:1] == ["--probe"]:
         return _probe(argv[1:])
-    source = None
-    if argv[:1] == ["--source"]:
-        source, argv = argv[1], argv[2:]
+    source = name = None
+    while argv[:1] in (["--source"], ["--module"]) and len(argv) > 1:
+        if argv[0] == "--source":
+            source = argv[1]
+        else:
+            name = argv[1]
+        argv = argv[2:]
     if not argv:
-        sys.stderr.write("usage: kelvin_shim.py [--source FILE] SCRIPT [ARGS...]\n")
+        sys.stderr.write("usage: kelvin_shim.py [--source FILE] [--module NAME] SCRIPT [ARGS...]\n")
         return 2
     script = os.path.abspath(argv[0])
     link = install()
@@ -909,8 +1002,9 @@ def main(argv):
         import tokenize
         with tokenize.open(script) as f:
             text = f.read()
-    sys.argv = [script] + list(argv[1:])
-    sys.path[0] = os.path.dirname(script)
+    sys.argv = [script] + list(argv[1:])   # as python -m has it too: the module's file, then its arguments
+    home = _home(script, name) if name else None
+    sys.path[0] = home or os.path.dirname(script)
     module = types.ModuleType("__main__")
     module.__dict__.update(__file__=script, __builtins__=builtins, __cached__=None)
     if os.environ.get("KELVIN_ACTION"):   # an experiment's action: Kelvin runs it, so its __main__ block doesn't too
@@ -918,6 +1012,8 @@ def main(argv):
     sys.modules["__main__"] = module
     status, error = 0, ""
     try:
+        if name:   # its package's __init__ fails as the script would: in the run's output, with its traceback
+            _as_module(module, name, script, home)
         exec(compile(text, script, "exec"), module.__dict__)
         api = sys.modules.get("kelvin")
         if getattr(api, "_ACTIONS", None):   # an experiment's action: the one Kelvin was asked to run
