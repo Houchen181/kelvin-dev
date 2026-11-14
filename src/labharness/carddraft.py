@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import yaml
 
 from .cards import STATUSES, Card, CardError, parse_card
+from .yamlio import load_yaml
 
 DATA = Path(__file__).parent / "data" / "cards"
 EXAMPLE = DATA / "instruments" / "keithley_2400.yaml"
@@ -203,9 +204,10 @@ def notes_in(text: str) -> List[str]:
 
 
 def check(text: str, source: str = "draft") -> Tuple[Optional[Card], List[str], List[str]]:
-    """(card or None, problems that stop it from being used, warnings worth fixing)."""
+    """(card or None, problems that stop it from being used, warnings worth fixing). Read as the lab reads a card
+    (load_yaml: 1e-3 is a number; YAML 1.1's safe_load took it for text, so Check refused a card the lab used)."""
     try:
-        data = yaml.safe_load(text)
+        data = load_yaml(text)
     except yaml.YAMLError as e:
         mark = getattr(e, "problem_mark", None)
         where = " (line %d)" % (mark.line + 1) if mark is not None else ""

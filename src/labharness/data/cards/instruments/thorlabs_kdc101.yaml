@@ -11,7 +11,9 @@ notes:
   - "Positions are in the real-world units Kinesis is set up with for the stage: degrees for a PRM1Z8 rotation mount (this card's limits), mm for a Z8 actuator. For a linear stage, make the lab's version of this card with mm and its travel (0 to 25 mm for a Z825B)."
   - "Draft, from Thorlabs' Kinesis examples: every move asks a person until someone checks the card on the stage."
 identify:
-  idn: "^Thorlabs"
+  # the KDC101 alone: "^Thorlabs" offered this card to every Thorlabs instrument a scan found (a PM16 power meter).
+  # Kinesis gives no *IDN?: Kelvin's identity for it is "Thorlabs,<this card's model>,<serial number>"
+  idn: "^Thorlabs,\\s*(Thorlabs\\s+)?KDC101\\b"
   example: "Thorlabs,KDC101,27000001"
 connection: { timeout_ms: 70000 }
 library:

@@ -6,6 +6,7 @@ its run's run.h5 (/fits/<name>), figures into the data folder's figures/, export
 run_python's files into its scratch folder."""
 from __future__ import annotations
 
+import math
 import re
 import threading
 import time
@@ -224,6 +225,8 @@ def fit_run(rt: Any, run_id: str = "last", model: str = "", x: str = "", y: str 
             ph = np.asarray(ph, dtype=float)[mask]
     if key == "resonator":   # S21: magnitude (dB or linear) and, when given, phase
         mag = 10 ** (yv / 20) if yu in DB_UNITS else yv
+        if yu in DB_UNITS and sig is not None:   # a sigma in dB, as the amplitude's: d|S21| = |S21|·ln10/20·d(dB)
+            sig = np.asarray(sig, dtype=float) * mag * (math.log(10) / 20)
         if ph is not None:
             rad = np.deg2rad(ph) if pu in DEG else ph
             yv = mag * np.exp(1j * rad)
@@ -239,6 +242,8 @@ def fit_run(rt: Any, run_id: str = "last", model: str = "", x: str = "", y: str 
         m = fitting.MODELS[key]()
         if yu in DB_UNITS and key in ("lorentzian", "gaussian", "double_lorentzian"):
             yv = 10 ** (yv / 10)   # a resonance is a Lorentzian in power, not in dB
+            if sig is not None:    # its sigma in dB too, as the power's: dP = P·ln10/10·d(dB)
+                sig = np.asarray(sig, dtype=float) * yv * (math.log(10) / 10)
             notes.append("%s in %s fitted as linear power 10^(dB/10): its widths are linewidths (a fit on dB values "
                          "gives a width of the dB curve, not a linewidth)" % (yn, yu))
             yu = ""
@@ -413,6 +418,11 @@ def plot_runs(rt: Any, curves: Optional[List[Dict[str, Any]]] = None, title: str
                 raise ToolError("%s keeps no fit %r (it keeps: %s)" % (src.run_id, spec["fit"], ", ".join(fits) or
                                                                        "none"))
             fx, fy = kept_curve(f)
+            if yu in DB_UNITS and f.get("y_unit") not in DB_UNITS:
+                # fitted on the column's linear values (fit_run and the Analysis pane fit a line in dB on its power,
+                # a resonator on its |S21|): drawn in dB again, over the curve, not in linear power along its bottom
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    fy = (20 if f.get("model") == "resonator" else 10) * np.log10(np.asarray(fy, dtype=float))
             drawn.append(plotting.Curve(np.asarray(fx) * xfactor, np.asarray(fy) * factor, "%s fit%s" % (
                 f.get("model"), " (failed)" if f.get("failed") else ""), FIT, "fit"))
             if f.get("failed"):

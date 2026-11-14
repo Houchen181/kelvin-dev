@@ -444,7 +444,8 @@ def make_safe(text: str, maker: str, model: str, idn: str, url: str, model_key: 
     notes: what the model left out or is unsure of, and specs: where the ranges came from, for the card's header.
     entry: the instrument collection's entry for the instrument, which names the card."""
     import yaml
-    data = yaml.safe_load(carddraft.extract_yaml(text))
+    from .yamlio import load_yaml
+    data = load_yaml(carddraft.extract_yaml(text))   # its numbers as the lab reads them: 1e-3 a number, not text
     if not isinstance(data, dict):
         raise ValueError("the model did not answer with a card")
     changed: List[str] = []

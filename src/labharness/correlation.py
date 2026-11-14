@@ -81,10 +81,15 @@ def fit_g2(delays: Sequence[float], g2: Sequence[float], counts: Optional[Sequen
     scale = max(1.0, chi2 / dof) if counts is not None else chi2 / dof   # Poisson weights: never shrink the errors
     err = np.sqrt(np.maximum(np.diag(cov) * scale, 0.0))
     a, rho, t0, tc = p
+    # τc held at its limit (a sixth of the window) is no measured τc: the dip is wider than the window tells, and
+    # g2(0) and A are then off by more than their errors (15 ns in ±30 ns read "10.00 ± 0.65 ns", g2(0) 0.17 for 0.20)
+    limit = span / 6
+    at_limit = bool(abs(tc) >= limit * (1 - 1e-9))
     # g2(0) = 1 - ρ in units of the fitted normalisation: its error from ρ's
     return {"g2_zero": float(1.0 - rho), "g2_zero_err": float(err[1]), "tau": float(abs(tc)), "tau_err": float(err[3]),
             "offset": float(t0), "offset_err": float(err[2]), "norm": float(a), "norm_err": float(err[0]),
-            "chi2_red": float(chi2 / dof), "points": int(x.size), "model": "g2 = A(1 - rho exp(-|t - t0|/tc))"}
+            "chi2_red": float(chi2 / dof), "points": int(x.size), "model": "g2 = A(1 - rho exp(-|t - t0|/tc))",
+            "tau_at_limit": at_limit, "tau_limit": float(limit)}
 
 
 def _levenberg(np: Any, x: Any, y: Any, sigma: Any, p0: Sequence[float], step: float, longest: float,
@@ -133,13 +138,20 @@ def _levenberg(np: Any, x: Any, y: Any, sigma: Any, p0: Sequence[float], step: f
 
 
 def verdict(fit: Dict[str, Any]) -> str:
-    """What the fit says, in a line: one emitter, several, or uncorrelated or bunched light."""
+    """What the fit says, in a line: one emitter, several, or uncorrelated or bunched light; and when τc ended at its
+    limit, that the window is too short to tell it."""
     g0, err = fit["g2_zero"], fit["g2_zero_err"]
     shown = "g2(0) = %.2f ± %.2f, τc = %.2g ns" % (g0, err, fit["tau"] * 1e9)
     if g0 + 2 * err < 0.5:
-        return shown + ": antibunched below 0.5, a single emitter"
-    if g0 + 2 * err < 1:
-        return shown + ": antibunched, but not below 0.5 (more than one emitter, or background)"
-    if g0 - 2 * err > 1:
-        return shown + ": bunched"
-    return shown + ": no dip (uncorrelated light)"
+        said = shown + ": antibunched below 0.5, a single emitter"
+    elif g0 + 2 * err < 1:
+        said = shown + ": antibunched, but not below 0.5 (more than one emitter, or background)"
+    elif g0 - 2 * err > 1:
+        said = shown + ": bunched"
+    else:
+        return shown + ": no dip (uncorrelated light)"
+    if fit.get("tau_at_limit"):   # a dip (or peak) wider than the window can tell
+        said += ("; but τc is not measured: it ended at the fit's limit, a sixth of the delay window (%.2g ns), so "
+                 "the dip is wider than the window tells and g2(0) is off by more than its error: widen the window "
+                 "(more or wider bins)" % (fit.get("tau_limit", fit["tau"]) * 1e9))
+    return said

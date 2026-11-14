@@ -7,6 +7,7 @@ guards moves away from it.
 """
 from __future__ import annotations
 
+import difflib
 import math
 import re
 import dataclasses
@@ -38,6 +39,21 @@ CONNECTION_KEYS = {"read_termination": str, "write_termination": str, "baud_rate
                    # port), read and dropped before the first command; none coming is fine (its serial port has none)
                    "greeting_lines": int,
                    "enq": bool}   # Pfeiffer's protocol: each command is acknowledged (ACK or NAK) and a reply is sent on ENQ
+# what Kelvin reads in a card, and nothing else: a key outside these is refused, saying what it may have meant (as in a
+# lab config). A misspelled one was ignored as if it weren't there: read_wen: let a look switch a 2400's output on,
+# plausable: and statuss: let an open thermometer's 0 K through, raw.bloked: blocked nothing (audit of 0.3.52, I6)
+CARD_KEYS = ("card", "id", "model", "vendor", "kind", "status", "manual", "manual_url", "notes", "vars", "identify",
+             "connection", "on_connect", "parameters", "raw", "health", "safe_sequence", "error_query", "no_error",
+             "display", "library", "actions", "jsonrpc", "techniques", "requires", "twin")
+PARAM_KEYS = ("kind", "type", "unit", "label", "description", "get", "set", "values", "limits", "safe", "default",
+              "max_rate", "ramp", "ramp_step", "readback", "tol", "timeout", "rate_param", "rate_per", "enables",
+              "bool_text", "applies_when", "field", "read_when", "wait", "acquires", "parse", "source_range",
+              "current_limit", "status", "busy", "arrived", "plausible", "words", "axis", "binary", "pairs", "y")
+RAW_KEYS = ("reset", "blocked")
+IDENTIFY_KEYS = ("idn", "example", "query", "usb", "also")
+HEALTH_KEYS = ("query", "expect", "says", "before", "read", "range")
+DISPLAY_KEYS = ("headline",)
+ACTION_KEYS = ("send", "label", "drives")   # drivs: would have let a pulse fire with nobody asked
 PARITY = {"n": "none", "e": "even", "o": "odd", "m": "mark", "s": "space"}   # a manual's letter, as PyVISA names it
 FRAMING = re.compile(r"^\s*([5-8])\s*([NEOMS])\s*(1|1\.5|2)\s*$", re.I)        # 8N1, 7O1, 8E2
 VAR_NAME = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
@@ -509,6 +525,18 @@ def _y_names(y: Optional[str], problem: Callable[[str], None]) -> List[str]:
     return sorted({n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and id(n) not in called})
 
 
+def _unknown(section: Any, known: Tuple[str, ...], path: str, err: Callable[[str, str], None]) -> None:
+    """Each key of a card's section that Kelvin doesn't read, refused with what it may have meant (path: where the
+    section is, "" for the card's top, else ending in a dot)."""
+    if not isinstance(section, dict):
+        return
+    for key in section:
+        if str(key) not in known:
+            near = difflib.get_close_matches(str(key), known, n=1, cutoff=0.6)
+            err(path + str(key), "not something Kelvin reads here%s (it reads %s; a note to yourself goes after a #)"
+                % (": did you mean %s?" % near[0] if near else "", ", ".join(known)))
+
+
 def _template(text: Any, err: Callable[[str, str], None], path: str, prefix: bool = False) -> Any:
     try:
         return Template(str(text)).header_prefix() if prefix else Template(str(text))   # PUT /x: not every PUT
@@ -522,6 +550,7 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
     if not isinstance(p, dict):
         err(path, "must be a mapping")
         return None
+    _unknown(p, PARAM_KEYS, path + ".", err)
     kind = p.get("kind")
     if kind not in KINDS:
         err(path + ".kind", "must be measure or drive")
@@ -782,6 +811,7 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         raise CardError(source, ["a card must be a mapping"])
     if data.get("card") != 1:
         err("card", "schema version must be 1")
+    _unknown(data, CARD_KEYS, "", err)
     original = data
     card_vars = _card_vars(data, err)
     chosen = {k: v["default"] for k, v in card_vars.items()}
@@ -866,6 +896,7 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
     health: List[HealthCheck] = []
     for i, h in enumerate(data.get("health") or []):
         path = "health[%d]" % i
+        _unknown(h, HEALTH_KEYS, path + ".", err)
         if isinstance(h, dict) and h.get("query"):
             before = h.get("before") or []
             before = [before] if isinstance(before, str) else before
@@ -894,6 +925,7 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
             err(path, "needs query (+ expect) or read (+ range)")
 
     raw = data.get("raw") or {}
+    _unknown(raw, RAW_KEYS, "raw.", err)
     reset = [t for t in (_template(x, err, "raw.reset", True) for x in raw.get("reset") or []) if t]
     blocked = [t for t in (_template(x, err, "raw.blocked", True) for x in raw.get("blocked") or []) if t]
     error_query = _template(data["error_query"], err, "error_query") if data.get("error_query") else None
@@ -906,6 +938,7 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         if error_query is None:
             err("no_error", "the reply of the error query that means no error: give error_query too")
     identify = data.get("identify") or {}
+    _unknown(identify, IDENTIFY_KEYS, "identify.", err)
     if identify.get("idn"):
         try:
             re.compile(str(identify["idn"]))
@@ -970,6 +1003,7 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
     manual_url = str(data.get("manual_url") or "").strip()
     if manual_url and not re.match(r"^https://[^\s/]+\.[^\s/]+/\S*$", manual_url):
         err("manual_url", "must be an https:// address of the maker's manual")
+    _unknown(data.get("display"), DISPLAY_KEYS, "display.", err)
     headline = (data.get("display") or {}).get("headline")
     if headline is not None and (headline not in params or params[headline].get_cmd is None):
         err("display.headline", "%r is not a readable parameter" % headline)
@@ -1302,6 +1336,7 @@ def _actions(raw: Any, params: Dict[str, ParamSpec], err: Callable[[str, str], N
         if not re.match(r"^[a-z][a-z0-9_]{0,30}$", str(name)) or not isinstance(spec, dict):
             err(path, "a lower-case name, with send: the command (or commands) as the manual gives them")
             continue
+        _unknown(spec, ACTION_KEYS, path + ".", err)
         send = spec.get("send")
         send = [send] if isinstance(send, str) else send
         if not send or not all(isinstance(c, str) and c.strip() and "{" not in c for c in send):

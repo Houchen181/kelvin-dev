@@ -14,6 +14,10 @@ SETUP = b"MZ pretend installer"
 DIGEST = "sha256:" + hashlib.sha256(SETUP).hexdigest()
 
 
+def signed(path):   # a stand-in installer, as Windows judges one Kelvin's publisher signed (test_audit_release.py)
+    return "Valid", updater.PUBLISHER
+
+
 def release(tag, assets, prerelease=False, draft=False):
     return {"tag_name": tag, "prerelease": prerelease, "draft": draft, "html_url": "https://github.com/x/" + tag,
             "body": "notes for " + tag,
@@ -66,7 +70,7 @@ def test_published_builds_come_from_the_public_repository_and_private_ones_from_
 
 def test_download_check_and_install(tmp_path):
     files = {updater.api("stable"): json.dumps(RELEASES).encode(), "https://dl/Kelvin-Setup-0.3.6.exe": SETUP}
-    u = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetcher(files))
+    u = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetcher(files), verify=signed)
     state = u.run_once("ask")
     assert state["state"] == "available" and state["latest"] == "0.3.6" and u.pending() is None   # asks first
     state = u.run_once("auto")
@@ -115,7 +119,7 @@ def test_a_private_repository_goes_through_the_github_cli(tmp_path):
     gh = tmp_path / "gh.py"
     gh.write_text(FAKE_GH % (json.dumps(RELEASES), SETUP), encoding="utf-8")
     u = Updater(tmp_path, current="0.3.5", chan="private", plat="win32", gh=[sys.executable, str(gh)],
-                fetch=fetcher({}))                                         # the web API says 404: private
+                fetch=fetcher({}), verify=signed)                          # the web API says 404: private
     assert u.run_once("auto")["state"] == "ready" and u.via == "gh"
     assert u.pending()["version"] == "0.3.7"
     none = Updater(tmp_path / "x", current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetcher({}))
@@ -135,7 +139,7 @@ def test_the_portal_installs_only_when_nothing_runs(tmp_path):
     from labharness.web.store import ChatStore
 
     files = {updater.api("stable"): json.dumps(RELEASES).encode(), "https://dl/Kelvin-Setup-0.3.6.exe": SETUP}
-    u = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetcher(files))
+    u = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetcher(files), verify=signed)
     started, closed = [], []
     real_install = u.install
     u.install = lambda pid, relaunch: real_install(pid, relaunch, spawn=started.append)
@@ -206,7 +210,7 @@ def test_the_install_helper_really_starts_the_installer(tmp_path):
         "version": "0.3.6", "path": str(setup), "tag": "v0.3.6",
         "sha256": hashlib.sha256(setup.read_bytes()).hexdigest()}), encoding="utf-8")
     kelvin = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"])   # Kelvin, about to close
-    u = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetcher({}))
+    u = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetcher({}), verify=signed)
     u.install(kelvin.pid, relaunch=True)
     started = setup.parent / "started.txt"
     for _ in range(60):

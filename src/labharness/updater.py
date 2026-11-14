@@ -6,7 +6,10 @@
   Kelvin never sees its token.
 - Which: published builds follow published releases (vX.Y.Z); the private build, which has _private_build.py
   (release.yml writes it for private-v tags), follows private-vX.Y.Z pre-releases. Only a newer version is taken.
-- Checked: the download's SHA-256 must match the digest GitHub reports for that file, or it is thrown away.
+- Checked: the download's SHA-256 must match the digest GitHub reports for that file, and on Windows the installer
+  must carry a valid Authenticode signature by Kelvin's publisher (PUBLISHER, as release.yml signs it since 0.3.49),
+  checked again before it runs; else it is thrown away. The digest comes from GitHub as the file does: whoever could
+  publish a release there could otherwise run code on every lab PC that updates by itself.
 - Installed: on Windows by the installer, silently, into the same folder with the same app id, so it replaces the
   copy that is there and never adds a second one. It runs after Kelvin closes: when the person quits (automatic
   updates), with Restart to update, or at the next start if Kelvin was not closed properly. Never while a plan,
@@ -41,10 +44,37 @@ ASSETS = {("stable", "win32"): r"^Kelvin-Setup-(\d+\.\d+\.\d+)\.exe$",
           ("private", "win32"): r"^Kelvin-Setup-(\d+\.\d+\.\d+)-private\.exe$",
           ("stable", "darwin"): r"^Kelvin-(\d+\.\d+\.\d+)-macOS\.zip$"}
 INSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{8C0F6E5A-3B7D-4C1E-9A2F-6D5E4B3A2C10}_is1"
+# whom release.yml signs Kelvin as (its certificate profile's subject, $publisher there): the only signer whose
+# installer Kelvin runs
+PUBLISHER = "CN=Richen Xiong, O=Richen Xiong, L=Cambridge, S=MA, C=US"
+LIMITED = ("GitHub limits how often one address may ask it without signing in (60 times an hour), and this one is "
+           "over that for now (an address a campus network shares reaches it soon): Kelvin looks again later, or sign "
+           "in the GitHub CLI (gh) here to look now")
 
 
 class UpdateError(Exception):
     pass
+
+
+def signature(path: Path) -> Tuple[str, str]:
+    """A file's Authenticode signature as Windows judges it, asked of PowerShell's Get-AuthenticodeSignature (as
+    release.yml checks its builds): (its status, "Valid" only for an intact signature by a trusted certificate; the
+    signer's subject, "" for none). Raises when PowerShell can't be asked or its answer read."""
+    script = ("$s = Get-AuthenticodeSignature -LiteralPath '%s'; @{status = [string]$s.Status; "
+              "subject = [string]$s.SignerCertificate.Subject} | ConvertTo-Json -Compress"
+              % str(path).replace("'", "''"))
+    p = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True,
+                       encoding="utf-8", errors="replace", timeout=120, creationflags=_flags())
+    found = json.loads(p.stdout)
+    return str(found.get("status") or ""), str(found.get("subject") or "")
+
+
+def _over_limit(e: urllib.error.HTTPError) -> bool:
+    """GitHub's answer to an anonymous caller past its limit: 403 (or 429) with no requests left, or saying so. A
+    private repository it answers with 404."""
+    headers = e.headers or {}
+    return e.code == 429 or str(headers.get("x-ratelimit-remaining") or "").strip() == "0" or \
+        bool(headers.get("retry-after")) or "rate limit" in str(e.reason or "").lower()
 
 
 def api(chan: str) -> str:
@@ -124,7 +154,8 @@ def _flags() -> int:
 class Updater:
     def __init__(self, home: Any, current: str = __version__, chan: Optional[str] = None,
                  plat: Optional[str] = None, gh: Optional[List[str]] = None,
-                 fetch: Optional[Callable[[str], bytes]] = None):
+                 fetch: Optional[Callable[[str], bytes]] = None,
+                 verify: Optional[Callable[[Path], Tuple[str, str]]] = None):
         self.dir = Path(home) / "updates"
         self.current = current
         self.channel = chan or channel()
@@ -133,6 +164,7 @@ class Updater:
         found = shutil.which("gh")
         self.gh: List[str] = gh if gh is not None else ([found] if found else [])
         self._fetch = fetch or self._urlopen
+        self._verify = verify or signature   # an installer's (status, signer): signature() asks Windows
         self.lock = threading.Lock()
         self.state: Dict[str, Any] = {"state": "idle", "current": current, "channel": self.channel}
         self.found: Optional[Dict[str, Any]] = None
@@ -166,9 +198,14 @@ class Updater:
             data = json.loads(self._fetch(url))
             self.via = "web"
         except urllib.error.HTTPError as e:
-            if e.code not in (401, 403, 404):
+            if e.code not in (401, 403, 404, 429):
                 raise UpdateError("GitHub answered %s" % e.code)
-            data = json.loads(self._gh(["api", url.split("api.github.com/", 1)[1]], timeout=60))   # private repo
+            try:   # a private repo, or past the anonymous limit (a 403 too: no private repo): gh, signed in
+                data = json.loads(self._gh(["api", url.split("api.github.com/", 1)[1]], timeout=60))
+            except UpdateError:
+                if _over_limit(e):   # never "the repository is private": both are public
+                    raise UpdateError(LIMITED)
+                raise
             self.via = "gh"
         except (urllib.error.URLError, OSError, ValueError) as e:
             raise UpdateError("could not reach GitHub: %s" % getattr(e, "reason", e))
@@ -230,6 +267,13 @@ class Updater:
             self._set(state="error", error="the download did not match GitHub's checksum and was deleted",
                       latest=found["version"], url=found["url"])
             raise UpdateError(self.state["error"])
+        why = self._unsigned(path)
+        if why:
+            path.unlink()
+            self._set(state="error", error="the download was deleted, not installed: %s" % why,
+                      latest=found["version"], url=found["url"])
+            log.warning(self.state["error"])
+            raise UpdateError(self.state["error"])
         (self.dir / "pending.json").write_text(json.dumps({"version": found["version"], "path": str(path),
                                                            "sha256": got, "tag": found["tag"]}), encoding="utf-8")
         self._set(state="ready", latest=found["version"], url=found["url"], notes=found["notes"],
@@ -238,7 +282,8 @@ class Updater:
         return self.state
 
     def pending(self) -> Optional[Dict[str, Any]]:
-        """A downloaded, checked installer for a newer version, if there is one (checked again: it is run next)."""
+        """A downloaded, checked installer for a newer version, if there is one (checked again, its signature too: it
+        is run next)."""
         try:
             p = json.loads((self.dir / "pending.json").read_text(encoding="utf-8"))
             path = Path(p["path"])
@@ -246,9 +291,27 @@ class Updater:
                 return None
             if hashlib.sha256(path.read_bytes()).hexdigest() != p["sha256"]:
                 return None
+            why = self._unsigned(path)
+            if why:
+                log.warning("the downloaded Kelvin %s is not installed: %s", p.get("version"), why)
+                return None
             return p
         except (OSError, ValueError, KeyError, TypeError):
             return None
+
+    def _unsigned(self, path: Path) -> str:
+        """Why a Windows installer may not run, "" when it may: only one validly signed by Kelvin's publisher runs."""
+        if self.platform != "win32":   # no installer runs elsewhere (macOS: a link to the release)
+            return ""
+        try:
+            status, subject = self._verify(path)
+        except Exception as e:   # no PowerShell, a timeout, an answer it can't read: not checked is not signed
+            return "its signature could not be checked (%s)" % (str(e) or type(e).__name__)
+        if status != "Valid":
+            return "it is not validly signed (%s)" % (status or "no signature")
+        if subject != PUBLISHER:
+            return "it is signed by %s, not by Kelvin's publisher" % (subject or "nobody")
+        return ""
 
     def mark_tried(self, p: Dict[str, Any]) -> None:
         p = dict(p, tried=time.time())

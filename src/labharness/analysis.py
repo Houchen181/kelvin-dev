@@ -39,6 +39,7 @@ from .cards import si, si_parts, trace_x
 
 FIT_POINTS = 200
 SELECT_POINTS = 2000      # a longer curve is decimated to about this many points to choose its model
+REFIT_STEPS = 40          # a line found on the decimated copy, fitted again to every point in at most these steps
 TIME_LIMIT = 10.0         # seconds for a whole run's analysis (it runs while the lab is held)
 MAP_MIN = 8               # values on each of two axes that make a sweep a map
 TRACE_ROWS = 12           # a run's traces looked at: spread over its rows, the first and the last among them
@@ -194,7 +195,7 @@ def _scale(x: Any, y: Any) -> Tuple[float, float, float, float]:
 
 
 def fit(model: str, xs: Sequence[float], ys: Sequence[float], p0: Optional[Sequence[float]] = None,
-        deadline: Optional[float] = None, db: bool = False) -> Optional[Dict[str, Any]]:
+        deadline: Optional[float] = None, db: bool = False, steps: int = 300) -> Optional[Dict[str, Any]]:
     """Fit `model` to (xs, ys). Parameters come back in data units with one-sigma errors. db: ys are the dB values of
     a line that is the model in linear power (a resonance on a VNA): it is fitted to 10^(dB/10), so its width is a
     linewidth; r2_db and rms_db say how it tells the curve as recorded, to weigh it against fits made on the dB
@@ -226,7 +227,7 @@ def fit(model: str, xs: Sequence[float], ys: Sequence[float], p0: Optional[Seque
     if n <= len(guess):
         return None
     try:
-        sol = least_squares(lambda p: f(us, p) - vs, guess, max_iter=300, deadline=deadline)
+        sol = least_squares(lambda p: f(us, p) - vs, guess, max_iter=steps, deadline=deadline)
     except (FitError, ZeroDivisionError, OverflowError, ValueError, np.linalg.LinAlgError):
         return None
     p, chi = sol.p, sol.cost
@@ -386,7 +387,8 @@ def _quadratic(x: Any, y: Any) -> Optional[Dict[str, Any]]:
             "curve": {"x": grid.tolist(), "y": (c0 + c1 * gu + c2 * gu * gu).tolist()}}
 
 
-def _refit(model: str, chosen: Dict[str, Any], x: Any, y: Any, deadline: Optional[float]) -> Dict[str, Any]:
+def _refit(model: str, chosen: Dict[str, Any], x: Any, y: Any, deadline: Optional[float], steps: int = 300
+           ) -> Dict[str, Any]:
     """The model a decimated curve showed, fitted to every point (started from where the decimated fit ended)."""
     if model == "linear":
         return _linear(x, y) or chosen
@@ -404,7 +406,7 @@ def _refit(model: str, chosen: Dict[str, Any], x: Any, y: Any, deadline: Optiona
         p0 = [(vals[0] - nyc) / nys, vals[1] / nys, vals[2] * nxs, chosen["_p"][3], vals[4] / nxs]
     else:
         p0 = [(vals[0] - nyc) / nys, vals[1] / nys, vals[2] / nxs]
-    return fit(model, x, y, p0, deadline, db) or chosen
+    return fit(model, x, y, p0, deadline, db, steps) or chosen
 
 
 def _p_flat(f: Optional[Dict[str, Any]], n: int, trials: float = 1.0) -> float:
@@ -618,6 +620,12 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
             f = fit(model, xd, yd, p0, deadline, on_power)
             if f and math.isfinite(f["r2"]) and (best is None or f["r2"] > best["r2"]):
                 best = f
+        if best and model in LINES and xd.size < n:
+            # a line is judged against the whole curve's noise, so fitted to every point first: on the decimated
+            # copy (each stretch's extremes) it left about twice that noise, and a narrow dip 50σ deep on 16 001
+            # points was "no clear dependence". From the decimated fit a line takes a few steps; noise, where none
+            # is, would take hundreds (a second a trace)
+            best = _refit(model, best, xs_s, ys_s, deadline, REFIT_STEPS)
         if best:
             candidates[model] = best
 
@@ -670,7 +678,7 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
         each = all(0 < w <= reach and inside(c) and stands_out(a, ea, w)
                    for a, ea, c, w in ((a1, e[1], c1, w1), (a2, e[4], c2, w2)))
         single = candidates.get("lorentzian")
-        better = single is None or _p_more(single, f, len(yd)) * trials(min(w1, w2)) < 1e-3
+        better = single is None or _p_more(single, f, n) * trials(min(w1, w2)) < 1e-3   # lines: fitted to every point
         good = f["r2"] >= 0.99 or near(f) or told(f)
         return each and (a1 > 0) == (a2 > 0) and _valley(f) >= 0.1 and better and good
 
@@ -1160,12 +1168,16 @@ def hysteresis(xs: Sequence[float], ys: Sequence[float], x_unit: str, y_unit: st
     turn = max(range(len(xs)), key=lambda i: xs[i]) if xs[1] >= xs[0] else min(range(len(xs)), key=lambda i: xs[i])
     if turn in (0, len(xs) - 1):
         return None
-    up = {round(x, 12): y for x, y in zip(xs[:turn + 1], ys[:turn + 1])}
-    down = {round(x, 12): y for x, y in zip(xs[turn:], ys[turn:])}
+    # up and down matched at the same x to a thousandth of the sweep's finest step, whatever x's size (to 12
+    # decimals, a delay stepped by 20 fs paired each point with another's)
+    steps = [abs(b - a) for a, b in zip(xs, xs[1:]) if b != a]
+    q = min(steps) / 1000 if steps else 1.0
+    up = {round(x / q): y for x, y in zip(xs[:turn + 1], ys[:turn + 1])}
+    down = {round(x / q): y for x, y in zip(xs[turn:], ys[turn:])}
     common = [x for x in up if x in down]
     if len(common) < 3:
         return None
-    diffs = [(abs(up[x] - down[x]), x) for x in common]
+    diffs = [(abs(up[x] - down[x]), x * q) for x in common]
     d, at = max(diffs)
     span = max(ys) - min(ys) or 1e-300
     sigma = noise_estimate([up[x] for x in sorted(up)])
@@ -1413,10 +1425,10 @@ def _recorded(fit: Dict[str, Any], rows: List[Dict[str, Any]], swept: str, x_key
               ) -> List[Any]:
     """A fit in ohms, in the reading's own units to draw over it: R over start (the chain's factor), or where the run
     swept the excitation itself (swept: its key), R times the excitation's setting over start: the curve's one
-    setting, or each x's where the excitation is x. Else nothing is drawn."""
+    setting, or each x's where the excitation is x (with its sign, as R was worked out). Else nothing is drawn."""
     if not swept:
         return [y / start if _number(y) else y for y in fit["y"]]
-    own = {abs(r[swept]) for r in rows if _number(r.get(swept))}
+    own = {r[swept] for r in rows if _number(r.get(swept))}
     if len(own) == 1:
         return [y * min(own) / start if _number(y) else y for y in fit["y"]]
     if swept == x_key:
@@ -1426,7 +1438,7 @@ def _recorded(fit: Dict[str, Any], rows: List[Dict[str, Any]], swept: str, x_key
             grid = _np().linspace(xs[0], xs[1], FIT_POINTS)
             ys = (ys[0] + (ys[1] - ys[0]) * (grid - xs[0]) / (xs[1] - xs[0])).tolist()
             xs = fit["x"] = grid.tolist()
-        return [y * abs(x) / start if _number(y) and _number(x) else None for x, y in zip(xs, ys)]
+        return [y * x / start if _number(y) and _number(x) else None for x, y in zip(xs, ys)]
     fit["x"] = []
     return []
 
@@ -1656,9 +1668,10 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
         swept, start = "", factor   # R = reading * start / the excitation's own setting, where that was swept
         source, used = getattr(derived, "source", ""), getattr(derived, "value", 0.0)
         if derived and used and len({r.get(source) for r in rows if _number(r.get(source))}) > 1:
-            # the excitation itself swept (a linearity check): each point over its own current, not the start's
+            # the excitation itself swept (a linearity check): each point over its own current, not the start's, with
+            # its sign (a dc I-V from -1 µA to 1 µA is one resistance, not a step from -R to R; the report's chart too)
             swept, start = source, factor * used
-            mine = [dict(r, **{m["key"]: r[m["key"]] * start / abs(r[source])
+            mine = [dict(r, **{m["key"]: r[m["key"]] * start / r[source]
                                if _number(r.get(m["key"])) and _number(r.get(source)) and r[source] else None})
                     for r in mine]
             factor, how = 1.0, how.split(", I = ")[0] + ", I from each point's own " + source
