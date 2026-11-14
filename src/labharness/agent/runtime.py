@@ -11178,7 +11178,7 @@ class LabRuntime:
                       if has]
             persons = bool(theirs)   # card and address alone: added again, it is as it was (or stricter)
             if persons and not twins:
-                notes.append("A person set %s for it: they go with its entry. Added again, it starts from the "
+                notes.append("What a person set for it goes with its entry (%s). Added again, it starts from the "
                              "maker's limits, asking about every change until a person reviews them."
                              % ", ".join(theirs))
             request = ApprovalRequest(("Remove %s from the lab while it is on?" if on else "Remove %s from the lab?")
