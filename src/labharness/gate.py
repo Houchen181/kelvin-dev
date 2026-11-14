@@ -1155,7 +1155,9 @@ class SafetyGate:
         alarm was still up), its limits (a device mounted, protected to less), its interlocks, hands on the sample.
         (action, why) when the change no longer goes; None: it goes as approved."""
         now = self._current(inst, spec)
-        if not _same(spec, now, current):
+        # unknown then and unknown now (no read-back, not set since connecting): nothing says it moved; a value
+        # Kelvin set meanwhile is known, and compared
+        if not (now is None and current is None) and not _same(spec, now, current):
             return "declined", ("declined: %s changed while its card waited (%s then, %s now), so the yes was for "
                                 "another move; ask again" % (key, spec.show(current), spec.show(now)))
         problem = (self._limit_problem(inst, spec, target) or self._breaks_interlock(inst, spec, target)

@@ -232,7 +232,7 @@ def test_settings_with_no_read_back_can_be_set():
     for param, value in (("freq", 1000), ("func", "sine"), ("amp", 1e-7), ("amp", 0)):
         r = gate.set("g", param, value)
         assert r.ok, r.message
-    assert [c for c in sent if c != "SYST:ERR?"] == ["FREQ 1000", "FUNC SIN", "AMPL 1e-07", "AMPL 0"]
+    assert [c for c in sent if c != "SYST:ERR?"] == ["FREQ 1000", "FUNC SIN", "AMPL 0.0000001", "AMPL 0"]   # plain (I7)
     assert lab.read("g", "freq") == 1000   # what Kelvin set, as it can't be read
     sent.clear()
     gate.set("g", "amp", 1e-7)

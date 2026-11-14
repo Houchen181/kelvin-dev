@@ -600,8 +600,10 @@ class Instrument:
                 raise self._garbled(command, reply) from None
             raise
         self._read_ok.add(spec.name)
-        if spec.numeric and isinstance(value, (int, float)) and not isinstance(value, bool) \
-                and abs(value) >= SCPI_OVERFLOW:   # the instrument's own word that this is no reading
+        # a reading's 9.9E37 is the instrument's word that this is no reading (over range, or 9.91E37: not a number);
+        # a setting's (one with a set command) is SCPI's infinity, a value (a 6221's endless wave duration)
+        if spec.set_cmd is None and spec.numeric and isinstance(value, (int, float)) \
+                and not isinstance(value, bool) and abs(value) >= SCPI_OVERFLOW:
             raise SensorFlagged("%s.%s is over its range: %s answered %s, SCPI's overflow value, not a reading (a "
                                 "larger range or autorange reads it)" % (self.name, spec.name, command.strip(),
                                                                          str(reply).strip()[:20]))
