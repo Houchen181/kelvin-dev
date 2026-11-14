@@ -61,8 +61,7 @@ def build(rt: Any, runs: Iterable[str] = (), entries: Iterable[str] = (), figure
     from .samples import SampleBook
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     exports = Path(rt.data_dir) / "exports"
-    crate = exports / ("crate-%s" % stamp)
-    crate.mkdir(parents=True, exist_ok=False)
+    crate = exports / ("crate-%s" % stamp)   # made once what it packages is known and may be seen
     graph: List[Dict[str, Any]] = []
     parts: List[Dict[str, str]] = []
     people: Dict[str, Dict[str, Any]] = {}
@@ -88,19 +87,26 @@ def build(rt: Any, runs: Iterable[str] = (), entries: Iterable[str] = (), figure
 
     wanted = list(dict.fromkeys(str(r) for r in runs if str(r).strip()))
     kept_entries = notebook.read(rt.data_dir)
+    sees = getattr(rt, "may_see", lambda marks: True)   # the asking chat's view: unshared work stays inside it
     for eid in entries:
         e = kept_entries.get(str(eid))
-        if e is None:
+        if e is None or not sees(notebook.marks(e)):   # another project's confidential entry is no entry here
             raise KeyError("no entry %s" % eid)
         wanted += [r for r in notebook.latest(e).get("runs") or [] if r not in wanted]
     figure_records = []
     for name in figures:
         path, record = find_figure(Path(rt.data_dir) / "figures", str(name))
+        for s in record.get("runs") or []:   # a figure of runs the chat may not see is no figure here
+            try:
+                rt._run_dir(s["run"])
+            except KeyError:
+                raise KeyError("no figure %s" % name) from None
         figure_records.append((path, record))
         wanted += [s["run"] for s in record.get("runs") or [] if s["run"] not in wanted]
+    folders = [rt._run_dir(rid) for rid in wanted]   # KeyError for one the chat may not see, before anything is made
+    crate.mkdir(parents=True, exist_ok=False)
     run_files: Dict[str, str] = {}
-    for rid in wanted:
-        d = rt._run_dir(rid)
+    for d in folders:
         rec = rundata.load(d, with_rows=False)
         meta = rec.meta
         target = crate / "runs" / d.name
@@ -179,8 +185,13 @@ def build(rt: Any, runs: Iterable[str] = (), entries: Iterable[str] = (), figure
         graph.append(_file(crate, rel, "File", extra))
         parts.append({"@id": rel})
     book = SampleBook(rt.data_dir)
+    asked = {str(s).strip().lower() for s in samples if str(s).strip()}
     for name in sample_names:
         _, s = book.find(None, name)
+        if s and s.get("project") and not sees({"project": s["project"]}):   # another project's unshared sample
+            if name.lower() in asked:
+                raise KeyError("no sample %s" % name)
+            s = None   # named by a run the chat may see: its name, not its record
         thing: Dict[str, Any] = {"@id": "#sample-%s" % name, "@type": "Thing", "name": name,
                                  "additionalType": "Sample"}
         if s:
@@ -195,7 +206,8 @@ def build(rt: Any, runs: Iterable[str] = (), entries: Iterable[str] = (), figure
                 thing["description"] = "; ".join(x for x in (s.get("kind"), s.get("material"), s.get("description"))
                                                  if x)
         graph.append(thing)
-    pbook = ProcedureBook(Path(rt.home) / "procedures")
+    kelvin = rt._kelvin_dir() if hasattr(rt, "_kelvin_dir") else Path(rt.home)   # kelvin-mcp has no app home
+    pbook = ProcedureBook(Path(kelvin) / "procedures")
     for name, version in procs.items():
         try:
             text, n = pbook.text(name, version)

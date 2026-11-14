@@ -683,3 +683,33 @@ def test_d12_a_change_that_fails_part_way_leaves_derived_h5_as_it_was(tmp_path):
             raise RuntimeError("Kelvin ended here")
     assert (d / rundata.DERIVED).read_bytes() == before and not (d / (rundata.DERIVED + ".part")).exists()
     assert rundata.read_h5(d, with_rows=False).analysis["assessment"] == "first"
+
+
+def test_export_crate_packages_only_what_the_asking_chat_may_see(tmp_path):
+    """Found while fixing R11: export_crate packaged a named notebook entry, body and all, for any chat, and a figure
+    or a sample record of unshared work; refused, it left an empty folder in exports."""
+    rt = runtime(tmp_path / "data")
+    rt.project_info = secret_project
+    rt.home = tmp_path / "home"
+    rt.user = "ada"
+    rt.attribution = dict(CONFIDENTIAL)
+    with rt.viewing(inside()):
+        rt.write_entry(title="Tc of the secret flake", body="The transition is at 4.2 K. Recipe: anneal at 300 C "
+                       "for 2 h.", day="2026-11-13")
+        run, _ = measured(rt, "secret_iv")
+    rt.attribution = {}
+    eid = next(iter(notebook.read(rt.data_dir)))
+    figures = rt.data_dir / "figures"
+    figures.mkdir()
+    (figures / "secret_flake_iv.json").write_text(json.dumps({
+        "id": "f1", "figure": "secret_flake_iv", "made": "2026-11-14T12:01:51",
+        "runs": [{"run": run}], "files": []}), encoding="utf-8")
+    exports = rt.data_dir / "exports"
+    with rt.viewing(outsider()):
+        assert rt.export_crate(entries=eid) == "not written: no entry %s" % eid
+        assert rt.export_crate(figures="secret_flake_iv") == "not written: no figure secret_flake_iv"
+        assert rt.export_crate(runs=run).startswith("not written: run %s is unshared work" % run)
+    assert not exports.exists() or not list(exports.iterdir())   # nothing made, nothing left
+    with rt.viewing(inside()):
+        said = rt.export_crate(entries=eid)
+    assert said.startswith("wrote "), said
