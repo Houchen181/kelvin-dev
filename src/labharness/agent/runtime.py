@@ -2025,7 +2025,14 @@ class LabRuntime:
 
     def _new_log(self, clock: Any = None) -> EventLog:
         return EventLog(self.events_path, clock or self.lab.clock, shared=self.shared_log, user=self.user,
-                        whose=self._whose_now, actor=self._actor_now)
+                        whose=self._whose_now, actor=self._actor_now, ends=self._ends_path)
+
+    def _ends_path(self) -> Optional[Path]:
+        """Where each person's record's end is kept, outside their data folder (eventlog.keep_end): Kelvin's own
+        folder; None in a script or a test that has none (nothing holds the end then)."""
+        from ..eventlog import ENDS_FILE
+        home = getattr(self, "home", None) or getattr(self, "lab_memory_dir", None)
+        return Path(home) / ENDS_FILE if home else None
 
     def use_user(self, user: Optional[str], data_dir: Any, problem: Optional[str] = None) -> None:
         """Work for another person (None: nobody is signed in). Their data folder holds their runs, reports, record
@@ -2736,8 +2743,10 @@ class LabRuntime:
 
     def _tidy_now(self) -> Dict[str, int]:
         """tidy_runs' work, its lock held by the caller."""
+        from .. import integrity
         root = self.runs
         done = {"interrupted": 0, "upgraded": 0, "failed": 0, "sealed": 0}
+        recorded: Optional[Dict[str, str]] = None   # the seals the record kept, read once one is needed
         for d in root.iterdir():
             try:
                 if (d / rundata.RECORD).exists():
@@ -2755,6 +2764,13 @@ class LabRuntime:
                         self._log_seal(d, late=True)
                 elif (rundata.have_h5() and (d / rundata.RUN_FILE).exists() and not (d / rundata.SEAL).exists()
                       and not self._running_id()):   # kept before seals: sealed now, saying it was late
+                    if recorded is None:
+                        recorded = self._recorded_seals()
+                    if integrity.folder_name(d.name) in recorded:
+                        # the record sealed it when it was kept: its seal file was deleted since. Sealing it again
+                        # sealed whatever run.h5 holds now, and Verify then called a changed run unchanged (audit
+                        # 0.3.52, D2); Verify compares it with the record's seal instead, and says the file is gone
+                        continue
                     s = rundata.seal(d)
                     if s and s["new"]:
                         done["sealed"] += 1
@@ -2772,6 +2788,13 @@ class LabRuntime:
             self.gate.log.write("runs_kept", by="kelvin", **done)
         self._tidied = True
         return done
+
+    def _recorded_seals(self) -> Dict[str, str]:
+        """The seals the record kept (integrity.recorded_seals): this person's record and the lab's instrument log."""
+        from .. import integrity, provenance
+        paths = [p for p in (Path(self.shared_log) if self.shared_log else None, self.events_path)
+                 if p is not None and p.exists()]
+        return integrity.recorded_seals(provenance.read_events(paths))
 
     def _log_seal(self, d: Path, late: bool) -> None:
         """A run kept here, as tidy_runs keeps it: its seal into the lab's record (run_sealed)."""
@@ -3458,33 +3481,52 @@ class LabRuntime:
 
     def verify_records(self, since: str = "", runs: str = "") -> str:
         """Verify (integrity.py): the lab's record, chain by chain (this person's record, the lab's instrument log,
-        the config history), and each kept run against its seal and the seal the record kept. since: only runs from
-        that day on (2026-11-07); runs: only these (comma-separated). Never runs of unshared work the viewer of this
-        thread may not see."""
-        from .. import integrity, provenance
+        the config history, the notebook), this person's record against where it ended last (kept outside it:
+        eventlog.keep_end); each kept run against its seal and the seal the record kept, and its notes' chain; each
+        run the record sealed, that its folder is there; each notebook entry against its hash and its signatures,
+        and against the record's lines about it. since: only runs from that day on (2026-11-07); runs: only these
+        (comma-separated). Never runs of unshared work the viewer of this thread may not see."""
+        import os
+        from .. import integrity, notebook, provenance
+        from ..eventlog import end_holds, read_ends
         logs: Dict[str, Any] = {"your record": self.events_path}
         if self.shared_log:
             logs["the lab's instrument log"] = Path(self.shared_log)
         audit = getattr(self.versions, "audit", None)
         if audit is not None:
             logs["the config history"] = Path(audit)
+        if notebook.path_of(self.data_dir).exists():   # its chain was never walked, though the docs said so (D4)
+            logs["the notebook"] = notebook.path_of(self.data_dir)
         checked = integrity.check_logs(logs)
+        more: List[str] = []
+        where = self._ends_path()
+        end = read_ends(where).get(os.path.abspath(str(self.events_path))) if where is not None else None
+        since_end = end_holds(self.events_path, end) if end else None
+        if since_end:   # its chain holds, cut short: only its end, kept elsewhere, says so (D6)
+            more.append("your record: %s" % since_end)
         paths = [p for p in (Path(self.shared_log) if self.shared_log else None, self.events_path)
                  if p is not None and p.exists()]
         try:
             every = provenance.read_events(paths)
         except ValueError:
             every = []
+        own = self.seen_events(self.gate.log.events())   # this person's record, as this viewer may see it
         if since:
             from .. import catalog
             try:
                 since = catalog._time(since, False)[:10]
             except ValueError as e:
                 return "not a time: %s" % e
-        folders = integrity.run_folders(self.runs.iterdir(), self._hidden_runs(), since,
-                                        [r for r in str(runs or "").split(",") if r.strip()])
+        only = [r for r in str(runs or "").split(",") if r.strip()]
+        hidden = self._hidden_runs()
+        found = list(self.runs.iterdir())
+        folders = integrity.run_folders(found, hidden, since, only)
         result = integrity.check_runs(folders, integrity.recorded_seals(every))
-        text = integrity.report(checked, result)
+        gone = integrity.runs_gone(integrity.recorded_seals(own), [d.name for d in found], hidden, since, only)
+        again = [a for a in integrity.seals_said_again(own) if a[0] not in hidden and (not only or a[0] in only)]
+        if not only:
+            more += self._notebook_problems(own)
+        text = integrity.report(checked, result, gone, again, more)
         from ..samples import SampleBook
         book, kept, changed = SampleBook(self.data_dir), 0, []
         for key, s in book.all().items():
@@ -3501,6 +3543,34 @@ class LabRuntime:
         if kept or changed:
             text += "\nSample pictures: %d as they were kept%s" % (kept, "".join("\n- " + c for c in changed))
         return text
+
+    def _notebook_problems(self, own: List[Dict[str, Any]]) -> List[str]:
+        """Verify's look at the notebook (D4): each entry the viewer may see against its hash and its signatures (a
+        signed text changed in the file still showed as signed), and each entry and signature the record names (own:
+        its lines this viewer may see) that the notebook no longer has (entries cut from its end)."""
+        from .. import notebook
+        entries = notebook.read(self.data_dir)
+        out: List[str] = []
+        for eid, e in entries.items():
+            if self.may_see(notebook.marks(e)):
+                out += ["the notebook, entry %s: %s" % (eid, why) for why in notebook.altered(e)]
+        for ev in own:
+            kind, eid = ev.get("type"), str(ev.get("entry") or "")
+            if kind not in ("entry", "entry_signed") or not eid:
+                continue
+            e = entries.get(eid)
+            if e is not None and not self.may_see(notebook.marks(e)):
+                continue
+            versions = (e or {}).get("versions", [])
+            if kind == "entry" and not any(v.get("version") == ev.get("version") for v in versions):
+                out.append("the notebook: the record names entry %s v%s, which the notebook here doesn't have"
+                           % (eid, ev.get("version")))
+            elif kind == "entry_signed" and not any(s.get("version") == ev.get("version") and
+                                                    s.get("sha256") == ev.get("sha256")
+                                                    for s in (e or {}).get("signs", [])):
+                out.append("the notebook: the record names a signature on entry %s v%s, which the notebook here "
+                           "doesn't have" % (eid, ev.get("version")))
+        return list(dict.fromkeys(out))
 
     def tidy_later(self) -> None:
         """tidy_runs in the background."""
