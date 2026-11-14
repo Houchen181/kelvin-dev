@@ -1760,7 +1760,7 @@ class LabRuntime:
         if plan.get("script"):
             self.library.note_script(plan["script"], rec.run_id, plan.get("params"), plan.get("args"),
                                      plan.get("python"), plan.get("sha256"), marks=marks,
-                                     beside=rec.meta.get("beside"))
+                                     beside=rec.meta.get("beside"), module=plan.get("module"))
             return
 
         def unit(key: str) -> str:
@@ -5479,9 +5479,25 @@ class LabRuntime:
         python = self._python_here(item["script"], entry.get("python"), notes)
         if python:
             item["python"] = python
+        item["script"] = self._again(item["script"], entry.get("module"))
         with self.attributed(whose):   # its item knows its entry: the Sequence shows the entry's name and colour
             return self.queue_run_now([yaml.safe_dump(item, sort_keys=False, allow_unicode=True)], at_end, by, notes,
                                       library=entry_id, at=at)
+
+    def _again(self, path: str, module: Any) -> str:
+        """How a script is named to run again as it ran: a module of the lab's own, which ran as python -m runs it, as
+        "-m <module>" (one asked for so may import its package by name only, which as a file it can't), while that
+        still finds this very file in the lab's scripts folders; else by its path, so another copy of the package
+        (nvpulse beside v2/nvpulse) never runs in its place."""
+        if not module:
+            return path
+        from .. import scriptrun
+        try:
+            real = Path(path).expanduser().resolve()
+            again = scriptrun.locate_module(str(module), self.scripts_folders())[0]
+        except (scriptrun.ScriptError, OSError, ValueError):
+            return path
+        return "-m %s" % module if real.is_file() and again == real else path
 
     def _python_here(self, script: str, python: Any, notes: List[str]) -> Optional[str]:
         """The Python a run had (as its record names it), if Kelvin still runs the lab's scripts with it here; else
@@ -5933,6 +5949,7 @@ class LabRuntime:
         python = self._python_here(script["path"], script["python"], notes)
         if python:
             item["python"] = python
+        item["script"] = self._again(script["path"], plan.get("module"))
         texts = [yaml.safe_dump(item, sort_keys=False, allow_unicode=True)]
         if restoring:
             texts.insert(0, yaml.safe_dump({"step": "the lab as run %s started" % run_id, "set": restoring},
@@ -8429,18 +8446,38 @@ class LabRuntime:
             raise scriptrun.ScriptError("%s doesn't use kelvin, so it has no actions" % path.name)
         return path, source
 
-    def check_script(self, path: str, params: Optional[Dict[str, Any]] = None, action: str = "") -> str:
+    @staticmethod
+    def _script_named(path: str, module: str = "") -> str:
+        """The script a call names: its path, or a module of the lab's own run as python -m runs it ("-m nvpulse",
+        which scriptrun.locate and prepare take). ScriptError: both, or neither."""
+        from .. import scriptrun
+        path, module = str(path or "").strip(), str(module or "").strip()
+        if module.lower().startswith("-m "):
+            module = module[3:].strip()
+        if path and module:
+            raise scriptrun.ScriptError("give script or module, not both (module: %s runs as python -m %s)"
+                                        % (module, module))
+        if module:
+            return "-m " + module
+        if not path:
+            raise scriptrun.ScriptError("give the script's path, or the module to run as python -m runs it")
+        return path
+
+    def check_script(self, path: str, params: Optional[Dict[str, Any]] = None, action: str = "", module: str = "",
+                     python: str = "") -> str:
         """What running one of the lab's scripts would do, without running it: the Python that runs it, the settings
         it takes, an experiment's actions, and the one approval a person would be asked (instruments, drive ranges,
-        what Kelvin can't check) for the action asked for (action; "": the main one)."""
-        return self.script_check(path, params, action)["text"]
+        what Kelvin can't check) for the action asked for (action; "": the main one). module: a module of the lab's own
+        to run as python -m runs it, instead of a path; python: the Python for this run (scriptrun.python_named)."""
+        return self.script_check(path, params, action, module=module, python=python)["text"]
 
-    def script_check(self, path: str, params: Optional[Dict[str, Any]] = None, action: str = "") -> Dict[str, Any]:
+    def script_check(self, path: str, params: Optional[Dict[str, Any]] = None, action: str = "", module: str = "",
+                     python: str = "") -> Dict[str, Any]:
         """check_script's answer as {text, problems}: problems are what stops the script now (it can't be read or
         run here, or a drive it uses would be refused), for the Runs panel's import."""
         from .. import scriptrun
         try:
-            prep = self._prepare_script(path, params, action=action)
+            prep = self._prepare_script(self._script_named(path, module), params, action=action, python=python)
         except scriptrun.ScriptError as e:
             return {"text": "can't run it: %s" % e, "problems": [str(e)]}
         refused: List[str] = []
@@ -8450,6 +8487,16 @@ class LabRuntime:
             refused.extend(problems)
             settings = scriptrun.parameters(prep.original)
             lines = ["%s in %s" % (prep.name, prep.path.parent)]
+            if prep.module:   # python -m nvpulse runs nvpulse/__main__.py, from the folder above the package
+                try:
+                    lines[0] = "%s (%s) in %s" % (prep.name, prep.path.relative_to(prep.folder).as_posix(),
+                                                  prep.folder)
+                except ValueError:
+                    lines[0] = "%s (%s)" % (prep.name, prep.path)
+            others = [n for n, _ in scriptrun.conda_envs()]
+            if others:   # what python may name for a run, besides the one it runs with
+                lines.append("Pythons a run may name (python), besides the one set in Settings: this computer's conda "
+                             "environments %s" % ", ".join(others[:12]))
             if settings:
                 lines.append("settings it takes (params): " + "; ".join(p.text() for p in settings))
             if prep.found.experiment:
@@ -8467,18 +8514,22 @@ class LabRuntime:
 
     def run_script(self, path: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
                    drives: Optional[Dict[str, Any]] = None, mark: Callable[[str], str] = lambda text: text,
-                   action: str = "", dry_run: bool = False, background: bool = False) -> str:
+                   action: str = "", dry_run: bool = False, background: bool = False, module: str = "",
+                   python: str = "") -> str:
         """Run one of the lab's scripts as it is, in the lab's Python, with every instrument command through the
         gate (scriptrun.py): one approval by a person, then its commands; a stopped or failed run sends what it drove
         back to safe. mark: how the script's own output is marked for the model (text from outside the lab).
         action: an experiment's action (its main one when none is named). dry_run: only a rehearsal of an experiment
         on the simulated lab, never followed by the real run. background: through the queue (queue_run_now), so this
-        returns at once and set_live reaches the run while it goes on. A person's Stop from the moment this is called
-        (while it is read, waits for the lab, is rehearsed, approved or starting) means it doesn't run."""
+        returns at once and set_live reaches the run while it goes on. module: a module of the lab's own, run as python
+        -m runs it, instead of a path. python: the Python for this run (scriptrun.python_named), else the one set in
+        Settings or the one Kelvin finds. A person's Stop from the moment this is called (while it is read, waits for
+        the lab, is rehearsed, approved or starting) means it doesn't run."""
         from .. import scriptrun
         since = self.gate.stop_generation
         try:
-            prep = self._prepare_script(path, params, args, drives, action=action)
+            path = self._script_named(path, module)
+            prep = self._prepare_script(path, params, args, drives, action=action, python=python)
         except scriptrun.ScriptError as e:
             return "script not run: %s" % e
         if dry_run:
@@ -8487,13 +8538,15 @@ class LabRuntime:
             if drives:
                 return ("script not run: drives can't go with background (a queued script's ranges are read from it); "
                         "run it without background to give them")
-            item: Dict[str, Any] = {"script": path}
+            item: Dict[str, Any] = {"script": path}   # a module's as "-m nvpulse", which the queue's item runs so too
             if prep.action:
                 item["action"] = prep.action
             if params:
                 item["params"] = dict(params)
             if args:
                 item["args"] = [str(a) for a in args]
+            if python:
+                item["python"] = str(python)
             try:
                 said = self.queue_run_now([yaml.safe_dump(item, sort_keys=False, allow_unicode=True)],
                                           by="agent")["message"]
@@ -8567,7 +8620,8 @@ class LabRuntime:
         if isinstance(then, dict):
             changed = sorted((n for n in set(then) | set(now) if then.get(n) != now.get(n)), key=str.lower)
             if changed:
-                lines.append("Beside it, changed %s (it may import them): %s%s" % (since, ", ".join(
+                lines.append("%s, changed %s (it may import them): %s%s" % (
+                    "In its package" if getattr(prep, "module", "") else "Beside it", since, ", ".join(
                     n + (" (new)" if n not in then else " (gone)" if n not in now else "") for n in changed[:8]),
                     " and %d more" % (len(changed) - 8) if len(changed) > 8 else ""))
         return lines

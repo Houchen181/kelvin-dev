@@ -163,7 +163,8 @@ You are connected to a physics lab through Kelvin.
   wants one of their scripts run as it is (from the lab's scripts folders, or one they imported in the Runs panel),
   use run_script: it runs in the lab's own Python with every command it sends through the gate, after one
   approval, and its readings become a run like a plan's. params changes its settings for that run (check_script
-  lists them); never edit the person's script to change a value.
+  lists them); never edit the person's script to change a value. Code run as python -m <package>: module, with
+  args; a Python the person names for the run (a conda environment): python. Never write a launcher for it.
 - A lab that runs its instruments from LabVIEW: survey_labview on its LabVIEW folder reads NI MAX and its projects
   and VIs the same way (never running a VI) and translates each VI it could read into a scan, saying what didn't
   translate; a scan is a plan, run with run_plan once the person agrees. Never guess what a VI not read does.
@@ -614,24 +615,33 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return outside(rt, "the lab's experiments", rt.experiments_view(name))
 
     @server.tool(annotations=READ, structured_output=False)
-    def check_script(script: str, params: Optional[Dict[str, Any]] = None, action: str = "") -> str:
-        """What run_script would do with one of the lab's own scripts, without running it: the Python that runs it,
-        the settings it takes (its module constants such as VMAX = 5, and main()'s defaults: params changes them
-        for a run), an experiment's actions, and the one approval a person would be asked (the lab instruments it
-        opens, the drive ranges it uses, what Kelvin can't check) for that action (action; "": its main one). Only to
-        see a script's settings, or when the person asks: run_script checks by itself."""
-        return outside(rt, "the lab's scripts", rt.check_script(script, params or {}, action))
+    def check_script(script: str = "", params: Optional[Dict[str, Any]] = None, action: str = "", module: str = "",
+                     python: str = "") -> str:
+        """What run_script would do with one of the lab's own scripts, without running it: the Python that runs it
+        (and the others a run may name), the settings it takes (its module constants such as VMAX = 5, and main()'s
+        defaults: params changes them for a run), an experiment's actions, and the one approval a person would be
+        asked (the lab instruments it opens, the drive ranges it uses, what Kelvin can't check) for that action
+        (action; "": its main one). module and python as run_script takes them. Only to see a script's settings, or
+        when the person asks: run_script checks by itself."""
+        return outside(rt, "the lab's scripts", rt.check_script(script, params or {}, action, module=module,
+                                                                python=python))
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
-    def run_script(script: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[str]] = None,
+    def run_script(script: str = "", params: Optional[Dict[str, Any]] = None, args: Optional[List[str]] = None,
                    drives: Optional[Dict[str, Any]] = None, action: str = "", dry_run: bool = False,
-                   background: bool = False) -> str:
+                   background: bool = False, module: str = "", python: str = "") -> str:
         """Run one of the lab's own measurement scripts (Python or a notebook) as it is, in the lab's own Python:
         script is its path in one of the lab's scripts folders (those the person named in Settings or Set up: a file
         name is the file at the top of a folder, else the only one in their sub-folders; when two folders have it at
         the top, or two sub-folders, give its full path), or one the person imported in the Runs panel; Kelvin runs
-        nothing from elsewhere. Every command it sends to a lab instrument (pyvisa, pyserial, a socket)
+        nothing from elsewhere. Code the lab runs as python -m <package> <args>: module is the package or module
+        ({"module": "nvpulse", "args": ["check", "soc"]}), in place of script; a package's own modules, its
+        __main__.py too, run as python -m runs them by themselves, so their relative imports work. python: the Python
+        for this run, when the person says which: one of this computer's conda environments (its name, folder or
+        python.exe; check_script lists them) or the one set in Settings; else Kelvin uses the one set in Settings, or
+        finds one with everything it imports. Every
+        command it sends to a lab instrument (pyvisa, pyserial, a socket)
         goes through the safety gate on Kelvin's own connection: readings and settings run, drives are checked against
         the limits, ramped and watched. A person approves the run once; Kelvin reads the script first for the drive
         ranges it uses. params: values for its settings for this run, without editing the file ({"VMAX": 2});
@@ -647,7 +657,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         can change its live inputs from this chat while it runs."""
         return rt.run_script(script, params or {}, args or [], drives or {},
                              mark=lambda text: outside(rt, "the lab's script output", text), action=action,
-                             dry_run=dry_run, background=background)
+                             dry_run=dry_run, background=background, module=module, python=python)
 
     @server.tool(annotations=ACT, structured_output=False)
     def set_live(name: str, value: Any, run: str = "") -> str:
