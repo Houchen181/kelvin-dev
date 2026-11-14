@@ -1354,7 +1354,7 @@ class Monitor:
                     self._tell(a, "Raised once: it stays until %s's replies have been clean for %s. Runs that read it "
                                   "stop at a reply Kelvin can't read." % (name, _dur(GARBLE_CLEAR_S)), instrument=name)
             elif name in self._comms and now - self._garbled_lab.get(name, now) >= GARBLE_CLEAR_S \
-                    and (h.answered_at or 0) > (h.garbled_at or 0):
+                    and h.clean_since_garble:
                 a = self._comms.pop(name)
                 self._clear(a.id, "%s's replies are clean again (none garbled for %s; %d garbled in all)"
                             % (name, _dur(GARBLE_CLEAR_S), h.garbles))

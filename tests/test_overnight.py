@@ -297,6 +297,41 @@ def test_garbled_replies_raise_one_comms_fault_that_holds_until_they_are_clean(l
     assert notices[-1][1].startswith("Cleared: lockin's replies are clean again (none garbled for 5 min")
 
 
+def test_a_comms_fault_clears_though_the_clean_replies_bear_the_garbled_ones_clock_stamp(lab, make_gate, monkeypatch):
+    """Windows' clock (time.time under Python 3.12 and older) moves every 15.6 ms: clean replies in the same tick as
+    the last garbled one bore its stamp, and the comms fault stayed up (the test above failed so on Python 3.9). The
+    order of the replies says it, not their stamps."""
+    import time as real_time
+
+    import labharness.instrument as instrument_module
+    from labharness.monitor import GARBLE_CLEAR_S, Monitor
+
+    class OneTick:   # the wall clock as one 15.6 ms tick: every stamp the same
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        @staticmethod
+        def time():
+            return 1_700_000_000.0
+    monkeypatch.setattr(instrument_module, "time", OneTick())
+    gate, _ = make_gate([])
+    monitor = Monitor(lab, gate, lambda kind, title, text="": None)
+    twin = real_twin(lab, "lockin")
+    monitor.add(Watch("lockin.X", above=1, every=0))
+    monitor.tick()
+    real = garbling(twin)
+    for _ in range(3):
+        lab.clock.sleep(61)
+        monitor.tick()
+    [alarm] = monitor.alarms
+    assert alarm.kind == "comms" and not alarm.cleared
+    twin.query = real
+    for _ in range(int(GARBLE_CLEAR_S // 61) + 2):
+        lab.clock.sleep(61)
+        monitor.tick()
+    assert alarm.cleared
+
+
 def test_a_garbled_reading_stops_a_run_in_words_and_a_garbled_error_check_fails_a_set(lab, make_engine):
     from labharness import load_plan
     from labharness.instrument import Garbled

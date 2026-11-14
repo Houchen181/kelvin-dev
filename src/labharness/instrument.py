@@ -194,6 +194,9 @@ class Health:
     garbles: int = 0                     # replies that arrived garbled since Kelvin connected it
     garbled_text: str = ""               # the latest, in plain words
     garbled_at: Optional[float] = None
+    # its latest reply arrived clean, by the order of its replies: a clean one and a garbled one can bear the same
+    # clock stamp (Windows' clock moves every 15.6 ms under Python 3.12 and older), and a comms fault then stayed up
+    clean_since_garble: bool = True
     reopened_at: Optional[float] = None  # when Kelvin last made its connection anew, its session having died
     reopened_as: str = ""                # the identity it answered then, as itself
 
@@ -213,6 +216,7 @@ class Health:
     def answered(self) -> None:
         with self._lock:
             self.fails, self.gone, self.answered_at = 0, False, time.time()
+            self.clean_since_garble = True
 
     def resting(self, now: Optional[float] = None) -> Optional[float]:
         """Until when Kelvin's own looks (the Lab panel, the idle checks) leave it alone after it stopped answering:
@@ -229,6 +233,7 @@ class Health:
             self.fails, self.gone = 0, False
             self.garbles += 1
             self.garbled_text, self.garbled_at = text, time.time()
+            self.clean_since_garble = False
 
 
 class OffBackend:
