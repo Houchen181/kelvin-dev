@@ -9621,10 +9621,10 @@ class LabRuntime:
                 rec = envs.info(env, self.home) or rec
                 kept = self._fetch_files(env, files)
                 rec = envs.info(env, self.home) or rec
-        except Exception as e:
-            self.gate.log.write("install_failed", by=by, env=env, packages=packages, files=files or None,
-                                error=profiles._first_line(e))
-            return "could not install: %s" % profiles._first_line(e)
+        except Exception as e:   # uv's whole reason (envs._said): cut at 200, it lost the versions that clash
+            said = profiles._first_line(e, 2000)
+            self.gate.log.write("install_failed", by=by, env=env, packages=packages, files=files or None, error=said)
+            return "could not install: %s" % said
         if env == envs.DRIVERS:
             envs.attach(env, self.home)
         self.gate.log.write("installed", by=by, env=env, packages=packages, files=files or None, why=why or None)

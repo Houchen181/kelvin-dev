@@ -108,6 +108,63 @@ def test_kelvin_installs_a_drivers_package_and_says_what(kelvin, tmp_path):
     assert any(e.get("type") == "installed" and e.get("env") == "drivers" for e in logged)
 
 
+# uv refusing versions that can't go together (the drivers environment is held to the app's numpy, %s), as uv says it
+# now and as an older uv said it; uv puts the environment's line first, since Kelvin names its Python
+UV_CLASH = """Using Python 3.13.15 environment at: C:\\Users\\someone\\Kelvin\\env\\drivers
+error: No solution found when resolving dependencies
+  cause: Because you require numpy==2.2.6 and %s, we can conclude that your requirements are unsatisfiable.
+"""
+UV_CLASH_BOXED = """Using Python 3.13.15 environment at: C:\\Users\\someone\\Kelvin\\env\\drivers
+  × No solution found when resolving dependencies:
+  ╰─▶ Because you require numpy==2.2.6 and %s, we can conclude that your requirements are unsatisfiable.
+"""
+
+
+@pytest.mark.parametrize("said", [UV_CLASH, UV_CLASH_BOXED], ids=["uv", "an older uv"])
+def test_a_version_clash_names_both_versions_and_whose_one_is(kelvin, monkeypatch, said):
+    """Field report (2026-11-13): asked to pin numpy==2.2.6 in the drivers environment, uv refused, and Kelvin's answer
+    stopped at "Because you require numpy==2.2": its first 200 characters, uv's line on the environment first."""
+    pin = (envs.app_pins() or ["numpy==2.5.4"])[0]
+    monkeypatch.setattr(envs, "app_pins", lambda: [pin])
+    monkeypatch.setitem(PYPI, "numpy", {"info": {"name": "numpy", "version": "2.5.4", "summary": "arrays"}})
+    assert kelvin.install_for_instrument("drivers", ["Pyro4"]).startswith("installed")
+    uv = kelvin.uv
+
+    def refuses(cmd, env):
+        if cmd[1:3] == ["pip", "install"] and "numpy==2.2.6" in cmd:
+            uv.envs.append(env)
+            return 1, said % pin
+        return uv(cmd, env)
+    monkeypatch.setattr(envs, "_run", refuses)
+    answer = kelvin.install_for_instrument("drivers", ["numpy==2.2.6"])
+    assert answer == ("could not install: uv could not install numpy==2.2.6: No solution found when resolving "
+                      "dependencies: Because you require numpy==2.2.6 and %s, we can conclude that your requirements "
+                      "are unsatisfiable. (%s is Kelvin's own. Kelvin's built-in drivers run with it whatever this "
+                      "environment has, so the environment keeps it.)" % (pin, pin))
+    assert uv.envs[-1]["UV_NO_WRAP"] == "1"                            # each of uv's sentences on one line
+
+
+def test_what_uv_said_reads_whole_however_it_wraps():
+    wrapped = ("Using Python 3.13.15 environment at: C:\\Kelvin\\env\\drivers\n"
+               "  × No solution found when resolving dependencies:\n"
+               "  ╰─▶ Because qick==0.2.422 depends on numpy<2 and you require numpy==2.5.4,\n"
+               "      we can conclude that qick==0.2.422 cannot be used.\n"
+               "      And because you require qick==0.2.422, we can conclude that your\n"
+               "      requirements are unsatisfiable.\n\n"
+               "      hint: numpy was requested with a pre-release marker\n")
+    assert envs._said(wrapped) == ("No solution found when resolving dependencies: Because qick==0.2.422 depends on "
+                                   "numpy<2 and you require numpy==2.5.4, we can conclude that qick==0.2.422 cannot be "
+                                   "used. And because you require qick==0.2.422, we can conclude that your requirements "
+                                   "are unsatisfiable. hint: numpy was requested with a pre-release marker")
+    built = ("Resolved 1 package in 120ms\nerror: Failed to build `oddpkg==1.0`\n  cause: The build backend returned an "
+             "error\n\n  [stderr]\n  error: Microsoft Visual C++ 14.0 or greater is required\n\n"
+             "hint: This usually indicates a problem with the package or the build environment.\n")
+    assert envs._said(built) == ("cause: The build backend returned an error | error: Microsoft Visual C++ 14.0 or "
+                                 "greater is required | hint: This usually indicates a problem with the package or the "
+                                 "build environment.")
+    assert envs._said("") == "no message"
+
+
 def test_after_reading_the_web_a_person_answers_and_a_no_installs_nothing(kelvin, tmp_path):
     kelvin.gate.note_outside("a web page")                            # it could be steering the model
     kelvin.approver.answers = [False]

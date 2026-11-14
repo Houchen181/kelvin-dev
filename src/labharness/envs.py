@@ -167,12 +167,14 @@ def clean_environ(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
 
 
 def uv_env(home: Any = None) -> Dict[str, str]:
-    """uv keeps everything in Kelvin's folder and uses only the Pythons it fetched (never one a program left)."""
+    """uv keeps everything in Kelvin's folder and uses only the Pythons it fetched (never one a program left). It
+    writes each sentence of an error on one line (UV_NO_WRAP), as _said() reads them."""
     tools = root(home) / "tools"
     env = {k: v for k, v in clean_environ().items()
            if k not in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", "CONDA_PREFIX")}
     env.update({"UV_PYTHON_INSTALL_DIR": str(tools / "python"), "UV_CACHE_DIR": str(tools / "uv-cache"),
-                "UV_MANAGED_PYTHON": "1", "UV_NO_PROGRESS": "1", "UV_NO_CONFIG": "1", "UV_LINK_MODE": "copy"})
+                "UV_MANAGED_PYTHON": "1", "UV_NO_PROGRESS": "1", "UV_NO_CONFIG": "1", "UV_LINK_MODE": "copy",
+                "UV_NO_WRAP": "1"})
     return env
 
 
@@ -182,9 +184,26 @@ def _run(cmd: List[str], env: Dict[str, str]) -> Tuple[int, str]:
     return p.returncode, p.stdout.decode("utf-8", "replace")
 
 
-def _tail(text: str) -> str:
-    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
-    return " | ".join(lines[-3:])[:400] or "no message"
+# uv's lines on its progress and on the Python it works with, and its [stderr] labels: none says what went wrong
+_UV_PROGRESS = re.compile(r"^(Using \S+ \S+ (environment|interpreter) at|Creating virtual environment|Resolved \d|"
+                          r"Prepared \d|Installed \d|Uninstalled \d|Audited \d|Checked \d|Bytecode compiled|"
+                          r"Downloading |Downloaded |Building |Built |[-+~] \S|\[std(out|err)\]$)")
+# how uv marks an error and its causes: "error:" and "cause:", or (an older uv) "×", "├─▶" and "╰─▶"
+_UV_MARK = re.compile(r"^(error:|cause:|×|[├╰]─▶|│)\s*")
+
+
+def _said(text: str) -> str:
+    """What uv says went wrong, on one line. Versions that can't go together: its whole reason, which names them
+    ("Because you require numpy==2.2.6 and numpy==2.5.4, ..."). Anything else: its last lines, where a failed
+    build's own error is."""
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    lines = [ln for ln in lines if ln and not _UV_PROGRESS.match(ln)]
+    start = next((i for i, ln in enumerate(lines) if "No solution found" in ln), None)
+    if start is None:
+        return " | ".join(lines[-3:])[:400] or "no message"
+    head = _UV_MARK.sub("", lines[start]).rstrip(":")
+    why = " ".join(_UV_MARK.sub("", ln) for ln in lines[start + 1:])
+    return ("%s: %s" % (head, why) if why else head)[:1500]
 
 
 def _uv(home: Any) -> Path:
@@ -211,7 +230,7 @@ def create(name: str, python: str = "", bits: int = 64, home: Any = None, run: O
     d = env_dir(name, home)
     code, out = run([str(_uv(home)), "venv", str(d), "--python", python], env)
     if code:
-        raise RuntimeError("uv could not make the environment %s: %s" % (name, _tail(out)))
+        raise RuntimeError("uv could not make the environment %s: %s" % (name, _said(out)))
     rec = {"name": name, "python": python, "bits": bits, "packages": {}, "files": [], "for": [why] if why else [],
            "created": time.time()}
     _save(rec, home)
@@ -244,7 +263,12 @@ def _pip(name: str, what: List[str], home: Any, run: Run) -> Dict[str, Any]:
         cmd += ["--constraint", str(env_dir(name, home) / "constraints.txt")]
     code, out = run(cmd + what, env)
     if code:
-        raise RuntimeError("uv could not install %s: %s" % (", ".join(Path(w).name for w in what), _tail(out)))
+        said = _said(out)
+        held = [p for p in pins if p in said]
+        if held:   # the conflict is with the app's own version, which a person can't change here
+            said += (" (%s is Kelvin's own. Kelvin's built-in drivers run with it whatever this environment has, so "
+                     "the environment keeps it.)" % " and ".join(held))
+        raise RuntimeError("uv could not install %s: %s" % (", ".join(Path(w).name for w in what), said))
     code, out = run([str(uv), "pip", "list", "--python", str(py), "--format", "json"], env)
     try:
         rec["installed"] = {d["name"].lower().replace("_", "-"): d["version"] for d in json.loads(out[out.find("["):])}
