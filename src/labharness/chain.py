@@ -113,16 +113,18 @@ def setting_in_run(key: str, plan: Dict[str, Any], start: Dict[str, Any]) -> Any
 
 def excitation_current(chain: Dict[str, Any], value_of: Callable[[str], Any]) -> Optional[Tuple[float, str]]:
     """The excitation as an rms current through the sample (A), with how it was worked out; None when the chain has
-    no excitation or its value isn't known (value_of(key) gives the setting's value, None when unknown)."""
+    no excitation or its value isn't known (value_of(key) gives the setting's value, None when unknown). A dc current
+    keeps its sign (-1 µA through 1 kΩ reads -1 mV: R is +1 kΩ); an ac amplitude has none."""
     exc = (chain or {}).get("excitation")
     if not exc:
         return None
     v = value_of(exc["source"])
     if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v) or v == 0:
         return None
-    rms = abs(v) * FORMS[exc["form"]]
+    v = v if exc["form"] == "dc" else abs(v)
+    rms = v * FORMS[exc["form"]]
     unit = "V" if exc.get("series_resistor") else "A"
-    how = "%s = %s %s" % (exc["source"], _si(abs(v), unit), exc["form"])
+    how = "%s = %s %s" % (exc["source"], _si(v, unit), exc["form"])
     if exc["form"] not in ("rms", "dc"):
         how += " = %s rms" % _si(rms, unit)
     if exc.get("series_resistor"):
@@ -168,11 +170,13 @@ def derived_readings(chain: Any, setup: Any, start: Any, measures: Any) -> Dict[
         return setting_in_run(key, plan, start if isinstance(start, dict) else {})
     current = excitation_current(chain, value_of)
     source = ((chain.get("excitation") or {}).get("source")) or ""
+    dc = (chain.get("excitation") or {}).get("form") == "dc"   # its sign kept, as excitation_current keeps it
     out = {}
     for m in measures or []:
         d = derived(chain, m["key"], m.get("unit") or "", current)
         if d:
-            out[m["key"]] = Derived(d, source, abs(float(value_of(source))))
+            value = float(value_of(source))
+            out[m["key"]] = Derived(d, source, value if dc else abs(value))
     return out
 
 

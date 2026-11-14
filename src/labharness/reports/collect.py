@@ -290,7 +290,12 @@ class Collector:
             ys = last[m["key"]]
             xs = trace_x(last, m["key"], len(ys))
             series = [Series(m["key"], xs, ys)]
-            fit = next((f for f in fits if f["y"] == m["key"]), None)
+            # the drawn row's own fit, never the first row's (its line may have moved since): the analysis's last
+            # series of this trace, where it is that row's, by the same label the analysis gives it
+            label = "%s = %s" % (axes[-1]["key"], si(last.get(axes[-1]["key"]), axes[-1].get("unit", ""))) \
+                if axes and len(rows) > 1 else None
+            own = [s for s in analysis.get("series") or [] if s.get("y") == m["key"]]
+            fit = own[-1] if own and own[-1].get("group") == label and own[-1] in fits else None
             if fit:
                 series.append(Series("fit", fit["fit"]["x"], fit["fit"]["y"], fit=True))
             x_unit = m.get("x_unit", "")

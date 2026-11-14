@@ -175,8 +175,12 @@ def step(np: Any, x: Any, y: Any, xu: Optional[str], yu: Optional[str], xn: str,
         if x.size < 3:
             raise AnalysisError("a derivative needs 3 points or more")
         dx = np.gradient(x)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            y = np.where(dx != 0, np.gradient(y) / dx, np.nan)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            # at each point, on unevenly spaced x too (a log sweep), as compute's deriv(y, x): the slope between its
+            # two neighbours was off by 31% at three points a decade; where x repeats, still that slope
+            even = np.where(dx != 0, np.gradient(y) / dx, np.nan)
+            exact = np.gradient(y, x)
+            y = np.where(np.isfinite(exact), exact, even)
         yu, yn = units.per(yu, xu), "d%s/d%s" % (yn, xn)
     elif op == "integrate":
         if x.size < 2:

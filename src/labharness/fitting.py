@@ -36,7 +36,8 @@ SIGNIFICANT = 1e-3            # a fit that beats a flat line by less than noise 
 from .rundata import DERIVED_LOCK as _STORE   # noqa: E402 - one writer of a run's derived.h5 at a time
 OHMS = {"Ω": 1.0, "ohm": 1.0, "Ohm": 1.0, "ohms": 1.0, "mΩ": 1e-3, "kΩ": 1e3, "MΩ": 1e6, "GΩ": 1e9,
         "mOhm": 1e-3, "kOhm": 1e3, "MOhm": 1e6}
-TESLA = {"T": 1.0, "mT": 1e-3, "µT": 1e-6, "uT": 1e-6, "G": 1e-4, "kG": 0.1}
+TESLA = {"T": 1.0, "mT": 1e-3, "µT": 1e-6, "uT": 1e-6, "G": 1e-4, "kG": 0.1, "Oe": 1e-4, "kOe": 0.1}   # Oe: µ0·H
+VOLTS = {"V": 1.0, "mV": 1e-3, "µV": 1e-6, "uV": 1e-6, "kV": 1e3}
 LOCATIONS = ("x0", "x1", "x2", "fr", "V_D", "t0")   # parameters that say where along x a feature is
 PEAK_MODELS = ("lorentzian", "gaussian", "double_lorentzian")
 
@@ -123,12 +124,19 @@ def least_squares(fun: Callable[[Any], Any], p0: Sequence[float], free: Optional
         it += 1
         js, norms = scaled(jac)
         g = js.T @ r
-        a = js.T @ js
+        # a parameter at a bound that the step would push past it sits the step out, held there, and the others are
+        # solved for without it (solved with it and clipped after, they crept on to the step limit: "did not converge")
+        move = ~(((p[free] <= lo[free]) & (g > 0)) | ((p[free] >= hi[free]) & (g < 0)))
+        if not move.any():   # every free parameter pressed against its bound: the best the bounds allow
+            converged = True
+            break
+        a = (js.T @ js)[np.ix_(move, move)]
         eye = np.eye(a.shape[0])
         accepted = False
         while lam < 1e16:
+            step = np.zeros(free.size)
             try:
-                step = -np.linalg.solve(a + lam * eye, g) / norms
+                step[move] = -np.linalg.solve(a + lam * eye, g[move]) / norms[move]
             except np.linalg.LinAlgError:
                 lam *= 10
                 continue
@@ -631,9 +639,9 @@ def _resonator_magnitude() -> Model:
 
 def _graphene() -> Model:
     def f(x: Any, p: Dict[str, Any]) -> Any:
-        np = _np()
-        n = p["C_g"] * (x - p["V_D"]) / QE
-        return p["R_c"] + p["aspect"] / (QE * abs(p["mu"]) * np.sqrt(p["n0"] ** 2 + n * n))
+        np = _np()   # x and y in the data's own units: _x_si and _y_si make them V and Ω (_si: a gate in mV, R in kΩ)
+        n = p["C_g"] * p.get("_x_si", 1.0) * (x - p["V_D"]) / QE
+        return p["R_c"] + p["aspect"] / (p.get("_y_si", 1.0) * QE * abs(p["mu"]) * np.sqrt(p["n0"] ** 2 + n * n))
 
     def guess(x: Any, y: Any) -> Dict[str, float]:
         np = _np()
@@ -695,8 +703,11 @@ def _gl_hc2() -> Model:
         return {"Tc": tc, "Bc2_0": float(y.max()) / max(1 - (float(x[int(np.argmax(y))]) / tc) ** 2, 0.05)}
 
     def derived(v: Dict[str, float], xu: str, yu: str) -> List[Tuple[str, float, str]]:
-        return [("GL coherence length xi(0)", math.sqrt(PHI0 / (2 * math.pi * abs(v["Bc2_0"]))) if v["Bc2_0"] else
-                 math.inf, "m")]
+        tesla = TESLA.get(yu or "T")   # Bc2_0 is in y's unit (mT, Oe): the coherence length takes it in tesla
+        if tesla is None:              # not a field: no coherence length (_field_unit says why)
+            return []
+        return [("GL coherence length xi(0)", math.sqrt(PHI0 / (2 * math.pi * abs(v["Bc2_0"] * tesla))) if v["Bc2_0"]
+                 else math.inf, "m")]
     return Model("gl_hc2", ("Bc2_0", "Tc"), f, "Bc2_0·(1 - (T/Tc)²)", guess,
                  lambda xu, yu: {"Bc2_0": yu or "T", "Tc": xu or "K"},
                  "the upper critical field against temperature, Ginzburg-Landau's empirical parabola (x: T in K, "
@@ -732,7 +743,10 @@ def _whh_hc2() -> Model:
         return {"Tc": float(tc), "S": float(abs(s)) or 1.0}
 
     def derived(v: Dict[str, float], xu: str, yu: str) -> List[Tuple[str, float, str]]:
-        b0 = 0.693 * v["Tc"] * v["S"]
+        tesla = TESLA.get(yu or "T")   # Tc·S is in y's unit (mT, Oe): said in tesla
+        if tesla is None:              # not a field (_field_unit says why)
+            return []
+        b0 = 0.693 * v["Tc"] * v["S"] * tesla
         return [("Bc2(0), WHH (0.693·Tc·S)", b0, "T"),
                 ("GL coherence length xi(0)", math.sqrt(PHI0 / (2 * math.pi * b0)) if b0 > 0 else math.inf, "m")]
     return Model("whh_hc2", ("Tc", "S"), f, "Tc·S·h_WHH(T/Tc)", guess,
@@ -881,9 +895,10 @@ def fit(model: Model, x: Any, y: Any, sigma: Any = None, start: Optional[Dict[st
     free_names = [k for k in model.params if k not in held]
     if n < len(free_names) + 1:
         raise FitError("%d points can't fit %d parameters" % (n, len(free_names)))
+    si = _si(model, x_unit, y_unit)
     guess = model.guess(xs, y) if model.guess else {}
     if model.name == "graphene":   # mobility and puddle density from the curve's tails and peak, given C_g and aspect
-        cg, aspect = float(held["C_g"]), float(held["aspect"])
+        cg, aspect = float(held["C_g"]) * si["_x_si"], float(held["aspect"]) / si["_y_si"]   # per the data's units
         guess["mu"] = aspect / max(cg * guess["_far"] * max(guess["_rfar"], 1e-30), 1e-300)
         guess["n0"] = aspect / max(QE * guess["mu"] * max(guess["_rmax"], 1e-30), 1e-300)
     p0 = []
@@ -920,7 +935,7 @@ def fit(model: Model, x: Any, y: Any, sigma: Any = None, start: Optional[Dict[st
     free = [model.params.index(k) for k in free_names]
 
     def values(p: Any) -> Dict[str, Any]:
-        return dict(zip(model.params, p))
+        return dict(zip(model.params, p), **si)
 
     def evaluate(p: Any, at: Any = None, cols: Optional[Dict[str, Any]] = None) -> Any:
         at = xs if at is None else at
@@ -974,6 +989,8 @@ def fit(model: Model, x: Any, y: Any, sigma: Any = None, start: Optional[Dict[st
     _significance(np, out, model, xs, y, sig)
     if model.name == "hall":   # after the significance: the density follows the same test
         _hall_density(out, x_unit, y_unit)
+    if model.name in ("gl_hc2", "whh_hc2"):
+        _field_unit(out, y_unit)
     out["failed"] = _failed(out, sol, model, xs)
     return out
 
@@ -1081,6 +1098,27 @@ def _hall_density(out: Dict[str, Any], x_unit: str, y_unit: str) -> None:
         out["warnings"].append("y has no unit: the carrier density takes it to be in ohms")
 
 
+def _si(model: Model, x_unit: str, y_unit: str) -> Dict[str, float]:
+    """What turns the data's own units into the ones a model's formula is written in: graphene's gate in V and
+    resistance in Ω (a gate in mV, an R in kΩ once read 1000 times off in mobility). FitError for units it can't take;
+    none given are taken to be those."""
+    if model.name != "graphene":
+        return {}
+    volts, ohms = VOLTS.get(x_unit or "V"), OHMS.get(y_unit or "Ω")
+    if volts is None:
+        raise FitError("graphene's x is the gate voltage, in V (or mV): not in %s" % x_unit)
+    if ohms is None:
+        raise FitError("graphene's y is the resistance, in Ω (or kΩ): not in %s" % y_unit)
+    return {"_x_si": volts, "_y_si": ohms}
+
+
+def _field_unit(out: Dict[str, Any], y_unit: str) -> None:
+    """An Hc2 fit's y must be a field for Bc2(0) and the coherence length (in T, or mT, G, Oe: converted)."""
+    if y_unit and y_unit not in TESLA:
+        out["warnings"].append("y is in %s, not a magnetic field: no Bc2(0) in tesla or coherence length follows "
+                               "(give Bc2 in T, mT, G or Oe)" % y_unit)
+
+
 def _plain(np: Any, a: Any) -> Any:
     """An array as JSON can keep it: complex values as [re, im] pairs."""
     a = np.asarray(a)
@@ -1164,6 +1202,7 @@ def curve(model: Model, result: Dict[str, Any], points: int = CURVE_POINTS) -> T
     if model.columns or x.size < 2:
         return list(result["x"]), list(result["fit"])
     p = {q["name"]: q["value"] for q in result["params"]}
+    p.update(_si(model, result.get("x_unit") or "", result.get("y_unit") or ""))
     x0 = result.get("x_start") or 0.0
     grid = np.linspace(float(x.min()), float(x.max()), points)
     with np.errstate(all="ignore"):
@@ -1338,7 +1377,8 @@ def kept_curve(kept: Dict[str, Any]) -> Tuple[List[float], List[float]]:
             raise KeyError(kept.get("model"))
         if len(m.params) != len(kept.get("params") or []) or m.complex:
             raise KeyError("shape")
-        result = {"x": x.tolist(), "fit": fy.tolist(), "x_start": kept.get("x_start"),
+        result = {"x": x.tolist(), "fit": fy.tolist(), "x_start": kept.get("x_start"), "x_unit": kept.get("x_unit"),
+                  "y_unit": kept.get("y_unit"),
                   "params": [{"name": k, "value": v} for k, v in zip(kept["params"], kept["values"])]}
         return curve(m, result)
     except (KeyError, ValueError, TypeError, FitError):
