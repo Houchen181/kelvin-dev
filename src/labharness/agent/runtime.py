@@ -438,6 +438,113 @@ def writable_folder(path: Any) -> Path:
     return new
 
 
+def _writable(path: str) -> None:
+    """A kept file's read-only mark cleared (a run.h5 and its seal have one: rundata._read_only)."""
+    import os
+    import stat
+    try:
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+    except OSError:
+        pass
+
+
+def _remove(path: Path) -> None:
+    """A file or folder deleted, read-only marks and all; OSError when some of it can't be."""
+    import os
+    import shutil
+    if not os.path.lexists(str(path)):
+        return
+    if path.is_dir() and not path.is_symlink():
+        for root, dirs, files in os.walk(str(path)):
+            for name in dirs + files:
+                _writable(os.path.join(root, name))
+        shutil.rmtree(str(path))
+    else:
+        _writable(str(path))
+        os.unlink(str(path))
+
+
+def _copy_differs(src: Path, copy: Path) -> Optional[str]:
+    """Why a copy isn't whole (a file missing or of another size, a run's run.h5 that isn't what its seal says), or
+    None."""
+    import os
+    if not src.is_dir():
+        return None if copy.is_file() and copy.stat().st_size == src.stat().st_size else "the copy isn't whole"
+    for root, _, files in os.walk(str(src)):
+        for name in files:
+            a = Path(root) / name
+            b = copy / a.relative_to(src)
+            if not b.is_file() or b.stat().st_size != a.stat().st_size:
+                return "%s wasn't copied whole" % a.relative_to(src).as_posix()
+    seal = rundata.sealed(src)
+    if seal and (copy / rundata.RUN_FILE).exists() and rundata.sha256_file(copy / rundata.RUN_FILE) != seal:
+        return "the copy of run.h5 isn't what its seal says"
+    return None
+
+
+def _restore(copy: Path, original: Path) -> None:
+    """What a delete that stopped part-way took of the original, put back from its copy."""
+    import os
+    import shutil
+    if not copy.is_dir():
+        if not original.exists():
+            shutil.copy2(str(copy), str(original))
+        return
+    for root, _, files in os.walk(str(copy)):
+        for name in files:
+            a = Path(root) / name
+            b = original / a.relative_to(copy)
+            if not b.exists():
+                b.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(a), str(b))
+
+
+def move_item(src: Path, dst: Path, staging: Path) -> Optional[str]:
+    """A file or folder of the data folder moved to dst, which isn't there: renamed on one drive; across drives
+    copied into staging (beside dst, so a copy half made is never taken for a run), checked (each file's size, a
+    run's run.h5 against its seal), put in its place, then the original deleted, read-only marks cleared first. A
+    kept run.h5 and its seal are read-only, so a plain move copied a run, failed to delete it, and left it in both
+    places, the move ending there at every try (audit 0.3.52, R14). None when moved; else why not, and then the
+    original is whole where it was and nothing is at dst."""
+    import errno
+    import os
+    import shutil
+    try:
+        os.rename(str(src), str(dst))
+        return None
+    except OSError as e:
+        if e.errno != errno.EXDEV:   # on one drive: nothing changed
+            return "it couldn't be moved (%s), so it stays here" % (e.strerror or e)
+    part = staging / dst.name
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+        _remove(part)   # what an earlier try left
+        if src.is_dir():
+            shutil.copytree(str(src), str(part))
+        else:
+            shutil.copy2(str(src), str(part))
+        why = _copy_differs(src, part)
+        if why:
+            raise OSError(why)
+        os.rename(str(part), str(dst))
+    except OSError as e:
+        try:
+            _remove(part)
+        except OSError:
+            pass
+        return "it couldn't be copied there (%s), so it stays here" % (e.strerror or e)
+    try:
+        _remove(src)
+    except OSError as e:   # part of it is in use (another program has a file open): made whole here again
+        try:
+            _restore(dst, src)
+            _remove(dst)
+        except OSError:
+            pass
+        return "it couldn't be deleted here (%s), so it stays here whole" % (e.strerror or e)
+    return None
+
+
 def _installed_by_a_maker(folder: str) -> bool:
     """A folder a maker's installer wrote: in Program Files (only an administrator writes there), /Applications or
     /opt."""
@@ -1984,11 +2091,21 @@ class LabRuntime:
                 if (self.data_dir / "reports").exists() else 0,
                 "elsewhere": sum(1 for d in self.runs.iterdir() if d.parent != runs)}   # in chats' own folders
 
+    # what a data folder holds that follows it, with "Move what is saved now": each item of these folders (a run, a
+    # report, a written sequence, a saved queue, a figure...), and these files. It moved runs, reports, sequences, the
+    # record and the library only, so the notebook, the samples and the saved queues stayed behind while the answer
+    # said nothing was kept back (audit 0.3.52, R15)
+    DATA_FOLDERS = ("runs", "reports", "sequences", "notebook", "queues", "figures", "frames", "exports", "eln",
+                    "python")
+    # (watches.json keeps every lab's watches: this lab's are written into the new folder's after, the others' kept)
+    DATA_FILES = ("events.jsonl", "library.json", "chains.json", "home.json", "sm-imports.json", "watches.json")
+
     def set_data_dir(self, path: Any, move: bool = False, by: str = "human") -> Dict[str, Any]:
-        """Keep runs, the lab record (events.jsonl) and reports in another folder: a person's choice, from Settings.
-        Refused while Kelvin is busy. With move, what is saved now goes along, but nothing there is overwritten:
-        a run or report whose name is taken, or a record the new folder already has, stays where it was."""
-        import shutil
+        """Keep runs, the lab record (events.jsonl), reports and the rest of what Kelvin keeps for the person in
+        another folder: a person's choice, from Settings. Refused while Kelvin is busy. With move, what is saved now
+        goes along (_move_data), but nothing there is overwritten: what the new folder already has stays, and what it
+        would replace stays where it was (kept); what can't be moved stays where it was, whole (failed). The mounted
+        sample goes with the setup either way, so its protection holds after a restart (_carry_mounted)."""
         if not Path(str(path or "").strip()).expanduser().is_absolute():
             raise ValueError("give the folder's full path, such as D:\\Data\\Kelvin or /Users/me/Data/Kelvin")
         if not self.lock.acquire(blocking=False):
@@ -1999,34 +2116,18 @@ class LabRuntime:
             new = writable_folder(path)
             old = self.data_dir
             if new.resolve() == old.resolve():
-                return dict(self.data_summary(), moved=0, kept=[])
-            moved, kept = 0, []
+                return dict(self.data_summary(), moved=0, kept=[], failed=[])
+            moved, kept, failed = 0, [], []   # type: int, List[str], List[str]
             if move:
-                for sub in ("runs", "reports", "sequences"):   # the lab's written pulse sequences go along too
-                    src = old / sub
-                    if not src.is_dir():
-                        continue
-                    (new / sub).mkdir(exist_ok=True)
-                    for item in sorted(src.iterdir()):
-                        target = new / sub / item.name
-                        if target.exists():
-                            kept.append("%s/%s" % (sub, item.name))
-                            continue
-                        shutil.move(str(item), str(target))
-                        moved += 1
-                # the record, and the person's library of scans and scripts (the scripts they imported run from it)
-                for name in ("events.jsonl", "library.json"):
-                    if not (old / name).exists():
-                        continue
-                    if (new / name).exists():
-                        kept.append(name)
-                    else:
-                        shutil.move(str(old / name), str(new / name))
-                        moved += 1
+                self.gate.log.settle(2.0)   # the record's lines in its file before the file moves
+                moved, kept, failed = self._move_data(old, new)
                 for f in RunFolders(old).chat_folders():   # the chats' folders keep their runs; Kelvin still finds them
                     RunFolders(new).remember(f)
+                if any(k.startswith("runs/") for k in kept + failed):   # runs that stayed are still found by their ids
+                    RunFolders(new).remember(old / "runs")
                 (old / RunFolders.INDEX).unlink(missing_ok=True)
-            if not move or kept:
+            mounted_before = self._carry_mounted(old, new, move, failed)
+            if not move or kept or failed:
                 self.gate.log.write("data_folder", by=by, moved_to=str(new),
                                     note="what stays here was not moved" if move else "earlier data stay here")
             self.data_dir = new
@@ -2038,15 +2139,111 @@ class LabRuntime:
             self.events_path = new / "events.jsonl"
             self.gate.log = self._new_log()
             self.engine.store = self._store()
-            self.gate.log.write("data_folder", by=by, previous=str(old), moved=moved, kept=len(kept))
+            self.gate.log.write("data_folder", by=by, previous=str(old), moved=moved, kept=len(kept),
+                                failed=failed or None, mounted_before=mounted_before)
             self.tidy_later()
-            return dict(self.data_summary(), moved=moved, kept=kept, previous=str(old))
+            return dict(self.data_summary(), moved=moved, kept=kept, failed=failed, previous=str(old))
         finally:
             self.lock.release()
 
+    def _move_data(self, old: Path, new: Path) -> Tuple[int, List[str], List[str]]:
+        """What the data folder old holds, moved into new (set_data_dir): (how many moved, what stayed because new
+        has it already, what couldn't be moved and why). Each item on its own (move_item): one that fails leaves
+        the others moving."""
+        moved, kept, failed = 0, [], []   # type: int, List[str], List[str]
+        staging = new / ".kelvin-moving"
+
+        def one(rel: str, src: Path, dst: Path) -> bool:
+            nonlocal moved
+            if dst.exists():
+                kept.append(rel)
+                return False
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                failed.append("%s: %s" % (rel, e.strerror or e))
+                return False
+            why = move_item(src, dst, staging)
+            if why:
+                failed.append("%s: %s" % (rel, why))
+                return False
+            moved += 1
+            return True
+        files = list(self.DATA_FILES)
+        if getattr(self, "lab_memory_dir", None) is None:   # a script's or a test's: the lab's memory and timings here
+            files += ["timing.json", "lab-memory.json"]
+        for name in files:
+            if (old / name).exists() and one(name, old / name, new / name) and name == "events.jsonl":
+                self._carry_end(old / name, new / name)
+        # the samples' register with their pictures: the pictures go only with the register that names them
+        register = (old / "samples.json").exists()
+        with_register = not register or one("samples.json", old / "samples.json", new / "samples.json")
+        for sub in self.DATA_FOLDERS + ("samples",):
+            src = old / sub
+            if not src.is_dir():
+                continue
+            if sub == "samples" and not with_register:
+                kept.append("samples/ (the samples' pictures, with their register)")
+                continue
+            for item in sorted(src.iterdir()):
+                one("%s/%s" % (sub, item.name), item, new / sub / item.name)
+            try:
+                src.rmdir()   # empty now; one that still holds something stays
+            except OSError:
+                pass
+        try:
+            staging.rmdir()
+        except OSError:
+            pass
+        return moved, kept, failed
+
+    def _carry_end(self, old: Path, new: Path) -> None:
+        """The record's end kept outside it (eventlog.keep_end), for the record at its new place."""
+        from ..eventlog import move_end
+        where = self._ends_path()
+        if where is not None:
+            try:
+                move_end(where, old, new)
+            except OSError:
+                pass
+
+    def _carry_mounted(self, old: Path, new: Path, move: bool, failed: List[str]) -> Optional[str]:
+        """The sample in the setup now, written into the new folder's mounted.json, whether what is saved moves or
+        not: Kelvin reads it there at its next start, and without it the device's protection was gone after a
+        restart, 12 V going to a ±6 V gate on an ordinary yes (audit 0.3.52, R9, R15). A record there of another
+        sample, from when that folder was last in use, names a sample that isn't in the setup: it is replaced, and
+        what it named is returned for the lab's record. With move, the old folder's record goes."""
+        if not self.mounted:
+            return None
+        there, text = new / "mounted.json", json.dumps(self.mounted, indent=1)
+        try:
+            before = there.read_text(encoding="utf-8") if there.exists() else None
+            if before != text:
+                there.write_text(text, encoding="utf-8")
+            if move:
+                (old / "mounted.json").unlink(missing_ok=True)
+        except OSError as e:
+            failed.append("mounted.json: %s (mount the sample again there)" % (e.strerror or e))
+            return None
+        if before is None or before == text:
+            return None
+        try:
+            named = json.loads(before)
+        except ValueError:
+            return "a record that isn't one"
+        return str(named.get("device_name") or named.get("device") or "another sample") if isinstance(named, dict) \
+            else "a record that isn't one"
+
     def _new_log(self, clock: Any = None) -> EventLog:
         return EventLog(self.events_path, clock or self.lab.clock, shared=self.shared_log, user=self.user,
-                        whose=self._whose_now, actor=self._actor_now)
+                        whose=self._whose_now, actor=self._actor_now, ends=self._ends_path)
+
+    def _ends_path(self) -> Optional[Path]:
+        """Where each person's record's end is kept, outside their data folder (eventlog.keep_end): Kelvin's own
+        folder; None in a script or a test that has none (nothing holds the end then)."""
+        from ..eventlog import ENDS_FILE
+        home = getattr(self, "home", None) or getattr(self, "lab_memory_dir", None)
+        return Path(home) / ENDS_FILE if home else None
 
     def use_user(self, user: Optional[str], data_dir: Any, problem: Optional[str] = None) -> None:
         """Work for another person (None: nobody is signed in). Their data folder holds their runs, reports, record
@@ -2760,8 +2957,10 @@ class LabRuntime:
 
     def _tidy_now(self) -> Dict[str, int]:
         """tidy_runs' work, its lock held by the caller."""
+        from .. import integrity
         root = self.runs
         done = {"interrupted": 0, "upgraded": 0, "failed": 0, "sealed": 0}
+        recorded: Optional[Dict[str, str]] = None   # the seals the record kept, read once one is needed
         for d in root.iterdir():
             try:
                 if (d / rundata.RECORD).exists():
@@ -2779,6 +2978,13 @@ class LabRuntime:
                         self._log_seal(d, late=True)
                 elif (rundata.have_h5() and (d / rundata.RUN_FILE).exists() and not (d / rundata.SEAL).exists()
                       and not self._running_id()):   # kept before seals: sealed now, saying it was late
+                    if recorded is None:
+                        recorded = self._recorded_seals()
+                    if integrity.folder_name(d.name) in recorded:
+                        # the record sealed it when it was kept: its seal file was deleted since. Sealing it again
+                        # sealed whatever run.h5 holds now, and Verify then called a changed run unchanged (audit
+                        # 0.3.52, D2); Verify compares it with the record's seal instead, and says the file is gone
+                        continue
                     s = rundata.seal(d)
                     if s and s["new"]:
                         done["sealed"] += 1
@@ -2796,6 +3002,13 @@ class LabRuntime:
             self.gate.log.write("runs_kept", by="kelvin", **done)
         self._tidied = True
         return done
+
+    def _recorded_seals(self) -> Dict[str, str]:
+        """The seals the record kept (integrity.recorded_seals): this person's record and the lab's instrument log."""
+        from .. import integrity, provenance
+        paths = [p for p in (Path(self.shared_log) if self.shared_log else None, self.events_path)
+                 if p is not None and p.exists()]
+        return integrity.recorded_seals(provenance.read_events(paths))
 
     def _log_seal(self, d: Path, late: bool) -> None:
         """A run kept here, as tidy_runs keeps it: its seal into the lab's record (run_sealed)."""
@@ -3216,8 +3429,9 @@ class LabRuntime:
             found = book.find(None, s)[1]
             if found:
                 recs.append(found)
-        recs += [e for e in self.seen_events(self.gate.log.events()) if str(e.get("wall", "")).startswith(day)
-                 or str(e.get("at", "")).startswith(day)]
+        from ..numbercheck import without_bookkeeping   # an event's line number is no measurement (audit 0.3.52, D5)
+        recs += [without_bookkeeping(e) for e in self.seen_events(self.gate.log.events())
+                 if str(e.get("wall", "")).startswith(day) or str(e.get("at", "")).startswith(day)]
         return recs, missing
 
     def write_entry(self, title: str = "", body: str = "", aim: str = "", runs: Any = None, samples: Any = None,
@@ -3225,9 +3439,21 @@ class LabRuntime:
         """Keep a notebook entry (notebook.py), or a new version of one: its title, aim and Markdown body citing each
         run it rests on as [run:<id>], its runs, samples and procedure, and its day. Every number in it is checked
         against the records it cites (numbercheck.py); the check is kept with it. A version after a signed one is an
-        amendment. Drives nothing, so nobody is asked; a person signs it in the Analysis pane's Notebook."""
+        amendment. Drives nothing, so nobody is asked; a person signs it in the Analysis pane's Notebook. A new
+        version of an entry only from where that entry may be seen (it keeps the entry's marks: notebook.marks), and
+        of a signed one only by a person, in the Notebook: a chat of another project "amended" a confidential entry
+        with a title alone, which copied its text without its marks for every chat to read, and an AI could amend a
+        person's signed entry (audit 0.3.52, R11)."""
         from .. import notebook, numbercheck
         by = by or ("agent" if self._actor_now() else "human")
+        entry = str(entry or "").strip()
+        if entry:
+            e = notebook.read(self.data_dir).get(entry)
+            if e is None or not self.may_see(notebook.marks(e)):
+                return "not kept: no entry %s (notebook lists them)" % entry
+            if _VIEWER.get() is not None and notebook.signed_version(e) is not None:
+                return ("not kept: %s is signed, and only a person amends a signed entry (Edit, in the Analysis pane's "
+                        "Notebook); keep what you have as a new entry instead" % entry)
         as_list = lambda v: [x.strip() for x in v.split(",")] if isinstance(v, str) else list(v or [])  # noqa: E731
         runs_given = [r for r in as_list(runs) if r]
         day = str(day or "").strip()[:10] or datetime.now().date().isoformat()
@@ -3243,12 +3469,12 @@ class LabRuntime:
         try:
             v = notebook.write(self.data_dir, {"title": title, "body": body, "aim": aim, "runs": runs_given,
                                                "samples": as_list(samples), "procedure": procedure, "day": day},
-                               by, entry=str(entry or "").strip(), account=self.user, ai=self._actor_now(),
+                               by, entry=entry, account=self.user, ai=self._actor_now(),
                                check=check, whose=self._whose_now())
         except ValueError as e:
             return "not kept: %s" % e
         self.gate.log.write("entry", by=by, entry=v["entry"], version=v["version"], title=v["title"], day=v["day"],
-                            amends=v.get("amends"))
+                            amends=v.get("amends"), whose=v.get("whose"))   # the line is the entry's, marks and all
         return "kept %s %s v%d, %s: %s. Numbers: %s.%s" % (
             "an amendment of" if v.get("amends") else "entry", v["entry"], v["version"], v["day"], v["title"],
             numbercheck.said(check), " Say where each one not found comes from, or take it out." if check["missing"]
@@ -3258,8 +3484,7 @@ class LabRuntime:
         """The notebook: one entry (its latest version, its number check, signatures and versions), or the entries
         of a day, or the latest ones. Never an entry about unshared work the viewer of this thread may not see."""
         from .. import notebook
-        entries = {k: e for k, e in notebook.read(self.data_dir).items()
-                   if self.may_see(notebook.latest(e).get("whose") or {})}
+        entries = {k: e for k, e in notebook.read(self.data_dir).items() if self.may_see(notebook.marks(e))}
         if str(entry or "").strip():
             e = entries.get(str(entry).strip())
             if e is None:
@@ -3282,15 +3507,19 @@ class LabRuntime:
             return "no entries%s yet (write_entry keeps one)" % (" for %s" % day if day else "")
         return "\n".join(notebook.summary(k, e) for k, e in rows[-20:])
 
-    def sign_entry(self, entry: str, role: str = "author") -> Dict[str, Any]:
+    def sign_entry(self, entry: str, role: str = "author", version: Optional[int] = None) -> Dict[str, Any]:
         """A person signs an entry in the Analysis pane's Notebook (author), or witnesses it (another person): never Kelvin's
-        AI, so this is no tool. ValueError says why not."""
+        AI, so this is no tool. version: the one the page showed them (notebook.sign). ValueError says why not."""
         from .. import notebook
         if _VIEWER.get() is not None and getattr(_VIEWER.get(), "model", None):
             raise ValueError("only a person signs an entry, in the Analysis pane's Notebook")
-        sig = notebook.sign(self.data_dir, entry, self.user or "", role)
+        e = notebook.read(self.data_dir).get(entry)
+        if e is not None and not self.may_see(notebook.marks(e)):
+            raise ValueError("no entry %s" % entry)
+        sig = notebook.sign(self.data_dir, entry, self.user or "", role, version)
+        # the line keeps the entry's marks: it named a confidential entry's id to every chat (audit 0.3.52, R11)
         self.gate.log.write("entry_signed", by="human", entry=entry, version=sig["version"], role=role,
-                            sha256=sig["sha256"])
+                            sha256=sig["sha256"], whose=notebook.marks(e or {}) or None)
         return sig
 
     def export_crate(self, runs: Any = None, entries: Any = None, figures: Any = None, samples: Any = None,
@@ -3316,13 +3545,19 @@ class LabRuntime:
         return "wrote %s: %d files, %.1f MB, %d run%s, described in ro-crate-metadata.json (RO-Crate 1.1)" % (
             out["path"], out["files"], out["bytes"] / 1e6, out["runs"], "" if out["runs"] == 1 else "s")
 
-    def backup_records(self, folder: str) -> str:
-        """A second copy of the lab's records (backup.py) in a folder the person names: runs as sealed (each run.h5
-        checked against its seal once copied), the lab's record, the notebook, samples, procedures and figures. Only
-        what is new or grew is copied. Not into Kelvin's own folders, nor one that may hold keys. Kelvin approves it
-        itself (it drives nothing), unless the chat read text from outside the lab: then the person answers."""
-        from .. import backup
+    def backup_records(self, folder: str, by: str = "") -> str:
+        """A second copy of the records (backup.py) in a folder a person names, when they ask for it in Settings
+        (Data & reports, Back up); by: who. Only a person starts one and chooses where it goes: a chat's tool call
+        is refused, as any chat could copy everyone's unshared work into its own folder and read it there (audit
+        0.3.52, R12). Copied: runs as sealed (each run.h5 checked against its seal once copied), the lab's
+        instrument log and config history, the procedures, and this person's own record, notebook, samples with their
+        pictures, and figures, under their name (D1, D7). Only what is new or grew is copied. Not into Kelvin's own
+        folders, nor one that may hold keys."""
+        from .. import backup, notebook
         from ..folderfiles import secret
+        if _VIEWER.get() is not None or not str(by or "").strip():
+            return ("not backed up: only a person backs up the records and chooses where they go. Ask them to do it "
+                    "in Kelvin's portal: Settings → Data & reports → Back up.")
         raw = str(folder or "").strip().strip('"')
         if not raw or not Path(raw).is_absolute():
             return "not backed up: give the backup folder's full path (a NAS, a OneDrive folder, a second disk)"
@@ -3336,26 +3571,18 @@ class LabRuntime:
             return "not backed up: %s is Kelvin's own folder, or holds it: a backup goes somewhere else" % target
         if not target.exists():
             return "not backed up: %s doesn't exist (connect the drive, or make the folder first)" % target
-        request = ApprovalRequest("Back up the lab's records into %s?" % target, [
-            "runs as they were sealed, the lab's record, the notebook, samples, procedures and figures",
-            "into %s" % (target / "Kelvin backup")])
-        if self._actor_now() and not self.gate.auto_simple(request, "copying the records to a folder the person "
-                                                                     "named drives nothing") \
-                and not self.gate.ask(request):
-            return "declined: the person did not want the records copied there"
         versions = getattr(self.versions, "audit", None)
-        records = {"events.jsonl": self.events_path,
-                   "instrument-log.jsonl": Path(self.shared_log) if self.shared_log else None,
-                   "entries.jsonl": Path(self.data_dir) / "notebook" / "entries.jsonl",
-                   "samples.json": Path(self.data_dir) / "samples.json",
+        records = {"instrument-log.jsonl": Path(self.shared_log) if self.shared_log else None,
                    "config-audit.jsonl": Path(versions) if versions else None}
-        folders = {"procedures": Path(self.home) / "procedures" if self.home else None,
-                   "figures": Path(self.data_dir) / "figures"}
+        own = {"events.jsonl": self.events_path, "entries.jsonl": notebook.path_of(self.data_dir),
+               "samples.json": Path(self.data_dir) / "samples.json"}
+        own_folders = {"samples": Path(self.data_dir) / "samples", "figures": Path(self.data_dir) / "figures"}
+        folders = {"procedures": Path(self.home) / "procedures" if self.home else None}
         out = backup.backup(list(self.runs.iterdir()), records, folders, target,
-                            getattr(self.lab.config, "name", "") or "lab")
+                            getattr(self.lab.config, "name", "") or "lab", self.user, own, own_folders)
         text, trouble = backup.said(out)
-        self.gate.log.write("backup", by="agent" if self._actor_now() else "human", folder=str(target),
-                            copied=out["copied"], problems=out["problems"][:20] or None)
+        self.gate.log.write("backup", by=by, folder=str(target), copied=out["copied"],
+                            problems=out["problems"][:20] or None)
         return text
 
     def search_records(self, text: str, kinds: str = "", limit: int = 20) -> str:
@@ -3395,7 +3622,7 @@ class LabRuntime:
                 str(s[k]) for k in ("kind", "material", "location") if s.get(k))), _json.dumps(s, ensure_ascii=False))
         for eid, e in notebook.read(self.data_dir).items():
             v = notebook.latest(e)
-            if self.may_see(v.get("whose") or {}):
+            if self.may_see(notebook.marks(e)):
                 consider("entries", v.get("at"), notebook.summary(eid, e),
                          " ".join(str(v.get(k) or "") for k in ("title", "aim", "body", "day")))
         for e in self.seen_events(self.gate.log.events()):
@@ -3416,12 +3643,14 @@ class LabRuntime:
             consider("procedures", "", "%s v%d" % (name, n), t)
         figures = Path(self.data_dir) / "figures"
         if figures.exists():
+            hidden = self._hidden_runs()   # a figure of a run the viewer may not see is that run's (audit 0.3.52, R13)
             for p in figures.glob("*.json"):
                 try:
                     rec = _json.loads(p.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
-                if isinstance(rec, dict):
+                if isinstance(rec, dict) and not any(isinstance(s, dict) and s.get("run") in hidden
+                                                     for s in rec.get("runs") or []):
                     consider("figures", rec.get("made"), "%s (from %s)" % (rec.get("figure"), ", ".join(
                         s.get("run", "") for s in rec.get("runs") or [])), _json.dumps(rec.get("spec") or {}) +
                         str(rec.get("figure")))
@@ -3471,8 +3700,7 @@ class LabRuntime:
                 "; deviations: " + "; ".join(e["deviation"] for e in steps if e.get("deviation"))
                 if any(e.get("deviation") for e in steps) else ""))
         entries = [(k, e) for k, e in notebook.read(self.data_dir).items()
-                   if str(notebook.latest(e).get("at", "")) >= start and self.may_see(notebook.latest(e).get("whose")
-                                                                                       or {})]
+                   if str(notebook.latest(e).get("at", "")) >= start and self.may_see(notebook.marks(e))]
         if entries:
             drafts = [k for k, e in entries if notebook.status(e) in ("draft", "amended")]
             lines.append("- %d notebook entr%s, %d still to sign%s" % (
@@ -3484,33 +3712,52 @@ class LabRuntime:
 
     def verify_records(self, since: str = "", runs: str = "") -> str:
         """Verify (integrity.py): the lab's record, chain by chain (this person's record, the lab's instrument log,
-        the config history), and each kept run against its seal and the seal the record kept. since: only runs from
-        that day on (2026-11-07); runs: only these (comma-separated). Never runs of unshared work the viewer of this
-        thread may not see."""
-        from .. import integrity, provenance
+        the config history, the notebook), this person's record against where it ended last (kept outside it:
+        eventlog.keep_end); each kept run against its seal and the seal the record kept, and its notes' chain; each
+        run the record sealed, that its folder is there; each notebook entry against its hash and its signatures,
+        and against the record's lines about it. since: only runs from that day on (2026-11-07); runs: only these
+        (comma-separated). Never runs of unshared work the viewer of this thread may not see."""
+        import os
+        from .. import integrity, notebook, provenance
+        from ..eventlog import end_holds, read_ends
         logs: Dict[str, Any] = {"your record": self.events_path}
         if self.shared_log:
             logs["the lab's instrument log"] = Path(self.shared_log)
         audit = getattr(self.versions, "audit", None)
         if audit is not None:
             logs["the config history"] = Path(audit)
+        if notebook.path_of(self.data_dir).exists():   # its chain was never walked, though the docs said so (D4)
+            logs["the notebook"] = notebook.path_of(self.data_dir)
         checked = integrity.check_logs(logs)
+        more: List[str] = []
+        where = self._ends_path()
+        end = read_ends(where).get(os.path.abspath(str(self.events_path))) if where is not None else None
+        since_end = end_holds(self.events_path, end) if end else None
+        if since_end:   # its chain holds, cut short: only its end, kept elsewhere, says so (D6)
+            more.append("your record: %s" % since_end)
         paths = [p for p in (Path(self.shared_log) if self.shared_log else None, self.events_path)
                  if p is not None and p.exists()]
         try:
             every = provenance.read_events(paths)
         except ValueError:
             every = []
+        own = self.seen_events(self.gate.log.events())   # this person's record, as this viewer may see it
         if since:
             from .. import catalog
             try:
                 since = catalog._time(since, False)[:10]
             except ValueError as e:
                 return "not a time: %s" % e
-        folders = integrity.run_folders(self.runs.iterdir(), self._hidden_runs(), since,
-                                        [r for r in str(runs or "").split(",") if r.strip()])
+        only = [r for r in str(runs or "").split(",") if r.strip()]
+        hidden = self._hidden_runs()
+        found = list(self.runs.iterdir())
+        folders = integrity.run_folders(found, hidden, since, only)
         result = integrity.check_runs(folders, integrity.recorded_seals(every))
-        text = integrity.report(checked, result)
+        gone = integrity.runs_gone(integrity.recorded_seals(own), [d.name for d in found], hidden, since, only)
+        again = [a for a in integrity.seals_said_again(own) if a[0] not in hidden and (not only or a[0] in only)]
+        if not only:
+            more += self._notebook_problems(own)
+        text = integrity.report(checked, result, gone, again, more)
         from ..samples import SampleBook
         book, kept, changed = SampleBook(self.data_dir), 0, []
         for key, s in book.all().items():
@@ -3527,6 +3774,34 @@ class LabRuntime:
         if kept or changed:
             text += "\nSample pictures: %d as they were kept%s" % (kept, "".join("\n- " + c for c in changed))
         return text
+
+    def _notebook_problems(self, own: List[Dict[str, Any]]) -> List[str]:
+        """Verify's look at the notebook (D4): each entry the viewer may see against its hash and its signatures (a
+        signed text changed in the file still showed as signed), and each entry and signature the record names (own:
+        its lines this viewer may see) that the notebook no longer has (entries cut from its end)."""
+        from .. import notebook
+        entries = notebook.read(self.data_dir)
+        out: List[str] = []
+        for eid, e in entries.items():
+            if self.may_see(notebook.marks(e)):
+                out += ["the notebook, entry %s: %s" % (eid, why) for why in notebook.altered(e)]
+        for ev in own:
+            kind, eid = ev.get("type"), str(ev.get("entry") or "")
+            if kind not in ("entry", "entry_signed") or not eid:
+                continue
+            e = entries.get(eid)
+            if e is not None and not self.may_see(notebook.marks(e)):
+                continue
+            versions = (e or {}).get("versions", [])
+            if kind == "entry" and not any(v.get("version") == ev.get("version") for v in versions):
+                out.append("the notebook: the record names entry %s v%s, which the notebook here doesn't have"
+                           % (eid, ev.get("version")))
+            elif kind == "entry_signed" and not any(s.get("version") == ev.get("version") and
+                                                    s.get("sha256") == ev.get("sha256")
+                                                    for s in (e or {}).get("signs", [])):
+                out.append("the notebook: the record names a signature on entry %s v%s, which the notebook here "
+                           "doesn't have" % (eid, ev.get("version")))
+        return list(dict.fromkeys(out))
 
     def tidy_later(self) -> None:
         """tidy_runs in the background."""

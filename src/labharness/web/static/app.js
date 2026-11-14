@@ -8975,12 +8975,26 @@
       if (r.moved) parts.push("Moved " + r.moved + " item" + (r.moved === 1 ? "" : "s") + ".");
       if (r.kept && r.kept.length) parts.push("Left in " + r.previous + " because the name is taken here: " + r.kept.join(", ") + ".");
       else if (!move && r.previous && (DATA.now.runs || DATA.now.reports)) parts.push("Earlier runs stay in " + r.previous + ".");
+      if (r.failed && r.failed.length) parts.push("Not moved, left whole in " + r.previous + ": " + r.failed.join("; ") + ".");
       DATA.now = r;
       $("data-path").value = r.path;
       showDataFolder(parts.join(" "));
       dataPathChanged();
       pollState();
     } catch (e) { showDataFolder(e.message, true); dataPathChanged(); }
+  }
+
+  // ------------------------------------------------------------------ a backup of the records (Settings): a person's
+  async function backUp() {   // only a person starts one and names its folder: no chat's tool can (backup.py)
+    const folder = $("backup-path").value.trim(), msg = $("backup-msg");
+    msg.classList.remove("bad");
+    if (!folder) { msg.textContent = "Choose the folder to back up into."; return; }
+    store("lh.backupFolder", folder);
+    $("backup-run").disabled = true;
+    msg.textContent = "Backing up…";
+    try { msg.textContent = (await api("/api/backup", { body: { folder } })).said; }
+    catch (e) { msg.textContent = e.message; msg.classList.add("bad"); }
+    $("backup-run").disabled = false;
   }
 
   // ------------------------------------------------------------------ Help and the first-run checklist (labops.py)
@@ -10070,7 +10084,7 @@
   function nbEntryEl(e) {
     const me = NB.data.me, mine = e.signs.filter((s) => s.account === me);
     const status = { draft: ["Draft", "line"], signed: ["Signed", "ok"], witnessed: ["Witnessed", "ok"],
-                     amended: ["Amended", "warn"] }[e.status] || [e.status, "line"];
+                     amended: ["Amended", "warn"], altered: ["Changed since it was kept", "bad"] }[e.status] || [e.status, "line"];
     const by = e.ai ? "Kelvin" : (e.account || "a person");   // its model in the tooltip, as answers say Kelvin
     const signers = e.signs.filter((s) => s.version >= (e.amends || 0)).map((s) => (s.role === "witness" ? "witness " : "") + s.account);
     const meta = h("div", { class: "nb-meta" }, h("span", { class: "chip " + status[1] }, status[0]),
@@ -10098,10 +10112,10 @@
       e.status === "draft" || e.status === "amended"
         ? h("button", { class: "btn small primary", type: "button", disabled: !can("author"),
                         title: me ? "Sign this version as its author" : "Sign in to Kelvin to sign",
-                        onclick: () => nbSign(e.id, "author") }, "Sign")
+                        onclick: () => nbSign(e.id, "author", e.version) }, "Sign")
         : e.status === "signed" && !mine.length
           ? h("button", { class: "btn small", type: "button", disabled: !me, title: "Witness it: you read it and agree",
-                          onclick: () => nbSign(e.id, "witness") }, "Witness") : null);
+                          onclick: () => nbSign(e.id, "witness", e.version) }, "Witness") : null);
     return h("article", { class: "kcard nb-entry", "data-entry": e.id }, h("h3", null, e.title), meta,
       e.aim ? h("p", { class: "nb-aim" }, e.aim) : null, h("div", { class: "nb-text", html: text }), runs, acts);
   }
@@ -10136,8 +10150,8 @@
         h("ol", null, ...d.record.map((line) => h("li", null, line)))));
     }
   }
-  async function nbSign(id, role) {
-    try { await api("/api/notebook/sign", { body: { entry: id, role } }); loadNotebook(NB.day); }
+  async function nbSign(id, role, version) {   // the version shown: never one written since the page showed it
+    try { await api("/api/notebook/sign", { body: { entry: id, role, version } }); loadNotebook(NB.day); }
     catch (e) { toast(e.message); }
   }
   async function nbDraft() {
@@ -10843,6 +10857,12 @@
     });
     $("scripts-add").addEventListener("click", addScriptFolder);
     $("data-open").addEventListener("click", () => api("/api/data-folder", { body: { open: true } }).catch((e) => showDataFolder(e.message, true)));
+    $("backup-path").value = store("lh.backupFolder") || "";
+    $("backup-choose").addEventListener("click", async () => {
+      const path = await pickFolder($("backup-path").value.trim(), "Choose the folder to back up into", { create: true });
+      if (path) $("backup-path").value = path;
+    });
+    $("backup-run").addEventListener("click", backUp);
     $("firewall-allow").addEventListener("click", allowFirewall);
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".compare-wrap")) { $("compare-menu").hidden = true; $("compare-btn").setAttribute("aria-expanded", "false"); }

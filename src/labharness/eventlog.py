@@ -75,19 +75,34 @@ def line_hash(line: bytes) -> str:
     return hashlib.sha256(line.rstrip(b"\r\n")).hexdigest()
 
 
-def _tail(path: Path) -> Tuple[int, Optional[str], int]:
-    """(lines, its last line's hash or None, size in bytes) of a record file; (0, None, 0) without one."""
-    n, last, size = 0, None, 0
+def _tail(path: Path) -> Tuple[int, Optional[str], Optional[int]]:
+    """(lines, its last line's hash or None, size in bytes) of a record file; (0, None, 0) without one. The size is
+    None when the file doesn't end with a line end (a line that reached it only in part): the next write ends that
+    line first (_chained)."""
+    n, last, size, ended = 0, None, 0, True
     try:
         with open(path, "rb") as f:
             for line in f:
                 n += 1
+                ended = line.endswith(b"\n")
                 if line.strip():
                     last = line
             size = f.tell()
     except OSError:
         return 0, None, 0
-    return n, (line_hash(last) if last is not None else None), size
+    return n, (line_hash(last) if last is not None else None), (size if ended else None)
+
+
+def _ends_line(path: Path, size: int) -> bool:
+    """Whether a record file's first `size` bytes end with a line end (or there are none)."""
+    if not size:
+        return True
+    try:
+        with open(path, "rb") as f:
+            f.seek(size - 1)
+            return f.read(1) in (b"\n", b"")
+    except OSError:
+        return True   # can't be read now: the write says what is wrong
 
 
 def _last_hash(path: Path) -> Optional[str]:
@@ -118,19 +133,24 @@ def _chained(path: Path, held: Optional[BinaryIO], tail: List[Any], *records: Di
     try:
         size = os.fstat(f.fileno()).st_size if held is not None else f.tell()
         last = tail[0] if size == tail[1] else _last_hash(path)
+        # a line the file took only in part (a full disk, a share that went away mid-line, the NUL bytes NTFS leaves
+        # after a power cut) is ended first: the next line was glued onto it, which made that line unreadable and every
+        # reader of the record fail from then on (audit 0.3.52, D3). The part stays, a line of its own, which Verify
+        # names; the chain goes on from it.
+        lead = b"" if size == tail[1] or _ends_line(path, size) else b"\n"
         lines = []
         for record in records:
             line = (json.dumps(dict(record, prev=last or GENESIS), ensure_ascii=False) + "\n").encode("utf-8")
             lines.append(line)
             last = line_hash(line)
-        data = memoryview(b"".join(lines))
+        data = memoryview(lead + b"".join(lines))
         while data:   # an unbuffered file may take only part of it
             n = f.write(data)
             if not n:
                 raise OSError("%s took nothing of the record" % path)
             data = data[n:]
         f.flush()
-        tail[0], tail[1] = last, size + sum(len(x) for x in lines)
+        tail[0], tail[1] = last, size + len(lead) + sum(len(x) for x in lines)
     finally:
         if held is None:
             f.close()
@@ -194,9 +214,100 @@ def verify_chain(path: Any) -> Dict[str, Any]:
     return out
 
 
+ENDS_FILE = "record-ends.json"   # where each person's record ended, kept outside the data folder (keep_end)
+# the lines after which a record's end is kept: what Verify relies on (a run's seal, an entry, a signature, a backup)
+END_TYPES = ("run_end", "run_sealed", "run_imported", "entry", "entry_signed", "backup")
+_ENDS_LOCK = threading.Lock()
+
+
+def _hash_before(path: Path, n: int) -> Optional[str]:
+    """The hash of the last line in a record file's first n bytes (None: none, or it can't be read)."""
+    try:
+        with open(path, "rb") as f:
+            back = min(n, 1 << 16)
+            while True:
+                f.seek(n - back)
+                lines = [x for x in f.read(back).splitlines() if x.strip()]
+                if len(lines) >= 2 or back == n:   # the first may be cut short
+                    break
+                back = min(n, back * 4)
+    except OSError:
+        return None
+    return line_hash(lines[-1]) if lines else None
+
+
+def end_holds(path: Any, end: Dict[str, Any]) -> Optional[str]:
+    """Whether a record still holds the end kept for it ({"bytes", "last", "lines", "at"}: its first `bytes` end with
+    the line whose hash is `last`): None when it does, else what happened since, in words."""
+    path = Path(path)
+    n = int(end.get("bytes") or 0)
+    when = str(end.get("at") or "")[:16].replace("T", " ")
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return "it is gone, though it had %s lines on %s" % (end.get("lines"), when)
+    if size < n:
+        return "it was cut short: it had %s lines on %s, and less now" % (end.get("lines"), when)
+    if n and _hash_before(path, n) != end.get("last"):
+        return "it was changed: its line %s isn't the one it was on %s" % (end.get("lines"), when)
+    return None
+
+
+def read_ends(where: Any) -> Dict[str, Dict[str, Any]]:
+    """The records' ends kept in this file, by each record's path."""
+    try:
+        data = json.loads(Path(where).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+
+
+def _write_ends(where: Path, ends: Dict[str, Dict[str, Any]]) -> None:
+    where.parent.mkdir(parents=True, exist_ok=True)
+    tmp = where.with_name("%s.%d.tmp" % (where.name, threading.get_ident()))
+    tmp.write_text(json.dumps(ends, indent=1, ensure_ascii=False), encoding="utf-8")
+    os.replace(str(tmp), str(where))
+
+
+def keep_end(where: Any, path: Any, end: Dict[str, Any]) -> bool:
+    """Keep where a record ends now (end: {"bytes", "last", "lines", "at"}) in the file `where`, outside the data
+    folder: a record cut short or changed later is then found by Verify, though its own chain still holds (nothing
+    else held the chain's end: audit 0.3.52, D6). Moved on only while the record still holds the end kept before;
+    once it doesn't, that end stays for Verify to say. Whether it was kept."""
+    where, key = Path(where), os.path.abspath(str(path))
+    with _ENDS_LOCK:
+        ends = read_ends(where)
+        before = ends.get(key)
+        if before is not None and before != end and end_holds(path, before) is not None:
+            return False
+        ends[key] = dict(end)
+        _write_ends(where, ends)
+    return True
+
+
+def move_end(where: Any, old: Any, new: Any) -> None:
+    """A record moved from old to new (the data folder moved): its end kept from now on under its new place."""
+    where = Path(where)
+    with _ENDS_LOCK:
+        ends = read_ends(where)
+        end = ends.pop(os.path.abspath(str(old)), None)
+        if end is not None:
+            ends[os.path.abspath(str(new))] = end
+            _write_ends(where, ends)
+
+
 def _unchained(event: Dict[str, Any]) -> Dict[str, Any]:
     event.pop("prev", None)
     return event
+
+
+def _record_line(line: str) -> Optional[Dict[str, Any]]:
+    """A record line as its event, or None for one that isn't (cut short, NUL bytes): Verify names those."""
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return None
+    return e if isinstance(e, dict) else None
 
 
 class EventLog:
@@ -222,13 +333,15 @@ class EventLog:
 
     def __init__(self, path: Any = None, clock: Any = None, shared: Any = None, user: Optional[str] = None,
                  whose: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
-                 actor: Optional[Callable[[], Optional[Dict[str, Any]]]] = None):
+                 actor: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+                 ends: Optional[Callable[[], Optional[Path]]] = None):
         self.path = Path(path) if path else None
         self.clock = clock
         self.shared = Path(shared) if shared else None
         self.user = user
         self.whose = whose
         self.actor = actor
+        self.ends = ends   # where the record's end is kept outside it (keep_end), or None: nowhere
         self._memory: List[Dict[str, Any]] = []
         self._seq = 0
         self._tail: List[Any] = [None, 0]   # [the last line's hash, the file's size] (_chained)
@@ -362,9 +475,10 @@ class EventLog:
         try:
             if not self.path.exists():
                 on_file: List[Dict[str, Any]] = []
-            else:
-                with open(self.path, encoding="utf-8") as f:
-                    on_file = [_unchained(json.loads(line)) for line in f if line.strip()]
+            else:   # a line that can't be read (one the file took only in part) is left out, never the whole record
+                with open(self.path, encoding="utf-8", errors="replace") as f:
+                    on_file = [_unchained(e) for e in (_record_line(line) for line in f if line.strip())
+                               if e is not None]
         except OSError:   # the file can't be read now: what is kept back, at least
             on_file = []
         seen = {(e.get("seq"), e.get("wall"), e.get("type")) for e in on_file}
@@ -488,6 +602,7 @@ class EventLog:
         if events and not self._back:   # the usual way: straight onto the file
             try:
                 self._io(self.path, lambda: _chained(self.path, self._held, self._tail, *events))
+                self._end_kept(events)
                 return
             except OSError as e:
                 self._unwritten(e)
@@ -510,6 +625,21 @@ class EventLog:
             del self._back[:len(lines)]
             if not self._back:
                 self._trouble, self._dropped = None, 0
+        self._end_kept(lines)
+
+    def _end_kept(self, written: List[Dict[str, Any]]) -> None:
+        """Where the record ends now, kept outside it (keep_end) once a line Verify relies on is written (END_TYPES):
+        rarely, so a run's points never wait for it. Whatever goes wrong here, the record's line is written."""
+        if self.ends is None or not any(e.get("type") in END_TYPES for e in written):
+            return
+        try:
+            where = self.ends()
+            if where is not None and self._tail[1] is not None:
+                last = written[-1]
+                keep_end(where, self.path, {"bytes": self._tail[1], "last": self._tail[0],
+                                            "lines": last.get("seq"), "at": last.get("wall")})
+        except Exception:   # the end is a help for Verify; the record never fails for it
+            pass
 
     def _unwritten(self, e: OSError) -> None:
         """The file couldn't be written: why, and when to try again. A file kept open is let go of (its drive may
@@ -752,17 +882,29 @@ RUN_NAME = re.compile(r"^\d{8}-\d{6}-[\w.-]*$")   # a run's folder is its id, as
 NAME_MAX = 40      # characters of the plan's name in a run's folder name; a longer name is cut and hashed
 PATH_MAX = 259     # Windows' longest path (MAX_PATH less its terminating NUL), unless long paths are switched on
 INSIDE_MAX = 48    # the longest name Kelvin writes inside a run's folder: frames/00001_<reading>.npy, report.pptx
+ID_TRIES = 50      # ids tried for a run whose name others take at the same moment
 
 
 class RunFolderError(OSError):
     """A run's folder couldn't be made, so the run did not start (nothing was set); the message says why in words."""
 
 
+def _taken(e: OSError, path: Path) -> bool:
+    """Whether a run's folder couldn't be made because another run made it a moment ago (not because a file stands
+    where a folder above it should be, which also says "already exists")."""
+    try:
+        return isinstance(e, FileExistsError) and path.is_dir()
+    except OSError:
+        return False
+
+
 def run_name(plan_name: str, most: int = NAME_MAX) -> str:
     """The plan's part of a run's folder name: letters, digits and . _ - only, at most `most` characters. A longer
     one keeps its start and a short hash of the whole name, so two long names stay apart (a 70-character plan title
     once made a folder Windows could not create: l09, l10)."""
-    safe = re.sub(r"[^\w.-]+", "_", plan_name)
+    # Windows drops a folder name's trailing dots: "IV at 4 K." was kept in a folder whose name was not its id, so
+    # Verify found no seal for it, and "warm up..." got no folder at all (audit 0.3.52, D10)
+    safe = re.sub(r"[^\w.-]+", "_", plan_name).rstrip(".")
     if len(safe) <= most:
         return safe
     digest = hashlib.sha1(plan_name.encode("utf-8")).hexdigest()[:6]
@@ -884,12 +1026,25 @@ class RunStore:
     def _create(self, plan_name: str, plan: Dict[str, Any], operator: str, folder: Any = None,
                 when: Optional[float] = None) -> RunRecord:
         root = Path(folder) if folder and self.root else self.root
+        for _ in range(ID_TRIES):   # two runs of one name made in the same second: the second takes the next id, as
+            try:                    # one made a second apart does (it was refused: audit 0.3.52, D10)
+                return self._made(root, plan_name, plan, operator, when)
+            except FileExistsError:
+                continue
+        raise RunFolderError("Kelvin could not find a free name for the run's folder in %s, so the run did not start "
+                             "and nothing was set" % root)
+
+    def _made(self, root: Optional[Path], plan_name: str, plan: Dict[str, Any], operator: str,
+              when: Optional[float]) -> RunRecord:
+        """The run's record with a free id; FileExistsError when another run took that id meanwhile."""
         run_id = self._run_id(root, plan_name, when)
         if root is None or root == self.root:
             return self._record(run_id, root / run_id if root else None, plan, operator)
         try:
             rec = RunRecord(run_id, root / run_id, plan, operator)
         except OSError as e:   # the chat's folder is away (a drive, a server): the run still keeps its data
+            if _taken(e, root / run_id):
+                raise
             run_id = self._run_id(self.root, plan_name, when)   # the data folder may be deeper than the chat's
             rec = self._record(run_id, self.root / run_id, plan, operator)
             rec.moved = "the chat's folder %s could not be written (%s), so this run is in %s" % (
@@ -904,6 +1059,8 @@ class RunStore:
         try:
             return RunRecord(run_id, path, plan, operator)
         except OSError as e:   # nowhere to keep the run: it doesn't start, and says why (never a bare "tool error")
+            if path is not None and _taken(e, path):   # another run took this id a moment ago: the next one
+                raise
             too_long = os.name == "nt" and path is not None and len(str(path)) + INSIDE_MAX > PATH_MAX
             raise RunFolderError("Kelvin could not make the run's folder %s (%s)%s, so the run did not start and "
                                  "nothing was set" % (path, e.strerror or e, (

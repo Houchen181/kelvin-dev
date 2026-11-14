@@ -1278,9 +1278,8 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
     kept it (by: the agent or a person; account: the person signed in, when people sign in) and when (stored) go with
     it, for the run's reports; so does why it failed (failed), for a failed fit kept on purpose."""
     np = _np()
-    from .rundata import DERIVED, derived_head, h5_file
+    from .rundata import changing_derived, derived_head
     name = fit_name(name) or result["model"]
-    path = Path(folder) / DERIVED
     data = {k: np.asarray(result[k], dtype=float) for k in ("x", "y", "fit", "residuals") if result.get(k) is not None}
     if result.get("sigma") is not None:
         data["sigma"] = np.asarray(result["sigma"], dtype=float)
@@ -1300,7 +1299,7 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
     last: Optional[Exception] = None
     for _ in range(20):   # another reader may hold the file for a moment
         try:
-            with _STORE, h5_file(path, "a") as f:
+            with _STORE, changing_derived(Path(folder)) as f:   # never left cut short (audit 0.3.52, D12)
                 derived_head(f, Path(folder))
                 fits = f.require_group("fits")
                 if name in fits:
@@ -1335,7 +1334,13 @@ def stored(folder: Path, with_data: bool = False) -> List[Dict[str, Any]]:
     for file in (RUN_FILE, DERIVED):
         path = Path(folder) / file
         if path.exists():
-            for item in _fits_in(path, with_data):
+            try:
+                items = _fits_in(path, with_data)
+            except OSError:   # a derived.h5 that can't be read: the run's own (D12); run.h5's error is said
+                if file != DERIVED:
+                    raise
+                continue
+            for item in items:
                 found[item["name"]] = item
     return sorted(found.values(), key=lambda i: str(i.get("stored", "")))
 

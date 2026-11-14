@@ -8,6 +8,7 @@ or compute for its numbers. SCHEMA_TEXT is what query_runs tells the AI about th
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -16,7 +17,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import rundata, runnotes
 
@@ -112,10 +113,55 @@ class QueryError(ValueError):
     pass
 
 
+def _damaged(e: BaseException) -> bool:
+    """A catalog file that is damaged ("database disk image is malformed", "file is not a database"): never one that
+    is locked or on a full disk, nor a query's own mistake or one its authorizer refused."""
+    if not isinstance(e, sqlite3.DatabaseError):
+        return False
+    name = str(getattr(e, "sqlite_errorname", "") or "")   # Python 3.11+
+    if name:
+        return name.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB"))
+    text = str(e).lower()
+    return "malformed" in text or "not a database" in text
+
+
 class Catalog:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.synced = 0.0     # time.monotonic() of the last sync
+        self._runs: Any = None   # the run folders it was last brought up to date with (sync), to build it again
+
+    def _start_again(self) -> None:
+        """A damaged catalog deleted: it is only an index of the runs, so it is built again."""
+        with _lock:
+            for suffix in ("", "-journal", "-wal", "-shm"):
+                part = str(self.path) + suffix
+                try:
+                    os.remove(part)
+                except FileNotFoundError:
+                    pass
+                except OSError:   # open elsewhere, so Windows won't delete it: emptied, which is as good for an index
+                    try:
+                        with open(part, "r+b") as f:
+                            f.truncate(0)
+                    except OSError:
+                        pass
+            self.synced = 0.0
+
+    def _mended(self, work: Callable[[], Any]) -> Any:
+        """work(), and once more after the catalog is built again if it is damaged: damage past its first page (a
+        synced or network drive) showed only at a SELECT or an INSERT, and find_runs and tidying failed with it every
+        time until someone deleted the file by hand (audit 0.3.52, D9)."""
+        try:
+            return work()
+        except sqlite3.DatabaseError as e:
+            if not _damaged(e):
+                raise
+            logging.getLogger("kelvin").warning("the runs' catalog %s is damaged (%s): built again", self.path, e)
+        self._start_again()
+        if self._runs is not None:
+            self._sync(self._runs, ())
+        return work()
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,15 +193,25 @@ class Catalog:
 
     def ready(self) -> None:
         """Open it once: a damaged catalog starts again, empty (synced is then 0, so it is brought up to date)."""
-        with _lock:
-            self._connect().close()
+        def look() -> None:
+            with _lock:
+                con = self._connect()
+                try:
+                    con.execute("SELECT count(*) FROM runs").fetchone()   # damage past the first page shows here
+                finally:
+                    con.close()
+        self._mended(look)
 
     # ------------------------------------------------------------------ keeping it up to date
 
     def sync(self, runs_dir: Path, skip: Sequence[str] = ()) -> int:
         """Bring the catalog up to date with the run folders: add new and changed runs, drop the ones gone.
         runs_dir: a folder of runs, or every folder a person's runs are in (eventlog.RunFolders).
-        skip: runs being measured. Returns how many runs were read."""
+        skip: runs being measured. Returns how many runs were read. A damaged catalog is built again (_mended)."""
+        self._runs = runs_dir
+        return self._mended(lambda: self._sync(runs_dir, skip))
+
+    def _sync(self, runs_dir: Any, skip: Sequence[str]) -> int:
         runs_dir = runs_dir if hasattr(runs_dir, "roots") else Path(runs_dir)
         folders = {d.name: d for d in runs_dir.iterdir() if d.is_dir()} if runs_dir.exists() else {}
         with _lock:
@@ -184,13 +240,16 @@ class Catalog:
     def add(self, folder: Path) -> None:
         """Catalog one run now (when it has just ended)."""
         folder = Path(folder)
-        with _lock:
-            con = self._connect()
-            try:
-                self._add(con, folder, _stamp(folder))
-                con.commit()
-            finally:
-                con.close()
+
+        def add() -> None:
+            with _lock:
+                con = self._connect()
+                try:
+                    self._add(con, folder, _stamp(folder))
+                    con.commit()
+                finally:
+                    con.close()
+        self._mended(add)
 
     @staticmethod
     def _drop(con: sqlite3.Connection, run_id: str) -> None:
@@ -297,13 +356,16 @@ class Catalog:
             args.append("%," + tag.strip().lower().lstrip("#") + ",%")
         sql = "SELECT * FROM runs%s ORDER BY started DESC LIMIT ?" % (
             " WHERE " + " AND ".join(where) if where else "")
-        with _lock:
-            con = self._connect()
-            con.row_factory = sqlite3.Row
-            try:
-                rows = [dict(r) for r in con.execute(sql, args + [max(1, min(int(limit), MAX_ROWS))])]
-            finally:
-                con.close()
+
+        def found() -> List[Dict[str, Any]]:
+            with _lock:
+                con = self._connect()
+                con.row_factory = sqlite3.Row
+                try:
+                    return [dict(r) for r in con.execute(sql, args + [max(1, min(int(limit), MAX_ROWS))])]
+                finally:
+                    con.close()
+        rows = self._mended(found)
         for r in rows:
             r["card"] = json.loads(r["card"] or "{}")
             r.pop("mtime", None)
@@ -317,30 +379,36 @@ class Catalog:
                "WHERE c.run_id = r.run_id AND c.unit = 'K' AND c.value IS NOT NULL) AS kelvin FROM runs r "
                "WHERE (r.device = ? OR lower(r.device_name) = lower(?)) AND r.run_id NOT IN "
                "(SELECT value FROM json_each(?)) ORDER BY r.started")
-        with _lock:
-            con = self._connect()
-            con.row_factory = sqlite3.Row
-            try:
-                return [dict(r) for r in con.execute(sql, (device or "", name or "", json.dumps(sorted(skip))))]
-            finally:
-                con.close()
+        def found() -> List[Dict[str, Any]]:
+            with _lock:
+                con = self._connect()
+                con.row_factory = sqlite3.Row
+                try:
+                    return [dict(r) for r in con.execute(sql, (device or "", name or "", json.dumps(sorted(skip))))]
+                finally:
+                    con.close()
+        return self._mended(found)
 
     def count(self) -> int:
-        with _lock:
-            con = self._connect()
-            try:
-                return con.execute("SELECT count(*) FROM runs").fetchone()[0]
-            finally:
-                con.close()
+        def counted() -> int:
+            with _lock:
+                con = self._connect()
+                try:
+                    return con.execute("SELECT count(*) FROM runs").fetchone()[0]
+                finally:
+                    con.close()
+        return self._mended(counted)
 
     def marks(self) -> List[Tuple[str, str, str, str, Dict[str, Any]]]:
         """Every run's (run_id, plan, started, finished, whose it is: its project and marks)."""
-        with _lock:
-            con = self._connect()
-            try:
-                rows = con.execute("SELECT run_id, plan, started, finished, project, marks FROM runs").fetchall()
-            finally:
-                con.close()
+        def read() -> List[Tuple[Any, ...]]:
+            with _lock:
+                con = self._connect()
+                try:
+                    return con.execute("SELECT run_id, plan, started, finished, project, marks FROM runs").fetchall()
+                finally:
+                    con.close()
+        rows = self._mended(read)
         out = []
         for run_id, plan, started, finished, project, marks in rows:
             try:
@@ -355,7 +423,10 @@ class Catalog:
         """A read-only SQL query: (column names, rows, whether there were more than MAX_ROWS). Only reading is
         allowed (no writes, ATTACH or PRAGMA), and a query running longer than QUERY_SECONDS is stopped. skip:
         runs the query never reads (unshared work the asker may not see): it reads a copy of the catalog without
-        them."""
+        them. A damaged catalog is built again first (_mended)."""
+        return self._mended(lambda: self._query(sql, skip))
+
+    def _query(self, sql: str, skip: Iterable[str]) -> Tuple[List[str], List[Tuple[Any, ...]], bool]:
         self._connect().close()
         skip = sorted(skip)
         if skip:
@@ -380,6 +451,8 @@ class Catalog:
                 names = [d[0] for d in cur.description or []]
                 rows = cur.fetchmany(MAX_ROWS + 1)
             except sqlite3.DatabaseError as e:
+                if _damaged(e):   # the file, not the query: built again
+                    raise
                 msg = str(e)
                 if "interrupted" in msg:
                     raise QueryError("the query ran longer than %g s and was stopped" % QUERY_SECONDS)

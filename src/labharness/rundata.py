@@ -33,6 +33,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -701,7 +702,10 @@ def read_h5(folder: Path, with_rows: bool = True) -> Recorded:
     rec = _read_run(folder, with_rows)
     later = derived_text(folder, "analysis")
     if later:
-        rec.analysis = json.loads(later)
+        try:
+            rec.analysis = json.loads(later)
+        except ValueError:   # a re-analysis that can't be read: the one the run was kept with
+            pass
     return rec
 
 
@@ -1071,7 +1075,10 @@ def card(folder: Path) -> Dict[str, Any]:
     if (folder / RUN_FILE).exists() and have_h5():
         later = derived_text(folder, "card")   # after a re-analysis
         if later:
-            return json.loads(later or "{}")
+            try:
+                return json.loads(later or "{}")
+            except ValueError:   # one that can't be read: the card the run was kept with
+                pass
         with h5_file(folder / RUN_FILE, "r") as f:
             if "card" in f:
                 return json.loads(_text(f["card"]) or "{}")
@@ -1162,12 +1169,18 @@ def check_seal(folder: Path) -> Tuple[str, str]:
 
 
 def derived_text(folder: Path, name: str) -> Optional[str]:
-    """A text dataset of the run's derived.h5 (its latest analysis, its card); None when it has none."""
+    """A text dataset of the run's derived.h5 (its latest analysis, its card); None when it has none, or when
+    derived.h5 can't be read: the run is then read as it was kept. A damaged derived.h5 made the intact, sealed run
+    unreadable by everything until someone deleted it by hand (audit 0.3.52, D12)."""
     path = Path(folder) / DERIVED
     if not path.exists() or not have_h5():
         return None
-    with DERIVED_LOCK, h5_file(path, "r") as f:
-        return _text(f[name]) if name in f else None
+    try:
+        with DERIVED_LOCK, h5_file(path, "r") as f:
+            return _text(f[name]) if name in f else None
+    except (OSError, ValueError, KeyError, RuntimeError) as e:   # cut short, not HDF5, a dataset that isn't text
+        logging.getLogger("kelvin").warning("%s can't be read (%s): the run as it was kept", path, e)
+        return None
 
 
 def derived_head(f: Any, folder: Path) -> None:
@@ -1186,14 +1199,57 @@ def derived_head(f: Any, folder: Path) -> None:
         f.attrs["run_uuid"] = _attr(uid)
 
 
+@contextmanager
+def changing_derived(folder: Path) -> Iterator[Any]:
+    """The run's derived.h5 open to change (made when needed): the changes go into a copy of it, which takes its place
+    once they are all in. It was changed in place, so Kelvin ending inside a change (a crash, a power cut) could leave
+    it cut short, and the sealed run unreadable with it (audit 0.3.52, D12). One that can't be opened is kept aside as
+    derived.h5.damaged, and a new one begun. The caller holds DERIVED_LOCK; BlockingIOError: another program has the
+    file now."""
+    folder = Path(folder)
+    path, part = folder / DERIVED, folder / (DERIVED + ".part")
+    if part.exists():   # what a change Kelvin ended inside left
+        part.unlink()
+    if path.exists():
+        shutil.copyfile(str(path), str(part))
+        try:
+            with h5_file(part, "a"):
+                pass
+        except BlockingIOError:
+            part.unlink()
+            raise
+        except OSError as e:
+            part.unlink()
+            logging.getLogger("kelvin").warning("%s can't be read (%s): kept aside, a new one begun", path, e)
+            os.replace(str(path), str(folder / (DERIVED + ".damaged")))
+    try:
+        with h5_file(part, "a") as f:
+            yield f
+    except BaseException:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        raise
+    for attempt in range(20):   # a reader in another program may have it open for a moment
+        try:
+            os.replace(str(part), str(path))
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
+
+
 def write_derived(folder: Path, items: Dict[str, str]) -> None:
-    """Text datasets into the run's derived.h5 (made when needed), each replacing its earlier one."""
+    """Text datasets into the run's derived.h5 (made when needed), each replacing its earlier one (changing_derived:
+    a crash inside never leaves it cut short)."""
     import h5py
     folder = Path(folder)
     last: Optional[Exception] = None
     for _ in range(20):   # another reader may hold the file for a moment
         try:
-            with DERIVED_LOCK, h5_file(folder / DERIVED, "a") as f:
+            with DERIVED_LOCK, changing_derived(folder) as f:
                 derived_head(f, folder)
                 for name, value in items.items():
                     if name in f:

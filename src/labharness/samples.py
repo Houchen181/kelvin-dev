@@ -48,10 +48,23 @@ def _key(device_id: Optional[str], name: str) -> str:
     return device_id or "name:" + " ".join(str(name).split()).lower()
 
 
+_LOCKS: Dict[str, Any] = {}   # one lock per register file, whichever SampleBook asks
+_LOCKS_LOCK = threading.Lock()
+REPLACE_TRIES = 40            # a register a reader has open for a moment (Windows refuses to replace it meanwhile)
+
+
+def _lock_for(path: Path) -> Any:
+    """The register's own lock: every caller makes its own SampleBook, so a lock of the object's own let two changes
+    at once read, change and write samples.json over each other, and share one temporary file (audit 0.3.52, D8)."""
+    key = os.path.normcase(os.path.abspath(str(path)))
+    with _LOCKS_LOCK:
+        return _LOCKS.setdefault(key, threading.RLock())
+
+
 class SampleBook:
     def __init__(self, data_dir: Any):
         self.path = Path(data_dir) / FILE
-        self._lock = threading.Lock()
+        self._lock = _lock_for(self.path)
 
     def _read(self) -> Dict[str, Any]:
         try:
@@ -61,13 +74,24 @@ class SampleBook:
         return data if isinstance(data, dict) and isinstance(data.get("samples"), dict) else {"samples": {}}
 
     def _write(self, data: Dict[str, Any]) -> None:
+        """The register written whole, through a temporary file of its own (the caller holds the register's lock)."""
+        import time
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
+        tmp = self.path.with_name("%s.%d.tmp" % (self.path.name, threading.get_ident()))
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(str(tmp), str(self.path))
+        for attempt in range(REPLACE_TRIES):
+            try:
+                os.replace(str(tmp), str(self.path))
+                return
+            except PermissionError:   # a reader has it open for a moment
+                if attempt == REPLACE_TRIES - 1:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                time.sleep(0.025)
 
     def all(self) -> Dict[str, Dict[str, Any]]:
-        return self._read()["samples"]
+        with self._lock:   # never while it is being replaced (which a reader holding it open makes fail on Windows)
+            return self._read()["samples"]
 
     def find(self, device_id: Optional[str], name: str) -> Tuple[str, Optional[Dict[str, Any]]]:
         """(its key, the sample) by its device id or its name (any case); the sample None when it has no entry."""

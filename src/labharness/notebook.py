@@ -13,7 +13,11 @@ it: a signed version is never changed, a later version is an amendment and says 
       a signature: {"entry", "sign": {"account", "at", "role": author | witness, "version", "sha256"}}
 
 sha256 is the version's content (its title, day, aim, body, runs, samples and procedure as canonical JSON): a signature
-names the content it signed."""
+names the content it signed. Each read checks both (altered): a version whose text was changed in the file afterwards
+no longer shows as signed (audit 0.3.52, D4).
+
+whose: the marks of unshared work (a confidential project's chat wrote it). An entry keeps them on every later
+version, whoever writes it (marks): a version without them showed a confidential entry to every chat (R11)."""
 from __future__ import annotations
 
 import hashlib
@@ -77,8 +81,48 @@ def signed_version(e: Dict[str, Any]) -> Optional[int]:
     return authors[-1]["version"] if authors else None
 
 
+BOOLEAN_MARKS = ("incognito", "unshared", "confidential", "unpublished")
+
+
+def marks(e: Dict[str, Any], *more: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The marks of unshared work an entry carries (whose, as LabRuntime.may_see reads them): every version's, and
+    those given, together. Its first project, chat and rules stay; a mark any of them has, it has."""
+    out: Dict[str, Any] = {}
+    for whose in [v.get("whose") for v in e.get("versions") or []] + list(more):
+        if not isinstance(whose, dict):
+            continue
+        for k, v in whose.items():
+            if not v:
+                continue
+            if k in BOOLEAN_MARKS:
+                out[k] = True
+            else:
+                out.setdefault(k, v)
+    return out
+
+
+def altered(e: Dict[str, Any]) -> List[str]:
+    """What in an entry is no longer as it was kept, in words: a version whose content isn't what its sha256 says,
+    a signature whose version's content isn't what was signed. Empty when it is as kept."""
+    out: List[str] = []
+    by_version = {v.get("version"): v for v in e.get("versions") or []}
+    for v in e.get("versions") or []:
+        if content_hash(v) != v.get("sha256"):
+            out.append("v%s's text was changed after it was kept" % v.get("version"))
+    for s in e.get("signs") or []:
+        v = by_version.get(s.get("version"))
+        if v is None:
+            out.append("%s signed v%s, which isn't there" % (s.get("account"), s.get("version")))
+        elif content_hash(v) != s.get("sha256"):
+            out.append("%s's signature on v%s doesn't match its text now" % (s.get("account"), s.get("version")))
+    return list(dict.fromkeys(out))
+
+
 def status(e: Dict[str, Any]) -> str:
-    """draft, signed, witnessed, or amended (a version after the signed one)."""
+    """draft, signed, witnessed, amended (a version after the signed one), or altered (changed in the file since it
+    was kept or signed: never shown as signed)."""
+    if altered(e):
+        return "altered"
     v = latest(e).get("version")
     s = signed_version(e)
     if s is None:
@@ -96,13 +140,16 @@ def cited_runs(text: str) -> List[str]:
 def write(data_dir: Any, fields: Dict[str, Any], by: str, entry: str = "", account: Optional[str] = None,
           ai: Optional[Dict[str, Any]] = None, check: Optional[Dict[str, Any]] = None,
           whose: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """A new entry (entry ""), or a new version of one. ValueError: no title or body, or no such entry."""
+    """A new entry (entry ""), or a new version of one, which keeps the entry's marks (marks) with the writer's.
+    ValueError: no title or body, or no such entry."""
     title = " ".join(str(fields.get("title") or "").split())[:200]
     body = str(fields.get("body") or "").strip()[:MAX_BODY]
     entries = read(data_dir)
     before = latest(entries[entry]) if entry and entry in entries else None
     if entry and before is None:
         raise ValueError("no entry %s (notebook lists them)" % entry)
+    if entry:
+        whose = marks(entries[entry], whose) or None
     title = title or (before or {}).get("title", "")
     body = body or (before or {}).get("body", "")
     if not title or not body:
@@ -128,9 +175,12 @@ def write(data_dir: Any, fields: Dict[str, Any], by: str, entry: str = "", accou
     return version
 
 
-def sign(data_dir: Any, entry: str, account: str, role: str = "author") -> Dict[str, Any]:
+def sign(data_dir: Any, entry: str, account: str, role: str = "author", version: Optional[int] = None
+         ) -> Dict[str, Any]:
     """A person signs an entry's latest version (author), or witnesses it (another person, once the author
-    signed). ValueError: no such entry, a witness who wrote or signed it, the same signature twice."""
+    signed). version: the one the person read: a signature lands on what they saw, never on a version written after
+    they opened the entry (audit 0.3.52, D11). ValueError: no such entry, another version than the latest, one
+    changed since it was kept, a witness who wrote or signed it, the same signature twice."""
     entries = read(data_dir)
     if entry not in entries:
         raise ValueError("no entry %s" % entry)
@@ -140,12 +190,19 @@ def sign(data_dir: Any, entry: str, account: str, role: str = "author") -> Dict[
         raise ValueError("a signature is the author's or a witness's")
     if not account:
         raise ValueError("only a person signed in to Kelvin signs an entry")
+    if version is not None and int(version) != v["version"]:
+        raise ValueError("v%d of this entry came in after you opened it: read it, then sign" % v["version"])
+    changed = altered(e)
+    if changed:
+        raise ValueError("not signed: %s" % "; ".join(changed))
     if role == "witness":
         s = signed_version(e)
         if s != v["version"]:
             raise ValueError("a witness signs after the author has signed this version")
         if any(x.get("account") == account and x.get("version") == s for x in e["signs"]):
             raise ValueError("a witness is someone other than who signed it")
+        if v.get("account") == account:
+            raise ValueError("a witness is someone other than who wrote it")
     if any(x.get("account") == account and x.get("version") == v["version"] and x.get("role") == role
            for x in e["signs"]):
         raise ValueError("%s already signed version %d" % (account, v["version"]))
@@ -158,8 +215,11 @@ def sign(data_dir: Any, entry: str, account: str, role: str = "author") -> Dict[
 def summary(eid: str, e: Dict[str, Any]) -> str:
     v = latest(e)
     st = status(e)
-    who = ", ".join("%s %s" % ("witnessed by" if s["role"] == "witness" else "signed by", s["account"])
-                    for s in e["signs"] if s.get("version") == signed_version(e))
+    if st == "altered":   # what was signed isn't what is shown: said, never "signed by"
+        who = "; ".join(altered(e))
+    else:
+        who = ", ".join("%s %s" % ("witnessed by" if s["role"] == "witness" else "signed by", s["account"])
+                        for s in e["signs"] if s.get("version") == signed_version(e))
     by = "Kelvin (%s)" % v["ai"]["model"] if v.get("ai") else (v.get("account") or v.get("by"))
     return "%s %s v%d (%s%s): %s, by %s" % (v.get("day"), eid, v.get("version", 0), st, "; " + who if who else "",
                                             v.get("title"), by)
