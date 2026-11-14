@@ -49,6 +49,7 @@ _REAL = {name: getattr(socket.socket, name) for name in
 _REAL_CREATE_CONNECTION = socket.create_connection
 _REAL_SLEEP = time.sleep
 _LINK = None
+CONNECT_S = 30   # how long the stand-in waits to reach Kelvin as the script starts
 
 
 class KelvinRefused(RuntimeError):
@@ -66,7 +67,16 @@ class _Link(object):
     def __init__(self, address, token):
         host, _, port = address.rpartition(":")
         self.sock = _REAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM)
-        _REAL["connect"](self.sock, (host, int(port)))
+        # a Kelvin that doesn't answer (endpoint security that drops this computer's own connections) is said, not
+        # waited for: the script hung before it ran anything, with nothing to say why
+        self.sock.settimeout(CONNECT_S)
+        try:
+            _REAL["connect"](self.sock, (host, int(port)))
+        except Exception as e:
+            raise RuntimeError("Kelvin's stand-in could not reach Kelvin at %s within %d s (%s): a firewall or "
+                               "security program may be blocking this computer's own connections" % (
+                                   address, CONNECT_S, e))
+        self.sock.settimeout(None)
         self.lock = threading.Lock()        # one request written at a time
         self.state = threading.Lock()       # the stop's bookkeeping, between the reader and the main thread
         self.waiting = {}                   # request id -> [answered, answer]

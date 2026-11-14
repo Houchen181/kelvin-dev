@@ -39,6 +39,8 @@ def _target(address: str) -> Tuple[str, Dict[str, str]]:
 
 class Camera(DriverBackend):
     """What every camera shares: frame (saved, its path), and the latest frame's statistics."""
+    # a frame takes its exposure and readout: each camera bounds its own (bounded), so no other limit cuts it
+    call_s = None
 
     def __init__(self, name: str, card: Card, address: str):
         super().__init__(name, card, address)

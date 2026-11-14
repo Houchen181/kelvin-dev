@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .instrument import Busy, Garbled, InstrumentLost, SensorError, patience
+from .instrument import Busy, Garbled, InstrumentLost, SensorError, briefly, leave_alone, patience, unstoppable
 
 log = logging.getLogger("kelvin")
 
@@ -49,6 +49,8 @@ SAFE_WAIT_S = 2.0            # seconds the monitor waits for a to-safe it starte
 SAFE_STOP_S = 10.0           # seconds stopping the monitor (quitting, a lab switch) waits for to-safes under way
 ERROR_CHECK_EVERY = 60.0     # lab seconds between error-queue checks on real instruments
 BUS_PROBE_S = 30.0           # how often one instrument on a hung GPIB bus is asked whether it answers again
+RETRY_MS = 1000              # how long a question whether an instrument is there (who it is) waits for its answer:
+                             # a GPIB bus is everyone's, and a dead lock-in's timeout held it 31 s at a time
 ALIVE_EVERY = 20.0           # lab seconds between checks that each real instrument answers, while a run or queue goes
 RESET_EVERY = 5.0            # lab seconds between checks that the outputs the running plan switched on are still on
 GARBLE_CLEAR_S = 300.0       # lab seconds without a garbled reply before a comms fault clears
@@ -495,7 +497,10 @@ class Monitor:
         now = self.lab.clock.now()
         failed: List[BaseException] = []
         try:
-            with patience(WAIT_S, self.in_use):   # an instrument that other work has is busy, not waited for
+            # an instrument that other work has is busy, not waited for; one that stopped answering is asked again on
+            # a thread of its own, never in this look (_left_alone); and a person's Stop is the work's, never this
+            # look's: one in the middle of an interlock's reading must never trip it (unstoppable)
+            with patience(WAIT_S, self.in_use), leave_alone(self._left_alone), unstoppable():
                 for doing, check, args in (("reading the watches", self._check_watches, (now,)),
                                            ("following the set points", self._check_setpoints, (now,)),
                                            ("checking the interlocks", self._check_interlocks, (now,)),
@@ -776,8 +781,9 @@ class Monitor:
         return key, h
 
     def _safe_run(self, h: _Safing, job: Callable[[], List[Tuple[bool, str]]], before: Optional[_Safing]) -> None:
-        if before is not None:
-            before.done.wait()   # its instrument's to-safe before this one first
+        if before is not None:   # its instrument's to-safe before this one first; bounded (gate.SAFE_ALL_S), never
+            from .gate import SAFE_ALL_S   # left waiting for good should that one never end
+            before.done.wait(SAFE_ALL_S)
         try:
             said = list(job())
         except Exception as e:   # (job says what failed itself; this is for what it didn't foresee)
@@ -860,6 +866,12 @@ class Monitor:
         if now - self._last_interlock_check < INTERLOCK_EVERY:
             return
         self._last_interlock_check = now
+        # an interlock's readings are always asked, also of an instrument the other looks leave alone (_left_alone):
+        # one reply missed once (to the Lab panel, a run) must never trip an interlock that reads well now
+        with leave_alone(None):
+            self._interlocks_now(now)
+
+    def _interlocks_now(self, now: float) -> None:
         from .gate import _unreachable, interlock_problem, reading_away
         for i, lock in enumerate(self.lab.config.interlocks):
             self._at("checking the interlock on %s" % lock.drive)
@@ -1124,8 +1136,13 @@ class Monitor:
         the instrument off and on (review of 0.3.45, 4.1)."""
         for name, inst in list(self.lab.instruments.items()):
             backend = inst.backend
-            if not getattr(backend, "broken", "") or inst.simulated or not inst.enabled or name in self._reopening:
+            if inst.simulated or not inst.enabled or name in self._reopening:
                 continue
+            if not getattr(backend, "broken", ""):
+                self._ask_again(name, inst)   # it stopped answering, its connection whole
+                continue
+            if self._on_hung_bus(inst):
+                continue   # its bus is hung: the bus's probe tries it (_probe_bus), not one try per instrument
             if not getattr(backend, "reopens_by_itself", lambda: False)() or inst.health.resting() is not None:
                 continue
             if self.in_use is not None and self.in_use(name):
@@ -1133,6 +1150,47 @@ class Monitor:
             self._reopening.add(name)
             threading.Thread(target=self._reconnect, args=(name, inst), name="kelvin-reconnect-" + name,
                              daemon=True).start()
+
+    def _left_alone(self, inst: Any) -> Optional[str]:
+        """Why this look at the lab asks this instrument nothing now (instrument.leave_alone), or None. One that stopped
+        answering, with a question to ask it whether it is back (_probe), is asked again on a thread of its own on its
+        health's schedule (_ask_again), never here, where its timeout held every watch and interlock up: a field
+        test's monitor spent 31 s at a time asking a lock-in that didn't answer. Its alarm says it meanwhile; a watch of
+        it isn't read, and an interlock that needs it fails as one that can't be read, as when it was asked."""
+        h = inst.health
+        if inst.simulated or not h.fails or self._probe(inst) is None:
+            return None
+        rest = h.resting()
+        return "%s; Kelvin asks it again %s" % (
+            h.lost_text or "%s doesn't answer" % inst.name,
+            "at %s" % time.strftime("%H:%M:%S", time.localtime(rest)) if rest is not None else "now")
+
+    def _ask_again(self, name: str, inst: Any) -> None:
+        """One that stopped answering, its connection whole (a timeout: switched off, unplugged, its bus hung behind
+        another), asked again whether it is back, on a thread of its own (_left_alone) and on its health's schedule
+        (Health.resting: 5 s after it didn't answer, twice as long after each try, a minute at most). Not while work
+        uses it: that work's own exchanges show soon enough. Its answer, or none, goes into its health, and
+        _check_health clears or keeps its alarm."""
+        if not inst.health.fails or inst.health.resting() is not None or self._on_hung_bus(inst):
+            return
+        if self.in_use is not None and self.in_use(name):
+            return
+        probe = self._probe(inst)
+        if probe is None:
+            return
+        self._reopening.add(name)
+        threading.Thread(target=self._asked_again, args=(name, probe, self._quick(inst)),
+                         name="kelvin-ask-again-" + name, daemon=True).start()
+
+    def _asked_again(self, name: str, probe: Callable[[], Any], quick: bool) -> None:
+        try:
+            with patience(WAIT_S, self.in_use), briefly(RETRY_MS if quick else None):
+                probe()
+            log.info("%s: answers again", name)
+        except Exception as e:   # not back yet: its health says it
+            log.info("%s: doesn't answer yet: %s", name, str(e).splitlines()[0][:200] if str(e) else type(e).__name__)
+        finally:
+            self._reopening.discard(name)
 
     def _reconnect(self, name: str, inst: Any) -> None:
         """One connection made anew (_check_reconnect). Another instrument of its model answering there (its serial
@@ -1205,11 +1263,21 @@ class Monitor:
             self._tell(a, "Runs that use instruments on it stop; Kelvin asks one of them again every %.0f s." %
                        BUS_PROBE_S, bus=bus)
         for bus in list(BUSES.hung):
-            if time.time() - self._bus_probe_at.get(bus, 0.0) < BUS_PROBE_S:
+            if time.time() - self._bus_probe_at.get(bus, 0.0) < BUS_PROBE_S or bus in self._reopening:
                 continue
             self._bus_probe_at[bus] = time.time()
+            self._reopening.add(bus)   # asked on a thread of its own: a hung bus's question may hang too
+            threading.Thread(target=self._probe_bus_aside, args=(bus,), name="kelvin-bus-probe", daemon=True).start()
+
+    def _probe_bus_aside(self, bus: str) -> None:
+        from .adapters import bus_words
+        try:
             if self._probe_bus(bus):
                 self.bus_cleared(bus, "%s answers again" % bus_words(bus))
+        except Exception:
+            pass
+        finally:
+            self._reopening.discard(bus)
 
     def _probe_bus(self, bus: str) -> bool:
         """One instrument on a hung bus (not the one that stopped first), asked who it is: whether the bus answers."""
@@ -1223,9 +1291,13 @@ class Monitor:
         if not others:
             return False
         pick = max(others, key=lambda i: i.health.answered_at or 0.0)
-        try:
-            with BUSES.through(bus):
-                pick.query_raw(pick.card.idn_query)
+        try:   # asked even though it stopped answering (the look leaves such alone), and briefly: the bus is hung
+            with leave_alone(None), briefly(RETRY_MS), BUSES.through(bus):
+                if getattr(pick.backend, "broken", "") and getattr(pick.backend, "reopens_by_itself",
+                                                                   lambda: False)():
+                    pick.reopen()   # its session was set aside (a call that never came back): a new one, checked
+                else:
+                    pick.query_raw(pick.card.idn_query)
             return True
         except Exception:
             return False
@@ -1269,8 +1341,8 @@ class Monitor:
             return
         asked = dict(asked)
         for name, inst in list(self.lab.instruments.items()):
-            if inst.simulated or not inst.enabled or self._on_hung_bus(inst):
-                continue
+            if inst.simulated or not inst.enabled or self._on_hung_bus(inst) or self._left_alone(inst) is not None:
+                continue   # one that stopped answering is asked again on a thread of its own (_ask_again)
             answered = inst.health.answered_at
             if answered is not None and answered > self._alive_asked.get(name, 0.0):
                 self._last_alive_check[name] = now   # it answered something since (the run talks to it): nothing sent
@@ -1279,9 +1351,10 @@ class Monitor:
                 self._last_alive_check[name] = now
                 probe = self._probe(inst)
                 self._at("asking %s whether it answers" % name)
-                try:
-                    if probe is not None:
-                        probe()
+                try:   # who it is: answered at once by any instrument there, so asked briefly (RETRY_MS)
+                    with briefly(RETRY_MS if self._quick(inst) else None):
+                        if probe is not None:
+                            probe()
                 except Exception:
                     # its health says it, if it didn't answer; a busy one (Busy) answers the work that has it, which
                     # shows soon enough whether it is there
@@ -1291,6 +1364,11 @@ class Monitor:
             if now - self._last_reset_check.get(name, -1e18) >= RESET_EVERY:
                 self._last_reset_check[name] = now
                 self._check_reset(name, inst, asked, now)
+
+    @staticmethod
+    def _quick(inst: Any) -> bool:
+        """Whether its probe (_probe) asks who it is: a question any instrument answers at once."""
+        return bool(inst.card.idn_pattern and inst.card.idn_query and not hasattr(inst.backend, "identity"))
 
     def _probe(self, inst: Any) -> Optional[Callable[[], Any]]:
         if inst.card.idn_pattern and not hasattr(inst.backend, "identity"):

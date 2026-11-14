@@ -1,6 +1,8 @@
 """Overnight durability (field tests, 2026-10: a queue re-asked in the night and declined after 5 minutes; a lost
 instrument paused the queue with a raw VISA code and no alarm; garbled replies flapped as errors 42 times; off-desk
 alerts needed a third-party webhook). Each check reproduces what testers met, on the virtual lab, a fake bus or labsim."""
+import time
+
 import pytest
 
 from labharness import ScriptedApprover
@@ -151,7 +153,8 @@ def real_twin(lab, name):
 def test_an_instrument_nothing_reads_is_checked_while_work_runs_and_alarms_once(lab, make_gate):
     """l09 unplugged the 2182A for 2 min 40 s during a cool-down: nothing read it, so nothing noticed. While a plan
     or a queue item runs, every real instrument is asked to answer; one that can't be reached at all alarms at once,
-    in words, and once; it clears when it answers again."""
+    in words, and once; it clears when it answers again. Once it stopped answering, the monitor's looks leave it
+    alone: a thread of its own asks it again, on its health's schedule (Health.resting, not waited out here)."""
     from labharness.monitor import Monitor
     gate, _ = make_gate([])
     notices = []
@@ -177,7 +180,12 @@ def test_an_instrument_nothing_reads_is_checked_while_work_runs_and_alarms_once(
             monitor.tick()
         assert len(monitor.alarms) == 1 and [k for k, _ in notices] == ["alarm"]   # once, not at every check
         twin.query = real
+        lab.instruments["lockin"].health.lost_at -= 1000   # its next question is due
         lab.clock.sleep(21)
+        monitor.tick()
+        end = time.monotonic() + 5
+        while "lockin" in monitor._reopening and time.monotonic() < end:
+            time.sleep(0.02)
         monitor.tick()
     assert alarm.cleared and notices[-1][1].startswith("Cleared: lockin answers again (it didn't for ")
 

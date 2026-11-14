@@ -188,7 +188,8 @@ def test_a_stop_before_a_script_starts_is_never_forgotten_by_its_approval(lab, f
             rt.approver.answer(asked["id"], True)
     threading.Thread(target=person, daemon=True).start()
     said = rt.run_script("sweep.py")
-    assert said.startswith("script not run: a person pressed Stop before it started"), said
+    # never run; its card, prepared as the Stop landed, is declined rather than shown after it (gate.work_since)
+    assert "not run" in said and "pressed Stop" in said, said
     assert lab.instrument("smu").read("output") is False
 
 

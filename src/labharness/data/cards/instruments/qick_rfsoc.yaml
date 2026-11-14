@@ -101,19 +101,23 @@ parameters:
     label: I
     kind: measure
     get: "GET i"
+    acquires: true   # plays the pulse once per rep: read when asked or measured, never by a look
   q:
     label: Q
     kind: measure
     get: "GET q"
+    acquires: true   # plays the pulse once per rep: read when asked or measured, never by a look
   magnitude:
     label: Magnitude
     kind: measure
     get: "GET magnitude"
+    acquires: true   # plays the pulse once per rep: read when asked or measured, never by a look
   phase:
     label: Phase
     kind: measure
     unit: deg
     get: "GET phase"
+    acquires: true   # plays the pulse once per rep: read when asked or measured, never by a look
 
 safe_sequence: [gain, output]
 display:

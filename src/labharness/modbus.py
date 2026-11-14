@@ -138,7 +138,8 @@ class ModbusInstrument(DriverBackend):
             q.get("parity", "N").upper()[:1]]
         try:
             self.serial = serial.Serial(self.target, int(q.get("baud", 9600)), parity=parity,
-                                        stopbits=int(q.get("stop", 1)), timeout=self.timeout)
+                                        stopbits=int(q.get("stop", 1)), timeout=self.timeout,
+                                        write_timeout=self.timeout)   # a USB-RS485 driver that stalls: bounded
         except OSError as e:   # SerialException: the port isn't there (yet), or another program has it
             raise link_failed(self.name, "could not open %s" % self.target, e) from e
 

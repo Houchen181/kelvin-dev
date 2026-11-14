@@ -29,20 +29,24 @@ parameters:
     kind: measure
     unit: counts
     get: "GET signal"
+    acquires: true   # counts for the integration time: read when asked or measured, never by a look
   reference:
     label: Reference counts
     kind: measure
     unit: counts
     get: "GET reference"
+    acquires: true   # counts for the integration time: read when asked or measured, never by a look
   contrast:
     label: Signal / reference
     kind: measure
     get: "GET contrast"
+    acquires: true   # counts for the integration time: read when asked or measured, never by a look
   rate:
     label: Count rate
     kind: measure
     unit: counts/s
     get: "GET rate"
+    acquires: true   # counts for the integration time: read when asked or measured, never by a look
   g2:
     label: g2, coincidences normalised to uncorrelated light
     kind: measure

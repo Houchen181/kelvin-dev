@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from .adapters import AdapterError, resource_name
+from .adapters import AdapterError, LinkLost, resource_name
 
 PORT = 1234                # the GPIB-ETHERNET's TCP port
 END = b"\x04"               # what the adapter adds where an instrument asserted EOI: the end of its reply
@@ -38,6 +38,16 @@ MAX_TMO_MS = 3000           # the longest the adapter waits for a byte (++read_t
 CONNECT_S = 3.0
 VER_S = 1.0                 # for the adapter's answer to ++ver
 SCAN_MS = 300               # a scan's wait for each GPIB address's *IDN? reply (30 addresses, one after another)
+# how long connecting, an interface clear or letting the connection go waits for the adapter's one exchange at a time:
+# past it the adapter is said to be stuck in a call (a GPIB-USB whose driver stopped taking bytes), never waited for
+LOCK_S = 10.0
+# how long an exchange waits for the one before it: as long as that one may take (a waveform's whole transfer), then it
+# fails as one that got no answer; it is never sent once its instrument's connection was closed meanwhile
+EXCHANGE_WAIT_S = 660.0
+SEND_S = 3.0                # how long the GPIB-USB may take to pass on what was written to it
+READ_MAX_S = 600.0          # the longest one reply may keep coming (an instrument left talking never ends one)
+READ_MAX_BYTES = 256 * 1024 * 1024
+CLOSE_JOIN_S = 2.0          # how long letting go of an adapter waits for its connection to close, then lets it close
 GPIB_ADDRESSES = range(1, 31)   # what a scan asks; 0 is the controller's own, by custom
 SETUP = (b"++savecfg 0",        # first: nothing after it is written to the EEPROM
          b"++mode 1", b"++auto 0", b"++eoi 1", b"++eos 3", b"++eot_enable 1", b"++eot_char 4")
@@ -197,8 +207,20 @@ class _Serial:
         self.port = port
 
     def send(self, data: bytes) -> None:
+        """Written (pyserial's write_timeout bounds that), then waited for until the adapter has taken it all, SEND_S at
+        most: pyserial's flush() waits for that with no end, and a GPIB-USB whose bus hung stops taking bytes."""
         self.port.write(data)
-        self.port.flush()
+        end = time.monotonic() + SEND_S
+        while True:
+            try:
+                waiting = self.port.out_waiting
+            except (AttributeError, NotImplementedError):
+                return
+            if not waiting:
+                return
+            if time.monotonic() >= end:
+                raise TimeoutError("the Prologix took no bytes for %g s (its GPIB bus hung?)" % SEND_S)
+            time.sleep(0.005)
 
     def recv(self, seconds: float) -> bytes:
         self.port.timeout = max(seconds, 0.001)
@@ -269,8 +291,15 @@ def _end_at(buf: bytes, block: bool) -> int:
     return buf.find(END, i + 2 + n + int(size)) if size.isdigit() else end
 
 
+class Stuck(LinkLost):
+    """The adapter's one exchange at a time didn't come to an end in time: stuck in its driver (a GPIB-USB whose bus
+    hung). Said, never waited for with no end."""
+
+
 class Adapter:
-    """One Prologix: one connection, shared by every instrument behind it, and one exchange on it at a time."""
+    """One Prologix: one connection, shared by every instrument behind it, and one exchange on it at a time. Nothing
+    waits for that exchange with no end (LOCK_S, EXCHANGE_WAIT_S): a GPIB-USB stuck in its driver held a person's Clear
+    the bus, every other instrument behind it, and every other adapter's connections for good."""
 
     def __init__(self, key: str):
         self.key = key
@@ -281,10 +310,25 @@ class Adapter:
         self.state: Dict[str, bytes] = {}   # the adapter's settings as last written (++addr, ++read_tmo_ms)
         self.last: Optional[Where] = None   # the instrument of the last exchange
 
+    @contextlib.contextmanager
+    def _turn(self, seconds: float = LOCK_S, alive: Optional[Callable[[], bool]] = None) -> Iterator[None]:
+        """The adapter's one exchange at a time, waited for `seconds` at most (Stuck past that). alive(): whether the
+        instrument whose exchange this is still wants it (its connection not closed meanwhile): one closed while it
+        waited sends nothing, never a command its caller gave up on long ago."""
+        if not self.lock.acquire(timeout=seconds):
+            raise Stuck("the Prologix %s is still in another exchange after %d s (stuck in its driver: a GPIB-USB whose "
+                        "bus hung?); unplug it and plug it in again if it stays so" % (place(self.key), round(seconds)))
+        try:
+            if alive is not None and not alive():
+                raise ConnectionError("its connection to the Prologix %s was closed while it waited" % place(self.key))
+            yield
+        finally:
+            self.lock.release()
+
     def connect(self) -> str:
         """Connected (again, after a lost connection); the adapter's version. AdapterError: it can't be reached, or
-        what answers isn't a Prologix."""
-        with self.lock:
+        what answers isn't a Prologix (Stuck: its one exchange at a time hasn't ended in LOCK_S)."""
+        with self._turn():
             if self.link is not None:
                 return self.version
             try:
@@ -335,14 +379,24 @@ class Adapter:
         self.disconnect()
         return ConnectionError("lost the connection to the Prologix %s (%s)" % (place(self.key), first_line(e)))
 
-    def disconnect(self) -> None:
-        with self.lock:
+    def disconnect(self, beside: bool = False) -> None:
+        """Its connection let go of. beside: when another exchange still has the adapter after LOCK_S (stuck in its
+        driver), the connection is closed beside it, which then fails (closing a port ends a call stuck in it);
+        otherwise Stuck."""
+        took = self.lock.acquire(timeout=LOCK_S)
+        if not took and not beside:
+            raise Stuck("the Prologix %s is still in another exchange after %d s, so its connection wasn't let go of"
+                        % (place(self.key), round(LOCK_S)))
+        try:
             link, self.link, self.state, self.last = self.link, None, {}, None
             if link is not None:
                 try:
                     link.close()
                 except Exception:
                     pass
+        finally:
+            if took:
+                self.lock.release()
 
     def _set(self, link: Any, key: str, command: bytes) -> None:
         if self.state.get(key) != command:
@@ -355,8 +409,8 @@ class Adapter:
         self._set(link, "addr", at.addr_command())
         self.last = at
 
-    def write(self, at: Where, data: bytes) -> None:
-        with self.lock:
+    def write(self, at: Where, data: bytes, alive: Optional[Callable[[], bool]] = None) -> None:
+        with self._turn(EXCHANGE_WAIT_S, alive):
             link = self._link()
             try:
                 link.drop_input()   # a new command: nothing still to come belongs to it
@@ -367,18 +421,26 @@ class Adapter:
 
     def interface_clear(self) -> None:
         """GPIB's interface clear (++ifc) on the adapter's bus: every instrument on it stops talking and listening (its
-        settings stay). What brings a hung bus back."""
-        with self.lock:
+        settings stay). What brings a hung bus back. An exchange stuck in the adapter's driver has its connection
+        closed beside it (which ends it), and the clear goes on a new one; Stuck when even that doesn't free it."""
+        if not self.lock.acquire(timeout=LOCK_S):
+            self.disconnect(beside=True)   # the stuck exchange fails, and lets go
+            if not self.lock.acquire(timeout=LOCK_S):
+                raise Stuck("the Prologix %s is stuck in a call that closing its connection didn't end: unplug it and "
+                            "plug it in again (or restart Kelvin)" % place(self.key))
+        try:
             link = self._link()
             try:
                 link.send(b"++ifc\n")
                 self.last = None   # each instrument is addressed afresh after it
             except OSError as e:
                 raise self._lost(e) from e
+        finally:
+            self.lock.release()
 
-    def clear(self, at: Where) -> None:
+    def clear(self, at: Where, alive: Optional[Callable[[], bool]] = None) -> None:
         """Selected Device Clear (++clr): the instrument drops what it was doing and what it had to say."""
-        with self.lock:
+        with self._turn(EXCHANGE_WAIT_S, alive):
             link = self._link()
             try:
                 self._address(link, at)
@@ -386,19 +448,24 @@ class Adapter:
             except OSError as e:
                 raise self._lost(e) from e
 
-    def read(self, at: Where, tmo_ms: int, term: bytes = b"", block: bool = False) -> Tuple[bytes, str]:
+    def read(self, at: Where, tmo_ms: int, term: bytes = b"", block: bool = False,
+             alive: Optional[Callable[[], bool]] = None) -> Tuple[bytes, str]:
         """One ++read of the instrument at `at`: (bytes, "end") when it ended its reply with EOI; with term (an
         instrument that ends its replies without EOI, read to its line end), (bytes, "term") at that byte; (bytes,
-        "silent") once the adapter has stopped waiting for more (tmo_ms without a byte)."""
-        with self.lock:
+        "silent") once the adapter has stopped waiting for more (tmo_ms without a byte). A reply that keeps coming past
+        READ_MAX_S or READ_MAX_BYTES (an instrument left talking) ends it: the connection is let go of."""
+        with self._turn(EXCHANGE_WAIT_S, alive):
             link = self._link()
             try:
                 self._address(link, at)
                 self._set(link, "tmo", b"++read_tmo_ms %d" % tmo_ms)
                 link.send(b"++read %d\n" % term[-1] if term else b"++read eoi\n")
                 buf, quiet = b"", tmo_ms / 1000.0 + MARGIN_S
-                until = time.monotonic() + quiet
+                until, stop = time.monotonic() + quiet, time.monotonic() + READ_MAX_S
                 while True:
+                    if time.monotonic() > stop or len(buf) > READ_MAX_BYTES:
+                        raise TimeoutError("%s kept sending for over %d s (%d bytes): an instrument left talking?"
+                                           % (at.words(), round(READ_MAX_S), len(buf)))
                     end = _end_at(buf, block)
                     if end >= 0:
                         return buf[:end], "end"
@@ -429,11 +496,25 @@ def _take(key: str) -> Adapter:
 
 
 def _give_back(a: Adapter) -> None:
+    """One user fewer; the last lets go of its connection, outside _adapters_lock (every adapter's connections wait
+    on it) and on a thread of its own, waited for CLOSE_JOIN_S: one stuck in a call has its connection closed beside
+    that call (Adapter.disconnect), never holding up whoever let go of it."""
     with _adapters_lock:
         a.users -= 1
-        if a.users <= 0 and _adapters.get(a.key) is a:
+        last = a.users <= 0 and _adapters.get(a.key) is a
+        if last:
             del _adapters[a.key]
-            a.disconnect()
+    if last:
+        t = threading.Thread(target=_let_go, args=(a,), name="kelvin-prologix-close", daemon=True)
+        t.start()
+        t.join(CLOSE_JOIN_S)
+
+
+def _let_go(a: Adapter) -> None:
+    try:
+        a.disconnect(beside=True)
+    except Exception:
+        pass
 
 
 @contextlib.contextmanager
@@ -483,7 +564,7 @@ class Resource:
     def write_raw(self, data: bytes) -> int:
         self._open()
         self._rx, self._end = b"", False   # a new command: what it hadn't read of the last reply is no longer wanted
-        self.adapter.write(self.at, bytes(data))
+        self.adapter.write(self.at, bytes(data), self._alive)
         return len(data)
 
     def read(self) -> str:
@@ -510,7 +591,7 @@ class Resource:
     def clear(self) -> None:
         self._open()
         self._rx, self._end = b"", False
-        self.adapter.clear(self.at)
+        self.adapter.clear(self.at, self._alive)
 
     def close(self) -> None:
         if not self._closed:
@@ -520,6 +601,9 @@ class Resource:
     def _open(self) -> None:
         if self._closed:   # as a closed VISA session: it would otherwise connect to the adapter again
             raise ConnectionError("%s: Kelvin closed its connection" % self.at.words())
+
+    def _alive(self) -> bool:
+        return not self._closed
 
     def _take(self, term: bytes) -> Optional[bytes]:
         """A whole reply from what came: to its line end (the last byte of the read termination, as VISA reads), or to
@@ -549,7 +633,7 @@ class Resource:
             if left <= 0:
                 raise TimeoutError("%s did not answer within %g s" % (self.at.words(), seconds))
             tmo = max(1, min(MAX_TMO_MS, math.ceil(left * 1000)))
-            data, how = self.adapter.read(self.at, tmo, b"" if self._eoi or not term else term, block)
+            data, how = self.adapter.read(self.at, tmo, b"" if self._eoi or not term else term, block, self._alive)
             if data:
                 self._rx += data
                 until = time.monotonic() + seconds

@@ -26,9 +26,21 @@ from .drivers import DriverBackend, link_failed
 _PATH = re.compile(r"^(\w+?)(\d+)$")   # "offset1": the parameter, then the axis
 MOVE_TIMEOUT_S = 60.0
 # one connection per controller, shared by its axes, with one lock: an axis's exchange never interleaves with another's
-# on the link (a read of axis 1 during axis 2's step took its reply, and a working controller was alarmed as silent)
-_shared: Dict[str, Tuple[Any, int, Any]] = {}
-_shared_lock = threading.Lock()
+# on the link (a read of axis 1 during axis 2's step took its reply, and a working controller was alarmed as silent);
+# and one thread its calls go through (_Calls): a Stop that ends one axis's wait, its call going on in the driver, never
+# lets another axis's call into the driver beside it
+_shared: Dict[str, Tuple[Any, int, Any, Any]] = {}
+_shared_lock = threading.Lock()   # only ever held for the bookkeeping: never across a call into a controller's driver
+# controllers being opened now, by key: their other axes wait for that open (OPEN_WAIT_S at most), outside _shared_lock,
+# which a controller's DLL that never returned from its open once held for every positioner and every switch-off
+_opening: Dict[str, threading.Event] = {}
+OPEN_WAIT_S = 60.0
+CLOSE_JOIN_S = 5.0   # how long letting go of a controller waits for its close; one stuck in its driver is left to it
+
+
+class _Calls:
+    """The controller's calls into its driver: one courier for all its axes (DriverBackend._driver_call)."""
+    courier: Any = None
 
 
 def _attocube(module: Any, name: str) -> Any:
@@ -53,9 +65,37 @@ class _Controller(DriverBackend):
         self.query_args = dict(urllib.parse.parse_qsl(url.query))
         self.module = module
         key = "%s:%s" % (self.KIND, self.target.lower())
-        with _shared_lock:
-            dev, users, lock = _shared.get(key, (None, 0, None))
-            if dev is None:
+        dev, lock, calls = self._join(key, name)
+        self.key, self.dev, self.lock, self._calls = key, dev, lock, calls
+        self.steps: Dict[int, int] = {}
+
+    def _join(self, key: str, name: str) -> Tuple[Any, Any, Any]:
+        """The controller's connection, shared by its axes: the one there, or one this axis opens, outside
+        _shared_lock (another axis of it waits for that open, OPEN_WAIT_S at most; every other controller never
+        does). One whose driver is still stuck in a call that never returned is replaced, and let go of beside."""
+        while True:
+            with _shared_lock:
+                dev, users, lock, calls = _shared.get(key, (None, 0, None, None))
+                if dev is not None and calls is not None and calls.courier is not None and calls.courier.dead:
+                    # its driver is still stuck in a call that never returned: this axis connects afresh, and the stuck
+                    # connection is let go of beside it (its other axes, gone, connect to the new one when reconnected)
+                    _shared.pop(key, None)
+                    threading.Thread(target=_close_quietly, args=(dev,), name="kelvin-%s-close" % key,
+                                     daemon=True).start()
+                    dev = None
+                if dev is not None:
+                    _shared[key] = (dev, users + 1, lock, calls)
+                    return dev, lock, calls
+                opening = _opening.get(key)
+                mine = opening is None
+                if mine:
+                    opening = _opening[key] = threading.Event()
+            if not mine:
+                if not opening.wait(OPEN_WAIT_S):
+                    raise AdapterError("%s: another axis's connection to the %s at %s is still opening after %d s (its "
+                                       "driver stuck?)" % (name, self.KIND, self.target or "0", round(OPEN_WAIT_S)))
+                continue   # opened now (joined next time round), or failed (this axis tries itself)
+            try:
                 try:
                     dev = self.open()
                 except AdapterError:
@@ -63,10 +103,32 @@ class _Controller(DriverBackend):
                 except Exception as e:
                     raise AdapterError("%s: could not open the %s at %s: %s" % (name, self.KIND, self.target or "0",
                                                                                e)) from e
-                lock = threading.Lock()
-            _shared[key] = (dev, users + 1, lock)
-        self.key, self.dev, self.lock = key, dev, lock
-        self.steps: Dict[int, int] = {}
+                lock = threading.RLock()   # re-entrant: a wait for it is one a Stop ends (Instrument._turn)
+                calls = _Calls()
+                with _shared_lock:
+                    _shared[key] = (dev, 1, lock, calls)
+                return dev, lock, calls
+            finally:
+                with _shared_lock:
+                    _opening.pop(key, None)
+                opening.set()
+
+    @property
+    def _courier(self) -> Any:
+        calls = self.__dict__.get("_calls")
+        return calls.courier if calls is not None else None
+
+    @_courier.setter
+    def _courier(self, courier: Any) -> None:
+        calls = self.__dict__.get("_calls")
+        if calls is not None:
+            calls.courier = courier
+
+    def _courier_name(self) -> str:
+        return self.key
+
+    def _end_calls(self) -> None:
+        pass   # the controller's, shared: ended by close() once its last axis lets go of it
 
     def open(self) -> Any:
         raise NotImplementedError
@@ -88,17 +150,27 @@ class _Controller(DriverBackend):
 
     def close(self) -> None:
         with _shared_lock:
-            dev, users, lock = _shared.get(self.key, (None, 0, None))
-            if dev is None:
+            dev, users, lock, calls = _shared.get(self.key, (None, 0, None, None))
+            if dev is None or calls is not self._calls:   # one let go of already (a stuck one another axis replaced)
                 return
             if users > 1:
-                _shared[self.key] = (dev, users - 1, lock)
+                _shared[self.key] = (dev, users - 1, lock, calls)
                 return
             _shared.pop(self.key, None)
-        try:
-            dev.close()
-        except Exception:
-            pass
+        if calls is not None and calls.courier is not None:
+            calls.courier.end()
+        # closed on a thread of its own, waited for CLOSE_JOIN_S: a controller stuck in its driver never holds up
+        # whoever lets go of it (a switch-off holds the lab)
+        t = threading.Thread(target=_close_quietly, args=(dev,), name="kelvin-%s-close" % self.key, daemon=True)
+        t.start()
+        t.join(CLOSE_JOIN_S)
+
+
+def _close_quietly(dev: Any) -> None:
+    try:
+        dev.close()
+    except Exception:
+        pass
 
 
 def _line(raw: bytes) -> str:
@@ -129,7 +201,8 @@ class Link:
         try:
             if re.match(r"^(COM\d+|/dev/)", self.target, re.I):
                 import serial   # pyserial, part of Kelvin's hardware support
-                self.port = serial.Serial(self.target, 38400, bytesize=8, parity="N", stopbits=1, timeout=0.2)
+                self.port = serial.Serial(self.target, 38400, bytesize=8, parity="N", stopbits=1, timeout=0.2,
+                                          write_timeout=self.timeout)   # a USB-serial driver that stalls: bounded
             else:
                 host, _, port = self.target.partition(":")
                 self.sock = socket.create_connection((host, int(port or 7230)), timeout=self.timeout)

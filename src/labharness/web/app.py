@@ -251,6 +251,9 @@ def channel(request: Request) -> Tuple[str, Optional[str]]:
 
 STOPPED = ("Stopped: Kelvin's answer, the ramp or run in progress (a run's safe-stop steps run) and the queue; open "
            "approvals were declined.")
+# when the stopped work hasn't ended within a moment (runtime.still_after_stop): said as it is, never "Stopped"
+NOT_YET = ("Stop sent, but the work hasn't ended yet: it waits for %s. It ends as soon as that does; a GPIB bus that "
+           "hangs: Clear the bus in its alarm; if it never ends, restart Kelvin. Open approvals were declined.")
 
 
 async def own_thread(fn: Callable[..., Any], *args: Any) -> Any:
@@ -2579,10 +2582,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             def num(name: str) -> Optional[float]:
                 v = body.get(name)
                 return None if v in (None, "") else float(v)
-            try:
-                view = runtime.add_watch(str(body.get("key") or ""), num("above"), num("below"), num("for_s") or 0.0,
-                                         str(body.get("note") or ""), source="person",
-                                         lab_wide=bool(body.get("lab_wide")))
+            try:   # it writes the watches and the record: never on the portal's own loop (a data folder may stall)
+                view = await asyncio.to_thread(lambda: runtime.add_watch(
+                    str(body.get("key") or ""), num("above"), num("below"), num("for_s") or 0.0,
+                    str(body.get("note") or ""), source="person", lab_wide=bool(body.get("lab_wide"))))
             except KeyError as e:
                 return error(404, e.args[0] if e.args else "no such reading")
             except (TypeError, ValueError) as e:
@@ -2592,7 +2595,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def watch_view(request: Request) -> Response:
         try:
-            runtime.remove_watch(request.path_params["watch_id"], source="person")
+            await asyncio.to_thread(runtime.remove_watch, request.path_params["watch_id"], source="person")
         except KeyError as e:
             return error(404, e.args[0])
         except PermissionError as e:
@@ -2601,7 +2604,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def alarm_ack(request: Request) -> Response:
         """A person's Got it, from the portal or a phone: kept with the alarm and in the record, with who and where."""
-        ok = runtime.acknowledge_alarm(request.path_params["alarm_id"], person(request), *channel(request))
+        ok = await asyncio.to_thread(runtime.acknowledge_alarm, request.path_params["alarm_id"], person(request),
+                                     *channel(request))   # it writes the record: never on the portal's own loop
         return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
 
     def lab_memory_now(said: str = "") -> Dict[str, Any]:
@@ -3771,7 +3775,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             await own_thread(runtime.stop, person(request))
             stopped = True
             tell_later(person_notices.stop_said(before, runtime.queue_started_by))
-            return JSONResponse({"ok": True, "message": STOPPED})
+            still = await own_thread(runtime.still_after_stop)
+            return JSONResponse({"ok": True, "message": NOT_YET % still if still else STOPPED,
+                                 "ended": not still})
         if not chat_id:
             return JSONResponse({"ok": False, "message": "Nothing stopped: no conversation was named. The lab's work "
                                                          "stops with {lab: true}, everything with {}."})
@@ -3797,7 +3803,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if action == "dismiss":
             if runtime.operating:   # the guard lets the card's safe through while Claude works the screen, not this
                 return error(423, OPERATING)
-            runtime.dismiss_incident(person(request))
+            await asyncio.to_thread(runtime.dismiss_incident, person(request))
             return JSONResponse({"ok": True})
         return error(400, "action is safe or dismiss")
 
@@ -3942,8 +3948,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if request.method == "POST":
             body = await request.json()
             try:
-                return JSONResponse(runtime.set_approval_mode(str(body.get("mode")), "human (portal)",
-                                                              pin=body.get("pin")))
+                return JSONResponse(await asyncio.to_thread(lambda: runtime.set_approval_mode(
+                    str(body.get("mode")), "human (portal)", pin=body.get("pin"))))
             except RoleRefused as e:   # the lab's roles: not a trainee's, PIN or not
                 return JSONResponse({"error": str(e), "role": "trainee"}, status_code=403)
             except PermissionError as e:   # the lab owner's PIN (accounts.OwnerPin)
@@ -4096,8 +4102,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         op, by = str(body.get("op") or ""), "human"
         item = body.get("item")
         if op == "fields":   # changes nothing, so no one hears of it
-            try:
-                return JSONResponse(runtime.queue_fields(item))
+            try:   # never on the portal's own loop: the queue's lock may wait on its file (every request with it)
+                return JSONResponse(await asyncio.to_thread(runtime.queue_fields, item))
             except KeyError as e:
                 return error(404, e.args[0] if e.args else "no such queue item")
         before = await asyncio.to_thread(runtime.queue_view)   # what it was, for the change in words (notices.py)
@@ -4137,7 +4143,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             ok = not msg.startswith("not added")
         elif op == "then_pause":   # {item, value}: the queue pauses after it, or no longer does
             try:
-                found = runtime.queue.set_then_pause(item, bool(body.get("value", True)))
+                found = await asyncio.to_thread(runtime.queue.set_then_pause, item, bool(body.get("value", True)))
                 msg, ok = "the queue %s after %s" % ("pauses" if found.then_pause else "goes on", found.name), True
             except KeyError as e:
                 msg, ok = e.args[0], False
@@ -4145,7 +4151,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             msg = await asyncio.to_thread(persons, runtime.queue_edit, item, str(body.get("text") or ""), by)
             ok = not msg.startswith("not changed")
         elif op in ("move", "remove", "again", "clear"):
-            msg = runtime.queue_change(op, item, body.get("position"), by)
+            msg = await asyncio.to_thread(runtime.queue_change, op, item, body.get("position"), by)
             ok = not msg.startswith(("not changed", "unknown"))
         elif op == "start":   # its approval card may wait for a person for hours: never a request held open meanwhile
             return await soon(started())
@@ -4153,7 +4159,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             # whose second press takes the pause back): a queue no longer in it is left as it is, 409 saying why
             want = body.get("want")
             try:
-                msg = runtime.queue_pause(by, None if want is None else str(want))
+                msg = await asyncio.to_thread(runtime.queue_pause, by, None if want is None else str(want))
             except ValueError as e:
                 return error(400, str(e))
             if msg.startswith("not changed"):
@@ -4161,18 +4167,18 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             ok = True
         elif op == "on_error":
             try:
-                runtime.queue_set_on_error(str(body.get("value") or ""), by)
+                await asyncio.to_thread(runtime.queue_set_on_error, str(body.get("value") or ""), by)
                 msg, ok = "ok", True
             except ValueError as e:
                 msg, ok = str(e), False
         elif op == "save":
-            msg = runtime.queue_save(str(body.get("name") or ""))
+            msg = await asyncio.to_thread(runtime.queue_save, str(body.get("name") or ""))
             ok = msg.startswith("saved")
         elif op == "load":
             msg = await asyncio.to_thread(persons, runtime.queue_load, str(body.get("name") or ""), by)
             ok = msg.startswith("added")
         elif op == "rename":
-            msg = runtime.queue_rename(body.get("name"), by)
+            msg = await asyncio.to_thread(runtime.queue_rename, body.get("name"), by)
             ok = not msg.startswith("not changed")
         elif op in ("skip", "duplicate"):
             msg = await asyncio.to_thread(runtime.queue_change, op, item, None, by)

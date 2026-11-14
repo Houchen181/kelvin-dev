@@ -816,8 +816,9 @@ def run(gate: Any, inst: Any, tech: Technique, given: Dict[str, Any], stops_sinc
     backend = inst.backend
     lock = getattr(backend, "lock", None)
     held = lock if lock is not None and hasattr(lock, "_is_owned") else None   # re-entrant: held throughout
-    if held is not None:
-        held.acquire()
+    if held is not None:   # as long as the exchange that has it takes (bounded), never past a Stop
+        wait = getattr(inst, "_wait_for", None)
+        wait(held) if wait is not None else held.acquire()
     try:
         if inst.card.error_query is not None:   # what is queued now isn't this technique's (each change checked its own)
             try:

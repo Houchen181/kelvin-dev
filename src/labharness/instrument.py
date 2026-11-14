@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from .adapters import lost_kind, short_code, short_model, where_and_cause
+from .adapters import lost_kind, short_code, short_model, stoppable, where_and_cause
 from .cards import BINARY_REPLY, Card, ParamSpec
 from .clock import Stops
 from .labconfig import Guard, InstrumentConfig
@@ -21,6 +21,12 @@ from .labconfig import Guard, InstrumentConfig
 OFF_TEXT = "%s is disconnected from Kelvin in the Lab panel: Kelvin sends it nothing until a person connects it"
 NOT_CONNECTED = "%s is not connected (%s): Kelvin sends it nothing until it connects (reconnect_instrument)"
 GUARD_S = 30.0    # how long what a card's check before a reading found holds, unless a command goes to it meanwhile
+STOP_LOOK_S = 0.2   # how often a thread waiting for an instrument's connection looks for a person's Stop
+# the longest a drive on its way to safe waits for its instrument's connection that another exchange has (no Stop ends
+# that wait: unstoppable): past it the instrument is said as held, and its safe steps are left. Work a Stop can end
+# waits as long as the exchange that has it takes, every call into a driver being bounded (adapters.Courier), as a
+# chat's 10-minute sweep is waited for by the queue's next scan on that instrument
+HELD_S = 120.0
 
 
 class InstrumentOff(RuntimeError):
@@ -83,6 +89,9 @@ class Busy(RuntimeError):
 
 _patience = threading.local()
 _ended = threading.local()
+_quick = threading.local()   # this thread's short wait for an answer (briefly)
+_leave = threading.local()   # whom this thread's looks leave alone (leave_alone)
+_steady = threading.local()  # no Stop ends this thread's waits on instruments (unstoppable)
 
 
 @contextlib.contextmanager
@@ -111,6 +120,55 @@ def patience(seconds: float, in_use: Optional[Callable[[str], bool]] = None) -> 
         yield
     finally:
         _patience.now = before
+
+
+@contextlib.contextmanager
+def briefly(ms: Optional[int]) -> Iterator[None]:
+    """On this thread, a question to an instrument (a quick one: who it is) waits ms at most for its answer, not its
+    card's whole timeout, where its connection can say so (VisaBackend.brief): asking one that stopped answering
+    whether it is back then holds a GPIB bus a second, not the half minute a dead lock-in's timeout held it, in front
+    of every other instrument on it. None: as usual."""
+    before = getattr(_quick, "ms", None)
+    _quick.ms = ms
+    try:
+        yield
+    finally:
+        _quick.ms = before
+
+
+@contextlib.contextmanager
+def unstoppable() -> Iterator[None]:
+    """On this thread, a person's Stop doesn't end a wait on an instrument (an exchange the driver still has, a wait for
+    its connection): drives on their way to safe (a second Stop, Bring to safe's own stop, an interlock's trip must
+    never leave one half way there, an output on), and the monitor's looks (a Stop in the middle of an interlock's
+    reading must never trip it). They stay bounded: each call into a driver by its limit (adapters.Courier), a wait for
+    a connection by HELD_S. A wait for a set point the instrument ramps to by itself still ends at a Stop, the set point
+    left as it was sent."""
+    before = getattr(_steady, "on", False)
+    _steady.on = True
+    try:
+        yield
+    finally:
+        _steady.on = before
+
+
+def _stop_ends_waits() -> bool:
+    return not getattr(_steady, "on", False)
+
+
+@contextlib.contextmanager
+def leave_alone(why: Optional[Callable[["Instrument"], Optional[str]]]) -> Iterator[None]:
+    """On this thread (the monitor's look at the lab), an instrument for which why(instrument) says something is not
+    asked anything: InstrumentLost, in those words, with nothing sent and nothing waited for, its health as it was.
+    The monitor leaves one that stopped answering to a thread of its own (Monitor._ask_again): a field test's monitor
+    spent 31 s at a time asking a lock-in that didn't answer, every watch and interlock waiting behind. None: every
+    instrument is asked."""
+    before = getattr(_leave, "now", None)
+    _leave.now = why
+    try:
+        yield
+    finally:
+        _leave.now = before
 
 
 @dataclass
@@ -222,6 +280,9 @@ class Instrument:
         # each reading's latest value and when (wall time), whoever read it: the monitor takes the running work's own
         # while that work has the connection (seen)
         self._seen: Dict[str, Tuple[Any, float]] = {}
+        # what each thread does with it now (doing): an exchange under way (command, since), a wait for its connection
+        self.asking: Dict[int, Tuple[str, float]] = {}
+        self.waiting: Dict[int, float] = {}
 
     def seen(self, param: str, within: float) -> Optional[Tuple[Any, float]]:
         """The latest value anyone read of this reading (a run, the Lab panel, the monitor), and when (wall time), if
@@ -234,14 +295,62 @@ class Instrument:
             self._seen[param] = (value, time.time())
         return value
 
+    def _wait_for(self, lock: Any) -> None:
+        """The connection's lock, taken by a thread that may wait for it (a run, a set, a person's look): as long as the
+        exchange that has it takes (every call into a driver is bounded: adapters.Courier), but never past a person's
+        Stop (the lab's, or this thread's own: ended_by). A run of a field test waited with no end behind an exchange
+        hung in a dead GPIB adapter's driver, and five Stops did nothing. Stopped, with nothing sent, when a Stop comes
+        first. A drive on its way to safe (unstoppable), which no Stop ends, waits HELD_S at most: Busy past that."""
+        if lock.acquire(False):
+            return
+        start, also, began = self.stops.count, getattr(_ended, "now", None), time.monotonic()
+        stops = _stop_ends_waits()
+        me = threading.get_ident()
+        self.waiting[me] = time.time()   # what this thread waits for, for whoever asks why it hasn't ended (doing)
+        try:
+            while not lock.acquire(timeout=STOP_LOOK_S):
+                if stops and (self.stops.since(start) or (also is not None and also())):
+                    raise Stopped("%s: stopped by a person while it waited for its connection, which other work had "
+                                  "(%s)" % (self.name, self.busy_text()))
+                if not stops and time.monotonic() - began > HELD_S:
+                    raise Busy("%s is held: another exchange has had its connection for over %d s and hasn't given it "
+                               "back (hung in its driver?). Clear its GPIB bus or reconnect it; nothing was sent"
+                               % (self.name, HELD_S))
+        finally:
+            self.waiting.pop(me, None)
+
+    def doing(self, thread: int, older: float = 0.0) -> Optional[str]:
+        """What this thread does with the instrument now, in words, if it has for `older` seconds or more: an exchange
+        under way ("dmm's reply to MEAS? since 18:28:51") or a wait for its connection, which another exchange has. A
+        Stop that didn't end the work at once says so, rather than "stopped" (a field test's stop_run said stopped of
+        a run still waiting)."""
+        now = time.time()
+        asking = self.asking.get(thread)
+        if asking is not None and now - asking[1] >= older:
+            return "%s's reply to %s, since %s" % (self.name, asking[0] or "a command",
+                                                   time.strftime("%H:%M:%S", time.localtime(asking[1])))
+        since = self.waiting.get(thread)
+        if since is not None and now - since >= older:
+            return "%s's connection, which another exchange has had since before %s" % (
+                self.name, time.strftime("%H:%M:%S", time.localtime(since)))
+        return None
+
     @contextlib.contextmanager
     def _turn(self) -> Iterator[None]:
         """This thread's turn on the connection, for one exchange or an acquisition's whole sequence. Under patience
-        (the monitor's): Busy instead of a wait behind other work that has it. Elsewhere nothing changes: the
-        backend's own lock makes others wait, as it always did."""
+        (the monitor's, a run's look at instruments it doesn't use): Busy instead of a wait behind other work that has
+        it. Elsewhere it waits for it as long as that work takes, but a person's Stop ends the wait (_wait_for)."""
         now = getattr(_patience, "now", None)
         if now is None:
-            yield
+            lock = getattr(self.backend, "lock", None)
+            if lock is None or not hasattr(lock, "_is_owned") or lock._is_owned():
+                yield   # no lock it can hold across the exchange, or held here already (an acquisition's sequence)
+                return
+            self._wait_for(lock)
+            try:
+                yield
+            finally:
+                lock.release()
             return
         wait, in_use, busy = now
         if self.name in busy:   # found busy already: not waited for twice
@@ -309,10 +418,25 @@ class Instrument:
         broken = getattr(self.backend, "broken", "")
         if broken:
             raise InstrumentLost(self.lost_words(broken))
+        leave = getattr(_leave, "now", None)
+        why = leave(self) if leave is not None else None
+        if why:   # the monitor's look leaves it to its own thread's question (leave_alone): nothing sent
+            raise InstrumentLost(why)
         with self._turn():
-            started = time.time()
+            started, me = time.time(), threading.get_ident()
+            self.asking[me] = (str(args[0]).strip()[:60] if args and isinstance(args[0], str) else "", started)
+            count, also = self.stops.count, getattr(_ended, "now", None)
+            look = getattr(_patience, "now", None)   # a look (the monitor's, a run's record of others): never waits long
+            ms = getattr(_quick, "ms", None)
+            brief = getattr(self.backend, "brief", None) if ms else None
             try:
-                out = fn(*args)
+                # a Stop that comes while the driver has the call ends this thread's wait at once, and a look waits
+                # behind the driver's earlier calls only as long as its patience (adapters.Courier)
+                stops = _stop_ends_waits()   # not on the way to safe, nor in the monitor's looks (unstoppable)
+                with stoppable(lambda: stops and (self.stops.since(count) or (also is not None and bool(also()))),
+                               max(look[0], 0.5) if look is not None else None):
+                    with brief(ms) if brief is not None else contextlib.nullcontext():
+                        out = fn(*args)
             except (InstrumentOff, Stopped, InstrumentLost):
                 raise
             except Exception as e:
@@ -320,13 +444,18 @@ class Instrument:
                 if kind is None:
                     raise
                 self._forget()
-                why = self._said_instead(fn, args) if kind == "silent" else None
+                # its error queue asked, a person's Stop ending that wait too (not on the way to safe: unstoppable)
+                with stoppable(lambda: stops and (self.stops.since(count) or (also is not None and bool(also()))),
+                               max(look[0], 0.5) if look is not None else None):
+                    why = self._said_instead(fn, args) if kind == "silent" and not ms else None   # briefly: is it there
                 if why:   # it answers its error queue: not lost; it couldn't do this one, and says why
                     self.health.answered()
                     raise InstrumentFault(why) from e
                 command = str(args[0]).strip() if args and isinstance(args[0], str) else ""
                 self.health.failed(kind == "gone", self.loss_text(e, command), command, started)
                 raise InstrumentLost(self.health.lost_text) from e
+            finally:
+                self.asking.pop(me, None)
             if alive:
                 self.health.answered()
                 if args and isinstance(args[0], str):
@@ -549,15 +678,17 @@ class Instrument:
         res = getattr(self.backend, "res", None)
         before = getattr(res, "timeout", None)
         if held is not None:
-            held.acquire()
+            self._wait_for(held)   # as long as the exchange that has it takes, never past a Stop
         try:
             if spec.wait_s and before is not None:
                 res.timeout = spec.wait_s * 1000.0
             start = self.stops.count
             also = getattr(_ended, "now", None)   # this thread's own stop too (ended_by: a chat's reading)
 
+            stops = _stop_ends_waits()   # the monitor's look at a sweep, a drive on its way to safe: no Stop ends it
+
             def stopped() -> bool:
-                return self.stops.since(start) or (also is not None and bool(also()))
+                return stops and (self.stops.since(start) or (also is not None and bool(also())))
             waiting = getattr(self.backend, "query_waiting", None)
             for c in spec.get_before:
                 if stopped():

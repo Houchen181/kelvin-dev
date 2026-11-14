@@ -22,6 +22,8 @@ from __future__ import annotations
 import math
 import re
 import threading
+import contextlib
+import functools
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -30,7 +32,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tupl
 from . import protection, pulses
 from .cards import ParamSpec, num
 from .eventlog import EventLog
-from .instrument import Busy, Instrument
+from .instrument import Busy, Instrument, unstoppable
 from .labconfig import Allowed, Envelope, Guard
 from .scpi import Template, is_query, split_compound
 
@@ -112,6 +114,22 @@ class SimulationApprover(Approver):
     def approve(self, request: ApprovalRequest) -> bool:
         self.requests.append(request)
         return True
+
+
+def _steadily(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """A way to safe no Stop cuts short (instrument.unstoppable): a second Stop, Bring to safe's own stop or an
+    interlock's trip that came while drives were on their way to safe left one half way and an output on."""
+    @functools.wraps(fn)
+    def steady(*args: Any, **kwargs: Any) -> Any:
+        with unstoppable():
+            return fn(*args, **kwargs)
+    return steady
+
+
+# drives of several instruments go to safe side by side, one thread an instrument (its own drives in its safe order):
+# one that a hung call holds never keeps a laser's shutter or another source waiting. Each is bounded (its calls'
+# limits, HELD_S for its connection, its ramp's length); the whole is waited for this long at most, then said
+SAFE_ALL_S = 1800.0
 
 
 def _dur(seconds: float) -> str:
@@ -308,6 +326,7 @@ class SafetyGate:
         self.trip_count = 0     # guard trips so far: an item that trips one pauses the queue, whatever on_error says
         self._prefixes: Dict[int, Template] = {}
         self._acting = threading.local()   # a person's own command (the portal's terminal), on this thread only
+        self._work = threading.local()     # the stop count as this thread's work began (work_since)
 
     @contextmanager
     def acting_as(self, by: str) -> Iterator[None]:
@@ -494,6 +513,13 @@ class SafetyGate:
     def status(self) -> Dict[str, Dict[str, Any]]:
         return self.lab.snapshot()
 
+    @_steadily
+    def to_safe_many(self, names: List[str]) -> List[Result]:
+        """to_safe for each of these instruments, side by side (_side_by_side): one held by a hung call never keeps
+        the others' outputs on."""
+        return self._side_by_side([(n, None) for n in names], lambda instr, _: self.to_safe(instr), self._who())
+
+    @_steadily
     def to_safe(self, instr: str) -> List[Result]:
         """Bring an instrument's drives to safe in its card's order (ramped, or held where the lab says so)."""
         by = self._who()
@@ -693,7 +719,25 @@ class SafetyGate:
 
     # ------------------------------------------------------------------ used by the run engine
 
+    @contextmanager
+    def work_since(self, generation: int) -> Iterator[None]:
+        """This thread's work began at this stop count: a person's Stop since declines any card it would show (ask),
+        rather than show it after the Stop. One prepared while the Stop landed (its checks, its dry run) showed after
+        it and waited its whole timeout, holding the lab, every request answered "busy". The outer work's count holds
+        within."""
+        before = getattr(self._work, "since", None)
+        self._work.since = generation if before is None else before
+        try:
+            yield
+        finally:
+            self._work.since = before
+
     def ask(self, request: ApprovalRequest) -> bool:
+        since = getattr(self._work, "since", None)
+        if since is not None and self.stop_generation != since:   # a Stop came while it was prepared: never shown
+            request.note = request.note or "a person pressed Stop while it was being asked"
+            self.log.write("ask", by=self._who(), request=str(request), answer="declined", note=request.note)
+            return False
         answer = bool(self.approver.approve(request))
         self.log.write("ask", by=self._who(), request=str(request), answer="approved" if answer else "declined",
                        note=request.note or None)
@@ -1861,6 +1905,7 @@ class SafetyGate:
                 words.append("%s could not be switched %s: %s" % (switch.name, switch.show(switch.safe), e))
         return results, "; ".join(words) or "already at %s" % spec.show(spec.safe)
 
+    @_steadily
     def cut(self, instr: str, param: str, by: str) -> List[Result]:
         """A watch's action (monitor.py): the drive to safe and the switch that applies it off, without asking (only
         ever toward safe); a drive the lab config holds is held instead."""
@@ -1889,6 +1934,7 @@ class SafetyGate:
                 out.append(r)
         return out
 
+    @_steadily
     def abort_to_safe(self, keys: List[str], by: str, hold: bool = True) -> List[Result]:
         """After a stop or a failure: these drives go to safe, each instrument's in its card's safe order, or hold
         where the lab config says hold. Nothing here waits for a set point the instrument ramps to by itself (a stop
@@ -1900,24 +1946,79 @@ class SafetyGate:
         for key in keys:
             instr, _, param = key.partition(".")
             wanted.setdefault(instr, []).append(param)
-        out: List[Result] = []
-        for instr, params in wanted.items():
-            inst = self.lab.instruments.get(instr)
-            if inst is None:
-                continue
-            if not inst.enabled:
-                out.append(self._done(Result(False, "error", instr, message="%s is %s, so Kelvin could not bring %s to "
-                                             "safe" % (instr, self.lab.away(instr), ", ".join(params))), "safe", by))
-                continue
-            seq = inst.card.safe_sequence
-            for param in [p for p in seq if p in params] + [p for p in params if p not in seq]:
+        return self._side_by_side(list(wanted.items()), lambda instr, params: self._instrument_to_safe(
+            instr, params, by, hold), by)
+
+    def _side_by_side(self, jobs: List[Tuple[str, Any]], one: Callable[[str, Any], List[Result]],
+                      by: str) -> List[Result]:
+        """one(instr, what) for each instrument, each on a thread of its own (no Stop cuts it short: unstoppable, and
+        acting as this thread's person), their results in the jobs' order. One instrument's alone: on this thread."""
+        if len(jobs) <= 1:
+            return [r for instr, what in jobs for r in one(instr, what)]
+        who = getattr(self._acting, "by", None)
+        results: Dict[str, List[Result]] = {}
+
+        def run(instr: str, what: Any) -> None:
+            with unstoppable(), (self.acting_as(who) if who else contextlib.nullcontext()):
                 try:
-                    r = self._safe_one(inst, inst.spec(param), wait=False, hold=hold)
-                except Exception as e:
-                    r = Result(False, "error", "%s.%s" % (instr, param),
-                               message="%s.%s: instrument error: %s" % (instr, param, e))
-                if r is not None:
+                    results[instr] = one(instr, what)
+                except Exception as e:   # one() never raises; this is for what it didn't foresee
+                    results[instr] = [self._done(Result(False, "error", instr, message="%s: could not bring it to "
+                                                        "safe: %s" % (instr, e)), "safe", by)]
+        threads = [threading.Thread(target=run, args=(instr, what), daemon=True, name="kelvin-to-safe-" + instr)
+                   for instr, what in jobs]
+        for th in threads:
+            th.start()
+        end = time.monotonic() + SAFE_ALL_S
+        for th in threads:
+            th.join(max(0.0, end - time.monotonic()))
+        out: List[Result] = []
+        for instr, _ in jobs:
+            done = results.get(instr)
+            if done is None:   # past SAFE_ALL_S: said, and left to go on by itself
+                done = [self._done(Result(False, "error", instr, message="%s is still on its way to safe after %s"
+                                          % (instr, _dur(SAFE_ALL_S))), "safe", by)]
+            out += done
+        return out
+
+    def _instrument_to_safe(self, instr: str, params: List[str], by: str, hold: bool) -> List[Result]:
+        """One instrument's drives to safe, in its card's safe order (abort_to_safe)."""
+        from .adapters import BUSES, bus_of
+        from .instrument import InstrumentLost
+        out: List[Result] = []
+        inst = self.lab.instruments.get(instr)
+        if inst is None:
+            return out
+        if not inst.enabled:
+            out.append(self._done(Result(False, "error", instr, message="%s is %s, so Kelvin could not bring %s to "
+                                         "safe" % (instr, self.lab.away(instr), ", ".join(params))), "safe", by))
+            return out
+        # one that can't be reached now (its bus hung, its session dead) is said at once, not tried drive by
+        # drive: each try would only wait its time again, and the others' safe steps wait behind it
+        why = BUSES.text(bus_of(inst.config.address)) or (getattr(inst.backend, "broken", "") and
+                                                         "its connection ended (%s)" % inst.backend.broken)
+        if why:
+            out.append(self._done(Result(False, "error", instr, message="%s can't be reached now (%s), so Kelvin "
+                                         "could not bring %s to safe" % (instr, why, ", ".join(params))),
+                                  "safe", by))
+            return out
+        seq = inst.card.safe_sequence
+        order = [p for p in seq if p in params] + [p for p in params if p not in seq]
+        for k, param in enumerate(order):
+            try:
+                r = self._safe_one(inst, inst.spec(param), wait=False, hold=hold)
+            except Exception as e:
+                r = Result(False, "error", "%s.%s" % (instr, param),
+                           message="%s.%s: instrument error: %s" % (instr, param, e))
+                if isinstance(e, (InstrumentLost, Busy)) and order[k + 1:]:
+                    # it doesn't answer, or is held past HELD_S: its other drives would only wait as long again
                     out.append(self._done(r, "safe", by))
+                    out.append(self._done(Result(False, "error", instr, message="%s doesn't answer, so Kelvin "
+                                                 "could not bring %s to safe either" % (
+                                                     instr, ", ".join(order[k + 1:]))), "safe", by))
+                    break
+            if r is not None:
+                out.append(self._done(r, "safe", by))
         return out
 
     def all_to_safe(self, by: str) -> List[Result]:

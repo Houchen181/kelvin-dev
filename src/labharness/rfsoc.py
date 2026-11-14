@@ -158,6 +158,7 @@ def _channels(text: Any) -> Dict[str, int]:
 
 
 class Qick(DriverBackend):
+    call_s = None   # every call to the board waits at most its own time (Pyro's COMMTIMEOUT)
     def __init__(self, name: str, card: Card, address: str, module: Any = None):
         super().__init__(name, card, address)
         url = urllib.parse.urlparse(address)

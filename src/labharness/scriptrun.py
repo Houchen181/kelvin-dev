@@ -39,6 +39,7 @@ import sys
 import tempfile
 import threading
 import time
+import contextlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,7 +47,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set,
 
 from . import experiment, prologix
 from . import scripts as lab_scripts
-from .adapters import resource_name, timed_out
+from .adapters import long_calls, resource_name, stoppable, timed_out
 from .eventlog import RunStore
 from .gate import ApprovalRequest, Approver, SafetyGate, _dur
 from .labconfig import Allowed
@@ -84,6 +85,24 @@ PAST_THE_LAB = ("ctypes", "_ctypes", "cffi", "_cffi_backend", "subprocess", "mul
                 "libusb1", "hid", "ftd2xx", "pyftdi", "pylibftdi")
 PROGRAMS = ("system", "popen", "startfile", "posix_spawn", "posix_spawnp", "fork", "forkpty", "kill", "killpg")
 _PLACE = re.compile(r"\{([^{}]*)\}")
+
+
+@contextlib.contextmanager
+def _held(inst: Any, lock: Any) -> Iterator[None]:
+    """An instrument's connection, taken for one of the script's own exchanges with it: waited for as long as the
+    exchange that has it takes (each call into its driver is bounded: adapters.Courier), but never past a person's
+    Stop (Instrument._wait_for). The script's requests are served on one thread: a wait with no end there kept its Stop
+    from being seen at all."""
+    wait = getattr(inst, "_wait_for", None)
+    if wait is None or not hasattr(lock, "_is_owned"):
+        with lock:
+            yield
+        return
+    wait(lock)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 class ScriptError(ValueError):
@@ -1112,6 +1131,7 @@ class _Output:
         self.file = open(path, "wb")
         self.cap = MAX_OUTPUT if cap is None else cap
         self.kept = self.left = 0
+        self.failed: Optional[str] = None   # why output.txt couldn't be written (its drive went away, a full disk)
         self.lock = threading.Lock()
         self.thread: Optional[threading.Thread] = None
 
@@ -1120,27 +1140,47 @@ class _Output:
         self.thread.start()
 
     def _copy(self, stream: Any) -> None:
+        """What the script prints, into output.txt as it comes. The pipe is read to its end whatever the file says: a
+        file that can't be written any more (a full disk, its drive gone) left the pipe unread, and the script froze in
+        its next print(), the run with it, for good. What can't be kept is counted (close says how much)."""
         try:
             for chunk in iter(lambda: stream.read1(65536), b""):
                 with self.lock:
-                    room = self.cap - self.kept if not self.file.closed else 0
+                    room = self.cap - self.kept if not self.file.closed and self.failed is None else 0
                     part = chunk[:max(0, room)]
                     if part:
-                        self.file.write(part)
-                        self.file.flush()   # the tail is read as the run ends; a person may look meanwhile
+                        try:
+                            self.file.write(part)
+                            self.file.flush()   # the tail is read as the run ends; a person may look meanwhile
+                        except (OSError, ValueError) as e:
+                            self.failed = str(getattr(e, "strerror", None) or e or type(e).__name__)
+                            part = b""
                     self.kept += len(part)
                     self.left += len(chunk) - len(part)
         except (OSError, ValueError):
-            pass
+            pass   # the pipe itself ended: the process did
 
     def close(self, wait: float = 5.0) -> None:
         if self.thread is not None:
             self.thread.join(wait)
         with self.lock:
-            if self.left:
-                self.file.write(("\n[Kelvin kept the first %s of what the script printed, and left out %s more]\n"
-                                 % (_size(self.cap), _size(self.left))).encode("utf-8"))
-            self.file.close()
+            try:
+                if self.left and self.failed is None:
+                    self.file.write(("\n[Kelvin kept the first %s of what the script printed, and left out %s more]\n"
+                                     % (_size(self.cap), _size(self.left))).encode("utf-8"))
+            except (OSError, ValueError) as e:
+                self.failed = str(getattr(e, "strerror", None) or e or type(e).__name__)
+            try:
+                self.file.close()
+            except (OSError, ValueError) as e:   # its last bytes couldn't go: said with the rest (failed)
+                self.failed = self.failed or str(getattr(e, "strerror", None) or e or type(e).__name__)
+
+    def lost(self) -> Optional[str]:
+        """What of the script's output couldn't be kept because output.txt couldn't be written, in words; None."""
+        if self.failed is None:
+            return None
+        return "what the script printed could not all be kept: output.txt could not be written (%s), and %s of it " \
+               "was left out" % (self.failed, _size(self.left))
 
 
 def _size(n: int) -> str:
@@ -1235,6 +1275,9 @@ class ScriptRun:
         self.rec: Any = None
         self.rec_id: Optional[str] = None
         self.commands_file: Any = None
+        # why its record couldn't be written (its data, its command log): the run stops, as a plan's does (_unwritten)
+        self.record_trouble: Optional[str] = None
+        self.lingered = False   # its main script ended, but its process kept running: Kelvin ended it (execute)
         self.t0 = self.last_activity = time.monotonic()
         self.stop_at = 0.0
         self._shown = 0.0
@@ -1243,20 +1286,49 @@ class ScriptRun:
     # ---------------------------------------------------------------- recording
 
     def _flush(self) -> None:
+        """The readings since the script's last change, as one row of its record. One its record can't take (its
+        folder's drive went away, a full disk) stops the run (_unwritten), never the script's command that came with
+        it: a row that raised gave the script an error for a command that had reached the instrument, and every row
+        after it raised as well."""
         if not self.reading or self.explicit:
             return
-        row = {"i": len(self.rows), "t": self.reading.pop("_t")}
+        reading, self.reading = self.reading, {}
+        row = {"i": len(self.rows), "t": reading.pop("_t", round(time.monotonic() - self.t0, 6))}
         row.update((k, v) for k, v in self.state.items() if _number(v))
-        row.update(self.reading)
+        row.update(reading)
+        if self.rec is not None:
+            if self.record_trouble is not None:
+                return   # the run stops: what it reads meanwhile isn't kept
+            try:
+                self.rec.add(row)
+            except OSError as e:
+                self._unwritten(e)
+                return
         self.rows.append(row)
         for k in self.state:
             if k in row and self.first.setdefault(k, repr(row[k])) != repr(row[k]):
                 self.changed[k] = None
         if self.rec is not None:
-            self.rec.add(row)
             self._emit(event="point", run_id=self.rec_id, done=len(self.rows), total=None, row=row, eta_s=None,
                        columns=self._columns())   # its axes and readings so far: they grow as it runs
-        self.reading = {}
+
+    def _unwritten(self, e: BaseException, what: str = "its data") -> None:
+        """The run's record couldn't be written (its folder's drive or network share went away, a full disk): the run
+        stops, as a plan's does (the serving loop begins it), said once, with an alarm a person says Got it to. The
+        script's own clean-up and Kelvin's way back to safe still go (execute): a run-folder error that raised there
+        skipped them, and a stopped script's source stayed on."""
+        if self.record_trouble is not None:
+            return
+        where = self.rec.path if self.rec is not None and getattr(self.rec, "path", None) else "its folder"
+        why = getattr(e, "strerror", None) or str(e) or type(e).__name__
+        self.record_trouble = "%s could not be written to %s (%s)" % (what, where, why)
+        try:
+            if self.rec is not None and not getattr(self.rec, "alarmed", False):
+                self.rec.alarmed = True
+                self.gate._raise_alarm("record", str(where), "Run %s: %s. Is that drive or network folder there, "
+                                       "with room?" % (self.rec_id, self.record_trouble))
+        except Exception:   # the alarm is a help: the run stops all the same
+            pass
 
     def _emit(self, **event: Any) -> None:
         if self.progress is not None:
@@ -1326,10 +1398,15 @@ class ScriptRun:
                                                      self.n_commands, ", " + self._last if self._last else ""))
 
     def _write(self, entry: Dict[str, Any]) -> None:
+        """One line of commands.jsonl. One it can't take stops the run (_unwritten), never the command it is about,
+        which has reached the instrument."""
         with self._log_lock:
-            if self.commands_file is not None and not self.commands_file.closed:
+            if self.commands_file is not None and not self.commands_file.closed and self.record_trouble is None:
                 entry["t"] = round(time.monotonic() - self.t0, 4)
-                self.commands_file.write(json.dumps(entry, default=str) + "\n")
+                try:
+                    self.commands_file.write(json.dumps(entry, default=str) + "\n")
+                except (OSError, ValueError) as e:
+                    self._unwritten(e, "its command log")
 
     # ---------------------------------------------------------------- live inputs
 
@@ -1417,7 +1494,16 @@ class ScriptRun:
         if not timeout_ms or res is None or lock is None:
             yield
             return
-        with lock:
+        with _held(inst, lock):
+            # the session as it is now that the connection is this run's: one made anew meanwhile (a reconnect) has
+            # its own, and the script's longer timeout goes to it, never to the one set aside
+            if inst.backend is not backend:
+                yield
+                return
+            res = getattr(backend, "res", None)
+            if res is None:
+                yield
+                return
             before = getattr(res, "timeout", None)
             longer = False
             try:
@@ -1468,10 +1554,22 @@ class ScriptRun:
             except Exception as e:
                 raise _Refuse(str(e), stop=False) from None
 
+    @contextmanager
+    def _direct(self, res: Any, bulk: bool = False) -> Iterator[None]:
+        """The script's own exchange with a session (a read, a binary block, a clear): a person's Stop ends the wait
+        for it at once, the call going on in the driver (its late reply dropped before the next command: _missed); and
+        a transfer its timeout doesn't bound (a block, a raw read) may take as long as one does (adapters.long_calls)."""
+        with stoppable(self._stop_pressed), (long_calls(res) if bulk else contextlib.nullcontext()):
+            yield
+
     @staticmethod
     def _missed(backend: Any, e: BaseException) -> None:
-        """After a direct exchange that ran out of time: the reply the instrument may still send is dropped before the
-        next command (the connection's _timed_out), never taken for a later command's."""
+        """After a direct exchange that ran out of time, or whose wait a Stop ended: the reply the instrument may still
+        send is dropped before the next command (the connection's _timed_out), never taken for a later command's."""
+        from .instrument import Stopped
+        if isinstance(e, Stopped) and hasattr(backend, "owed"):
+            backend.owed = True
+            return
         mark = getattr(backend, "_timed_out", None)
         if mark is not None and timed_out(e):
             try:
@@ -1552,15 +1650,16 @@ class ScriptRun:
                 raise _Refuse("%s has no reply waiting" % inst.name, stop=False)
             return ""
         self._bus_free(inst)
-        with self._patience(inst, msg.get("timeout")), backend.lock:
+        with self._patience(inst, msg.get("timeout")), _held(inst, backend.lock):
             res = backend.res
             try:
-                if count:
-                    data = res.read_bytes(count, break_on_termchar=bool(msg.get("break_on_termchar")))
-                elif raw:
-                    data = res.read_raw()
-                else:
-                    data = res.read()
+                with self._direct(res, bulk=True):   # a reply read to its end may be long (an ASCII trace): each chunk within its timeout
+                    if count:
+                        data = res.read_bytes(count, break_on_termchar=bool(msg.get("break_on_termchar")))
+                    elif raw:
+                        data = res.read_raw()
+                    else:
+                        data = res.read()
             except Exception as e:
                 self._missed(backend, e)
                 raise _Refuse("%s: %s" % (inst.name, e), stop=False) from None
@@ -1603,15 +1702,26 @@ class ScriptRun:
                 if value.get("x") is not None:
                     row[key + ".x"] = value["x"]
             elif isinstance(value, list) and value and all(isinstance(r, list) for r in value):
-                row[key], kind = self._image(value, key, n), "image"
+                try:
+                    row[key], kind = self._image(value, key, n), "image"
+                except OSError as e:   # its frame couldn't be kept: as its record, the run stops
+                    self._unwritten(e)
+                    raise _Refuse("not recorded: %s" % self.record_trouble, stop=True)
             elif isinstance(value, list):
                 row[key], kind = value, "trace"
             else:
                 row[key], kind = value, "text" if isinstance(value, str) else "scalar"
             self.kinds.setdefault(key, kind)
+        if self.rec is not None:
+            if self.record_trouble is not None:
+                raise _Refuse("not recorded: %s" % self.record_trouble, stop=True)
+            try:
+                self.rec.add(row)
+            except OSError as e:   # its folder's drive went away, a full disk: the run stops, as a plan's does
+                self._unwritten(e)
+                raise _Refuse("not recorded: %s" % self.record_trouble, stop=True)
         self.rows.append(row)
         if self.rec is not None:
-            self.rec.add(row)
             self._emit(event="point", run_id=self.rec_id, done=len(self.rows), total=None, row=row, eta_s=None,
                        columns=self._columns())
         return {}
@@ -1747,14 +1857,15 @@ class ScriptRun:
             if res is None:
                 raise _Refuse("%s is simulated: it has no binary readings" % inst.name, stop=False)
             self._bus_free(inst)
-            with self._patience(inst, msg.get("timeout")), inst.backend.lock:
+            with self._patience(inst, msg.get("timeout")), _held(inst, inst.backend.lock):
                 try:
                     self._in_step(inst)
-                    values = inst.backend.res.query_binary_values(
-                        command, datatype=msg.get("datatype") or "f", is_big_endian=bool(msg.get("is_big_endian")),
-                        header_fmt=msg.get("header_fmt") or "ieee",
-                        expect_termination=msg.get("expect_termination", True),
-                        data_points=int(msg.get("data_points") or 0), container=list)
+                    with self._direct(inst.backend.res, bulk=True):
+                        values = inst.backend.res.query_binary_values(
+                            command, datatype=msg.get("datatype") or "f", is_big_endian=bool(msg.get("is_big_endian")),
+                            header_fmt=msg.get("header_fmt") or "ieee",
+                            expect_termination=msg.get("expect_termination", True),
+                            data_points=int(msg.get("data_points") or 0), container=list)
                 except Exception as e:
                     self._missed(inst.backend, e)
                     raise _Refuse("%s: %s" % (inst.name, e), stop=False) from None
@@ -1769,12 +1880,13 @@ class ScriptRun:
             res = getattr(inst.backend, "res", None)
             if res is not None:
                 self._bus_free(inst)
-                with inst.backend.lock:
+                with _held(inst, inst.backend.lock):
                     try:
                         self._in_step(inst)
-                        inst.backend.res.write_binary_values(command, list(msg.get("values") or []),
-                                                             datatype=msg.get("datatype") or "f",
-                                                             is_big_endian=bool(msg.get("is_big_endian")))
+                        with self._direct(inst.backend.res, bulk=True):
+                            inst.backend.res.write_binary_values(command, list(msg.get("values") or []),
+                                                                 datatype=msg.get("datatype") or "f",
+                                                                 is_big_endian=bool(msg.get("is_big_endian")))
                     except Exception as e:
                         self._missed(inst.backend, e)
                         raise _Refuse("%s: %s" % (inst.name, e), stop=False) from None
@@ -1785,9 +1897,10 @@ class ScriptRun:
             inst = self._instrument(msg)
             res = getattr(inst.backend, "res", None)
             if res is not None:
-                with inst.backend.lock:
+                with _held(inst, inst.backend.lock):
                     try:
-                        res.clear()
+                        with self._direct(res):
+                            res.clear()
                     except Exception as e:
                         raise _Refuse("%s: %s" % (inst.name, e), stop=False) from None
             return {}
@@ -1795,7 +1908,7 @@ class ScriptRun:
             inst = self._instrument(msg)
             res = getattr(inst.backend, "res", None)
             if res is not None:
-                with inst.backend.lock:
+                with _held(inst, inst.backend.lock), self._direct(res):
                     return {"value": int(res.read_stb())}
             r = self.gate.raw(inst.name, "*STB?")
             return {"value": int(float(r.value)) if r.ok and r.value else 0}
@@ -1871,6 +1984,12 @@ class ScriptRun:
             if c.ok:
                 self._send(c, {"op": "stop", "why": why})
 
+    def _stop_if_unwritten(self, conns: Dict[socket.socket, _Conn]) -> None:
+        """A record that can't be written (_unwritten) stops the run, as a plan's does."""
+        if self.record_trouble is not None and not self.stopping:
+            self.failed = self.failed or self.record_trouble
+            self._begin_stop(self.record_trouble, conns)
+
     @staticmethod
     def _changes(msg: Dict[str, Any]) -> bool:
         """A request that changes something on an instrument: a setting, an action, a command that isn't a query, a
@@ -1931,6 +2050,7 @@ class ScriptRun:
                 return True
         except Exception as e:   # a command that failed on the way: the script gets the error, the run goes on
             answer = {"id": rid, "ok": False, "error": "%s: %s" % (type(e).__name__, e), "stop": False}
+        self._stop_if_unwritten(conns)
         if not self.stopping and self._stop_pressed():   # a Stop while this was answered (a wait it cut short): said
             self._begin_stop("stop requested", conns)      # first, so the script's request ends in its stop
         self._send(conn, answer)
@@ -2001,7 +2121,7 @@ class ScriptRun:
         # values set, a notebook, or an earlier run's version of the file: the text in script.py runs, not the file
         changed = prep.source != prep.original or prep.path.suffix.lower() != ".py" or prep.version is not None
         source_file = run_dir / "script.py" if changed else None
-        start = lab.snapshot()
+        start = lab.snapshot(needed=list(prep.found.instruments))   # the others only looked at
         self.rec.snapshot("start", start)
         gate.log.write("run_start", by=gate.operator, run=self.rec.run_id, plan=prep.name, points=0,
                        script=str(prep.path))
@@ -2073,10 +2193,17 @@ class ScriptRun:
                         sel.unregister(conn.sock)
                         conns.pop(conn.sock, None)
                         conn.sock.close()
+                self._stop_if_unwritten(conns)   # its record found unwritable elsewhere (set_live's line)
                 if not self.stopping and self._stop_pressed():
                     self._begin_stop("stop requested", conns)
                 if proc.poll() is not None:
                     break
+                if not self.stopping and self.bye_at and time.monotonic() - self.bye_at > GRACE_S:
+                    # its main script ended, but its process goes on (a thread it started that isn't a daemon): ended,
+                    # as one that stops is; a run that waited on such a thread for ever never ended, nor its queue
+                    self.lingered = True
+                    self._begin_stop("its main script ended %s ago, but its process kept running (a thread it "
+                                     "started)" % _dur(time.monotonic() - self.bye_at), conns)
                 if self.stopping:
                     why = self._overdue(time.monotonic())
                     if why:
@@ -2088,19 +2215,25 @@ class ScriptRun:
                             self.outlived = True             # the clean-up goes on without it, and says so
                         break
         finally:
-            approved.__exit__(None, None, None)
-            if job is not None:
-                job.close()
-            for c in list(conns.values()):
-                c.sock.close()
-            sel.close()
-            server.close()
-            out.close(0.5 if proc is not None and proc.poll() is None else 5.0)   # one that outlived its end: its pipe
-            # stays open, and is not waited for
-            self._flush()
+            # each step on its own: one that raises (its run folder's drive gone, a full disk) never keeps the others,
+            # nor the way back to safe after them, from their turn (a stopped script's source stayed on)
+            def close_conns() -> None:
+                for c in list(conns.values()):
+                    c.sock.close()
+            for step in (lambda: approved.__exit__(None, None, None), lambda: job.close() if job is not None else None,
+                         close_conns, sel.close, server.close,
+                         # one that outlived its end: its pipe stays open, and is not waited for
+                         lambda: out.close(0.5 if proc is not None and proc.poll() is None else 5.0), self._flush):
+                try:
+                    step()
+                except Exception:
+                    pass
             self.ended = True
             with self._log_lock:
-                self.commands_file.close()
+                try:
+                    self.commands_file.close()
+                except (OSError, ValueError) as e:
+                    self._unwritten(e, "its command log")
         duration = time.monotonic() - self.t0
         code = proc.returncode if proc is not None else None
         stopped_by_person = self.stopping == "stop requested" and not self.failed
@@ -2113,17 +2246,23 @@ class ScriptRun:
             reason = self.bye.get("error") or "it ended with exit code %s" % code
         else:
             status, reason = "done", None
+        lingered = self.lingered and not self.failed and not self.bye.get("error")
+        if lingered:   # its own work ended well: only a thread it left kept its process going
+            status, reason = "done", None
         self.killed = killed
-        if killed:
+        if killed and not lingered:
             reason = "%s; %s" % (reason, self.kill_why)
         cleanup: List[str] = []
         if status != "done":
             if not self.stopping:   # one that stopped said so as it began to (_begin_stop)
                 self._emit(event="phase", run_id=self.rec.run_id, phase="stopping", eta_s=None)
-            cleanup = self._back_to_safe()
+            try:
+                cleanup = self._back_to_safe()
+            except Exception as e:   # each drive is tried on its own (_back_to_safe); this is for what it didn't foresee
+                cleanup = ["could not bring every drive back to safe: %s" % e]
         left = self._left_on() if status == "done" else []
         try:
-            self.rec.snapshot("end", lab.snapshot())
+            self.rec.snapshot("end", lab.snapshot(needed=list(prep.found.instruments) if status == "done" else ()))
         except Exception:
             pass
         output = self._tail(output_path)
@@ -2142,12 +2281,22 @@ class ScriptRun:
         if self.reported:
             report.warnings.append("the instruments refused %d of its commands, as they would have without Kelvin "
                                    "(commands.jsonl says which and why)" % self.reported)
+        if lingered:
+            report.warnings.append(self.kill_why or "its main script ended, but a thread it started kept its process "
+                                   "running after it, so Kelvin stopped it")
+        if self.record_trouble and self.record_trouble not in (reason or ""):
+            report.warnings.append(self.record_trouble)
+        if out.lost():
+            report.warnings.append(out.lost())
         if self.outlived:
             report.warnings.append(
                 "its process (pid %s) was still there %s after Kelvin ended it: a call stuck in a maker's driver can "
                 "keep it, and it may still hold an instrument. If it stays, end it in the Task Manager"
                 % (self.pid, _dur(END_WAIT_S)))
-        self.rec.set_columns(report.columns)
+        try:
+            self.rec.set_columns(report.columns)
+        except OSError as e:
+            self._unwritten(e)
         meta = dict(status=status, reason=reason, points=len(self.rows), duration_s=round(duration, 3),
                     cleanup=cleanup, warnings=report.warnings, exit_code=code, commands=self.n_commands,
                     files=files, figures=report.figures, sets=sorted(self.state))   # sets: what the script set
@@ -2160,7 +2309,12 @@ class ScriptRun:
                 self.rec.set_analysis(report.analysis)
             except Exception as e:
                 report.warnings.append("automatic analysis failed: %s" % e)
-        self.rec.finish(**meta)
+        try:
+            self.rec.finish(**meta)
+        except OSError as e:   # what was written stays, and Kelvin keeps it as the run's data at its next start
+            self._unwritten(e)
+            report.warnings.append("%s: what was written before stays there, and Kelvin keeps it as the run's data at "
+                                   "its next start" % self.record_trouble)
         gate.log.write("run_end", by=gate.operator, run=self.rec.run_id, status=status, reason=reason,
                        points=len(self.rows), duration_s=round(duration, 3), script=str(prep.path),
                        uuid=self.rec.meta.get("uuid"), sha256=getattr(self.rec, "sha256", None))
@@ -2179,18 +2333,27 @@ class ScriptRun:
         do; an instrument it sent a drive command the gate couldn't read goes to its safe state."""
         out = []
         from .gate import paces
-        for key in self.touched:
-            if self.lab.config.safe_actions.get(key) == "hold":
-                continue
-            instr, _, param = key.partition(".")
-            if paces(self.lab.instrument(instr).card, param) is not None:
-                continue   # a ramp rate stays: at its safe 0 the drive it paces couldn't come back to safe
-            spec = self.lab.instrument(instr).spec(param)
-            r = self.gate._set(instr, param, spec.safe, True, "abort:" + self.prep.name, record_undo=False)
-            if r.action != "no-change":
-                out.append(r.message)
-        for instr in self.unparsed:
-            out += [r.message for r in self.gate.to_safe(instr)]
+        from .instrument import unstoppable
+        with unstoppable():   # a second Stop never cuts it short (instrument.unstoppable)
+            for key in self.touched:
+                if self.lab.config.safe_actions.get(key) == "hold":
+                    continue
+                instr, _, param = key.partition(".")
+                try:
+                    if paces(self.lab.instrument(instr).card, param) is not None:
+                        continue   # a ramp rate stays: at its safe 0 the drive it paces couldn't come back to safe
+                    spec = self.lab.instrument(instr).spec(param)
+                    r = self.gate._set(instr, param, spec.safe, True, "abort:" + self.prep.name, record_undo=False)
+                except Exception as e:   # one drive that fails never keeps the others from their turn
+                    out.append("could not bring %s to safe: %s" % (key, e))
+                    continue
+                if r.action != "no-change":
+                    out.append(r.message)
+            for instr in self.unparsed:
+                try:
+                    out += [r.message for r in self.gate.to_safe(instr)]
+                except Exception as e:
+                    out.append("could not bring %s to safe: %s" % (instr, e))
         return out
 
     def _left_on(self) -> List[str]:

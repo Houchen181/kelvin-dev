@@ -1,6 +1,7 @@
 """A lab runtime: the instruments of one setup, its config and its clock."""
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import logging
 import re
@@ -12,8 +13,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from .cards import Card, CardRegistry, ParamSpec, num
 from .adapters import AdapterError, ErrorAnswer, timed_out
 from .clock import SimClock, Stops
-from .instrument import (NOT_CONNECTED, OFF_TEXT, Garbled, Instrument, InstrumentFault, InstrumentLost, InstrumentOff,
-                         NotHere, NotNow, OffBackend, SensorFlagged, Unavailable)
+from .instrument import (NOT_CONNECTED, OFF_TEXT, Busy, Garbled, Instrument, InstrumentFault, InstrumentLost,
+                         InstrumentOff, NotHere, NotNow, OffBackend, SensorFlagged, Stopped, Unavailable)
 from .labconfig import InstrumentConfig, LabConfig
 
 log = logging.getLogger("kelvin")
@@ -25,6 +26,26 @@ SwitchedOff = Callable[[str], Iterable[str]]   # a lab's name -> the instruments
 OPEN_S = 60.0
 ENDED_CLOSE_S = 10.0   # a connection that ended by itself (its driver didn't return) is closed waiting this long at most
 CONNECTING_AGAIN = "Kelvin is connecting it"   # while a person's switch on (Lab panel) opens it
+# a run's look at an instrument it doesn't use (Lab.snapshot's needed): the most it waits for that instrument's
+# connection while other work has it, rather than wait that work out
+LOOK_S = 1.0
+
+
+def not_now(inst: Instrument) -> Optional[str]:
+    """Why an instrument isn't asked now by work that only looks at it (a run's record of the lab, as it starts or
+    ends), in words; None when it may be: its GPIB bus is hung, its session died, or it didn't answer its latest
+    exchanges (each would wait its timeout again; the monitor goes on asking it, and says when it is back)."""
+    from .adapters import BUSES, bus_of
+    hung = BUSES.text(bus_of(inst.config.address))
+    if hung:
+        return hung
+    broken = getattr(inst.backend, "broken", "")
+    if broken:
+        return "%s's connection ended (%s)" % (inst.name, broken)
+    if inst.health.fails:
+        return "%s isn't answering (since %s)" % (inst.name, time.strftime(
+            "%H:%M:%S", time.localtime(inst.health.first_failed_at or inst.health.lost_at or time.time())))
+    return None
 
 
 class OpenTimedOut(AdapterError):
@@ -153,9 +174,18 @@ def _let_go(backend: Any, within: float = ENDED_CLOSE_S) -> bool:
     return not t.is_alive()
 
 
+def _in_a_call(backend: Any) -> bool:
+    """Whether a call into its driver is under way now (one a Stop let go of, or a look's): closing it then may wait as
+    long as that call, so it is closed on a thread of its own (_let_go)."""
+    courier = getattr(backend, "__dict__", {}).get("_courier") or getattr(getattr(backend, "res", None), "_courier",
+                                                                           None)
+    return getattr(courier, "_now", None) is not None
+
+
 def _close_now(backend: Any) -> None:
-    """Close a connection: at once, or on a thread of its own (bounded) when it ended by itself (_let_go)."""
-    if _ended(backend):
+    """Close a connection: at once, or on a thread of its own (bounded) when it ended by itself, or a call into its
+    driver is still under way (_let_go)."""
+    if _ended(backend) or _in_a_call(backend):
         _let_go(backend)
     else:
         backend.close()
@@ -277,6 +307,7 @@ class Lab:
         # meanwhile is then not the lab's (_take)
         self._swap = threading.Lock()
         self._parked: Dict[str, Any] = {}   # connections set aside unclosed when switched off (closing would send)
+        self._opening: Dict[str, threading.Thread] = {}   # each instrument's latest try to connect (_open)
         self._set_aside: List[Any] = []     # those of instruments taken out of the lab, likewise (take_out)
         off = set(switched_off(config.name)) if switched_off else set()
         self.instruments: Dict[str, Instrument] = {}
@@ -304,6 +335,10 @@ class Lab:
         if not self._deadline or address.startswith("sim://"):
             return self._factory(name, card, address)
         limit = open_deadline(card, address)
+        stuck = getattr(self, "_opening", {}).get(name)
+        if stuck is not None and stuck.is_alive():   # its last try never returned: none more beside it (each would
+            raise OpenTimedOut("%s: Kelvin's last try to connect it is still stuck in its driver; close its maker's "
+                               "software or switch the instrument off and on, or restart Kelvin" % name)
         context = contextvars.copy_context()   # connecting_entry(name): the entry being connected, there too
         lock = threading.Lock()
         done = threading.Event()
@@ -326,7 +361,9 @@ class Lab:
                         name, address)
             _close_backend(backend)
 
-        threading.Thread(target=work, name="kelvin-open-" + name, daemon=True).start()
+        opening = threading.Thread(target=work, name="kelvin-open-" + name, daemon=True)
+        self.__dict__.setdefault("_opening", {})[name] = opening
+        opening.start()
         done.wait(limit)
         with lock:
             if not done.is_set():
@@ -471,8 +508,8 @@ class Lab:
             backend, inst.backend = inst.backend, OffBackend(name)
             if _ended(backend):   # its driver didn't return: closed on a thread of its own, made anew when on
                 _let_go(backend)
-            elif getattr(backend, "quiet_close", False):
-                backend.close()
+            elif getattr(backend, "quiet_close", False):   # on a thread of its own, ENDED_CLOSE_S at most: a
+                _let_go(backend)                             # maker's program that froze never holds the person
             else:
                 self._parked[name] = backend
             return
@@ -618,31 +655,42 @@ class Lab:
     def read(self, instr: str, param: str) -> Any:
         return self.instrument(instr).read(param)
 
-    def snapshot(self, names: Optional[Iterable[str]] = None, settings: bool = True) -> Dict[str, Dict[str, Any]]:
+    def snapshot(self, names: Optional[Iterable[str]] = None, settings: bool = True,
+                 needed: Optional[Iterable[str]] = None) -> Dict[str, Dict[str, Any]]:
         """Every readable scalar parameter of every instrument (or of these). settings=False: its readings and outputs
         only, not its settings (a lock-in's time constant, a source's range), which change only when someone changes
-        them (the Lab panel reads those less often)."""
+        them (the Lab panel reads those less often). needed: the instruments the work taking it uses (a run's record of
+        the lab as it starts and ends), read as ever; every other one is only looked at (not_now, LOOK_S): one that
+        isn't answering now is left unread, saying why, nothing waits behind other work that has its connection, and
+        a person's Stop ends the look. A field test's read-only log of the attoDRY never started: its record of the lab
+        waited on a hung GPIB bus it didn't use."""
+        from .instrument import patience
         snap: Dict[str, Dict[str, Any]] = {}
+        needed = None if needed is None else set(needed)
+        stops = self.stops.count
         for name, inst in self.instruments.items():
             if not inst.enabled or (names is not None and name not in names):
                 continue
             values: Dict[str, Any] = {}
-            silent = False
+            looked = needed is not None and name not in needed
+            silent = (not_now(inst) or (self.stops.since(stops) and "a person pressed Stop")) if looked else None
             replies: Dict[str, str] = {}   # this look's own replies: two readings of one :READ? take it once
-            for spec in inst.card.params.values():
-                if spec.type in ("trace", "image") or spec.acquires or (spec.get_cmd is None and
-                                                                        spec.name not in inst._last):
-                    continue   # traces, frames and acquisitions are read when asked or measured, not to look
-                if not settings and spec.set_cmd is not None and not spec.is_drive:
-                    continue   # a setting: read at its own, slower pace
-                if silent:   # it did not answer: each other reading would only wait as long again
-                    values[spec.name] = "ERROR: not read: %s did not answer" % name
-                    continue
-                try:
-                    values[spec.name] = inst.read(spec.name, replies)
-                except Exception as e:  # a snapshot must never stop a run
-                    values[spec.name] = "ERROR: %s" % e
-                    silent = timed_out(e) or isinstance(e, InstrumentLost)
+            with patience(LOOK_S) if looked else contextlib.nullcontext():
+                for spec in inst.card.params.values():
+                    if spec.type in ("trace", "image") or spec.acquires or (spec.get_cmd is None and
+                                                                            spec.name not in inst._last):
+                        continue   # traces, frames and acquisitions are read when asked or measured, not to look
+                    if not settings and spec.set_cmd is not None and not spec.is_drive:
+                        continue   # a setting: read at its own, slower pace
+                    if silent:   # it did not answer, or isn't now: each other reading would only wait as long again
+                        values[spec.name] = "ERROR: not read: %s" % (silent if isinstance(silent, str) else
+                                                                     "%s did not answer" % name)
+                        continue
+                    try:
+                        values[spec.name] = inst.read(spec.name, replies)
+                    except Exception as e:  # a snapshot must never stop a run
+                        values[spec.name] = "ERROR: %s" % e
+                        silent = timed_out(e) or isinstance(e, (InstrumentLost, Busy, Stopped))
             snap[name] = values
         return snap
 
@@ -826,6 +874,10 @@ class Lab:
             # timeouts only: "nothing listens" (an instrument switched off at its mains) means the bus itself worked
             failing = [i for i in insts if i.enabled and i.health.fails and not i.health.gone and i.health.lost_at
                        and now - i.health.lost_at < BUS_WINDOW_S]
+            # and a call into its driver that never came back (adapters.Hung): on GPIB, most likely the adapter or the
+            # bus, though it reads as a lost connection
+            failing += [i for i in insts if i.enabled and i not in failing and i.health.fails
+                        and now - (getattr(i.backend, "hung_at", None) or 0.0) < BUS_WINDOW_S]
             opened = [i for i in insts if i.unavailable and "VI_ERROR_TMO" in i.unavailable
                       and "cannot open" in i.unavailable]
             if len(failing) + len(opened) < 2:
