@@ -40,7 +40,8 @@ from ..accounts import _hash
 
 log = logging.getLogger("kelvin.hub")
 
-SCHEMA_VERSION = 3               # 2: account ids are never reused (AUTOINCREMENT); 3: chats keep their size
+SCHEMA_VERSION = 4               # 2: account ids are never reused (AUTOINCREMENT); 3: chats keep their size;
+                                 # 4: each sign-in keeps its own platform and name
 ITERATIONS = 600_000             # PBKDF2-SHA256, as OWASP suggests; older hashes are redone at the next sign-in
 UPLOADS_AT_ONCE = 2              # per person
 LOCK_WAIT = 10.0                 # seconds a request waits for the same person's sync or upload before a 429
@@ -133,7 +134,11 @@ CREATE TABLE IF NOT EXISTS tokens (
   lab_id INTEGER REFERENCES labs(id) ON DELETE SET NULL,   -- the lab a connected Kelvin shares into
   created_at REAL NOT NULL,
   last_used REAL,
-  expires_at REAL
+  expires_at REAL,
+  -- what the Kelvin or phone said it is at this account's sign-in, kept apart from the installation's row, which
+  -- every account naming its id shares: another account can't make a person's Kelvin a phone (relay.py)
+  platform TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS codes (
   code_hash TEXT PRIMARY KEY,
@@ -242,6 +247,10 @@ class Busy(HubError):
     status = 429
 
 
+class Taken(HubError):
+    """Registering with an email that has an account: the server counts it as a try, as it does a registration."""
+
+
 def sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -260,6 +269,11 @@ def _text(value: Any, missing: Optional[str], limit: int) -> str:
     if not text and missing:
         raise HubError(missing)
     return text
+
+
+def _has(con: sqlite3.Connection, table: str) -> bool:
+    """The table is there: the model gateway's (llm.py) are made when the hub's server starts."""
+    return con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone() is not None
 
 
 def _email(value: Any) -> str:
@@ -427,6 +441,8 @@ class Hub:
             if version in (1, 2):
                 self._migrate_2_to_3(con)
             con.executescript(SCHEMA)
+            if version < 4:
+                self._migrate_3_to_4(con)
             con.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
             con.commit()
 
@@ -454,6 +470,18 @@ class Hub:
         if "bytes" not in [r[1] for r in con.execute("PRAGMA table_info(chats)")]:
             con.execute("ALTER TABLE chats ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0")
         con.execute("UPDATE chats SET bytes = LENGTH(CAST(messages AS BLOB))")
+        con.commit()
+
+    @staticmethod
+    def _migrate_3_to_4(con: sqlite3.Connection) -> None:
+        """Each sign-in keeps what its Kelvin or phone said it is, apart from the installation's shared row."""
+        have = [r[1] for r in con.execute("PRAGMA table_info(tokens)")]
+        for column in ("platform", "name"):
+            if column not in have:
+                con.execute("ALTER TABLE tokens ADD COLUMN %s TEXT NOT NULL DEFAULT ''" % column)
+        con.execute("UPDATE tokens SET platform = COALESCE((SELECT i.platform FROM installations i WHERE"
+                    " i.id = tokens.installation_id), ''), name = COALESCE((SELECT i.name FROM installations i WHERE"
+                    " i.id = tokens.installation_id), '')")
         con.commit()
 
     # ------------------------------------------------------------------ plumbing
@@ -566,7 +594,10 @@ class Hub:
             raise HubError("To make an account, please agree to the terms and the privacy notice.")
         salt = secrets.token_bytes(16)
         now = time.time()
+        taken = Taken("There is already an account with that email. Sign in, or reset its password.")
         with self.connect() as con:
+            if con.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
+                raise taken   # before the password's hash: a second of work for nothing
             try:
                 cur = con.execute(
                     "INSERT INTO users (email, name, orcid, password_hash, salt, iterations, consent_version,"
@@ -574,7 +605,7 @@ class Hub:
                     (email, name, orcid_id, _hash(password, salt, ITERATIONS), salt.hex(), ITERATIONS,
                      self.consent_version, now, now, now))
             except sqlite3.IntegrityError:
-                raise HubError("There is already an account with that email. Sign in, or reset its password.")
+                raise taken
             self.audit(con, "user", "registered", cur.lastrowid, {"consent": self.consent_version}, ip)
             return _public(con.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone())
 
@@ -809,8 +840,9 @@ class Hub:
                         (inst["id"], inst["name"], inst["platform"], inst["version"], now, now))
             con.execute("DELETE FROM tokens WHERE kind = 'app' AND user_id = ? AND installation_id = ?",
                         (user["id"], inst["id"]))
-            con.execute("INSERT INTO tokens (user_id, kind, token_hash, installation_id, created_at, last_used)"
-                        " VALUES (?, 'app', ?, ?, ?, ?)", (user["id"], sha(token), inst["id"], now, now))
+            con.execute("INSERT INTO tokens (user_id, kind, token_hash, installation_id, created_at, last_used,"
+                        " platform, name) VALUES (?, 'app', ?, ?, ?, ?, ?, ?)",
+                        (user["id"], sha(token), inst["id"], now, now, inst["platform"], inst["name"]))
             con.execute("UPDATE users SET last_seen = ? WHERE id = ?", (now, user["id"]))
             self.audit(con, "app", "signed in from Kelvin", user["id"], {"installation": inst["id"],
                                                                           "name": inst["name"]}, ip)
@@ -871,8 +903,10 @@ class Hub:
             # one connection per person per Kelvin: connecting again replaces the old token
             con.execute("DELETE FROM tokens WHERE kind = 'app' AND user_id = ? AND installation_id = ?",
                         (user_id, inst["id"]))
-            con.execute("INSERT INTO tokens (user_id, kind, token_hash, installation_id, lab_id, created_at, last_used)"
-                        " VALUES (?, 'app', ?, ?, ?, ?, ?)", (user_id, sha(token), inst["id"], lab_id, now, now))
+            con.execute("INSERT INTO tokens (user_id, kind, token_hash, installation_id, lab_id, created_at, last_used,"
+                        " platform, name) VALUES (?, 'app', ?, ?, ?, ?, ?, ?, ?)",
+                        (user_id, sha(token), inst["id"], lab_id, now, now, inst.get("platform", ""),
+                         inst.get("name", "")))
             # earlier ids this Kelvin named on /connect (checked there), and its computer part (its id before ids
             # were per person)
             for old in sorted(set(data.get("previous") or []) | set(previous_ids("", inst["id"]))):
@@ -926,7 +960,8 @@ class Hub:
             return None
         with self.connect() as con:
             row = con.execute("SELECT t.id AS token_id, t.installation_id, t.lab_id AS token_lab, t.last_used,"
-                              " i.name AS installation_name, i.platform AS installation_platform, u.*"
+                              " COALESCE(NULLIF(t.name, ''), i.name) AS installation_name,"
+                              " t.platform AS installation_platform, u.*"
                               " FROM tokens t JOIN users u ON u.id = t.user_id"
                               " LEFT JOIN installations i ON i.id = t.installation_id"
                               " WHERE t.token_hash = ? AND t.kind = 'app'", (sha(str(token)),)).fetchone()
@@ -944,9 +979,9 @@ class Hub:
     def kelvins_of(self, user_id: int) -> List[Dict[str, Any]]:
         """The Kelvins (not phones) this person is signed in to, the most recently seen first."""
         with self.connect() as con:
-            rows = con.execute("SELECT i.id, i.name, i.platform, i.version, i.last_seen FROM tokens t"
-                               " JOIN installations i ON i.id = t.installation_id"
-                               " WHERE t.user_id = ? AND t.kind = 'app' AND i.platform NOT IN ('ios', 'android')"
+            rows = con.execute("SELECT i.id, COALESCE(NULLIF(t.name, ''), i.name) AS name, t.platform, i.version,"
+                               " i.last_seen FROM tokens t JOIN installations i ON i.id = t.installation_id"
+                               " WHERE t.user_id = ? AND t.kind = 'app' AND t.platform NOT IN ('ios', 'android')"
                                " ORDER BY i.last_seen DESC", (user_id,)).fetchall()
         return [dict(r) for r in rows]
 
@@ -984,7 +1019,8 @@ class Hub:
 
     def connections(self, user_id: int) -> List[Dict[str, Any]]:
         with self.connect() as con:
-            rows = con.execute("SELECT t.id, t.created_at, t.last_used, i.name, i.platform, i.version, l.name AS lab"
+            rows = con.execute("SELECT t.id, t.created_at, t.last_used, COALESCE(NULLIF(t.name, ''), i.name) AS name,"
+                               " t.platform, i.version, l.name AS lab"
                                " FROM tokens t LEFT JOIN installations i ON i.id = t.installation_id"
                                " LEFT JOIN labs l ON l.id = t.lab_id WHERE t.user_id = ? AND t.kind = 'app'"
                                " ORDER BY t.last_used DESC", (user_id,)).fetchall()
@@ -1069,7 +1105,8 @@ class Hub:
     # ------------------------------------------------------------------ sync: what connected Kelvins share
 
     def sync(self, app: Dict[str, Any], payload: Any) -> Dict[str, Any]:
-        """Take what a Kelvin shares: {"projects": [...], "chats": [...], "runs": [...], "removed": {...}}.
+        """Take what a Kelvin shares: {"projects": [...], "chats": [...], "runs": [...], "removed": {...}}. "removed"
+        names ids this Kelvin shared, or says {"everything": true}: all the person has on the hub goes (on_hub()).
 
         The hub applies the sharing rules itself, on the marks Kelvin sends: an unpublished, confidential or
         model-limited project is kept only as "not shared" (no name), and whatever the hub had of it is deleted;
@@ -1236,6 +1273,15 @@ class Hub:
                         done["removed"] += con.total_changes - before
                     else:
                         done["removed"] += con.execute("DELETE FROM %s WHERE %s" % (table, where), args).rowcount
+            if removed.get("everything") is True:
+                # sharing switched off: everything the person has here goes, from any of their Kelvins, also what went
+                # under an earlier id of this computer, or what Kelvin no longer remembers sending (the hub's address
+                # changed since)
+                before = con.total_changes
+                purge_runs("user_id = ?", (uid,))
+                con.execute("DELETE FROM chats WHERE user_id = ?", (uid,))
+                con.execute("DELETE FROM projects WHERE user_id = ?", (uid,))
+                done["removed"] += con.total_changes - before
             installation = payload.get("installation") or {}
             if isinstance(installation, dict) and installation.get("version"):
                 con.execute("UPDATE installations SET version = ?, last_seen = ? WHERE id = ?",
@@ -1261,6 +1307,12 @@ class Hub:
             yield
         finally:
             lock.release()
+
+    def on_hub(self, user_id: int) -> Dict[str, int]:
+        """How many projects, chats and run records the person has on the hub, shared from any of their Kelvins."""
+        with self.connect() as con:
+            return {t: con.execute("SELECT COUNT(*) FROM %s WHERE user_id = ?" % t, (user_id,)).fetchone()[0]
+                    for t in ("projects", "chats", "runs")}
 
     @staticmethod
     def _used(con: sqlite3.Connection, user_id: int) -> int:
@@ -1502,6 +1554,14 @@ class Hub:
             runs = [dict(r) for r in con.execute("SELECT * FROM runs WHERE user_id = ?", (user_id,))]
             audit = [dict(r) for r in con.execute("SELECT at, actor, action, detail, ip FROM audit WHERE user_id = ?"
                                                   " ORDER BY at", (user_id,))]
+            models: Dict[str, Any] = {"budget": None, "calls": []}   # the model gateway's tables (llm.py), if any
+            if _has(con, "llm_usage"):
+                models["calls"] = [dict(r) for r in con.execute(
+                    "SELECT at, month, service, model, input, output, cache_read, cache_write, usd, status FROM"
+                    " llm_usage WHERE user_id = ? ORDER BY at", (user_id,))]
+            if _has(con, "llm_budgets"):
+                row = con.execute("SELECT usd FROM llm_budgets WHERE scope = 'user' AND ref = ?", (user_id,)).fetchone()
+                models["budget"] = row["usd"] if row else None
         path = self.home / "tmp" / ("export-%d-%s.zip" % (user_id, secrets.token_hex(4)))
         dump = lambda obj: json.dumps(obj, indent=1, ensure_ascii=False)   # noqa: E731
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -1509,12 +1569,14 @@ class Hub:
                        "password is kept only as a hash and is not included)\nlabs.json  your labs\nconnections.json  "
                        "the Kelvins you connected\nprojects.json  your projects\nchats/  your shared conversations\n"
                        "runs/  your shared runs and their files\nactivity.json  the hub's record of your account's "
-                       "activity\n" % time.strftime("%Y-%m-%d %H:%M"))
+                       "activity\nmodels.json  your use of the hub's models: when, which model, its tokens and what it "
+                       "cost (never the text), and your own monthly budget\n" % time.strftime("%Y-%m-%d %H:%M"))
             z.writestr("account.json", dump(user))
             z.writestr("labs.json", dump(self.labs_of(user_id)))
             z.writestr("connections.json", dump(self.connections(user_id)))
             z.writestr("projects.json", dump(projects))
             z.writestr("activity.json", dump(audit))
+            z.writestr("models.json", dump(models))
             for c in chats:
                 c["messages"] = json.loads(c["messages"])
                 z.writestr("chats/%d-%s.json" % (c["id"], c["local_id"]), dump(c))
@@ -1534,7 +1596,9 @@ class Hub:
     def delete_user(self, user_id: int, actor: str = "user", ip: Optional[str] = None) -> None:
         """Delete the account and everything it shared. Labs left empty go too, and so do the Kelvins only it used
         and mail to it waiting in outbox/. The activity record keeps only that account number N was deleted (ids are
-        never reused); hub.log never has addresses. Backups still hold it until they age out (backups_kept days).
+        never reused); hub.log never has addresses. What its model calls cost stays under that bare number, for the
+        month's totals the owner pays (never any text), and its own budget goes. Backups still hold it until they age
+        out (backups_kept days).
         It waits for the person's sync or upload in progress, so no file lands after the folder is gone."""
         email = self.user(user_id)["email"]
         with self._person(user_id):
@@ -1549,6 +1613,9 @@ class Hub:
                             " installation_id IS NOT NULL) AND id NOT IN (SELECT installation_id FROM projects UNION"
                             " SELECT installation_id FROM chats UNION SELECT installation_id FROM runs)")
                 con.execute("UPDATE audit SET detail = '{}', ip = NULL WHERE user_id = ?", (user_id,))
+                for table in ("llm_budgets", "llm_alerts"):   # their own budget, and the months they were mailed at 80%
+                    if _has(con, table):
+                        con.execute("DELETE FROM %s WHERE scope = 'user' AND ref = ?" % table, (user_id,))
                 self.audit(con, actor, "account deleted", user_id)
             # committed: the files go after, so nobody else's sign-in or sync waits on the disk (a large account's
             # folder can take many seconds); the person's lock is still held, so no upload lands meanwhile

@@ -38,16 +38,23 @@ HELLO = 15                        # seconds a Kelvin has to say hello once its s
 FIRST_BYTE = 60                   # seconds a Kelvin has to start answering
 IDLE = 15 * 60                    # seconds an answer may go without a byte (a long chat turn streams as it works)
 PER_PERSON = 16                   # one person's requests through the hub at once
+MAX_HELD = 8 * 1024 * 1024        # bytes of an answer the hub holds that its phone hasn't read yet
+STALL = 10                        # seconds the hub waits for a phone to read on before it drops that answer (the
+                                  # Kelvin's pings wait meanwhile: well within their 25 s)
 PASSED = ("content-type", "content-disposition", "x-kelvin-hidden")   # the answer's headers the phone gets
 END = object()
 
 
 class Link:
-    """One Kelvin's socket: the requests in flight on it, each with a queue for what comes back."""
+    """One Kelvin's socket: the requests in flight on it, each with a queue for what comes back. An answer's bytes
+    the phone hasn't read are held up to MAX_HELD: past that the socket waits for the phone to read on, as a network
+    does, and drops the answer once it read nothing for STALL seconds."""
 
     def __init__(self, ws: WebSocket, name: str, version: str, direct: bool):
         self.ws, self.name, self.version, self.direct = ws, name, version, direct
         self.waiting: Dict[int, "asyncio.Queue[Any]"] = {}
+        self.held: Dict[int, int] = {}    # bytes of each answer in its queue
+        self.drained = asyncio.Event()    # a phone read some
         self.last = 0
         self.since = time.time()
         self._sending = asyncio.Lock()
@@ -66,6 +73,36 @@ class Link:
         for queue in self.waiting.values():
             queue.put_nowait(RuntimeError(message))
         self.waiting.clear()
+        self.held.clear()
+
+    def taken(self, rid: int, size: int) -> None:
+        """The phone read this many bytes of the answer to rid."""
+        self.held[rid] = max(0, self.held.get(rid, 0) - size)
+        self.drained.set()
+
+    async def room(self, rid: int) -> bool:
+        """Wait while the hub holds MAX_HELD of the answer to rid. False: its phone read nothing for STALL seconds, or
+        the request ended meanwhile."""
+        deadline = time.monotonic() + STALL
+        while self.held.get(rid, 0) >= MAX_HELD and rid in self.waiting:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            self.drained.clear()
+            try:
+                await asyncio.wait_for(self.drained.wait(), left)
+            except asyncio.TimeoutError:
+                return False
+        return rid in self.waiting
+
+    def drop(self, rid: int, message: str) -> None:
+        """No more of the answer to rid: what is held of it goes, and its phone gets `message`."""
+        queue = self.waiting.pop(rid, None)
+        self.held.pop(rid, None)
+        if queue is not None:
+            while not queue.empty():
+                queue.get_nowait()
+            queue.put_nowait(RuntimeError(message))
 
 
 class Passed(StreamingResponse):
@@ -146,9 +183,14 @@ def routes(hub: Any, call: Callable[..., Any], read_body: Callable[..., Any],
                     break
                 if message.get("bytes") is not None:
                     data = message["bytes"]
-                    queue = link.waiting.get(int.from_bytes(data[:4], "big"))
-                    if queue is not None and len(data) > 4:
-                        queue.put_nowait(data[4:])
+                    rid = int.from_bytes(data[:4], "big")
+                    if rid in link.waiting and len(data) > 4:
+                        if await link.room(rid):
+                            link.held[rid] = link.held.get(rid, 0) + len(data) - 4
+                            link.waiting[rid].put_nowait(data[4:])
+                        elif rid in link.waiting:   # its phone stopped reading: the Kelvin stops sending it
+                            link.drop(rid, "The phone stopped reading the answer.")
+                            asyncio.ensure_future(_cancel(link, rid))
                     continue
                 frame = json.loads(message.get("text") or "{}")
                 queue = link.waiting.get(frame.get("id")) if isinstance(frame, dict) else None
@@ -214,6 +256,7 @@ def routes(hub: Any, call: Callable[..., Any], read_body: Callable[..., Any],
             if not done["released"]:
                 done["released"] = True
                 link.waiting.pop(rid, None)
+                link.held.pop(rid, None)
                 relay.in_flight[uid] = max(0, relay.in_flight.get(uid, 1) - 1)
 
         try:
@@ -247,6 +290,7 @@ def routes(hub: Any, call: Callable[..., Any], read_body: Callable[..., Any],
                         return
                     if isinstance(item, Exception):
                         return
+                    link.taken(rid, len(item))
                     yield item
             except asyncio.TimeoutError:
                 return

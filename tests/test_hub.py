@@ -563,7 +563,7 @@ def test_chats_keep_their_size_and_an_old_database_learns_it(tmp_path):
     Hub(tmp_path)                                                     # schema 2 -> 3 works the sizes out
     with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
         assert con.execute("SELECT bytes FROM chats").fetchone()[0] == size[1]
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert con.execute("PRAGMA user_version").fetchone()[0] == hubdb.SCHEMA_VERSION
 
 
 def test_folding_never_files_shared_work_into_a_project_made_private_since(tmp_path):
