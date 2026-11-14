@@ -47,9 +47,10 @@ RULES = {"watch": [(m, re.compile(p + "$")) for m, p in _WATCH],
 
 
 def allowed(role: str, method: str, path: str) -> bool:
+    """The whole path: "$" alone also lets "/api/chats\\n" through, which the portal's routes answer as /api/chats."""
     if role == "owner":
         return True
-    return any(m == method and rx.match(path) for m, rx in RULES.get(role, []))
+    return any(m == method and rx.fullmatch(path) for m, rx in RULES.get(role, []))
 
 
 def token_hash(token: str) -> str:

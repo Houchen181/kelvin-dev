@@ -192,8 +192,8 @@ class RelayLink:
             await send(rid.to_bytes(4, "big") + data)
             await send(json.dumps({"t": "end", "id": rid}))
 
-        if not target.startswith("/api/") or ".." in target:
-            await reply(404, {"error": "not found"})
+        if not target.startswith("/api/") or ".." in target or any(ord(c) < 32 or ord(c) == 127 for c in target):
+            await reply(404, {"error": "not found"})   # a line break at the end passed every check, as /api/chats
             return
         if (method, target) not in RELAY_ONLY and not allowed("control", method, target):
             await reply(403, {"error": "A phone can't do that. Use the Kelvin computer."})

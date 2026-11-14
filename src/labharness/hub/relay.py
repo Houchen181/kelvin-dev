@@ -240,7 +240,7 @@ def routes(hub: Any, call: Callable[..., Any], read_body: Callable[..., Any],
             return api_error("That Kelvin is offline: it isn't running, or nobody is signed in to it with your "
                              "Kelvin account.", 503, offline=True)
         path = "/" + request.path_params["path"]
-        if not path.startswith("/api/"):
+        if not path.startswith("/api/") or any(ord(c) < 32 or ord(c) == 127 for c in path):   # never a line break
             return api_error("not found", 404)
         if relay.in_flight.get(uid, 0) >= PER_PERSON:
             return api_error("Too many requests at once; try again in a moment.", 429)

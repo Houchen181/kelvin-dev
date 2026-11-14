@@ -37,7 +37,7 @@ from ..configversions import ConfigVersions, widens as config_widens
 from .. import central, edition, expstore
 from ..homeboard import FILE as HOME_FILE, HomeBoard
 from ..agent.approval import WebApprover
-from ..agent.runtime import (SETUP_STEPS, KeptAlready, LabBusy, LabRuntime, Underway, Viewer, not_shown,
+from ..agent.runtime import (SETUP_STEPS, WHOSE, KeptAlready, LabBusy, LabRuntime, Underway, Viewer, not_shown,
                              writable_folder)
 from ..agent.server import build_server
 from ..adapters import AdapterError
@@ -386,21 +386,39 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """The queue as it is this instant, in the few words a Stop's notice needs: nothing read, no lock taken, so a
         Stop never waits for it (it answers at once whatever the server's threads are doing)."""
         q = runtime.queue
-        return {"state": q.state, "items": [{"id": i.id, "name": i.name, "kind": i.kind, "status": i.status,
-                                             "chat": i.chat} for i in list(q.items)]}
+        return {"state": q.state, "items": [dict(i.whose(), id=i.id, name=i.name, kind=i.kind, status=i.status)
+                                            for i in list(q.items)]}
 
-    def tell_later(said: Any) -> None:
+    def work_named(text: str, items: Any) -> List[Dict[str, Any]]:
+        """Whose work the blocks a notice's line names are (WHOSE marks), so only the chats that may see it hear it."""
+        return [{k: i.get(k) for k in WHOSE} for i in items or [] if isinstance(i, dict) and i.get("name")
+                and str(i["name"]) in text]
+
+    def home_work(blocks: Any) -> List[Dict[str, Any]]:
+        """Whose work Home's blocks are: the chats that put them there (their project, marks and rules)."""
+        out = []
+        for b in blocks or []:
+            try:
+                whose = agent._attribution(store.load(b["chat"])) if b.get("chat") else None
+            except (KeyError, OSError, ValueError):
+                continue
+            if whose:
+                out.append({k: whose.get(k) for k in WHOSE})
+        return out
+
+    def tell_later(said: Any, items: Any = ()) -> None:
         """A Stop's notice, told on a thread of its own once the Stop is done (notices.py): the chats it concerns."""
         if said:
-            threading.Thread(target=agent.notices.tell, args=(said[0], said[1], "sequence", said[2]), daemon=True,
-                             name="kelvin-notice").start()
+            threading.Thread(target=agent.notices.tell, args=(said[0], said[1], "sequence", said[2],
+                                                              work_named(said[0], items)),
+                             daemon=True, name="kelvin-notice").start()
 
     def failed_heard(item: Any, message: str) -> None:
         """An item of the sequence failed: the chat that queued it and the one that started the sequence hear of it
         (urgent: with the person's switch on, they answer at once)."""
         n = next((k for k, i in enumerate(runtime.queue.items, 1) if i.id == item.id), "?")
         agent.notices.tell("#%s %s failed: %s." % (n, item.name, str(message).split("\n")[0][:200]),
-                           [item.chat, runtime.queue_started_by], "sequence", urgent=True)
+                           [item.chat, runtime.queue_started_by], "sequence", urgent=True, whose=[item.whose()])
     runtime.queue_heard = failed_heard
     team = TeamChat(home)                                 # the lab's team chat, everyone's (teamchat.py)
     runtime.scripts_folders = lambda: settings.lab_scripts or []   # run_script runs only the scripts in them
@@ -901,8 +919,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         hidden = 0
         out = dict(data)
 
-        def card(entry: Dict[str, Any]) -> Dict[str, Any]:
-            return dict(entry, title="A request of unshared work", items=[UNSHARED_CARD], lessons=[], figures=[],
+        def card(entry: Dict[str, Any]) -> Dict[str, Any]:   # only what names nothing: not its translation (shown)
+            kept = {k: entry[k] for k in ("id", "seconds_left", "where", "escalated", "unshared", "answer", "by", "at")
+                    if k in entry}
+            return dict(kept, title="A request of unshared work", items=[UNSHARED_CARD], lessons=[], figures=[],
                         reasons=[])
         if isinstance(data.get("pending"), list):
             out["pending"] = [card(p) if isinstance(p, dict) and p.get("unshared") else p for p in data["pending"]]
@@ -1148,7 +1168,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 "needs_consent": bool((answer or {}).get("needs_consent")),
                 # the terms to agree to on the sign-in screen, here in Kelvin (POST /api/hub/terms)
                 "terms": terms_of(hub_address(), answer) if (answer or {}).get("needs_consent") else None,
-                "account_url": (answer or {}).get("account_url") or hub_address() + "/account"}
+                # at the address Kelvin reaches the hub by, as terms_of's: never an address the hub's answer gives,
+                # which the page puts behind a link as it is (a javascript: one would run there)
+                "account_url": hub_address() + "/account"}
 
     async def central_call(fn: Any, *args: Any) -> Response:
         """Run a central sign-in step and say how it went, as the sign-in screen expects."""
@@ -3799,7 +3821,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             before = queue_now()
             await own_thread(runtime.stop, person(request))
             stopped = True
-            tell_later(person_notices.stop_said(before, runtime.queue_started_by))
+            tell_later(person_notices.stop_said(before, runtime.queue_started_by), before.get("items"))
             still = await own_thread(runtime.still_after_stop)
             return JSONResponse({"ok": True, "message": NOT_YET % still if still else STOPPED,
                                  "ended": not still})
@@ -3923,10 +3945,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             n = await asyncio.to_thread(board.clear)
         except OSError as e:
             return error(500, str(e))
-        if going:   # the chats whose blocks went, told (notices.py)
+        if going:   # the chats whose blocks went, told (notices.py), and only the chats that may see them
             await asyncio.to_thread(agent.notices.tell, "You cleared Home: %s." % ", ".join(
                 "'%s'" % b["title"] for b in going[:6]) + (" and %d more" % (len(going) - 6) if len(going) > 6 else ""),
-                [b.get("chat") for b in going], "home")
+                [b.get("chat") for b in going], "home", False, await asyncio.to_thread(home_work, going[:6]))
         return JSONResponse(dict(await asyncio.to_thread(board.view),
                                  message="%d block%s taken off Home" % (n, "" if n == 1 else "s")))
 
@@ -3954,7 +3976,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 else:
                     return error(400, "send {pin} or {tick, done}")
             if said:
-                await asyncio.to_thread(agent.notices.tell, said, [block.get("chat")], "home")
+                await asyncio.to_thread(agent.notices.tell, said, [block.get("chat")], "home", False,
+                                        await asyncio.to_thread(home_work, [block]))
         except KeyError as e:
             return error(404, str(e.args[0]))
         except (ValueError, TypeError) as e:
@@ -4148,7 +4171,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return False
         stopped = await own_thread(stopping)
         if stopped:
-            tell_later(person_notices.stop_said(before, runtime.queue_started_by))
+            tell_later(person_notices.stop_said(before, runtime.queue_started_by), before.get("items"))
         return JSONResponse({"ok": stopped})
 
     async def queue(request: Request) -> Response:
@@ -4190,6 +4213,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             after = await side_thread(runtime.queue_view)
             said = person_notices.queue_said(op, body, before, after, runtime.queue_started_by)
             block_id = body.get("from_block") if op == "add" else None
+            taken = None
             if said and block_id:   # a block's button on Home: the chat that put it there hears it was taken
                 taken = next((b for b in await side_thread(runtime.home_board.blocks) if b["id"] == block_id),
                              None)
@@ -4197,8 +4221,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                     where = said[0][len("You added "):].split(" ")[0]   # its number in the sequence, "#6"
                     said = ("You added '%s' from Home to the sequence as %s." % (taken["title"], where),
                             [taken.get("chat")], False)
-            if said:
-                await side_thread(agent.notices.tell, said[0], said[1], "sequence", said[2])
+            if said:   # the blocks it names, whoever's they are: heard only by the chats that may see them
+                whose = work_named(said[0], list(before.get("items") or []) + list(after.get("items") or []))
+                whose += await side_thread(home_work, [taken] if taken is not None else [])
+                await side_thread(agent.notices.tell, said[0], said[1], "sequence", said[2], whose)
             return JSONResponse(dict(after, message=msg))
 
         async def started() -> Response:
