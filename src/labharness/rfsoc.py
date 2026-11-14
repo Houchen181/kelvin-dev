@@ -14,10 +14,16 @@ Kelvin plays one generator channel and reads one readout channel (set in the car
     length, readout_length, trigger_delay (us);  reps (averages)
     i, q, magnitude, phase   one averaged acquisition (QICK's acquire) per read, shared by the four values
 A continuous tone keeps playing after a program ends, so Kelvin stops it whenever the output goes off, the run
-ends or aborts (through the safe sequence), and when it disconnects."""
+ends or aborts (through the safe sequence), and when it disconnects.
+
+Pyro4 pickles what goes between them (QICK sets it so), and the board's numpy can be older than Kelvin's (numpy 1.21 on
+a PYNQ image): Kelvin reads what numpy 1.x pickles (read_old_numpy), and sends plain Python numbers and lists (Board)."""
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import math
+import sys
 import urllib.parse
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
@@ -33,6 +39,68 @@ READINGS = ("i", "q", "magnitude", "phase")
 # each call to the board waits at most this long (or the card's connection timeout_ms, if longer): Pyro's own default
 # is forever, so a board that stopped answering held the lab for good. QICK's acquisitions are many short calls
 CALL_S = 60.0
+# The modules a numpy 1.x pickle names, which numpy 2 moved from numpy.core to numpy._core: an array is
+# numpy.core.multiarray._reconstruct (numpy.core.numeric._frombuffer in pickle protocol 5), a numpy number
+# numpy.core.multiarray.scalar, a ufunc one of numpy.core._multiarray_umath's, an error one of numpy.core._exceptions'.
+# numpy 2 keeps numpy.core's modules only for old pickles and old imports; the app Kelvin installed had none of them
+# (PyInstaller didn't see numpy's lazy imports, until packaging/kelvin.spec named them), and a later numpy drops them.
+OLD_NUMPY = ("multiarray", "numeric", "_multiarray_umath", "umath", "_exceptions", "numerictypes", "fromnumeric",
+             "records", "defchararray", "arrayprint", "function_base", "getlimits", "shape_base", "einsumfunc",
+             "overrides", "_internal", "_dtype", "_dtype_ctypes")
+
+
+def read_old_numpy() -> None:
+    """Let this process read what numpy 1.x pickles, as a board's QICK sends its readings: each numpy.core module such
+    a pickle names imports, as numpy._core's own module where numpy.core's is missing. Nothing changes where it is
+    there, nor under numpy 1.x."""
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        return
+    for name in OLD_NUMPY:
+        old = "numpy.core." + name
+        try:
+            if old in sys.modules or importlib.util.find_spec(old) is not None:
+                continue
+        except ImportError:   # a numpy with no numpy.core at all
+            pass
+        try:
+            sys.modules[old] = importlib.import_module("numpy._core." + name)
+        except ImportError:
+            pass
+
+
+def plain(value: Any) -> Any:
+    """A value as plain Python, which the board's numpy reads whatever its version: numpy 2 pickles its arrays and
+    numbers under numpy._core, which numpy 1.x doesn't have. An array becomes lists, a numpy number a Python one."""
+    if isinstance(value, dict):
+        return {plain(k): plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        items = [plain(v) for v in value]
+        return items if isinstance(value, list) else tuple(items)
+    if type(value).__module__.partition(".")[0] == "numpy" and callable(getattr(value, "tolist", None)):
+        return value.tolist()
+    return value
+
+
+class Board:
+    """The board's Pyro4 proxy, as Kelvin and QICK's programs call it: each call's arguments go as plain Python
+    (plain()). What it answers comes as the board pickled it. Its attributes are the proxy's own (QICK checks
+    _pyroUri, and then sends a pulse's samples as lists itself)."""
+
+    def __init__(self, proxy: Any):
+        object.__setattr__(self, "_kelvin_proxy", proxy)
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "_kelvin_proxy":   # not set yet: a copy being made
+            raise AttributeError(name)
+        attr = getattr(self._kelvin_proxy, name)
+        if name.startswith("_") or not callable(attr):
+            return attr
+        return lambda *args, **kwargs: attr(*plain(args), **plain(kwargs))
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._kelvin_proxy, name, value)
 
 
 def load_qick() -> Any:
@@ -164,6 +232,7 @@ class Qick(DriverBackend):
         proxy = url.path.strip("/")
         if not url.hostname or not proxy:
             raise AdapterError("%s: a QICK board's address is qick://<name server host>[:8888]/<proxy name>" % name)
+        read_old_numpy()   # before the board's first answer: its numpy may be 1.x
         self.qick = module or load_qick()
         try:
             self.soc, self.soccfg = self.qick.make_proxy(ns_host=url.hostname, ns_port=url.port or 8888,
@@ -178,6 +247,7 @@ class Qick(DriverBackend):
             self.soc._pyroTimeout = max(CALL_S, float(card.connection.get("timeout_ms") or 0) / 1000.0)
         except Exception:
             pass
+        self.soc = Board(self.soc)   # what Kelvin and QICK's programs send it: plain Python, which any numpy reads
         # the board's QICK and this computer's should be the same version: Pyro hands objects over as they are
         self.versions = (str(self._cfg("sw_version") or ""), str(getattr(self.qick, "version", "") or ""))
         self.firmware = str(((self._cfg("tprocs") or [{}])[0] or {}).get("type") or "")

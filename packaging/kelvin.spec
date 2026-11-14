@@ -53,6 +53,10 @@ for package, dist, skip in PACKAGES:
         datas += copy_metadata(dist)   # so envs.have() sees what the app brings
     except Exception:
         pass
+# numpy 2 keeps numpy.core's modules for what older code and an older numpy's pickles name (a QICK board on numpy 1.21
+# sends its readings so; extensions built with pybind11 2.11 or older import numpy.core.multiarray). Nothing imports
+# them by name, so PyInstaller would leave them out, and the app would fail where Python from source doesn't.
+hiddenimports += collect_submodules("numpy.core", on_error="ignore")
 
 # Kelvin's own documentation, which kelvin_help searches (labharness/guide.py)
 datas += [(str(ROOT / "docs" / name), "labharness/data/docs") for name in

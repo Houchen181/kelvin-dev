@@ -372,8 +372,8 @@ def known(home: Any) -> List[str]:
     return sorted(p.name for p in root.iterdir() if (p / "instrument.json").exists()) if root.exists() else []
 
 
-def _first_line(e: BaseException) -> str:
-    return str(e).splitlines()[0][:200] if str(e) else type(e).__name__
+def _first_line(e: BaseException, limit: int = 200) -> str:
+    return str(e).splitlines()[0][:limit] if str(e) else type(e).__name__
 
 
 class _Later(Exception):
