@@ -390,6 +390,19 @@ def trace_summary(spec: ParamSpec, values: List[float]) -> str:
     return "%d points; min %s%s at #%d; max %s%s at #%d" % (len(values), num(values[lo]), u, lo, num(values[hi]), u, hi)
 
 
+def _names_a_secret(address: str) -> Optional[str]:
+    """The environment variable an address would send its value of (a web instrument's ?auth_env=NAME: its bearer
+    token), or None. Only a person writes one, in the lab config: the model's try_card once sent any variable's value
+    (an API key) to any web address it named, and nobody was asked."""
+    import urllib.parse
+    try:
+        q = urllib.parse.parse_qsl(urllib.parse.urlparse(address.strip()).query)
+    except ValueError:
+        return None
+    return next((v or k for k, v in q if k.lower() == "auth_env" or k.lower().endswith("_env") and k.lower() != "env"),
+                None)
+
+
 def _runs_a_program(address: str) -> bool:
     """A lib:// address that names a Python (python=), a folder of files anywhere (path=), or neither, runs a
     program a person chose: only a person writes one (Lab setup); Kelvin uses it once it is in the lab. One that
@@ -9212,13 +9225,19 @@ class LabRuntime:
                     "address with python= or path= names a program for Kelvin to run, so a person tries it in Lab, "
                     "Cards; or install the maker's library with install_for_instrument and use "
                     "lib://<address>?env=<environment>")
+        if address is None and _names_a_secret(instrument):
+            return ("not tried: %s sends the value of the environment variable %s with every request; only a person "
+                    "writes such an address, in the lab config (Lab, Set up)" % (instrument, _names_a_secret(instrument)))
         if address is None and ("::" in instrument or "://" in instrument):
             request = ApprovalRequest("Try a card on %s?" % instrument, [
                 "Kelvin's last scan did not find an instrument at %s. Trying the %s card asks it who it is and reads "
                 "its readings; it changes nothing (one setting is written with the value it already has, to check "
                 "the card's set command)." % (instrument, card.model)])
-            if not self.gate.auto_simple(request, "trying a card asks the instrument who it is and reads it, and "
-                                                  "changes nothing") \
+            web = instrument.strip().lower().startswith(("http://", "https://"))   # it may be anything on the
+            if web:                                                               # network: a person says
+                request.items.append("It is a web address: Kelvin sends it requests a person should know of")
+            if (web or not self.gate.auto_simple(request, "trying a card asks the instrument who it is and reads it, "
+                                                          "and changes nothing")) \
                     and not self.gate.ask(request):
                 note = " (%s)" % request.note if request.note else ""
                 return "declined: the person did not want Kelvin to try %s%s" % (instrument, note)
@@ -10260,6 +10279,9 @@ class LabRuntime:
         address = (address or "").strip()
         if not address or address.startswith("sim://"):
             return "not added: give the address of an instrument connected to this computer (scan_instruments)"
+        if _names_a_secret(address):
+            return ("not added: %s sends the value of the environment variable %s with every request; only a person "
+                    "writes such an address, in the lab config (Lab, Set up)" % (address, _names_a_secret(address)))
         lab_file = self.home / "lab.yaml"
         registry = lab_registry(self.home, self.collection)   # the cards the lab opens with, the collection's too
         found = self.found_info.get(resource_name(address), {})
