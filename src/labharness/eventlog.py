@@ -9,6 +9,8 @@ two files."""
 from __future__ import annotations
 
 import atexit
+import collections
+import errno
 import hashlib
 import json
 import math
@@ -21,7 +23,7 @@ import weakref
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, BinaryIO, Callable, Deque, Dict, Iterator, List, Optional, Tuple
 
 import yaml
 
@@ -63,6 +65,8 @@ KEEP_BACK = 50000       # lines kept back meanwhile, at most (the oldest go firs
 WRITE_WAIT_S = 0.5      # how long a write waits for its line to reach the file: past it, the line goes on by itself
 STALL_S = 10.0          # a file call under way this long: the record's trouble says so (the monitor's alarm)
 IDLE_S = 2.0            # the record's own thread ends after this long with nothing to do; a new line starts it again
+RECORD_WAIT_S = 0.5     # how long a run's point waits for its frame to reach the file: past it, it goes on by itself
+RECORD_KEEP_BYTES = 256 * 1024 * 1024   # a run's frames kept in memory at most while its folder doesn't answer
 _LOGS: "weakref.WeakSet[Any]" = weakref.WeakSet()   # the records that write files (settle_all, as Kelvin quits)
 
 
@@ -558,7 +562,15 @@ atexit.register(settle_all, 3.0)
 
 class RunRecord:
     """One run, recorded point by point in its folder's record.bin while it is measured (rundata.py: flushed at
-    once, synced to disk about once a second), and kept as run.h5 when it ends."""
+    once, synced to disk about once a second), and kept as run.h5 when it ends.
+
+    Its frames go to the file on a thread of the record's own (_write_on), in order. The run's first lines are waited
+    for (a folder that can't be written starts no run); once it measures, a point waits RECORD_WAIT_S at most for its
+    frame, and none at all while a file call has already taken longer: a data folder on a network share that stalled
+    (a NAS rebooting, a VPN dropping) held the run in its point's write for the whole stall, and a person's Stop with
+    it: the drives it touched stayed where they were until the share answered. Its frames wait in memory meanwhile
+    (RECORD_KEEP_BYTES at most), and its finish waits for every one. A frame that couldn't be written is said at the
+    run's next write, as the write said it before."""
 
     def __init__(self, run_id: str, path: Optional[Path], plan: Dict[str, Any], operator: str):
         self.run_id = run_id
@@ -570,6 +582,18 @@ class RunRecord:
         self.sha256: Optional[str] = None   # run.h5's seal, once the run is kept (finish)
         self._plan = plan
         self._record: Optional[rundata.Recorder] = None
+        self._started = False
+        # the record's own writer (_write_on): the frames it hasn't written, how many were asked and written, the
+        # bytes waiting, a file call under way since when, the error of a frame no caller has heard of yet
+        self._turn = threading.Condition()
+        self._frames: Deque[Tuple[bytes, bool]] = collections.deque()
+        self._asked = self._written = self._backlog = 0
+        self._io_since: Optional[float] = None
+        self._failed: Optional[BaseException] = None   # the first frame's error no point has said yet
+        self._failed_at: Dict[int, BaseException] = {}   # each frame that couldn't be written, by its number
+        self._lost = 0                                   # frames that never reached the file: the finish says so
+        self._lost_first: Optional[BaseException] = None
+        self._writer: Optional[threading.Thread] = None
         if path:
             path.mkdir(parents=True)
             self._record = rundata.Recorder(path)
@@ -578,10 +602,92 @@ class RunRecord:
                sync: bool = False) -> None:
         if self._record is None:
             return
-        if not getattr(self, "_started", False):   # the plan and who/where first, with the meta as it is by then
-            self._started = True
-            self._record.write("start", {"plan": plan_text(self._plan), "meta": dict(self.meta)}, sync=True)
-        self._record.write(kind, fields, values, sync=sync)
+        data = rundata.make_frame(kind, fields, values)   # its values as they are now, whenever it reaches the file
+        with self._turn:
+            if kind == "row":   # an earlier frame that couldn't be written: the run stops at this point, as it did
+                self._said_failed()
+            frames = []
+            if not self._started:   # the plan and who/where first, with the meta as it is by then
+                self._started = True
+                head = {"plan": plan_text(self._plan), "meta": dict(self.meta)}
+                frames.append((rundata.make_frame("start", head), True))
+            frames.append((data, sync))
+            self._send(frames, RECORD_WAIT_S if self.rows else None)
+
+    def _send(self, frames: List[Tuple[bytes, bool]], wait: Optional[float]) -> None:
+        """These frames to the writer, in their turn, waited for `wait` seconds at most (None: until written); the
+        caller holds _turn. One of these that couldn't be written within the wait is raised here; an earlier one's
+        error waits for the run's next point (add) and its finish, which say it: an end snapshot or an analysis that
+        raised it once was let go of, and the run said every point was kept with one missing from run.h5."""
+        first = self._asked + 1
+        for frame in frames:
+            self._frames.append(frame)
+            self._backlog += len(frame[0])
+        self._asked += len(frames)
+        mine = self._asked
+        if frames and self._writer is None:
+            self._writer = threading.Thread(target=self._write_on, name="kelvin-run-record", daemon=True)
+            self._writer.start()
+        self._turn.notify_all()
+        end = None if wait is None else time.monotonic() + wait
+        while self._written < mine:
+            now = time.monotonic()
+            if end is not None and self._backlog <= RECORD_KEEP_BYTES:
+                since = self._io_since
+                if now >= end or (since is not None and now - since >= wait):
+                    return   # its folder doesn't answer now: the frame goes once it does, in its turn
+                self._turn.wait(end - now)
+            else:
+                self._turn.wait(1.0)
+        own = next((self._failed_at[n] for n in range(first, mine + 1) if n in self._failed_at), None)
+        if own is not None:
+            if self._failed is own:
+                self._failed = None   # said now
+            raise own
+
+    def _said_failed(self) -> None:
+        if self._failed is not None:
+            e, self._failed = self._failed, None
+            raise e
+
+    def _settled(self, say: bool = True) -> None:
+        """Every frame asked so far written (or failed), however long the file takes; say: an error raised."""
+        with self._turn:
+            if say:
+                self._send([], None)
+                return
+            while self._written < self._asked:
+                self._turn.wait(1.0)
+
+    def _write_on(self) -> None:
+        """The record's own thread: its frames to the file, in order; ends after IDLE_S with none (a new one starts
+        it again)."""
+        while True:
+            with self._turn:
+                if not self._frames:
+                    self._turn.wait(IDLE_S)
+                    if not self._frames:
+                        self._writer = None
+                        return
+                data, sync = self._frames.popleft()
+                self._io_since = time.monotonic()
+            failed: Optional[BaseException] = None
+            try:
+                self._record.write_frame(data, sync)
+            except BaseException as e:   # its folder went away, a full disk: said at the run's next write
+                failed = e
+            with self._turn:
+                self._io_since = None
+                self._written += 1
+                self._backlog -= len(data)
+                if failed is not None:
+                    self._failed_at[self._written] = failed
+                    self._lost += 1
+                    if self._lost_first is None:
+                        self._lost_first = failed
+                    if self._failed is None:
+                        self._failed = failed
+                self._turn.notify_all()
 
     def set_columns(self, columns: Dict[str, Any]) -> None:
         """The run's axes and readings with their units (engine.columns)."""
@@ -608,6 +714,7 @@ class RunRecord:
         """Let go of a run that never started (its record couldn't be written): its folder's lock goes."""
         if self._record is not None:
             try:
+                self._settled(say=False)
                 self._record.release()
             except OSError:
                 pass
@@ -621,14 +728,21 @@ class RunRecord:
             return
         try:   # a record that can't be written (its drive went away) raises, and the run is let go of all the same
             self._write("finish", {"meta": dict(self.meta)}, sync=True)
+            self._settled()   # every frame in the file before it is closed
             self._record.close()
             try:
                 rundata.finish(self.path)
                 self.sha256 = rundata.sealed(self.path)
             except Exception as e:   # the record keeps every point; it becomes run.h5 at the next start
                 self.meta.setdefault("warnings", []).append("run.h5 not written yet: %s" % e)
+            if self._lost:   # frames that never reached the file: said, as a write that failed is
+                first = self._lost_first
+                why = (str(first).splitlines()[0][:200] if str(first) else type(first).__name__) if first else "?"
+                raise OSError(getattr(first, "errno", None) or errno.EIO, "%d of the run's frames could not be "
+                              "written (%s): run.h5 holds the rest" % (self._lost, why))
         finally:
             try:
+                self._settled(say=False)
                 self._record.release()
             except OSError:
                 pass

@@ -336,6 +336,21 @@ def _write_later(path: Path, text: str) -> threading.Event:
     return done
 
 
+_troubles: Dict[str, str] = {}   # a file the last write of which failed: why (save_trouble)
+
+
+def save_trouble(within: Optional[Sequence[Any]] = None) -> Optional[str]:
+    """Why one of the files Kelvin saves its queue, alarms and watches in (in these folders: a lab's data folder) can't
+    be written now, in words; None: each one's last write went through. A queue saved nowhere was gone after a
+    restart, and nobody heard of it."""
+    roots = [os.path.normcase(os.path.abspath(str(r))).rstrip(os.sep + "/") for r in (within or [])]
+    for key, why in list(_troubles.items()):
+        k = os.path.normcase(os.path.abspath(key))
+        if within is None or any(k.startswith(r + os.sep) for r in roots):
+            return "%s can't be written (%s)" % (key, why)
+    return None
+
+
 def _writer(path: Path) -> None:
     key = str(path)
     while True:
@@ -350,8 +365,9 @@ def _writer(path: Path) -> None:
             tmp = path.with_suffix(".tmp")
             tmp.write_text(text, encoding="utf-8")
             os.replace(tmp, path)
-        except OSError:
-            pass
+            _troubles.pop(key, None)
+        except OSError as e:
+            _troubles[key] = (getattr(e, "strerror", None) or str(e) or type(e).__name__)[:200]
         finally:
             for e in events:
                 e.set()

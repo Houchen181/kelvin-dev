@@ -510,7 +510,8 @@ class Monitor:
                                            # first: a hung bus is one alarm, and its instruments' own don't go up
                                            ("checking the GPIB buses", self._check_buses, ()),
                                            ("checking the instruments' health", self._check_health, (now,)),
-                                           ("checking the lab's record", self._check_record, ())):
+                                           ("checking the lab's record", self._check_record, ()),
+                                           ("checking what Kelvin saves", self._check_saves, ())):
                     self._at(doing)
                     try:
                         check(*args)
@@ -1158,12 +1159,43 @@ class Monitor:
         test's monitor spent 31 s at a time asking a lock-in that didn't answer. Its alarm says it meanwhile; a watch of
         it isn't read, and an interlock that needs it fails as one that can't be read, as when it was asked."""
         h = inst.health
-        if inst.simulated or not h.fails or self._probe(inst) is None:
+        if inst.simulated:
+            return None
+        busy_bus = self._bus_silent_now(inst)
+        if busy_bus:
+            return busy_bus
+        if not h.fails or self._probe(inst) is None:
             return None
         rest = h.resting()
         return "%s; Kelvin asks it again %s" % (
             h.lost_text or "%s doesn't answer" % inst.name,
             "at %s" % time.strftime("%H:%M:%S", time.localtime(rest)) if rest is not None else "now")
+
+    def _bus_silent_now(self, inst: Any) -> Optional[str]:
+        """An instrument on a GPIB bus another instrument of which didn't answer in this look (a timeout, or a call that
+        never came back): left for the rest of the look, in words; None otherwise. On a wedged adapter each instrument
+        on it held the look one call's limit before the bus was found hung (90 s for three), every watch and
+        interlock waiting. The next look asks again; an interlock's readings are always asked (_check_interlocks)."""
+        began = self._pass_began
+        if began is None:
+            return None
+        from .adapters import bus_of
+        bus = bus_of(inst.config.address)
+        if not bus or not str(bus).upper().startswith("GPIB"):
+            return None
+        from .adapters import gave_up_at, under_way
+        for other in list(self.lab.instruments.values()):
+            if other is inst or other.simulated or bus_of(other.config.address) != bus:
+                continue
+            h = other.health
+            hung = (getattr(other.backend, "hung_at", None) or 0.0) >= began
+            if (h.lost_at and h.lost_at >= began and (not h.gone or hung)) or gave_up_at(other.backend) >= began:
+                return "%s isn't asked in this look: %s, on the same bus, didn't answer in it" % (inst.name, other.name)
+            now = under_way(other.backend)
+            if now is not None and now[2]:   # a call past the time its driver should have answered: a wedged adapter
+                return "%s isn't asked in this look: %s's %s has been in the driver on %s for %d s" % (
+                    inst.name, other.name, now[0], bus, now[1])
+        return None
 
     def _ask_again(self, name: str, inst: Any) -> None:
         """One that stopped answering, its connection whole (a timeout: switched off, unplugged, its bus hung behind
@@ -1455,6 +1487,25 @@ class Monitor:
                 self._clear(self._errors.pop(name).id, "%s reports no more errors" % name)
 
     # ------------------------------------------------------------------ the lab's record
+
+    def _check_saves(self) -> None:
+        """The files the queue, the alarms and the watches are kept in, while one can't be written (a share gone, a
+        folder denied): one alarm says so, and clears once each is written again. Kelvin goes on with them in memory;
+        a restart meanwhile would start without what wasn't saved."""
+        check = getattr(self, "saves_trouble", None)   # the runtime's: its data folder's files (scanqueue)
+        trouble = check() if check is not None else None
+        with self._lock:
+            on = getattr(self, "_saves", None)
+            if trouble and on is None:
+                a = self._saves = self._new("record", "what Kelvin saves", "Kelvin can't save its queue, alarms or "
+                                            "watches: %s" % trouble, source="record")
+            elif not trouble and on is not None:
+                self._saves = None
+        if trouble and on is None:
+            self._tell(a, "Kelvin keeps them in memory meanwhile and saves them as soon as it can; a restart before "
+                          "then would start without them. Check that folder's drive or network share.")
+        elif not trouble and on is not None:
+            self._clear(on.id, "what Kelvin saves is written again")
 
     def _check_record(self) -> None:
         """The lab's record (events.jsonl), while it can't be written (its folder's drive or network share went away,

@@ -98,7 +98,6 @@ class WebApprover(Approver):
 
     def approve(self, request: ApprovalRequest) -> bool:
         self._annotate(request)
-        why = next((w for w in (veto() for veto in list(self.vetoes)) if w), None)
         try:
             where = self.where(request) if self.where else None
         except Exception:
@@ -110,6 +109,9 @@ class WebApprover(Approver):
         marks = self._unshared(request)
         unshared = bool(marks)
         with self._cv:
+            # under the lock a decline takes: a Stop that came as this was prepared either finds it open and declines
+            # it, or is seen here (its count, a cancelled call), and it is never shown
+            why = next((w for w in (veto() for veto in list(self.vetoes)) if w), None)
             self._seq += 1
             now = time.time()
             entry = {"id": "r%d-%s" % (self._seq, self._run), "title": request.title, "items": list(request.items),

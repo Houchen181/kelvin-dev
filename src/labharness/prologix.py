@@ -315,7 +315,18 @@ class Adapter:
         """The adapter's one exchange at a time, waited for `seconds` at most (Stuck past that). alive(): whether the
         instrument whose exchange this is still wants it (its connection not closed meanwhile): one closed while it
         waited sends nothing, never a command its caller gave up on long ago."""
-        if not self.lock.acquire(timeout=seconds):
+        # inside a call a session's courier waits for (an instrument's exchange): half of what that call has left at
+        # most, so the wait for another instrument's long read behind the same adapter is never taken for a driver
+        # that won't return (the session set aside, the bus flagged hung): busy instead, asked again later
+        from .adapters import time_left
+        left, wait, busy = time_left(), seconds, False
+        if left is not None and left / 2.0 < seconds:
+            wait, busy = max(0.0, left / 2.0), True
+        if not self.lock.acquire(timeout=wait):
+            if busy:
+                from .instrument import Busy
+                raise Busy("the Prologix %s is busy with another instrument's exchange (waited %d s); it is asked again "
+                           "later" % (place(self.key), round(wait)))
             raise Stuck("the Prologix %s is still in another exchange after %d s (stuck in its driver: a GPIB-USB whose "
                         "bus hung?); unplug it and plug it in again if it stays so" % (place(self.key), round(seconds)))
         try:

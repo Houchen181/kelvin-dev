@@ -137,14 +137,14 @@ def test_a_record_that_fills_up_stops_the_script_and_its_drives_still_go_back_to
             lockin.query("MEAS:X?")   # a reading: kept until the next one makes it a row
             time.sleep(0.1)
     """)
-    real = rundata.Recorder.write
+    real = rundata.Recorder.write_frame   # each frame reaches the file here (on the record's own thread)
     full = threading.Event()
 
-    def write_(self, kind, fields=None, values=None, sync=False):
-        if full.is_set() and kind == "row":
+    def write_(self, data, sync=False):
+        if full.is_set() and b'{"t": "row"' in data[:64]:
             raise OSError(28, "No space left on device")
-        return real(self, kind, fields, values, sync)
-    monkeypatch.setattr(rundata.Recorder, "write", write_)
+        return real(self, data, sync)
+    monkeypatch.setattr(rundata.Recorder, "write_frame", write_)
     threading.Timer(1.5, full.set).start()   # the disk fills while it runs
     gate, _, report = run(lab, folder, tmp_path, "drive.py", stop_after=15.0)   # (the Stop: only if all else fails)
     smu = lab.instrument("smu")

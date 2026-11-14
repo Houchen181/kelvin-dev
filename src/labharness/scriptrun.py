@@ -202,8 +202,9 @@ def locate(path: str, folders: Sequence[Any], chosen: Sequence[Any] = (), missin
         # out of them leads nowhere, as a path through one does)
         hits: List[Tuple[Optional[Path], Path]] = []
         seen: Set[str] = set()
+        look = _Look("a script called %s" % p.name)
         for r in roots:
-            for h in _named(r, p.name):
+            for h in _named(r, p.name, look=look):
                 real = h.resolve()
                 if os.path.normcase(str(real)) not in seen and any(_inside(real, x) for x in roots):
                     seen.add(os.path.normcase(str(real)))
@@ -226,13 +227,47 @@ def locate(path: str, folders: Sequence[Any], chosen: Sequence[Any] = (), missin
     raise ScriptError("no script %s in the lab's %s (%s)" % (path, noun, where))
 
 
-def _named(root: Path, name: str, most: int = 6) -> List[Path]:
-    """Files called `name` under root (environments, caches and hidden folders left out)."""
-    out: List[Path] = []
+# a look through the lab's scripts folders for a script or a module by its name: this long, and this many folders, at
+# most. On a network share each folder is a round trip: a look with no end once held the lab (a queue's start looked
+# nine times) and the portal's view of the sequence, and a Stop didn't end it
+WALK_S = 15.0
+WALK_DIRS = 20000
+FILES_LOOK_S = 5.0   # a run's look at the files in its folder (what it wrote), before and after: this long at most
+_SKIP_LOWER = {d.lower() for d in lab_scripts.SKIP_DIRS}
+
+
+class _Look:
+    """One look's budget (WALK_S, WALK_DIRS), shared by the folders it goes through."""
+
+    def __init__(self, what: str):
+        self.what, self.end, self.dirs = what, time.monotonic() + WALK_S, 0
+
+
+def _walk(root: Path, look: _Look) -> Iterator[Tuple[Path, List[str], List[str]]]:
+    """os.walk of root for a look by name: Python environments (a conda env's conda-meta, a venv's pyvenv.cfg), caches,
+    hidden folders and links left out, whatever the case of their letters; ScriptError past the look's budget rather
+    than a walk of minutes with the lab held."""
+    isjunction = getattr(os.path, "isjunction", None)
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in lab_scripts.SKIP_DIRS and not d.startswith(".")]
+        look.dirs += 1
+        if look.dirs > WALK_DIRS or time.monotonic() > look.end:
+            raise ScriptError("looking for %s went through %d folders of the lab's scripts folders in %d s without "
+                              "finishing: give its path in the scripts folder (folder/name.py), or keep fewer folders "
+                              "there" % (look.what, look.dirs - 1, round(WALK_S)))
+        here = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if d.lower() not in _SKIP_LOWER and not d.startswith(".")
+                       and not (here / d / "pyvenv.cfg").is_file() and not (here / d / "conda-meta").is_dir()
+                       and not (isjunction is not None and isjunction(str(here / d)))]
+        yield here, dirnames, filenames
+
+
+def _named(root: Path, name: str, most: int = 6, look: Optional[_Look] = None) -> List[Path]:
+    """Files called `name` under root (environments, caches and hidden folders left out)."""
+    look = look or _Look("a script called %s" % name)
+    out: List[Path] = []
+    for here, dirnames, filenames in _walk(root, look):
         if name in filenames:
-            out.append(Path(dirpath) / name)
+            out.append(here / name)
             if len(out) >= most:
                 break
     return out
@@ -269,24 +304,54 @@ def _module_in(home: Path, parts: List[str]) -> Optional[Path]:
     return None
 
 
-def _holding(root: Path, parts: List[str]) -> Iterator[Path]:
+def _holding(root: Path, parts: List[str], look: Optional[_Look] = None) -> Iterator[Path]:
     """The sub-folders of root from which python -m finds this module (environments, caches and hidden folders left
-    out), each as the walk comes to it."""
-    for dirpath, dirnames, filenames in os.walk(root):
-        here = Path(dirpath)
+    out), each as the walk comes to it (_walk: bounded)."""
+    look = look or _Look("the module %s" % ".".join(parts))
+    for here, dirnames, filenames in _walk(root, look):
         if here != root and (parts[0] in dirnames or parts[0] + ".py" in filenames) and \
                 _module_in(here, parts) is not None:
             yield here
-        dirnames[:] = [d for d in dirnames if d not in lab_scripts.SKIP_DIRS and not d.startswith(".")]
+
+
+_KEPT = threading.local()   # a module's places, as one piece of work found them (lookups_kept)
+
+
+@contextlib.contextmanager
+def lookups_kept() -> Iterator[None]:
+    """Within this (one piece of work on this thread: a queue's start, an item's add, a script's reading), a module's
+    places are looked for once: a queue's start looked through the scripts folders nine times for one module. Each new
+    piece of work looks afresh, so a second copy put there since is never missed."""
+    outer = getattr(_KEPT, "found", None)
+    if outer is None:
+        _KEPT.found = {}
+    try:
+        yield
+    finally:
+        if outer is None:
+            _KEPT.found = None
 
 
 def _find_modules(parts: List[str], roots: Sequence[Path], most: int = 6) -> List[Tuple[Path, Path]]:
     """Where python -m finds a module, in the lab's scripts folders: (its file, the folder it runs from), from the top
     of a folder, else from the sub-folders of theirs that hold it (all of them looked at, so a second copy is never
-    missed; at most `most` named); each file once, and only one inside the folders with its links followed."""
+    missed; at most `most` named); each file once, and only one inside the folders with its links followed. Once per
+    piece of work (lookups_kept); the look is bounded (_walk)."""
+    found = getattr(_KEPT, "found", None)
+    key = (tuple(parts), tuple(os.path.normcase(str(r)) for r in roots), most)
+    if found is not None and key in found:
+        return list(found[key])
+    hits = _find_modules_now(parts, roots, most)
+    if found is not None:
+        found[key] = list(hits)
+    return hits
+
+
+def _find_modules_now(parts: List[str], roots: Sequence[Path], most: int) -> List[Tuple[Path, Path]]:
     hits: List[Tuple[Path, Path]] = []
     seen: Set[str] = set()
-    for homes in (lambda: iter(roots), lambda: (h for r in roots for h in _holding(r, parts))):
+    look = _Look("the module %s" % ".".join(parts))
+    for homes in (lambda: iter(roots), lambda: (h for r in roots for h in _holding(r, parts, look))):
         for home in homes():   # the sub-folders are walked only when no folder has it at its top
             found = _module_in(home, parts)
             real = found.resolve() if found is not None else None
@@ -828,7 +893,37 @@ def _env_name(prefix: Path) -> str:
     return prefix.name if prefix.parent.name.lower() == "envs" else str(prefix)
 
 
+CONDA_KEEP_S = 30.0   # this computer's conda environments, found once, kept this long
+CONDA_LOOK_S = 5.0    # and looked for this long at most: one listed on a network share that stalled never holds the lab
+_CONDA: Dict[str, Any] = {}
+_CONDA_LOCK = threading.Lock()
+
+
 def conda_envs() -> List[Tuple[str, Path]]:
+    """conda_envs_now, kept CONDA_KEEP_S, and waited for CONDA_LOOK_S at most: past it, what was found last (the look
+    goes on by itself and keeps what it finds)."""
+    # kept for this person's home and conda (another one, or the same after a change of them, is looked at afresh)
+    where = (str(Path.home()), os.environ.get("LOCALAPPDATA"), os.environ.get("CONDA_EXE"))
+    kept = _CONDA.get("found")
+    if kept is not None and kept[2] == where and time.monotonic() - kept[0] < CONDA_KEEP_S:
+        return list(kept[1])
+    with _CONDA_LOCK:
+        looking = _CONDA.get("looking")
+        if looking is None or not looking.is_alive() or _CONDA.get("looking_for") != where:
+            def look() -> None:
+                try:
+                    _CONDA["found"] = (time.monotonic(), conda_envs_now(), where)
+                except Exception:
+                    pass
+            looking = _CONDA["looking"] = threading.Thread(target=look, name="kelvin-conda-envs", daemon=True)
+            _CONDA["looking_for"] = where
+            looking.start()
+    looking.join(CONDA_LOOK_S)
+    kept = _CONDA.get("found")
+    return list(kept[1]) if kept is not None and kept[2] == where else []
+
+
+def conda_envs_now() -> List[Tuple[str, Path]]:
     """The conda environments this person's own conda knows: those it lists for them (~/.conda/environments.txt, which
     only they write), the installs in their own folders (Anaconda, Miniconda, Miniforge: base and envs/*) and the base
     of the one their CONDA_EXE names: (its name, its folder), each once, only those with a Python, at most MAX_CONDA.
@@ -899,17 +994,19 @@ def activated(command: Sequence[str], env: Dict[str, str]) -> Dict[str, str]:
     return out
 
 
+PROBE_FAILED_KEEP_S = 30.0   # a probe that failed (a cold start that timed out) is tried again this soon
+
+
 def _probe(command: List[str], folder: Path, wanted: List[str]) -> Dict[str, Any]:
     key = (tuple(command), str(folder), tuple(sorted(wanted)))
     hit = _PROBED.get(key)
-    if hit and time.monotonic() - hit[0] < PROBE_KEEP_S:
+    if hit and time.monotonic() - hit[0] < (PROBE_FAILED_KEEP_S if "error" in hit[1] else PROBE_KEEP_S):
         return hit[1]
-    from .envs import clean_environ
-    try:
-        proc = subprocess.run(command + [str(SHIM), "--probe"] + wanted, cwd=str(folder),
-                              env=activated(command, clean_environ()), stdin=subprocess.DEVNULL, capture_output=True,
-                              timeout=PROBE_S, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        found = json.loads(proc.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+    from .envs import clean_environ, run_bounded
+    try:   # bounded whatever starts it (a .bat around Python, a folder on a share): envs.run_bounded
+        code, out, _ = run_bounded(command + [str(SHIM), "--probe"] + wanted, PROBE_S, cwd=str(folder),
+                                   env=activated(command, clean_environ()))
+        found = json.loads(out.decode("utf-8", "replace").strip().splitlines()[-1])
     except (OSError, subprocess.SubprocessError, ValueError, IndexError) as e:
         found = {"error": str(e) or type(e).__name__}
     _PROBED[key] = (time.monotonic(), found)
@@ -1055,10 +1152,11 @@ def python_for(script: Path, source: str, roots: Sequence[Path], configured: str
     if named:
         pick = python_named(script, roots, configured, named)
         if pick is None:
+            envs_here = conda_envs()   # listed once (it may look at folders on a share)
             raise ScriptError("%s is not a Python Kelvin runs the lab's scripts with here (the one set in Settings, an "
                               "environment beside the script, this computer's, one of the conda environments its "
                               "conda knows%s, or Kelvin's own): leave python out to use the one Kelvin picks"
-                              % (named, " (%s)" % ", ".join(n for n, _ in conda_envs()[:10]) if conda_envs() else ""))
+                              % (named, " (%s)" % ", ".join(n for n, _ in envs_here[:10]) if envs_here else ""))
         candidates = [pick]
     elif configured:
         candidates = [_configured(configured)]
@@ -2506,7 +2604,8 @@ class ScriptRun:
             self._bus_free(inst)
             with self._patience(inst, msg.get("timeout")), _held(inst, inst.backend.lock):
                 try:
-                    self._in_step(inst)
+                    with stoppable(self._stop_pressed):   # a Stop ends this wait too (its device clear, its identity)
+                        self._in_step(inst)
                     with self._direct(inst.backend.res, bulk=True):
                         values = inst.backend.res.query_binary_values(
                             command, datatype=msg.get("datatype") or "f", is_big_endian=bool(msg.get("is_big_endian")),
@@ -2529,7 +2628,8 @@ class ScriptRun:
                 self._bus_free(inst)
                 with _held(inst, inst.backend.lock):
                     try:
-                        self._in_step(inst)
+                        with stoppable(self._stop_pressed):
+                            self._in_step(inst)
                         with self._direct(inst.backend.res, bulk=True):
                             inst.backend.res.write_binary_values(command, list(msg.get("values") or []),
                                                                  datatype=msg.get("datatype") or "f",
@@ -2685,8 +2785,11 @@ class ScriptRun:
             if self.stopping:
                 self._send(conn, {"op": "stop", "why": self.stopping})
             return True
-        try:
-            answer = dict(self.handle(msg), id=rid, ok=True)
+        try:   # every wait on an instrument in it ends at the script's own Stop (from the moment it lands, and the
+            # clean-up's past MAX_GRACE_S), not only at the lab's taken as each exchange begins
+            from .instrument import ended_by
+            with ended_by(self._stop_pressed):
+                answer = dict(self.handle(msg), id=rid, ok=True)
         except _Refuse as e:
             answer = {"id": rid, "ok": False, "error": str(e), "stop": e.stop}
             if e.stop:
@@ -2737,8 +2840,12 @@ class ScriptRun:
             return out
         root = self.prep.folder
         own = os.path.normcase(str(self.rec.path)) if self.rec is not None and self.rec.path else None
+        end, folders = time.monotonic() + FILES_LOOK_S, 0   # a look of seconds at most, never minutes on a share
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in lab_scripts.SKIP_DIRS and not d.startswith(".")
+            folders += 1
+            if folders > 2000 or time.monotonic() > end:
+                return out
+            dirnames[:] = [d for d in dirnames if d.lower() not in _SKIP_LOWER and not d.startswith(".")
                            and os.path.normcase(os.path.join(dirpath, d)) != own]
             for f in filenames:
                 p = os.path.join(dirpath, f)
@@ -2895,11 +3002,6 @@ class ScriptRun:
         elif code not in (0, None):
             status = "aborted"
             reason = self.bye.get("error") or "it ended with exit code %s" % code
-            name = package_name(prep.path) if not prep.module else ""   # a package's module, run as a file
-            if name and ("attempted relative import" in reason or "No module named '%s'" % name.split(".")[0]
-                         in reason):
-                reason += " (it is the module %s of a package: run_script with module: %s runs it as python -m does)" \
-                          % (name, name)
         else:
             status, reason = "done", None
         lingered = self.lingered and not self.failed and not self.bye.get("error")
@@ -2916,6 +3018,18 @@ class ScriptRun:
                 cleanup = self._back_to_safe()
             except Exception as e:   # each drive is tried on its own (_back_to_safe); this is for what it didn't foresee
                 cleanup = ["could not bring every drive back to safe: %s" % e]
+        # a package's module run as a file: said, once its drives are back at safe (the folder's look may be slow on a
+        # share, and the way back to safe never waits for it); only when its error reads so
+        if status == "aborted" and reason and not prep.module and code not in (0, None) and \
+                ("attempted relative import" in reason or "No module named" in reason):
+            try:
+                name = package_name(prep.path)
+            except Exception:
+                name = ""
+            if name and ("attempted relative import" in reason or "No module named '%s'" % name.split(".")[0]
+                         in reason):
+                reason += " (it is the module %s of a package: run_script with module: %s runs it as python -m does)" \
+                          % (name, name)
         left = self._left_on() if status == "done" else []
         try:
             self.rec.snapshot("end", lab.snapshot(needed=list(prep.found.instruments) if status == "done" else ()))
@@ -3100,8 +3214,8 @@ def rehearsal_problem(prep: Prepared) -> Optional[str]:
     texts = [prep.source]
     package = _package_of(prep.module, prep.home)   # a package's module: every module of its package too
     modules = ([package] if package is not None else []) + _local_modules(prep.path, prep.source, prep.home)
-    for m in modules:
-        for f in (sorted(m.rglob("*.py")) if m.is_dir() else [m]):
+    for m in modules:   # a package's own files, as package_files reads them: Python environments left out, a few
+        for f in (package_files(m)[0] if m.is_dir() else [m]):   # hundred at most (never a venv inside it)
             if _same_path(f, prep.path):
                 continue
             try:

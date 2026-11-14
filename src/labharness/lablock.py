@@ -95,6 +95,26 @@ class LabLock:
             self._stack[-1] = old
             self._now = (me, old)
 
+    @contextlib.contextmanager
+    def aside(self) -> Iterator[None]:
+        """The work that has the lock uses no instrument for a while, whatever it said before (a run's record being
+        finished, on a data folder that may stall; its last look at the lab, which only reads): every instrument can
+        be read meanwhile, and Bring to safe goes
+        beside it at once (runtime._rescue_lab). Afterwards it holds what it held before. On a thread that doesn't
+        have the lock, nothing changes."""
+        me = threading.get_ident()
+        if self._now[0] != me or not self._stack:
+            yield
+            return
+        old = self._stack[-1]
+        self._stack[-1] = frozenset()
+        self._now = (me, frozenset())
+        try:
+            yield
+        finally:
+            self._stack[-1] = old
+            self._now = (me, old)
+
     def holds(self, name: str) -> bool:
         """Whether work on another thread holds this instrument now (its own work reads it as it likes)."""
         owner, scope = self._now

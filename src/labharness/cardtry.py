@@ -48,7 +48,14 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
                 reuse = inst.backend   # a text instrument: ask it through the connection the lab already has
     if reuse is None and address.startswith("sim://"):
         raise AdapterError("%s is a simulated instrument; try the card on a real address" % address)
-    backend = reuse or open_backend("try", _clone_without_connect(card) if not card.library else card, address)
+    if reuse is None:   # on a thread of its own, its open deadline at most: a maker's driver that never returns from
+        # opening (a camera's SDK in a bad state) held the lab for good, since a Try holds it (lab.open_within)
+        from .lab import open_deadline, open_within
+        tried = _clone_without_connect(card) if not card.library else card
+        backend = open_within(lambda n, k, a: open_backend(n, k, a), "try", tried, address,
+                              open_deadline(tried, address), stops=getattr(lab, "stops", None))
+    else:
+        backend = reuse
     inst = Instrument("try", card, backend, InstrumentConfig(name="try", card=card.id, address=address),
                       getattr(lab, "stops", None))   # a person's stop ends its waits too
     out: Dict[str, Any] = {"address": address, "card": card.id, "reused": reuse is not None, "readings": []}
@@ -106,11 +113,9 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
             if check is not None:
                 out["write_check"] = check
     finally:
-        if reuse is None:
-            try:
-                backend.close()
-            except Exception:
-                pass
+        if reuse is None:   # on a thread of its own, waited for a moment at most (lab._let_go)
+            from .lab import _let_go
+            _let_go(backend)
     return out
 
 

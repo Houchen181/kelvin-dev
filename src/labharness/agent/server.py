@@ -615,6 +615,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return outside(rt, "the lab's experiments", rt.experiments_view(name))
 
     @server.tool(annotations=READ, structured_output=False)
+    @cancellable   # it may hold the lab while it reads the script: the chat's Stop or a cancel ends it
     def check_script(script: str = "", params: Optional[Dict[str, Any]] = None, action: str = "", module: str = "",
                      python: str = "") -> str:
         """What run_script would do with one of the lab's own scripts, without running it: the Python that runs it

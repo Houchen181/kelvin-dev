@@ -183,7 +183,7 @@ class Waker:
         """The signed-in person's wake-ups."""
         now, root = time.monotonic(), self._root()
         return [{"chat_id": w.chat_id, "text": w.text, "note": w.note, "left_s": max(0, int(w.due - now))}
-                for w in self.pending.values() if w.root == root]
+                for w in list(self.pending.values()) if w.root == root]   # (others add and take wake-ups meanwhile)
 
     def latest(self) -> Optional[Dict[str, Any]]:
         """The latest wake-up, if it was in the signed-in person's chats."""

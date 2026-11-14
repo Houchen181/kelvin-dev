@@ -119,6 +119,11 @@ class RunReport:
         return self.message
 
 
+def _nothing() -> Any:
+    import contextlib
+    return contextlib.nullcontext()
+
+
 class RunEngine:
     def __init__(self, gate: SafetyGate, store: Optional[RunStore] = None):
         self.gate = gate
@@ -128,6 +133,9 @@ class RunEngine:
         self.progress: Optional[Callable[[Dict[str, Any]], None]] = None
         self.analyze = True
         self._healthy: Dict[str, float] = {}   # instrument -> when (monotonic) it last passed a health check
+        # what the run says while it only writes files (its record finished, its timings kept): it uses no instrument
+        # then (LabLock.aside, given by the runtime), so Bring to safe never waits on a data folder that stalled
+        self.files_only: Callable[[], Any] = _nothing
 
     def _emit(self, **event: Any) -> None:
         if self.progress is not None:
@@ -1551,7 +1559,11 @@ class RunEngine:
             duration = clock.now() - t0
             try:
                 # a run that stopped or failed only looks, its own instruments too: what ended it may hold one
-                rec.snapshot("end", lab.snapshot(needed=plan.requires if status == "done" else ()))
+                # with none of its instruments held (LabLock.aside): Bring to safe right after a Stop went to safe
+                # only once this look was over, a slow instrument's exchanges one after another
+                with self.files_only():
+                    end_values = lab.snapshot(needed=plan.requires if status == "done" else ())
+                rec.snapshot("end", end_values)
             except Exception:
                 pass
             meta = dict(status=status, reason=reason, points=n, planned_points=plan.points,
@@ -1574,12 +1586,14 @@ class RunEngine:
                 meta["timing"] = took.summary()
                 if timing is not None and n:
                     try:
-                        timing.learn(rec.run_id, took, self._ran_with(plan, start,
-                                                                      {k.split(".")[0] for k in took.reads}))
+                        ran_with = self._ran_with(plan, start, {k.split(".")[0] for k in took.reads})
+                        with self.files_only():
+                            timing.learn(rec.run_id, took, ran_with)
                     except Exception:   # an estimate is a convenience; the run is kept whatever happens here
                         pass
             try:
-                rec.finish(**meta)
+                with self.files_only():   # its record finished and kept: files only, never an instrument
+                    rec.finish(**meta)
             except Exception as e:   # its folder's drive went away, a full disk: said, and people hear of it
                 saved = False
                 warnings.append(self._unwritten(rec, e, ended=True))

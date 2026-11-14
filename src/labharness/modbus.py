@@ -99,6 +99,10 @@ class ModbusInstrument(DriverBackend):
     """A serial port that went away (a USB adapter pulled, then plugged back) is let go of, said as a lost instrument
     (LinkLost), and opened again at the next exchange: it was never remade. No reply at all is NoAnswer."""
     quiet_close = True   # closing the port or the connection sends the device nothing
+    # each exchange goes through the connection's own thread (DriverBackend._driver_call): a USB-RS485 adapter whose
+    # driver stalls in a purge or a read holds no run past a person's Stop, and a minute at most (an exchange takes its
+    # timeout, a few seconds)
+    call_s = 60.0
 
     def __init__(self, name: str, card: Card, address: str, module: Any = None):
         super().__init__(name, card, address)
@@ -167,14 +171,9 @@ class ModbusInstrument(DriverBackend):
     # -------------------------------------------------------------- frames
 
     def _exchange(self, pdu: bytes) -> bytes:
-        """One request and its reply's PDU, raising the device's own exception in words."""
-        with self.io_lock:
-            if self.transport is not None:
-                reply = self.transport(self._frame(pdu))
-            elif self.rtu:
-                reply = self._rtu(self._frame(pdu), pdu[0])
-            else:
-                reply = self._tcp(self._frame(pdu))
+        """One request and its reply's PDU, raising the device's own exception in words. The bytes go and come on the
+        connection's own thread (_wire, through _driver_call)."""
+        reply = self._driver_call("a Modbus exchange", self._wire, pdu)
         body = self._unframe(reply)
         if body[0] & 0x80:
             code = body[1] if len(body) > 1 else 0
@@ -183,6 +182,15 @@ class ModbusInstrument(DriverBackend):
         if body[0] != pdu[0]:
             raise AdapterError("%s: the device answered another request (function %d)" % (self.name, body[0]))
         return body
+
+    def _wire(self, pdu: bytes) -> bytes:
+        """One request's frame sent and its reply's frame read, one exchange at a time."""
+        with self.io_lock:
+            if self.transport is not None:
+                return self.transport(self._frame(pdu))
+            if self.rtu:
+                return self._rtu(self._frame(pdu), pdu[0])
+            return self._tcp(self._frame(pdu))
 
     def _frame(self, pdu: bytes) -> bytes:
         if self.rtu:

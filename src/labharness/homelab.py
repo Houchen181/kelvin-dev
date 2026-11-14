@@ -170,7 +170,8 @@ def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[
     world = World(clock, seed)
     sim = sim_backend_factory(world)
 
-    opened = []
+    opened: List[Any] = []   # while the lab is built only: kept after, it held every connection a reconnect made
+    building = [True]
 
     def factory(name: str, card: Any, address: str) -> Any:
         if set_aside and name in set_aside:   # also when reconnected: only a fixed entry and a new lab connect it
@@ -181,7 +182,8 @@ def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[
         from .lab import connecting_entry
         entry = connecting_entry(name) or cfg.instruments[name]   # one being added or changed: its new entry
         backend = open_backend(name, card, address, overrides=entry.connection)
-        opened.append(backend)
+        if building[0]:
+            opened.append(backend)
         return backend
 
     try:
@@ -190,6 +192,9 @@ def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[
         for backend in opened:  # one instrument failed: let go of the ones already opened
             backend.close()
         raise
+    finally:
+        building[0] = False
+    opened.clear()
     from .instrument import Unavailable
     for name, why in (set_aside or {}).items():   # said at once, not "connecting"
         if name in lab.instruments and lab.instruments[name].enabled is False and lab.instruments[name].unavailable:

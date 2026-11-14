@@ -54,7 +54,12 @@ OPEN_S = {"lightfield": 300.0, "picam": 120.0, "lib": 150.0, "shamrock": 120.0, 
 # the most one call into a maker's driver is waited for (DriverBackend.call_s): ten minutes, far past any of its
 # calls that work (a driver whose long calls are measurements, a counter's integration, bounds its own)
 DRIVER_CALL_S = 600.0
-LOOK_CALL_S = 60.0      # how long a look (the monitor's) waits for one, the call going on past it
+LOOK_CALL_S = 10.0      # how long a look (the monitor's) waits for one, the call going on past it: a look reads
+#                         plain readings (never an acquisition), and every watch and interlock waits behind it
+# a call of a driver that bounds its own long calls (call_s None: a camera's exposure, a counter's integration) is
+# still made on the connection's own thread, so a person's Stop ends the wait for it and a look gives up on it; it is
+# never taken for a driver that won't return by time alone
+UNBOUNDED_CALL_S = 864000.0
 _COMMAND = re.compile(r"^\s*(SET|GET)\s+(\S+)(?:\s+(\S+))?\s*$", re.I)
 
 
@@ -136,20 +141,24 @@ class DriverBackend:
 
     def _driver_call(self, what: str, fn: Callable[..., Any], *args: Any) -> Any:
         """fn(*args), a call into the maker's driver, on this connection's own thread (adapters.Courier): waited for
-        at most call_s, or until a person's Stop (the call goes on, unwaited, and the next waits behind it). One that
-        doesn't return in time ends this connection (gone), as bounded does."""
-        if self.call_s is None:
-            return fn(*args)
+        at most call_s (a driver with none: UNBOUNDED_CALL_S), or until a person's Stop (the call goes on, unwaited,
+        and the next waits behind it). One that doesn't return in time ends this connection (gone), as bounded does."""
         courier = self._courier
+        if courier is not None and courier.on_its_thread():   # a call inside a call (a driver's get asking query):
+            return fn(*args)                                  # made there and then, never queued behind itself
         if courier is not None and courier.dead:   # its driver is still in a call that didn't return (one shared by
             self.gone = self.gone or courier.dead  # a controller's axes: another axis's): nothing goes in beside it
             self.check_gone()
         if courier is None or courier.ended:   # none yet, or its connection was closed and is used again
             courier = self._courier = Courier(self._courier_name())
+        # a driver that bounds its own calls (call_s None) goes there too: a Stop ends the wait for it, and a look (the
+        # monitor's, a run's record of the instruments it doesn't use) gives up on it, where the look once went into a
+        # camera's library that never returned and a run on another instrument never started (UNBOUNDED_CALL_S)
+        limit = self.call_s if self.call_s is not None else UNBOUNDED_CALL_S
         try:
             if looking():   # the monitor's look waits a minute at most, the call keeping its own limit (Courier.look)
-                return courier.look(self.call_s, LOOK_CALL_S, what, fn, *args)
-            return courier.call(self.call_s, what, fn, *args)
+                return courier.look(limit, LOOK_CALL_S, what, fn, *args)
+            return courier.call(limit, what, fn, *args)
         except Hung:
             self.gone = courier.dead
             self.check_gone()
@@ -157,6 +166,15 @@ class DriverBackend:
 
     def _courier_name(self) -> str:
         return self.name
+
+    def _locked(self) -> Any:
+        """The connection's lock for an exchange; none on its own courier's thread (a call inside a call, whose caller
+        holds it for it there): waiting for it there would wait on itself."""
+        courier = getattr(self, "_courier", None)
+        if courier is not None and courier.on_its_thread():
+            import contextlib
+            return contextlib.nullcontext()
+        return self.lock
 
     def _end_calls(self) -> None:
         """Its calls' thread let go of once it is closed: each closed or reconnected connection left one behind."""
@@ -223,7 +241,7 @@ class DriverBackend:
         if verb != "SET":
             raise AdapterError("%s: %r reads, it does not set" % (self.name, command))
         self.check_gone()
-        with self.lock:
+        with self._locked():
             self.check_gone()   # again: it may have ended while this waited behind the call that didn't return
             # cards write paths in capitals; vendors use lower case
             self._driver_call("setting %s" % path.lower(), self.set, path.lower(), _number(value))
@@ -231,13 +249,13 @@ class DriverBackend:
     def query(self, command: str) -> str:
         self.check_gone()
         if command.strip().upper() in ("*IDN?", self.card.idn_query.strip().upper()):
-            with self.lock:
+            with self._locked():
                 self.check_gone()
                 return self._driver_call("its identity", self.identity)
         verb, path, _ = parse_command(command)
         if verb != "GET":
             raise AdapterError("%s: %r sets, it does not read" % (self.name, command))
-        with self.lock:
+        with self._locked():
             self.check_gone()
             return _fmt(self._driver_call("reading %s" % path.lower(), self.get, path.lower()))
 

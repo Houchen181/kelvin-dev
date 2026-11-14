@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .cards import Card, CardRegistry, ParamSpec, num
-from .adapters import AdapterError, ErrorAnswer, timed_out
+from .adapters import AdapterError, ErrorAnswer, Hung, timed_out
 from .clock import SimClock, Stops
 from .instrument import (NOT_CONNECTED, OFF_TEXT, Busy, Garbled, Instrument, InstrumentFault, InstrumentLost,
                          InstrumentOff, NotHere, NotNow, OffBackend, SensorFlagged, Stopped, Unavailable)
@@ -29,6 +29,15 @@ CONNECTING_AGAIN = "Kelvin is connecting it"   # while a person's switch on (Lab
 # a run's look at an instrument it doesn't use (Lab.snapshot's needed): the most it waits for that instrument's
 # connection while other work has it, rather than wait that work out
 LOOK_S = 1.0
+
+
+def _gpib(inst: Instrument) -> str:
+    """The GPIB bus a real instrument is on ("GPIB0"), or "" (another bus, or simulated)."""
+    from .adapters import bus_of
+    if inst.simulated:
+        return ""
+    bus = str(bus_of(inst.config.address) or "")
+    return bus if bus.upper().startswith("GPIB") else ""
 
 
 def not_now(inst: Instrument) -> Optional[str]:
@@ -158,6 +167,13 @@ def _close_quietly(inst: Instrument) -> None:
         pass   # closing: nothing more to do with it
 
 
+def _close_inst(inst: Instrument) -> None:
+    """An instrument's connection closed on a thread of its own, ENDED_CLOSE_S at most (_close_now)."""
+    t = threading.Thread(target=_close_quietly, args=(inst,), name="kelvin-close-" + inst.name, daemon=True)
+    t.start()
+    t.join(ENDED_CLOSE_S)
+
+
 def _close_backend(backend: Any) -> None:
     try:
         backend.close()
@@ -165,30 +181,85 @@ def _close_backend(backend: Any) -> None:
         pass   # closing: nothing more to do with it
 
 
-def _let_go(backend: Any, within: float = ENDED_CLOSE_S) -> bool:
-    """A connection closed on a thread of its own, waiting at most `within` seconds: one that ended because its driver
-    didn't return may not return from closing either, and must not hold the lab. True if it closed in time."""
+def _let_go(backend: Any, within: Optional[float] = None) -> bool:
+    """A connection closed on a thread of its own, waiting at most `within` seconds (ENDED_CLOSE_S): one that ended
+    because its driver didn't return may not return from closing either, and must not hold the lab. True if it closed
+    in time."""
     t = threading.Thread(target=_close_backend, args=(backend,), name="kelvin-close", daemon=True)
     t.start()
-    t.join(within)
+    t.join(ENDED_CLOSE_S if within is None else within)
     return not t.is_alive()
 
 
 def _in_a_call(backend: Any) -> bool:
-    """Whether a call into its driver is under way now (one a Stop let go of, or a look's): closing it then may wait as
-    long as that call, so it is closed on a thread of its own (_let_go)."""
-    courier = getattr(backend, "__dict__", {}).get("_courier") or getattr(getattr(backend, "res", None), "_courier",
-                                                                           None)
+    """Whether a call into its driver is under way now (one a Stop let go of, or a look's): a maker's driver's own
+    courier (a positioner's is its controller's), or a VISA session's."""
+    try:
+        courier = getattr(backend, "_courier", None) or getattr(getattr(backend, "res", None), "_courier", None)
+    except Exception:
+        courier = None
     return getattr(courier, "_now", None) is not None
 
 
 def _close_now(backend: Any) -> None:
-    """Close a connection: at once, or on a thread of its own (bounded) when it ended by itself, or a call into its
-    driver is still under way (_let_go)."""
-    if _ended(backend) or _in_a_call(backend):
-        _let_go(backend)
-    else:
-        backend.close()
+    """Close a connection on a thread of its own, waited for ENDED_CLOSE_S at most (_let_go): one that closes at once
+    is done as before; a maker's library that never returns from closing (a camera's Close, LightField's Dispose)
+    never holds the lab, the person who changed its address, or Kelvin's quitting."""
+    _let_go(backend)
+
+
+def open_within(factory: Callable[[str, Card, str], Any], name: str, card: Card, address: str, limit: float,
+                stops: Any = None, opening: Optional[Dict[str, threading.Thread]] = None) -> Any:
+    """factory(name, card, address) on a thread of its own, waited for at most `limit` seconds, and never past a
+    person's Stop (stops: the lab's): OpenTimedOut then, and the connection, should it open after all, closed again,
+    unused: never handed on, so nothing Kelvin doesn't know of talks to the instrument. opening: where the try's
+    thread is kept by name (Lab._open: none is started beside one still stuck). The lab's own opens, and a card's Try,
+    whose open once held the lab for good on a camera that never returned from opening."""
+    context = contextvars.copy_context()   # connecting_entry(name): the entry being connected, there too
+    lock = threading.Lock()
+    done = threading.Event()
+    out: Dict[str, Any] = {}
+
+    def work() -> None:
+        try:
+            backend = context.run(factory, name, card, address)
+        except BaseException as e:   # the caller's to raise; nothing to close
+            with lock:
+                out["error"] = e
+                done.set()
+            return
+        with lock:
+            if not out.get("late"):
+                out["backend"] = backend
+                done.set()
+                return
+        log.warning("%s: its driver finished opening %s after Kelvin had stopped waiting; closed again, unused",
+                    name, address)
+        _close_backend(backend)
+
+    thread = threading.Thread(target=work, name="kelvin-open-" + name, daemon=True)
+    if opening is not None:
+        opening[name] = thread
+    thread.start()
+    count = getattr(stops, "count", None)
+    end, stopped = time.monotonic() + limit, False
+    while not done.wait(max(0.0, min(0.2, end - time.monotonic()))):
+        if time.monotonic() >= end:
+            break
+        if count is not None and stops.since(count):   # a person's Stop: the wait ends, the open goes on unwaited
+            stopped = True
+            break
+    with lock:
+        if not done.is_set():
+            out["late"] = True
+    if out.get("late"):
+        if stopped:
+            raise OpenTimedOut("%s: a person pressed Stop while it connected; connect it again when ready" % name)
+        log.warning("%s: its driver didn't finish opening %s within %g s; set aside", name, address, limit)
+        raise OpenTimedOut(open_hung_text(name, limit, address))
+    if "error" in out:
+        raise out["error"]
+    return out["backend"]
 
 
 def open_deadline(card: Card, address: str) -> float:
@@ -339,41 +410,8 @@ class Lab:
         if stuck is not None and stuck.is_alive():   # its last try never returned: none more beside it (each would
             raise OpenTimedOut("%s: Kelvin's last try to connect it is still stuck in its driver; close its maker's "
                                "software or switch the instrument off and on, or restart Kelvin" % name)
-        context = contextvars.copy_context()   # connecting_entry(name): the entry being connected, there too
-        lock = threading.Lock()
-        done = threading.Event()
-        out: Dict[str, Any] = {}
-
-        def work() -> None:
-            try:
-                backend = context.run(self._factory, name, card, address)
-            except BaseException as e:   # the caller's to raise; nothing to close
-                with lock:
-                    out["error"] = e
-                    done.set()
-                return
-            with lock:
-                if not out.get("late"):
-                    out["backend"] = backend
-                    done.set()
-                    return
-            log.warning("%s: its driver finished opening %s after Kelvin had stopped waiting; closed again, unused",
-                        name, address)
-            _close_backend(backend)
-
-        opening = threading.Thread(target=work, name="kelvin-open-" + name, daemon=True)
-        self.__dict__.setdefault("_opening", {})[name] = opening
-        opening.start()
-        done.wait(limit)
-        with lock:
-            if not done.is_set():
-                out["late"] = True
-        if out.get("late"):
-            log.warning("%s: its driver didn't finish opening %s within %g s; set aside", name, address, limit)
-            raise OpenTimedOut(open_hung_text(name, limit, address))
-        if "error" in out:
-            raise out["error"]
-        return out["backend"]
+        return open_within(self._factory, name, card, address, limit, stops=getattr(self, "stops", None),
+                           opening=self.__dict__.setdefault("_opening", {}))
 
     def _take(self, inst: Instrument, was: Any, backend: Any) -> bool:
         """The instrument's connection is now `backend`, if it is still `was` (nobody switched it off meanwhile, as a
@@ -603,7 +641,7 @@ class Lab:
         self._publish(ic, new)
 
         def undo() -> None:
-            new.close()
+            _close_inst(new)
             self._publish(inst.config, inst)
             back()
         return undo
@@ -615,7 +653,7 @@ class Lab:
         self.config.instruments = {k: v for k, v in self.config.instruments.items() if k != name}
         self.instruments = {k: v for k, v in self.instruments.items() if k != name}
         self._parked.pop(name, None)
-        inst.close()
+        _close_inst(inst)
 
     def take_out(self, name: str) -> str:
         """Take an instrument out of this lab for good (its entry left the lab config: remove_instrument): forgotten,
@@ -664,16 +702,18 @@ class Lab:
         isn't answering now is left unread, saying why, nothing waits behind other work that has its connection, and
         a person's Stop ends the look. A field test's read-only log of the attoDRY never started: its record of the lab
         waited on a hung GPIB bus it didn't use."""
-        from .instrument import patience
+        from .instrument import GaveUp, patience
         snap: Dict[str, Dict[str, Any]] = {}
         needed = None if needed is None else set(needed)
         stops = self.stops.count
+        quiet: Dict[str, str] = {}   # a GPIB bus one of whose instruments didn't answer this look: the rest unasked
         for name, inst in self.instruments.items():
             if not inst.enabled or (names is not None and name not in names):
                 continue
             values: Dict[str, Any] = {}
             looked = needed is not None and name not in needed
-            silent = (not_now(inst) or (self.stops.since(stops) and "a person pressed Stop")) if looked else None
+            silent = (not_now(inst) or (self.stops.since(stops) and "a person pressed Stop")
+                      or self._bus_held(inst, quiet)) if looked else None
             replies: Dict[str, str] = {}   # this look's own replies: two readings of one :READ? take it once
             with patience(LOOK_S) if looked else contextlib.nullcontext():
                 for spec in inst.card.params.values():
@@ -682,6 +722,8 @@ class Lab:
                         continue   # traces, frames and acquisitions are read when asked or measured, not to look
                     if not settings and spec.set_cmd is not None and not spec.is_drive:
                         continue   # a setting: read at its own, slower pace
+                    if looked and not silent and self.stops.since(stops):   # a Stop (Bring to safe's own) meanwhile:
+                        silent = "a person pressed Stop"   # the rest left, never one more exchange beside its safe steps
                     if silent:   # it did not answer, or isn't now: each other reading would only wait as long again
                         values[spec.name] = "ERROR: not read: %s" % (silent if isinstance(silent, str) else
                                                                      "%s did not answer" % name)
@@ -691,8 +733,33 @@ class Lab:
                     except Exception as e:  # a snapshot must never stop a run
                         values[spec.name] = "ERROR: %s" % e
                         silent = timed_out(e) or isinstance(e, (InstrumentLost, Busy, Stopped))
+                        # a bus that didn't answer (a timeout, a look that gave up, a call that never came back),
+                        # not one instrument that is off (nothing listens there: said at once, nothing waited for)
+                        if looked and (timed_out(e) or isinstance(e, (GaveUp, Hung))
+                                       or isinstance(e.__cause__, Hung)):
+                            bus = _gpib(inst)
+                            if bus:
+                                quiet[bus] = "%s didn't answer on %s" % (name, bus)
             snap[name] = values
         return snap
+
+    def _bus_held(self, inst: Instrument, quiet: Dict[str, str]) -> Optional[str]:
+        """Why a look leaves an instrument on a GPIB bus unasked, in words: another on it didn't answer in this look,
+        or has had a call in its driver LOOK_S or more, behind which this one's would only wait on the bus (a wedged
+        adapter held a stopped run's record of the lab one call's limit for each of its instruments); None otherwise."""
+        from .adapters import under_way
+        bus = _gpib(inst)
+        if not bus:
+            return None
+        if bus in quiet:
+            return quiet[bus]
+        for other in list(self.instruments.values()):
+            if other is inst or not other.enabled or _gpib(other) != bus:
+                continue
+            now = under_way(other.backend)
+            if now is not None and now[1] >= LOOK_S:
+                return "%s is busy: %s's %s has been on it for %d s" % (bus, other.name, now[0], now[1])
+        return None
 
     def set_aside(self, name: str, why: str, idn: str = "") -> None:
         """An instrument that answers as another one (identity_problem: another serial number of the same model) is set
@@ -909,13 +976,13 @@ class Lab:
             twin.instruments[name]._last = dict(inst._last)
         return twin
 
-    def close(self, within: Optional[float] = None, quitting: bool = False) -> List[str]:
+    def close(self, within: Optional[float] = 30.0, quitting: bool = False) -> List[str]:
         """Every connection closed (a camera's, a maker's program's: they hold the instrument for other programs until
         then). Connections set aside when their instrument was switched off stay as they are: closing could send.
         within: seconds for all of them together, each closed on a thread of its own, so one that hangs (a camera
         library that never returns, a GPIB bus that doesn't answer) never keeps Kelvin from quitting. Returns the
         instruments still closing when the time was up."""
-        if within is None:
+        if within is None:   # as asked: each in turn, as long as it takes (a test's own lab)
             for inst in self.instruments.values():
                 inst.close()
             return []

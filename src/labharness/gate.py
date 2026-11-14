@@ -118,11 +118,12 @@ class SimulationApprover(Approver):
 
 def _steadily(fn: Callable[..., Any]) -> Callable[..., Any]:
     """A way to safe no Stop cuts short (instrument.unstoppable): a second Stop, Bring to safe's own stop or an
-    interlock's trip that came while drives were on their way to safe left one half way and an output on."""
+    interlock's trip that came while drives were on their way to safe left one half way and an output on. Counted
+    while under way (SafetyGate.going_to_safe): a rescue waits for work going to safe, and goes beside anything else."""
     @functools.wraps(fn)
-    def steady(*args: Any, **kwargs: Any) -> Any:
-        with unstoppable():
-            return fn(*args, **kwargs)
+    def steady(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with unstoppable(), self._to_safe_counted():
+            return fn(self, *args, **kwargs)
     return steady
 
 
@@ -320,7 +321,11 @@ class SafetyGate:
         # interlock's "to safe" was once undone that way, and the magnet stayed at field)
         self._sent_safe: Dict[str, int] = {}
         self._safe_seq = 0
+        # the to-safe count and record only, never held across an exchange; a hold and a to-safe of one drive take its
+        # own lock (_drive_lock): one drive's slow answer once kept a laser on through a Stop's clean-up of another
         self._safe_lock = threading.Lock()
+        self._drive_locks: Dict[str, Any] = {}
+        self._going_safe = 0   # ways to safe under way now (going_to_safe)
         self._stop_gen = 0
         self.stop_reason = ""   # why the latest stop came, when not from a person (an interlock): said with its result
         self.trip_count = 0     # guard trips so far: an item that trips one pauses the queue, whatever on_error says
@@ -726,11 +731,17 @@ class SafetyGate:
         it and waited its whole timeout, holding the lab, every request answered "busy". The outer work's count holds
         within."""
         before = getattr(self._work, "since", None)
-        self._work.since = generation if before is None else before
+        self._work.since = generation if before is None else min(before, generation)   # the earliest start counts
         try:
             yield
         finally:
             self._work.since = before
+
+    def stopped_since_work(self) -> Optional[str]:
+        """"stop button" when a person's Stop came since this thread's work began (work_since); None otherwise. The
+        approver's veto, under the lock its declines take: a card asked as a Stop landed is declined, never shown."""
+        since = getattr(self._work, "since", None)
+        return "stop button" if since is not None and self.stop_generation != since else None
 
     def ask(self, request: ApprovalRequest) -> bool:
         since = getattr(self._work, "since", None)
@@ -1774,21 +1785,47 @@ class SafetyGate:
             self._holding(inst, spec, val, since)
         return Result(False, "timeout", key, value=val, message=text)
 
+    @contextmanager
+    def _to_safe_counted(self) -> Iterator[None]:
+        with self._safe_lock:
+            self._going_safe += 1
+        try:
+            yield
+        finally:
+            with self._safe_lock:
+                self._going_safe -= 1
+
+    def going_to_safe(self) -> bool:
+        """Whether drives are on their way to safe now (a stopped run's clean-up, Bring to safe, an interlock's)."""
+        return self._going_safe > 0
+
+    def _drive_lock(self, key: str) -> Any:
+        """One drive's own lock: a hold of it (its look and its write) and a to-safe of it are one after the other;
+        other drives never wait for it."""
+        with self._safe_lock:
+            lock = self._drive_locks.get(key)
+            if lock is None:
+                lock = self._drive_locks[key] = threading.RLock()
+            return lock
+
     def _sending_safe(self, key: str) -> None:
         """A to-safe (a stop's clean-up, an interlock, a trip, a watch, Bring to safe) is about to send this drive
         toward safe: from now on no stopped or given-up wait holds it where its reading was (_holding)."""
-        with self._safe_lock:
-            self._safe_seq += 1
-            self._sent_safe[key] = self._safe_seq
+        with self._drive_lock(key):   # after a hold of this drive under way (its write), never in its middle
+            with self._safe_lock:
+                self._safe_seq += 1
+                self._sent_safe[key] = self._safe_seq
 
     def _holding(self, inst: Instrument, spec: ParamSpec, val: Any, since: int) -> bool:
         """Set a set point back to where its reading is (a move away from safe that a stop ended, or a wait gave up),
         unless a to-safe has sent it toward safe since `since`: then it goes on to safe, and False. The check and the
         write are one step, so a to-safe that comes at the same moment is never undone (an interlock's "to safe" was
-        once overwritten by the stopped wait it woke, and the magnet stayed at field)."""
-        with self._safe_lock:
-            if self._sent_safe.get("%s.%s" % (inst.name, spec.name), 0) > since:
-                return False
+        once overwritten by the stopped wait it woke, and the magnet stayed at field); one step for this drive only."""
+        key = "%s.%s" % (inst.name, spec.name)
+        with self._drive_lock(key):
+            with self._safe_lock:
+                if self._sent_safe.get(key, 0) > since:
+                    return False
             inst.write(spec.name, val)
             return True
 
@@ -2004,6 +2041,36 @@ class SafetyGate:
             return out
         seq = inst.card.safe_sequence
         order = [p for p in seq if p in params] + [p for p in params if p not in seq]
+        # on a GPIB bus another instrument's call has wedged (past the time its driver should have answered), each
+        # of this one's calls waits a moment behind and its own call the look's give-up, never its whole limit: the
+        # bus answers nothing, and Bring to safe once returned 20 s late for it (the others went side by side)
+        wedged = self._bus_wedged(inst)
+        steady = contextlib.ExitStack()
+        if wedged:
+            from .instrument import patience
+            steady.enter_context(patience(1.0))
+        with steady:
+            return self._each_to_safe(inst, instr, order, by, hold, out)
+
+    def _bus_wedged(self, inst: Instrument) -> Optional[str]:
+        """Another instrument's call on this one's GPIB bus past the time its driver should have answered (a wedged
+        adapter), in words; None otherwise."""
+        from .adapters import under_way
+        from .lab import _gpib
+        bus = _gpib(inst)
+        if not bus:
+            return None
+        for other in list(self.lab.instruments.values()):
+            if other is inst or not other.enabled or _gpib(other) != bus:
+                continue
+            now = under_way(other.backend)
+            if now is not None and now[2]:
+                return "%s's %s has been in the driver on %s for %d s" % (other.name, now[0], bus, now[1])
+        return None
+
+    def _each_to_safe(self, inst: Instrument, instr: str, order: List[str], by: str, hold: bool,
+                      out: List[Result]) -> List[Result]:
+        from .instrument import InstrumentLost
         for k, param in enumerate(order):
             try:
                 r = self._safe_one(inst, inst.spec(param), wait=False, hold=hold)
@@ -2057,7 +2124,7 @@ class SafetyGate:
             return None
         key = "%s.%s" % (inst.name, spec.name)
         actual = inst.read(spec.readback)
-        with self._safe_lock:
+        with self._drive_lock(key):   # this drive's own: another drive's way to safe never waits for it
             target = inst.read(spec.name)
             if abs(target - actual) <= spec.tol or spec.distance(target) == 0:
                 return None

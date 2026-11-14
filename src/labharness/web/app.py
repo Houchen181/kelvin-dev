@@ -256,7 +256,17 @@ NOT_YET = ("Stop sent, but the work hasn't ended yet: it waits for %s. It ends a
            "hangs: Clear the bus in its alarm; if it never ends, restart Kelvin. Open approvals were declined.")
 
 
-async def own_thread(fn: Callable[..., Any], *args: Any) -> Any:
+STATE_WAIT_S = 15.0   # how long a Lab panel poll waits for the look under way, then answers with the last one
+STAMP_WAIT_S = 0.5    # how long a poll waits for a file's stamp (Home's, the chats'), then sends the last one
+
+
+async def side_thread(fn: Callable[..., Any], *args: Any) -> Any:
+    """As own_thread, on a daemon thread: a read or a change that need not finish before Kelvin exits (a stamp, a queue
+    edit), so one stuck on a stalled share never holds Kelvin's quitting."""
+    return await own_thread(fn, *args, daemon=True)
+
+
+async def own_thread(fn: Callable[..., Any], *args: Any, daemon: bool = False) -> Any:
     """fn(*args) on a thread started for it alone, with this request's context (who asks), awaited: what only makes
     the lab safer (Stop, Bring to safe, the incident card's safe) never waits behind other work for one of the
     server's shared threads, nor behind another of its kind (a Stop waited 9 s behind twelve LabVIEW folders being
@@ -282,7 +292,7 @@ async def own_thread(fn: Callable[..., Any], *args: Any) -> Any:
             loop.call_soon_threadsafe(settle, result, error)
         except RuntimeError:   # the server stopped meanwhile: the work is done all the same
             pass
-    threading.Thread(target=work, name="kelvin-safe").start()
+    threading.Thread(target=work, name="kelvin-portal-aside" if daemon else "kelvin-safe", daemon=daemon).start()
     return await done
 
 
@@ -941,9 +951,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             out["instruments"] = [dict(i, in_use="it is in use (unshared work)") if isinstance(i, dict)
                                   and i.get("in_use") else i for i in data.get("instruments") or []]
         if isinstance(data.get("events"), list):   # the record's lines again, without unshared work's
-            from ..agent.runtime import event_line, tail_events
-            with runtime.viewing(Viewer()):
-                lines = [event_line(e) for e in reversed(runtime.seen_events(tail_events(runtime.events_path, 25)))]
+            from ..agent.runtime import event_line
+            with runtime.viewing(Viewer()):   # the latest the Lab panel read (never held by a stalled data folder)
+                lines = [event_line(e) for e in reversed(runtime.seen_events(runtime.latest_events()))]
             hidden += max(0, len(data["events"]) - len(lines))
             out["events"] = lines
         if isinstance(data.get("incident"), dict):   # what a restart cut short: unshared work unnamed
@@ -1544,7 +1554,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         path = home / "instrument-log.jsonl"
         from ..agent.runtime import event_line, tail_events
         n = max(1, min(int(request.query_params.get("n") or 50), 500))
-        events = tail_events(path, n) if path.exists() else []
+        events = await asyncio.to_thread(lambda: tail_events(path, n) if path.exists() else [])   # never on the loop
         return JSONResponse({"events": [{"user": e.get("user") or "", "wall": e.get("wall", ""), "text": event_line(e)}
                                         for e in reversed(events)]})
 
@@ -1800,7 +1810,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 except KeyError as e:
                     return error(404, e.args[0])
             try:
-                lines += await asyncio.to_thread(runtime.hands_off, by, body.get("pin"))
+                lines += await own_thread(runtime.hands_off, by, body.get("pin"))
             except PermissionError as e:   # the lab owner's PIN (accounts.OwnerPin)
                 return JSONResponse({"error": str(e), "pin": True}, status_code=403)
         settings.set_hands_on(runtime.hands)
@@ -1885,7 +1895,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                              "hands_on": runtime.hands, "watches": ended})
 
     async def reports_tree(request: Request) -> Response:
-        return JSONResponse(dict(runtime.reports_tree(), folder=str(runtime.reports_dir)))
+        return JSONResponse(dict(await asyncio.to_thread(runtime.reports_tree), folder=str(runtime.reports_dir)))
 
     async def reports_open_folder(request: Request) -> Response:
         runtime.reports_dir.mkdir(parents=True, exist_ok=True)
@@ -2457,7 +2467,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         summary, format}: write one. Today's runs and the last N are those of the chat it is asked from (chat_id),
         and of its project: never another project's or chat's unshared work (left, the runs it left out)."""
         if request.method == "GET":
-            return JSONResponse({"reports": runtime.reports_index(), "folder": str(runtime.reports_dir)})
+            return JSONResponse({"reports": await asyncio.to_thread(runtime.reports_index),
+                                 "folder": str(runtime.reports_dir)})
         body = await request.json()
         scope = str(body.get("scope") or "")
         notes: List[Any] = []
@@ -2498,7 +2509,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def report_file(request: Request) -> Response:
         try:
-            path = runtime.report_path(request.path_params["name"])
+            path = await asyncio.to_thread(runtime.report_path, request.path_params["name"])
         except KeyError as e:
             return error(404, e.args[0])
         media = "application/pdf" if path.suffix == ".pdf" else \
@@ -2512,7 +2523,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if name in runtime.RUN_SEEN and role_of(request) != "owner":
             return error(403, "A script's own files are read on the Kelvin computer.")
         try:
-            path = runtime.run_file(request.path_params["run_id"], name)
+            path = await asyncio.to_thread(runtime.run_file, request.path_params["run_id"], name)
         except KeyError as e:
             return error(404, e.args[0])
         if path.name in runtime.RUN_SEEN:   # text only, never a page or a program: the browser shows it as it is
@@ -2533,7 +2544,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         when it has traces), xlsx or npz. The files are kept in the run's folder too."""
         from .. import export
         try:
-            folder = runtime._run_dir(request.path_params["run_id"])
+            folder = await asyncio.to_thread(runtime._run_dir, request.path_params["run_id"])
             data, name, media = await asyncio.to_thread(export.download, folder,
                                                         request.query_params.get("format", "csv"))
         except KeyError as e:
@@ -2550,7 +2561,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """Open a run's file (or, with no name, its folder) on this computer."""
         run_id, name = request.path_params["run_id"], request.path_params.get("name")
         try:   # a script's own files are read in Kelvin, never opened: Windows could run script.py
-            path = runtime.run_file(run_id, name, opening=True) if name else runtime._run_dir(run_id)
+            path = await asyncio.to_thread(lambda: runtime.run_file(run_id, name, opening=True) if name
+                                           else runtime._run_dir(run_id))
         except KeyError as e:
             return error(404, e.args[0])
         try:
@@ -2562,7 +2574,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     async def report_open(request: Request) -> Response:
         """Open a report in this computer's PDF viewer or PowerPoint (Kelvin runs on the user's own computer)."""
         try:
-            path = runtime.report_path(request.path_params["name"])
+            path = await asyncio.to_thread(runtime.report_path, request.path_params["name"])
         except KeyError as e:
             return error(404, e.args[0])
         try:
@@ -2604,8 +2616,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def alarm_ack(request: Request) -> Response:
         """A person's Got it, from the portal or a phone: kept with the alarm and in the record, with who and where."""
-        ok = await asyncio.to_thread(runtime.acknowledge_alarm, request.path_params["alarm_id"], person(request),
-                                     *channel(request))   # it writes the record: never on the portal's own loop
+        ok = await own_thread(runtime.acknowledge_alarm, request.path_params["alarm_id"], person(request),
+                              *channel(request))   # on a thread of its own: never behind the shared threads' polls
         return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
 
     def lab_memory_now(said: str = "") -> Dict[str, Any]:
@@ -2929,7 +2941,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         try:
             health = await asyncio.to_thread(runtime.switch_lab, lab, envelope, info, by)
         except RuntimeError as e:
-            lab.close()
+            await asyncio.to_thread(lab.close)   # its connections closed off the portal's loop (a driver may hang)
             return error(409, str(e))
         if auto_setup:   # give new instruments their folders, settings and manuals
             setup.start("lab changed")
@@ -3146,7 +3158,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 return error(400, str(e))
             settings.set_data_dir(result["path"])
             return JSONResponse(dict(result, default=str(user_default_data()), problem=None))
-        return JSONResponse(dict(runtime.data_summary(), default=str(user_default_data()),
+        return JSONResponse(dict(await asyncio.to_thread(runtime.data_summary), default=str(user_default_data()),
                                  problem=getattr(runtime, "data_problem", None)))
 
     async def terminal(request: Request) -> Response:
@@ -3245,7 +3257,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         try:
             await asyncio.to_thread(runtime.switch_lab, lab, None, info, by, None, {new: old})
         except RuntimeError as e:   # a run started meanwhile: the lab config as it was, the lab as it is
-            lab.close()
+            await asyncio.to_thread(lab.close)
             tmp.write_text(text, encoding="utf-8")
             tmp.replace(lab_file)
             settings.set_switched_off(lab_name, off)
@@ -3814,26 +3826,70 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if body.get("approve") and role_of(request) == "watch":
             return error(403, "This phone can watch and decline, not approve. Approve on the Kelvin computer.")
         try:
-            ok = await asyncio.to_thread(runtime.answer, request.path_params["request_id"], bool(body.get("approve")),
-                                         person(request), *channel(request), body.get("approver"), body.get("pin"))
+            # on a thread of its own (own_thread): a decline only makes the lab safer, and never waits for one of
+            # the server's shared threads (every one of them was once held by polls on a stalled data folder)
+            ok = await own_thread(runtime.answer, request.path_params["request_id"], bool(body.get("approve")),
+                                  person(request), *channel(request), body.get("approver"), body.get("pin"))
         except PermissionError as e:   # a trainee's yes, not confirmed (accounts.LabRoles.vouch)
             return JSONResponse({"error": str(e), "approver": True, "approvers": runtime.roles.approvers(),
                                  "pin_set": bool(runtime.owner and runtime.owner.is_set)}, status_code=403)
         return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
 
+    state_now: Dict[str, Any] = {"task": None, "loop": None, "last": None}
+
+    async def state_once(fresh: List[str]) -> Dict[str, Any]:
+        """runtime.ui_state for the Lab panel's poll, one at a time: a poll that comes while one is under way waits
+        for it (STATE_WAIT_S at most), then gets the last one. Polls on a data folder that stalled once held every one
+        of the server's shared threads, and a person's Got it, approval answers and queue edits waited behind them."""
+        import copy
+        loop = asyncio.get_running_loop()
+        task = state_now["task"]
+        if task is None or task.done() or state_now["loop"] is not loop:
+            task = state_now["task"] = asyncio.ensure_future(asyncio.to_thread(runtime.ui_state, fresh))
+            state_now["loop"] = loop
+        try:
+            data = await asyncio.wait_for(asyncio.shield(task), STATE_WAIT_S)
+        except asyncio.TimeoutError:
+            if state_now["last"] is None:
+                data = await asyncio.shield(task)
+            else:
+                return copy.copy(state_now["last"])
+        state_now["last"] = data
+        return copy.copy(data)
+
+    stamps: Dict[str, Dict[str, Any]] = {}
+
+    async def stamp_once(name: str, fn: Callable[[], Any]) -> Any:
+        """A file's stamp each poll sends (the chats', Home's, the lab memory's): read on a thread of its own, one at a
+        time for each, waited for STAMP_WAIT_S at most, then the last one read. Every poll once held one of the
+        server's shared threads in a look at a stalled data folder: thirty viewers held all twelve, and every change
+        a person made through them (the queue's Pause, an add) waited past the browser's own patience."""
+        loop = asyncio.get_running_loop()
+        slot = stamps.setdefault(name, {"task": None, "loop": None, "last": None})
+        task = slot["task"]
+        if task is None or task.done() or slot["loop"] is not loop:
+            task = slot["task"] = asyncio.ensure_future(side_thread(fn))
+            slot["loop"] = loop
+        try:
+            slot["last"] = await asyncio.wait_for(asyncio.shield(task), STAMP_WAIT_S)
+        except Exception:   # still reading (a stalled share), or it failed: the last one, which changes nothing
+            pass
+        return slot["last"]
+
     async def state(request: Request) -> Response:
         fresh = [n for n in str(request.query_params.get("fresh") or "").split(",") if n][:20]   # rows just opened
-        data = await asyncio.to_thread(runtime.ui_state, fresh)  # may read instruments; keep the server responsive
+        data = await state_once(fresh)   # may read instruments and files: one at a time, never a pile of them
         data["active"] = agent.active
         data["answering"] = agent.answering()   # every chat answering now: the portal marks them
         data["wakes"], data["woke"] = agent.waker.view(), agent.waker.latest()
         data["ask_scripts"] = setup.first and settings.lab_scripts is None   # the first setup: the lab's scripts?
         from ..cardlang import shown   # each card also as this person reads it (Settings → Display), for the phone too
         data["pending"] = [shown(p, settings.card_language) for p in data.get("pending") or []]
-        data["lab_memory"] = runtime.lab_memory_stamp()   # the Lab panel reloads the lab's memory when it changes
+        # the Lab panel reloads the lab's memory when it changes: its file's stamp, read never on the portal's loop
+        data["lab_memory"] = await stamp_once("lab_memory", runtime.lab_memory_stamp)
         data["team"] = team.last   # the team chat's newest message: the portal marks what you haven't read
-        data["chats"] = await asyncio.to_thread(store.stamp)   # the sidebar reloads when a chat is made elsewhere
-        data["home"] = runtime.home_board.stamp()   # Home reloads its blocks when Kelvin or a person changes them
+        data["chats"] = await stamp_once("chats", store.stamp)   # the sidebar reloads when a chat is made elsewhere
+        data["home"] = await stamp_once("home", runtime.home_board.stamp)   # Home reloads its blocks when they change
         data["hub_terms"] = hub.brief() if HUB_SHARING else None   # the hub waits for its new terms before sharing
         return JSONResponse(data)
 
@@ -3998,7 +4054,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         trace column, and the automatic analysis."""
         run_id = request.path_params["run_id"]
         try:
-            rec = await asyncio.to_thread(rundata.load, runtime._run_dir(run_id))
+            rec = await asyncio.to_thread(lambda: rundata.load(runtime._run_dir(run_id)))
             rows = rec.rows
             cols = runtime._columns(rec)
         except (KeyError, OSError, ValueError) as e:
@@ -4024,7 +4080,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                              "plan_text": rec.plan_text,
                              "meta": {k: meta.get(k) for k in ("status", "reason", "points", "planned_points",
                                                                 "duration_s", "warnings")},
-                             "files": [f for f in runtime.run_files(run_id)   # a script's own: this computer's
+                             "files": [f for f in await asyncio.to_thread(runtime.run_files, run_id)   # this computer's
                                        if role_of(request) == "owner" or not f.get("view")]})
 
     async def live(request: Request) -> Response:
@@ -4092,7 +4148,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         {name: value | null}} for a script, or {item, wait: seconds} / {item, set: {instr.param: value | null}} for a
         step; ladder {items: [ids], key, values: [...]} (one copy of the items per value, appended)."""
         if request.method == "GET":
-            return JSONResponse(await asyncio.to_thread(runtime.queue_view))
+            return JSONResponse(await side_thread(runtime.queue_view))
         try:
             body = await request.json()
         except ValueError:
@@ -4103,10 +4159,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         item = body.get("item")
         if op == "fields":   # changes nothing, so no one hears of it
             try:   # never on the portal's own loop: the queue's lock may wait on its file (every request with it)
-                return JSONResponse(await asyncio.to_thread(runtime.queue_fields, item))
+                return JSONResponse(await side_thread(runtime.queue_fields, item))
             except KeyError as e:
                 return error(404, e.args[0] if e.args else "no such queue item")
-        before = await asyncio.to_thread(runtime.queue_view)   # what it was, for the change in words (notices.py)
+        before = await side_thread(runtime.queue_view)   # what it was, for the change in words (notices.py)
 
         def persons(fn: Any, *args: Any) -> str:
             """A person's change, beside whatever Kelvin does (the check may read an instrument): filed under no
@@ -4118,40 +4174,40 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             """The queue as it is after the change, with the change said to the chats it concerns."""
             if not ok:
                 return error(400, msg)
-            after = await asyncio.to_thread(runtime.queue_view)
+            after = await side_thread(runtime.queue_view)
             said = person_notices.queue_said(op, body, before, after, runtime.queue_started_by)
             block_id = body.get("from_block") if op == "add" else None
             if said and block_id:   # a block's button on Home: the chat that put it there hears it was taken
-                taken = next((b for b in await asyncio.to_thread(runtime.home_board.blocks) if b["id"] == block_id),
+                taken = next((b for b in await side_thread(runtime.home_board.blocks) if b["id"] == block_id),
                              None)
                 if taken is not None:
                     where = said[0][len("You added "):].split(" ")[0]   # its number in the sequence, "#6"
                     said = ("You added '%s' from Home to the sequence as %s." % (taken["title"], where),
                             [taken.get("chat")], False)
             if said:
-                await asyncio.to_thread(agent.notices.tell, said[0], said[1], "sequence", said[2])
+                await side_thread(agent.notices.tell, said[0], said[1], "sequence", said[2])
             return JSONResponse(dict(after, message=msg))
 
         async def started() -> Response:
-            msg = await asyncio.to_thread(runtime.queue_start, by)
+            msg = await side_thread(runtime.queue_start, by)
             return await answered(msg, msg.startswith("queue started"))
         if op == "add":
             pos = body.get("position")
-            msg = await asyncio.to_thread(persons, runtime.queue_add, str(body.get("text") or ""),
+            msg = await side_thread(persons, runtime.queue_add, str(body.get("text") or ""),
                                           int(pos) if pos else None, str(body.get("note") or ""), by,
                                           bool(body.get("then_pause")))
             ok = not msg.startswith("not added")
         elif op == "then_pause":   # {item, value}: the queue pauses after it, or no longer does
             try:
-                found = await asyncio.to_thread(runtime.queue.set_then_pause, item, bool(body.get("value", True)))
+                found = await side_thread(runtime.queue.set_then_pause, item, bool(body.get("value", True)))
                 msg, ok = "the queue %s after %s" % ("pauses" if found.then_pause else "goes on", found.name), True
             except KeyError as e:
                 msg, ok = e.args[0], False
         elif op == "edit":
-            msg = await asyncio.to_thread(persons, runtime.queue_edit, item, str(body.get("text") or ""), by)
+            msg = await side_thread(persons, runtime.queue_edit, item, str(body.get("text") or ""), by)
             ok = not msg.startswith("not changed")
         elif op in ("move", "remove", "again", "clear"):
-            msg = await asyncio.to_thread(runtime.queue_change, op, item, body.get("position"), by)
+            msg = await side_thread(runtime.queue_change, op, item, body.get("position"), by)
             ok = not msg.startswith(("not changed", "unknown"))
         elif op == "start":   # its approval card may wait for a person for hours: never a request held open meanwhile
             return await soon(started())
@@ -4159,7 +4215,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             # whose second press takes the pause back): a queue no longer in it is left as it is, 409 saying why
             want = body.get("want")
             try:
-                msg = await asyncio.to_thread(runtime.queue_pause, by, None if want is None else str(want))
+                msg = await side_thread(runtime.queue_pause, by, None if want is None else str(want))
             except ValueError as e:
                 return error(400, str(e))
             if msg.startswith("not changed"):
@@ -4167,28 +4223,28 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             ok = True
         elif op == "on_error":
             try:
-                await asyncio.to_thread(runtime.queue_set_on_error, str(body.get("value") or ""), by)
+                await side_thread(runtime.queue_set_on_error, str(body.get("value") or ""), by)
                 msg, ok = "ok", True
             except ValueError as e:
                 msg, ok = str(e), False
         elif op == "save":
-            msg = await asyncio.to_thread(runtime.queue_save, str(body.get("name") or ""))
+            msg = await side_thread(runtime.queue_save, str(body.get("name") or ""))
             ok = msg.startswith("saved")
         elif op == "load":
-            msg = await asyncio.to_thread(persons, runtime.queue_load, str(body.get("name") or ""), by)
+            msg = await side_thread(persons, runtime.queue_load, str(body.get("name") or ""), by)
             ok = msg.startswith("added")
         elif op == "rename":
-            msg = await asyncio.to_thread(runtime.queue_rename, body.get("name"), by)
+            msg = await side_thread(runtime.queue_rename, body.get("name"), by)
             ok = not msg.startswith("not changed")
         elif op in ("skip", "duplicate"):
-            msg = await asyncio.to_thread(runtime.queue_change, op, item, None, by)
+            msg = await side_thread(runtime.queue_change, op, item, None, by)
             ok = not msg.startswith("not changed")
         elif op == "params":   # a script's settings, or a step's wait and set values, checked as an edit is
-            msg = await asyncio.to_thread(persons, runtime.queue_params, item, body.get("params"), body.get("wait"),
+            msg = await side_thread(persons, runtime.queue_params, item, body.get("params"), body.get("wait"),
                                           body.get("set"), by)
             ok = not msg.startswith("not changed")
         elif op == "ladder":   # one copy of the items per value, each checked as an add is
-            msg = await asyncio.to_thread(persons, runtime.queue_ladder, body.get("items"), body.get("key"),
+            msg = await side_thread(persons, runtime.queue_ladder, body.get("items"), body.get("key"),
                                           body.get("values"), by)
             ok = not msg.startswith("not added")
         else:

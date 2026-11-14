@@ -178,10 +178,77 @@ def uv_env(home: Any = None) -> Dict[str, str]:
     return env
 
 
+def _kill_tree(proc: Any) -> None:
+    """A program ended with every process it started: Windows' taskkill /T over its tree, elsewhere its process group
+    (run_bounded starts it in one of its own)."""
+    if os.name == "nt":
+        if proc.poll() is None:
+            try:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except (OSError, subprocess.SubprocessError):
+                pass
+    else:
+        try:
+            import signal
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (OSError, AttributeError):
+            pass
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def run_bounded(cmd: List[str], timeout: float, cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None,
+                merge: bool = False) -> Tuple[int, bytes, bytes]:
+    """cmd run with a time limit that holds: (its exit code, what it wrote, what it wrote to stderr; with merge, both
+    as the first). Its output goes into files, not pipes: subprocess.run's limit killed the program alone and then
+    waited for its pipes with no end, while a child it started kept them open (a .bat around Python ran 20 s past a
+    2 s limit; uv's build backends). Past the limit the whole tree is ended (_kill_tree) and TimeoutExpired raised.
+    Starting it, too, is waited for the limit at most (a working folder on a share that stalled)."""
+    import tempfile
+    import threading
+    box: Dict[str, Any] = {}
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+                kw: Dict[str, Any] = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" \
+                    else {"start_new_session": True}
+                proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                        stderr=subprocess.STDOUT if merge else err, **kw)
+                box["proc"] = proc
+                try:
+                    proc.wait(timeout)
+                except subprocess.TimeoutExpired:
+                    _kill_tree(proc)
+                    box["error"] = subprocess.TimeoutExpired(cmd, timeout)
+                    return
+                out.seek(0)
+                err.seek(0)
+                box["value"] = (proc.returncode, out.read(), b"" if merge else err.read())
+        except BaseException as e:   # the caller's to raise
+            box["error"] = e
+        finally:
+            done.set()
+    threading.Thread(target=run, name="kelvin-bounded-run", daemon=True).start()
+    if not done.wait(timeout + 15):   # it never even started (or its tree's end hung): left, said as a time out
+        proc = box.get("proc")
+        if proc is not None:
+            _kill_tree(proc)
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
 def _run(cmd: List[str], env: Dict[str, str]) -> Tuple[int, str]:
-    p = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=1800,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return p.returncode, p.stdout.decode("utf-8", "replace")
+    code, out, _ = run_bounded(cmd, 1800, env=env, merge=True)   # uv: bounded with its build backends (run_bounded)
+    return code, out.decode("utf-8", "replace")
 
 
 # uv's lines on its progress and on the Python it works with, and its [stderr] labels: none says what went wrong

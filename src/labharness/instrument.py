@@ -87,6 +87,13 @@ class Busy(RuntimeError):
     failure: the instrument is answering that work."""
 
 
+class GaveUp(Busy):
+    """A look (the monitor's, a run's record of the instruments it doesn't use) stopped waiting for its own call into
+    the driver, which had run past the time the instrument's own timeout gives it (adapters.Session.look_give_up): the
+    call goes on, its late reply dropped before the next command. On a GPIB adapter that wedged, each look held the
+    monitor one call's whole limit (30 s), every watch and interlock waiting."""
+
+
 _patience = threading.local()
 _ended = threading.local()
 _quick = threading.local()   # this thread's short wait for an answer (briefly)
@@ -433,10 +440,18 @@ class Instrument:
                 # a Stop that comes while the driver has the call ends this thread's wait at once, and a look waits
                 # behind the driver's earlier calls only as long as its patience (adapters.Courier)
                 stops = _stop_ends_waits()   # not on the way to safe, nor in the monitor's looks (unstoppable)
+                # on the way to safe, which no Stop ends, a call waits behind the driver's earlier one (a call a Stop
+                # left there, which may take its whole limit: ten minutes for a maker's driver) HELD_S at most, as
+                # its wait for the connection does: Busy then, nothing sent, and that instrument's safe steps are said
+                behind = max(look[0], 0.5) if look is not None else (None if stops else HELD_S)
                 with stoppable(lambda: stops and (self.stops.since(count) or (also is not None and bool(also()))),
-                               max(look[0], 0.5) if look is not None else None):
+                               behind, look=look is not None):
                     with brief(ms) if brief is not None else contextlib.nullcontext():
                         out = fn(*args)
+            except Busy as e:   # a look that gave up on its own call (a driver past its time): not asked again in
+                if look is not None:   # this look, where each of its readings once gave up as long again
+                    look[2].setdefault(self.name, str(e))
+                raise
             except (InstrumentOff, Stopped, InstrumentLost):
                 raise
             except Exception as e:
@@ -446,7 +461,7 @@ class Instrument:
                 self._forget()
                 # its error queue asked, a person's Stop ending that wait too (not on the way to safe: unstoppable)
                 with stoppable(lambda: stops and (self.stops.since(count) or (also is not None and bool(also()))),
-                               max(look[0], 0.5) if look is not None else None):
+                               max(look[0], 0.5) if look is not None else None, look=look is not None):
                     why = self._said_instead(fn, args) if kind == "silent" and not ms else None   # briefly: is it there
                 if why:   # it answers its error queue: not lost; it couldn't do this one, and says why
                     self.health.answered()

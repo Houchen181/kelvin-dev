@@ -1839,11 +1839,11 @@ class ChatAgent:
                 turn.stream_task.cancel()
             for lane in turn.lanes:
                 lane.cancel()
-        if chat_id is None:
+        if chat_id is None:   # the stop count first, then the cards (LabRuntime.stop): none shows after it
+            self.runtime.gate.request_abort()
             decline_all = getattr(self.runtime.approver, "decline_all", None)
             if decline_all:
                 decline_all("stop button")
-            self.runtime.gate.request_abort()
             return True
         decline = getattr(self.runtime.approver, "decline_ids", None)
         if decline is not None and turns[0].cards:

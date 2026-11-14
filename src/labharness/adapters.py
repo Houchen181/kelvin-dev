@@ -48,6 +48,8 @@ RESYNC_S = 10.0        # after a bus's clear: how long an instrument's check wai
 # run waiting on it, or the lab, past that. Its session is set aside and the instrument connected anew
 CALL_GRACE_S = 10.0
 CALL_FLOOR_S = 20.0    # the least any call is waited for (a 3 s timeout's call: 20 s)
+LOOK_GRACE_S = 2.0     # a look waits for its own call the session's timeout and this long (Session.look_give_up), and
+LOOK_FLOOR_S = 3.0     # this long at least: past it, the driver should have answered or said it timed out
 OPEN_CALL_S = 30.0     # opening a session (on top of its own open_timeout), and asking or setting one of its attributes
 CLOSE_CALL_S = 10.0    # closing one
 STOP_SLICE_S = 0.2     # how often a caller waiting on its call looks for a person's Stop
@@ -87,6 +89,18 @@ class Hung(LinkLost):
 
 
 _waits = threading.local()   # this thread's own stop and patience, while it waits on a call (stoppable)
+_running = threading.local()   # on a courier's own thread: the call it makes now (time_left)
+
+
+def time_left() -> Optional[float]:
+    """On a courier's own thread, how long the call it makes now has left before its caller takes it for one that
+    won't return (its limit, less what it has taken); None anywhere else. Code inside such a call that waits for
+    something of its own (a Prologix adapter's turn behind another instrument's long read) waits no longer than
+    that, and says it was busy, rather than be taken for a hung driver."""
+    job = getattr(_running, "job", None)
+    if job is None or job.began is None:
+        return None
+    return job.limit - (time.monotonic() - job.began)
 
 
 def looking() -> bool:
@@ -95,18 +109,26 @@ def looking() -> bool:
     return now is not None and now[1] is not None
 
 
-def stoppable(stopped: Callable[[], bool], patience: Optional[float] = None) -> Any:
+def a_look() -> bool:
+    """Whether this thread's call is a look's own (instrument.patience: the monitor's, a run's record of the
+    instruments it doesn't use), not a way to safe that only waits behind earlier calls a while (HELD_S)."""
+    now = getattr(_waits, "now", None)
+    return bool(now is not None and len(now) > 2 and now[2])
+
+
+def stoppable(stopped: Callable[[], bool], patience: Optional[float] = None, look: bool = False) -> Any:
     """While this thread waits on a call into a driver (a with block): stopped() ends its wait, a person's Stop
     coming back at once (instrument.Stopped), and patience (a look's: the monitor's, a run's record of the
     instruments it doesn't use) is the most it waits behind the session's earlier calls (instrument.Busy). A call it
     stops waiting for that hasn't started is taken back; one under way goes on on its session's thread, its late reply
-    dropped before the next command (owed). Instrument._io gives it the lab's Stops and this thread's own."""
+    dropped before the next command (owed). Instrument._io gives it the lab's Stops and this thread's own. look: a
+    look's own call (a_look), which a VISA session waits for only as long as its timeout says (Session.look_give_up)."""
     import contextlib
 
     @contextlib.contextmanager
     def waiting() -> Any:
         before = getattr(_waits, "now", None)
-        _waits.now = (stopped, patience)
+        _waits.now = (stopped, patience, look)
         try:
             yield
         finally:
@@ -139,6 +161,7 @@ class Courier:
         self.name, self.dead, self.ended = name, "", False
         self._jobs: Any = queue.Queue()
         self._now: Optional[_Job] = None   # the call under way
+        self.gave_up_at: Optional[float] = None   # when a look last stopped waiting for its own call (wall time)
         self._thread = threading.Thread(target=self._run, name="kelvin-%s-driver" % name, daemon=True)
         self._thread.start()
 
@@ -155,13 +178,20 @@ class Courier:
                 job.done.set()
                 continue
             self._now = job
+            _running.job = job
             try:
                 job.box["value"] = job.fn(*job.args, **job.kwargs)
             except BaseException as e:   # the caller's to raise, if it still waits
                 job.box["error"] = e
             finally:
+                _running.job = None
                 self._now = None
                 job.done.set()
+
+    def on_its_thread(self) -> bool:
+        """Whether the thread asking is this courier's own (a driver's call that calls into the driver again): such a
+        call is made there and then, never queued behind itself."""
+        return threading.current_thread() is self._thread
 
     def _overdue(self) -> Optional[str]:
         """The call under way, when it has run past its own limit: in words; None otherwise."""
@@ -183,11 +213,12 @@ class Courier:
         it put back."""
         return self._call(limit, what, fn, args, {}, True)
 
-    def look(self, limit: float, give_up: float, what: str, fn: Callable[..., Any], *args: Any) -> Any:
-        """As call, for a look (the monitor's): past give_up seconds of its own call, the look stops waiting (Busy) and
-        the call goes on, its own limit unchanged: a slow reading is never taken for a driver that won't return, and
-        the connection the work uses isn't ended for it; a later caller finds it hung once past its limit."""
-        return self._call(limit, what, fn, args, {}, False, give_up)
+    def look(self, limit: float, give_up: float, what: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """As call, for a look (the monitor's): past give_up seconds of its own call, the look stops waiting (GaveUp, a
+        Busy) and the call goes on, its own limit unchanged: a slow reading is never taken for a driver that won't
+        return, and the connection the work uses isn't ended for it; a later caller finds it hung once past its
+        limit."""
+        return self._call(limit, what, fn, args, kwargs, False, give_up)
 
     def post(self, what: str, fn: Callable[..., Any], *args: Any) -> Optional[threading.Event]:
         """fn(*args) in its turn, after the calls asked before it and before any asked after, not waited for: a
@@ -208,7 +239,7 @@ class Courier:
             raise LinkLost("%s: its connection was closed" % self.name)
         job = _Job(fn, args, kwargs, limit, what)
         self._jobs.put(job)
-        stopped, patience = getattr(_waits, "now", None) or (None, None)
+        stopped, patience = (getattr(_waits, "now", None) or (None, None))[:2]
         waited = time.monotonic()
         while not job.done.wait(STOP_SLICE_S):
             if not self._thread.is_alive() and not job.done.is_set():   # closed meanwhile: never made
@@ -241,9 +272,10 @@ class Courier:
                                % (self.name, under_way.what if under_way is not None else "one before this"))
             began = job.began
             if give_up is not None and began is not None and time.monotonic() - began > give_up:
-                from .instrument import Busy
-                raise Busy("%s is busy: its driver hasn't returned from %s in %d s; a look waits no longer (the call "
-                           "goes on)" % (self.name, what, round(give_up)))
+                from .instrument import GaveUp
+                self.gave_up_at = time.time()
+                raise GaveUp("%s is busy: its driver hasn't returned from %s in %d s; a look waits no longer (the "
+                             "call goes on)" % (self.name, what, round(give_up)))
         if "error" in job.box:
             raise job.box["error"]
         return job.box.get("value")
@@ -322,9 +354,51 @@ class Session:
             return value
 
         def call(*args: Any, **kwargs: Any) -> Any:
-            return self._courier.call(self._limit(), name, value, *args, **kwargs)
+            limit = self._limit()
+            give_up = self.look_give_up() if a_look() else None
+            if give_up is not None:   # a query's own wait between its write and its read (a card's query_delay)
+                try:
+                    give_up += max(0.0, float(kwargs.get("delay") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+            if give_up is not None and give_up < limit:   # a look: past its timeout, the driver won't say more
+                return self._courier.look(limit, give_up, name, value, *args, **kwargs)
+            return self._courier.call(limit, name, value, *args, **kwargs)
         self._methods[name] = call
         return call
+
+    def look_give_up(self) -> Optional[float]:
+        """How long a look waits for its own call: the session's timeout (as last set; NI-488.2's on a GPIB board) and
+        LOOK_GRACE_S, LOOK_FLOOR_S at least. Past it the driver would have answered, or said it timed out, had the bus
+        been well: a wedged GPIB adapter's call goes on to its limit (twice that and more) without the look. None: a
+        long transfer (bulk), or a timeout not known yet."""
+        seconds = self._seconds(self._timeout)
+        if seconds is None or self._bulk:
+            return None
+        return max(LOOK_FLOOR_S, seconds + LOOK_GRACE_S)
+
+    def under_way(self) -> Optional[Tuple[str, float, bool]]:
+        """The call in its driver now: (what, seconds so far, overdue: past look_give_up, or past half its limit where
+        that isn't known); None: none."""
+        job = self._courier._now
+        began = job.began if job is not None else None
+        if began is None:
+            return None
+        so_far = time.monotonic() - began
+        due = self.look_give_up()
+        return job.what, so_far, so_far > (due if due is not None else job.limit / 2.0)
+
+    def _seconds(self, t: Any) -> Optional[float]:
+        """A VISA timeout (ms) in seconds, as the driver keeps it (NI-488.2's on a GPIB board); None: none known."""
+        try:
+            seconds = float(t) / 1000.0
+        except (TypeError, ValueError):
+            return None
+        if seconds != seconds or seconds == float("inf"):
+            return None
+        if self._gpib:
+            seconds = next((v for v in _NI_TIMEOUTS if v >= seconds - 1e-9), seconds)
+        return seconds
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Set in its turn. Its timeout, set around calls (a short wait and back, a long acquisition and back), is
@@ -351,11 +425,26 @@ class Session:
                              daemon=True).start()
             return
         try:
-            courier.call(CLOSE_CALL_S, "closing it", raw.close)
+            with stoppable(lambda: False):   # a Stop pending on this thread never cancels the close (nor leaks it)
+                courier.call(CLOSE_CALL_S, "closing it", raw.close)
         except Exception:
             pass
         finally:
             courier.end()
+
+
+def under_way(backend: Any) -> Optional[Tuple[str, float, bool]]:
+    """The call in this connection's driver now (Session.under_way: what, seconds so far, overdue); None: none, or a
+    connection that isn't a VISA session's."""
+    res = getattr(backend, "res", None)
+    return res.under_way() if isinstance(res, Session) else None
+
+
+def gave_up_at(backend: Any) -> float:
+    """When a look last stopped waiting for this connection's call (Courier.look's give-up; wall time); 0: never."""
+    res = getattr(backend, "res", None)
+    courier = res._courier if isinstance(res, Session) else getattr(backend, "_courier", None)
+    return getattr(courier, "gave_up_at", None) or 0.0
 
 
 def long_calls(res: Any) -> Any:
@@ -629,16 +718,19 @@ def close_resource_manager() -> None:
     """PyVISA's resource manager closed, after every session it opened is (Kelvin quitting, Lab.close first): left to
     Python's exit, it complained of sessions gone before it (VI_ERROR_INV_OBJECT, at every quit of a field test)."""
     global _rm, _rm_own
-    with _rm_lock:
+    if not _rm_lock.acquire(timeout=CLOSE_CALL_S):   # still being started on a thread stuck in the driver: left
+        return
+    try:
         if not _rm_own:   # one set from outside (a test's pretend bus) is theirs
             return
         rm, _rm, _rm_own = _rm, None, False
+    finally:
+        _rm_lock.release()
     close = getattr(rm, "close", None)
-    if close is not None:
-        try:
-            close()
-        except Exception:
-            pass   # quitting: nothing more to do with it
+    if close is not None:   # on a thread of its own, CLOSE_CALL_S at most: quitting never waits on a wedged VISA
+        closing = threading.Thread(target=_close_quietly, args=(rm,), name="kelvin-visa-close", daemon=True)
+        closing.start()
+        closing.join(CLOSE_CALL_S)
 
 
 def set_resource_manager(rm: Any) -> None:
@@ -878,13 +970,18 @@ class VisaBackend:
                                % (self.name, self.resource, stuck._now.what))
         self._stuck_open = None
         courier = Courier(self.name)   # a session's own: one lost to a call that never returned is never used again
+        opened: Dict[str, Any] = {}
+
+        def open_it(*args: Any, **kwargs: Any) -> Any:
+            opened["raw"] = (rm or resource_manager()).open_resource(*args, **kwargs)
+            return opened["raw"]
         try:
             rm = rm or courier.call(OPEN_CALL_S, "starting VISA", resource_manager)
             if open_timeout and hasattr(rm, "visalib"):
                 raw = courier.call(OPEN_CALL_S + open_timeout / 1000.0, "opening %s" % self.resource,
-                                   rm.open_resource, self.resource, open_timeout=open_timeout)
+                                   open_it, self.resource, open_timeout=open_timeout)
             else:
-                raw = courier.call(OPEN_CALL_S, "opening %s" % self.resource, rm.open_resource, self.resource)
+                raw = courier.call(OPEN_CALL_S, "opening %s" % self.resource, open_it, self.resource)
             self.res = Session(raw, courier, gpib=self.resource.upper().startswith("GPIB"))
         except AdapterError:
             if courier.dead:   # the open itself never returned
@@ -892,6 +989,16 @@ class VisaBackend:
             courier.end()
             raise
         except Exception as e:
+            from .instrument import Stopped
+            if isinstance(e, Stopped):
+                # a person's Stop ended the wait for the open, which goes on in the driver: none is opened beside it
+                # while it does (_stuck_open), and what it opens, should it, is closed, unused, as soon as it has
+                if courier._now is not None:
+                    self._stuck_open = courier
+                courier.post("closing what an open a Stop let go of opened",
+                             lambda: opened.get("raw") is not None and _close_quietly(opened["raw"]))
+                courier.end()
+                raise
             courier.end()
             from .survey import _is_builtin, ni4882
             gpib = self.resource.upper().startswith("GPIB")
@@ -1055,11 +1162,11 @@ class VisaBackend:
         (session_dead: a power cycle, a replug, a dropped LAN connection) marks it broken: it gave
         VI_ERROR_CONN_LOST to every exchange after, and nothing but switching it off and on brought it back (review
         of 0.3.45, 4.1). It is made anew between exchanges, checked first (reopen)."""
-        from .instrument import Stopped
+        from .instrument import GaveUp, Stopped
         if isinstance(e, Hung):   # its driver didn't return: on GPIB, most likely the adapter or the bus (hung_buses)
             self.hung_at = time.time()
-        if isinstance(e, Stopped):   # a Stop ended the wait, not the call: its late reply is dropped before the next
-            self.owed = True
+        if isinstance(e, (Stopped, GaveUp)):   # a Stop, or a look, ended the wait, not the call: its late reply is
+            self.owed = True                   # dropped before the next command
             return
         if timed_out(e):
             self._timed_out()

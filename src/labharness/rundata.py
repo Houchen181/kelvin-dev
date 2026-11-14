@@ -192,6 +192,11 @@ def _numbers(v: Any) -> Optional[array]:
 
 # ------------------------------------------------------------------ the record (while measuring)
 
+def make_frame(kind: str, fields: Optional[Dict[str, Any]] = None, values: Optional[Dict[str, Any]] = None) -> bytes:
+    """One frame of a record, made (its values as they are now), to be written later (Recorder.write_frame)."""
+    return _frame(kind, fields, values)
+
+
 def _frame(kind: str, fields: Optional[Dict[str, Any]] = None, values: Optional[Dict[str, Any]] = None) -> bytes:
     """One frame of a record: its length and CRC-32, then a JSON line, then the trace values as little-endian
     64-bit floats (head["blobs"] names them and their counts)."""
@@ -232,7 +237,11 @@ class Recorder:
 
     def write(self, kind: str, fields: Optional[Dict[str, Any]] = None, values: Optional[Dict[str, Any]] = None,
               sync: bool = False) -> None:
-        self._f.write(_frame(kind, fields, values))
+        self.write_frame(make_frame(kind, fields, values), sync)
+
+    def write_frame(self, data: bytes, sync: bool = False) -> None:
+        """A frame made already (make_frame): written and flushed, synced as write does."""
+        self._f.write(data)
         self._f.flush()
         now = time.monotonic()
         if sync or now - self._synced >= SYNC_EVERY:

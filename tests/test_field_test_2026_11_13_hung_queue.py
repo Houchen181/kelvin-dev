@@ -817,9 +817,9 @@ def test_bring_to_safe_waits_for_a_stopped_runs_own_way_to_safe_rather_than_ramp
     monkeypatch.setattr(rtmod, "RESCUE_WAIT_S", 0.5)
     rt = runtime(tmp_path, LAB)
 
-    def on_its_way():
-        with rt.lock:
-            time.sleep(2.0)                   # its steps' exchanges are short: never stuck
+    def on_its_way():   # the stopped run's own way to safe: going to safe (gate.going_to_safe), its exchanges short
+        with rt.lock, rt.gate._to_safe_counted():
+            time.sleep(2.0)
     threading.Thread(target=on_its_way, daemon=True).start()
     assert wait_until(lambda: rt.lock.owner()[0] is not None, 5)
     t0 = time.monotonic()
