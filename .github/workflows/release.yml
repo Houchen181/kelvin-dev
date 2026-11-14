@@ -194,6 +194,11 @@ jobs:
     needs: windows
     if: needs.windows.outputs.signed-new == '1'
     runs-on: ubuntu-latest
+    # one upload at a time: the v and private-v tags of a version build together, and two replacing
+    # signed-modules.zip at once failed one of them (HTTP 404, v0.3.52); the second waits for the first
+    concurrency:
+      group: signing-store
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:

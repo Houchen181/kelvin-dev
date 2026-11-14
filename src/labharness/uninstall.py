@@ -1,15 +1,17 @@
 """What uninstalling Kelvin removes, and what it keeps (Kelvin.exe --remove-data; the Windows uninstaller runs it).
 
 Removed, Kelvin's own:  settings and API keys, the ChatGPT sign-in (revoked with OpenAI first), chats, projects and
-                        memory, the accounts, the lab owner's PIN and the lab's roles (with the copy of the owner's
-                        notification settings), the lab config and its history, the lab's memory and timings, your
-                        instrument cards, the instrument folders with their manuals, the manuals Kelvin kept, what it
-                        installed for instruments (its environments, uv and their Pythons), the app's log, lock file
-                        and window cache. With accounts, each person's too.
+                        memory, the team chat, the accounts, the lab owner's PIN and the lab's roles (with the copy of
+                        the owner's notification settings), the lab config and its history, the lab's memory and
+                        timings, your instrument cards, the instrument folders with their manuals, the manuals Kelvin
+                        kept, its copy of the instrument collection, what it installed for instruments (its
+                        environments, uv and their Pythons), downloaded updates, Claude Code's working folder, the
+                        app's log, lock file and window cache. With accounts, each person's too.
 Kept, your measurements: every run folder, the record of commands and approvals (events.jsonl) and reports, in
-                        ~/Kelvin/virtual-lab, in each lab's ~/Kelvin/labs/<lab>, in each person's
-                        ~/Kelvin/users/<name>/data and in any data folder chosen in Settings; the lab's instrument log
-                        (instrument-log.jsonl, and lab/events.jsonl).
+                        ~/Kelvin/lab (what was done while nobody was signed in), ~/Kelvin/virtual-lab, in each lab's
+                        ~/Kelvin/labs/<lab>, in each person's ~/Kelvin/users/<name>/data and in any data folder chosen
+                        in Settings, each with the rest of its record (the catalog of its runs, alarms, watches); the
+                        lab's instrument log (instrument-log.jsonl). The note left in ~/Kelvin says which.
 
 Only items Kelvin itself makes are deleted, by name; anything else in the folder is left alone."""
 from __future__ import annotations
@@ -26,8 +28,11 @@ HARNESS = ("settings.json", "chatgpt.json", "app.json", "kelvin.log", "lab.yaml"
            "owner.json", "owner.tmp", "roles.json", "roles.tmp", "config-history",   # the PIN, roles, config history
            "manuals", "env", "tools",   # manuals Kelvin kept; instrument environments, uv and their Pythons (envs.py)
            "lab-memory.json", "virtual-lab-memory.json", "lab-memory.tmp", "virtual-lab-memory.tmp",   # labmemory.py
-           "timing.json", "timing.json.tmp")   # how long this lab's readings and ramp steps take (timing.py)
-DATA_HARNESS = ("chats",)                       # in the default data folder: the conversations, projects and memory
+           "timing.json", "timing.json.tmp",   # how long this lab's readings and ramp steps take (timing.py)
+           "team-chat.jsonl",   # the team chat: what people here wrote to each other (teamchat.py)
+           "collection", "updates", "claude-code")   # the instrument collection's copy, downloaded installers
+                                                     # (updater.py), Claude Code's working folder (claudecode.py)
+DATA_HARNESS = ("chats",)   # in the default data folders (lab, virtual-lab): the conversations, projects and memory
 PERSON = ("settings.json", "settings.tmp", "chatgpt.json", "chatgpt.tmp", "chats")   # in each ~/Kelvin/users/<name>
 MEASUREMENTS = ("runs", "reports", "events.jsonl")
 NOTE = "About this folder.txt"
@@ -119,7 +124,9 @@ def remove_data(home: Any, revoke: bool = True) -> Dict[str, List[str]]:
             if note:
                 report["notes"].append(note + ("" if folder == home else " (%s)" % folder.name))
     data = home / "virtual-lab"
-    for path in [home / n for n in HARNESS] + [data / n for n in DATA_HARNESS] + [p / n for p in people for n in PERSON]:
+    lab = home / "lab"   # the data folder of what is done while nobody is signed in (with accounts, as Kelvin starts)
+    for path in [home / n for n in HARNESS] + [d / n for d in (lab, data) for n in DATA_HARNESS] + \
+            [p / n for p in people for n in PERSON]:
         if not path.exists():
             continue
         try:
@@ -128,11 +135,11 @@ def remove_data(home: Any, revoke: bool = True) -> Dict[str, List[str]]:
         except OSError as e:
             report["failed"].append("%s (%s)" % (path, e.strerror or e))
     labs = sorted(p for p in (home / "labs").iterdir() if p.is_dir()) if (home / "labs").is_dir() else []
-    report["kept"] = [str(d / n) for d in [data] + labs + [p / "data" for p in people] for n in MEASUREMENTS
+    report["kept"] = [str(d / n) for d in [lab, data] + labs + [p / "data" for p in people] for n in MEASUREMENTS
                       if (d / n).exists()]
-    report["kept"] += [str(p) for p in (home / "instrument-log.jsonl", home / "lab" / "events.jsonl") if p.exists()]
+    report["kept"] += [str(p) for p in (home / "instrument-log.jsonl",) if p.exists()]
     report["kept"] += [c for c in chosen if Path(c).exists()]
-    for folder in [data, home / "lab"] + people + [home / "users", home]:   # nothing left: no empty folders behind
+    for folder in [data, lab] + people + [home / "users", home]:   # nothing left: no empty folders behind
         try:
             if folder.is_dir() and not any(folder.iterdir()):
                 folder.rmdir()
@@ -145,6 +152,9 @@ def remove_data(home: Any, revoke: bool = True) -> Dict[str, List[str]]:
                  "                            the start and end, and the automatic analysis",
                  "  virtual-lab/events.jsonl  the lab record: every command, reading, approval and alarm",
                  "  virtual-lab/reports       PDF and PowerPoint reports"]
+        if any((lab / n).exists() for n in MEASUREMENTS):
+            lines += ["", "The runs, record and reports of what was done while nobody was signed in are in lab, the "
+                      "same way."]
         if labs:
             lines += ["", "Each lab's own runs, record and reports are in labs/<lab>, the same way."]
         if people:
@@ -153,8 +163,11 @@ def remove_data(home: Any, revoke: bool = True) -> Dict[str, List[str]]:
             lines += ["", "instrument-log.jsonl is the lab's log: every command from everyone, with their names."]
         for c in chosen:
             lines += ["", "Runs from after a data folder was chosen in Settings are in %s." % c]
-        lines += ["", "Kelvin's settings, API keys, accounts, chats, memory, lab config, instrument cards and "
-                  "instrument folders were deleted.", "Installing Kelvin again shows these runs again."]
+        lines += ["", "Each of these folders keeps the rest of its record too: the catalog of its runs, its alarms "
+                  "and watches.",
+                  "", "Kelvin's settings, API keys, accounts, chats and the team chat, memory, lab config, instrument "
+                  "cards and instrument folders were deleted, with its copy of the instrument collection and "
+                  "downloaded updates.", "Installing Kelvin again shows these runs again."]
         try:
             (home / NOTE).write_text("\n".join(lines) + "\n", encoding="utf-8")
         except OSError:
