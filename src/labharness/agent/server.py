@@ -658,6 +658,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.set_live(name, value, run)
 
     @server.tool(annotations=READ, structured_output=False)
+    @cancellable   # it may hold the lab a while: the chat's Stop or a cancel ends it
     def try_card(card: str, instrument: str = "") -> str:
         """Try a card on the instrument before using it: card is its YAML text, or the id of a card Kelvin has (one
         draft_card wrote); instrument is its name in the lab or its address (one the last scan did not find asks the
@@ -824,6 +825,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
             return "no record: could not write it (%s)" % e
 
     @server.tool(annotations=READ, structured_output=False)
+    @cancellable   # it may hold the lab a while: the chat's Stop or a cancel ends it
     def scan_instruments() -> str:
         """Find instruments connected to this computer (GPIB, also behind a Prologix GPIB-USB adapter; USB, LAN,
         serial) and match them to cards. It only asks each instrument who it is. add_instrument adds one the person
@@ -831,6 +833,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.scan()
 
     @server.tool(annotations=READ, structured_output=False)
+    @cancellable   # it may hold the lab a while: the chat's Stop or a cancel ends it
     def inspect_address(address: str) -> str:
         """What an address on the lab's network answers, for an instrument the scan didn't find or didn't
         identify: the ports instruments use, what each says (its *IDN? reply where it speaks SCPI, a web page's
@@ -841,6 +844,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return outside(rt, "what a network address answered", rt.inspect_address(address))
 
     @server.tool(annotations=READ, structured_output=False)
+    @cancellable   # it may hold the lab a while: the chat's Stop or a cancel ends it
     def find_on_network(network: str = "") -> str:
         """Find instruments on the local network whose address nobody knows: those that announce themselves (mDNS,
         as LXI instruments do, and a VXI-11 broadcast), and every address of this computer's networks with a port
@@ -854,6 +858,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return outside(rt, "what addresses on the network answered", rt.find_on_network(network))
 
     @server.tool(annotations=READ, structured_output=False)
+    @cancellable   # it may hold the lab a while: the chat's Stop or a cancel ends it
     def inspect_serial(port: str, query: str = "*IDN?", baud: int = 0) -> str:
         """What an instrument on a serial port is, when the scan didn't identify it: what it sends by itself (some
         stream their readings), then its answer to an identity query at each speed and framing instruments use

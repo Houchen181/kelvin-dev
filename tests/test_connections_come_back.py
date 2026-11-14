@@ -518,7 +518,7 @@ def test_a_socket_whose_instrument_closed_it_is_connected_again_not_read_for_eve
     rm = One(first, second)
     smu = VisaBackend("smu", builtin_registry().get("keithley/2400"), "TCPIP0::10.0.0.5::5025::SOCKET", rm=rm)
     smu.drain()
-    assert called == [] and rm.opened == 2 and first.closed and smu.res is second
+    assert called == [] and rm.opened == 2 and first.closed and smu.res._raw is second   # (its session, through its own thread)
 
 
 def test_query_waitings_write_is_handled_as_any_exchanges():

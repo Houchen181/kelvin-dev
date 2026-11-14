@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -212,11 +213,16 @@ class JsonRpcInstrument(DriverBackend):
         except OSError as e:
             self._drop()
             raise link_failed(self.name, "lost the connection to %s:%s" % (self.host, self.port), e) from e
+        end = time.monotonic() + self.timeout
         while True:
             answer = self._answer()
             if answer.get("id") == request["id"]:
                 return answer
-            # the answer to a request that timed out, or a notification: not this one's
+            # the answer to a request that timed out, or a notification: not this one's. A server that only ever sends
+            # notifications never answers this one: given up on in its time, as one that sends nothing
+            if time.monotonic() > end:
+                raise NoAnswer("%s: no answer to its request within %g s (only other messages came)"
+                               % (self.name, self.timeout))
 
     def _over_http(self, request: Dict[str, Any]) -> Dict[str, Any]:
         url = "http://%s:%s%s" % (self.host, self.port, self.path)

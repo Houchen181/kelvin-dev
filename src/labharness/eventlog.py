@@ -8,6 +8,7 @@ closing the file did: a set in a plan costs some 15 µs of record instead of hal
 two files."""
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import math
@@ -16,6 +17,7 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +60,10 @@ _TAILS: Dict[str, List[Any]] = {}  # other chained records (append_chained): [la
 _TAILS_LOCK = threading.Lock()
 RETRY_S = 30.0          # while the record can't be written, how often (seconds) Kelvin tries again
 KEEP_BACK = 50000       # lines kept back meanwhile, at most (the oldest go first)
+WRITE_WAIT_S = 0.5      # how long a write waits for its line to reach the file: past it, the line goes on by itself
+STALL_S = 10.0          # a file call under way this long: the record's trouble says so (the monitor's alarm)
+IDLE_S = 2.0            # the record's own thread ends after this long with nothing to do; a new line starts it again
+_LOGS: "weakref.WeakSet[Any]" = weakref.WeakSet()   # the records that write files (settle_all, as Kelvin quits)
 
 
 def line_hash(line: bytes) -> str:
@@ -202,7 +208,13 @@ class EventLog:
     disk), the lines are kept back and written first once it can be (tried again every RETRY_S), chained as they are
     written, so the chain holds across the gap; trouble says why meanwhile (the monitor's alarm). A record that raised
     made every change fail with it, a person's Stop answered with an error, and a stopped run's clean-up ended at its
-    first drive."""
+    first drive.
+
+    Nor does a write wait on the file: its line goes to the file on a thread of the record's own (_write_on), in
+    order, and the write waits WRITE_WAIT_S at most for it (a local disk writes it at once, so a line is in the file
+    as its write returns). A data folder on a network share that stalls (a NAS rebooting, a VPN dropping) blocks a file
+    call for tens of seconds: every gate command writes a line, and each one, a run's steps, a ramp to safe and the
+    monitor with them, waited out that call; once one write has stalled, the next ones don't wait for it at all."""
 
     def __init__(self, path: Any = None, clock: Any = None, shared: Any = None, user: Optional[str] = None,
                  whose: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
@@ -220,15 +232,41 @@ class EventLog:
         self._held_shared: Optional[BinaryIO] = None
         self._holds = 0
         self._lock = threading.Lock()  # agent, plans and people write from different threads; keep every line
-        self.trouble: Optional[str] = None   # why the file can't be written, while it can't
+        self._turn = threading.Condition(self._lock)   # the writer's work, and the writes waiting for their lines
+        self._trouble: Optional[str] = None  # why the file can't be written, while it can't
         self._back: List[str] = []           # the lines kept back meanwhile
         self._dropped = 0                    # and those that didn't fit (KEEP_BACK)
         self._retry_at = 0.0                 # when (monotonic) to try the file again
+        # the writer (_write_on): what it hasn't taken yet, what it writes now, the last line it has dealt with
+        # (written, or kept back), flush()'s asks and its answers, holding()'s asks (open or let go of the files kept
+        # open) and its answers, and a file call under way since when, and on which file
+        self._pending: List[Dict[str, Any]] = []
+        self._flight: List[Dict[str, Any]] = []
+        self._done = 0
+        self._flush_asked = self._flushed = 0
+        self._hold_want, self._hold_asked, self._hold_done = False, 0, 0
+        self._io_since: Optional[float] = None
+        self._io_what: Any = None
+        self._writer: Optional[threading.Thread] = None
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.path.exists():
                 self._seq, last, size = _tail(self.path)
                 self._tail = [last, size]
+        self._done = self._seq
+        if self.path or self.shared:
+            _LOGS.add(self)
+
+    @property
+    def trouble(self) -> Optional[str]:
+        """Why the record can't be written now, while it can't (the monitor's alarm): its file failed, or a file call
+        has been under way STALL_S or more (its drive or network share doesn't answer)."""
+        if self._trouble:
+            return self._trouble
+        since, what = self._io_since, self._io_what
+        if since is not None and time.monotonic() - since >= STALL_S:
+            return "%s doesn't answer: a write to it has taken %d s so far" % (what, time.monotonic() - since)
+        return None
 
     def ai_now(self) -> Optional[Dict[str, Any]]:
         """The AI the calling thread works for (actor), or None: a person, Kelvin itself, a queue."""
@@ -237,38 +275,24 @@ class EventLog:
         except Exception:   # the record never loses an event to its marks
             return None
 
+    # ------------------------------------------------------------------ the callers' side
+
     @contextmanager
     def holding(self) -> Iterator[None]:
         """Keep the record's files open while a run measures (each line is still handed to the operating system as
-        it is written, as closing the file did; a crash loses nothing more)."""
+        it is written, as closing the file did; a crash loses nothing more). Opened and let go of by the record's own
+        thread, waited for WRITE_WAIT_S at most."""
         with self._lock:
             self._holds += 1
-            if self._holds == 1 and self.path:
-                try:
-                    self._held = open(self.path, "ab", buffering=0)
-                except OSError:
-                    self._held = None
-        if self.shared:
-            with _SHARED:
-                if self._holds == 1 and self._held_shared is None:
-                    try:
-                        self.shared.parent.mkdir(parents=True, exist_ok=True)
-                        self._held_shared = open(self.shared, "ab", buffering=0)
-                    except OSError:
-                        self._held_shared = None
+            if self._holds == 1 and (self.path or self.shared):
+                self._ask_hold(True)
         try:
             yield
         finally:
             with self._lock:
                 self._holds -= 1
-                last = self._holds == 0
-                if last:
-                    _let_go(self._held)
-                    self._held = None
-            if last:
-                with _SHARED:
-                    _let_go(self._held_shared)
-                    self._held_shared = None
+                if self._holds == 0 and (self.path or self.shared):
+                    self._ask_hold(False)
 
     def write(self, type_: str, **fields: Any) -> Dict[str, Any]:
         try:
@@ -288,84 +312,248 @@ class EventLog:
                 event["whose"] = _jsonable(whose)
             if ai:
                 event["ai"] = _jsonable(ai)
-            if self.path:
-                self._append(event)
-            else:
+            if not self.path:
                 self._memory.append(event)
-        if self.shared:
-            try:
-                with _SHARED:
-                    self.shared.parent.mkdir(parents=True, exist_ok=True)
-                    key = str(self.shared)
-                    if key not in _SHARED_SEQ:
-                        _SHARED_SEQ[key], last, size = _tail(self.shared)
-                        _SHARED_TAIL[key] = [last, size]
-                    _SHARED_SEQ[key] += 1
-                    # its own numbering: each person's record numbers its events (own_seq), and those mixed in here
-                    # read 34, 1, 35 (a field test's log, as Kelvin set up on start with nobody signed in)
-                    try:
-                        _chained(self.shared, self._held_shared, _SHARED_TAIL[key],
-                                 dict(event, seq=_SHARED_SEQ[key], own_seq=event["seq"], user=self.user))
-                    except OSError:   # a file kept open that failed is let go of: the next line opens it anew
-                        _let_go(self._held_shared)
-                        self._held_shared = None
-                        raise
-            except OSError:   # the person's own record has it; the lab's log is a copy
-                pass
+            if self.path or self.shared:   # to the file(s) on the record's own thread; its line waited for a moment
+                self._pending.append(event)
+                self._wake()
+                seq = event["seq"]
+                self._await(lambda: self._done >= seq)
         return event
 
-    def _append(self, event: Optional[Dict[str, Any]]) -> None:
-        """An event onto the file, after those kept back (the caller holds the lock). While the file can't be written,
-        it is kept back with them, and chained only as it is written; the file is tried again once RETRY_S has passed,
-        never at every line (a network share that is away can take seconds to say so)."""
-        if event is not None and not self._back:   # the usual way: straight onto the file
+    def flush(self) -> None:
+        """The lines kept back, written now if the file can be (no more often than RETRY_S apart): asked of the
+        record's own thread, waited for WRITE_WAIT_S at most (the monitor asks at each of its looks)."""
+        if not self.path:
+            return
+        with self._lock:
+            if not (self._back or self._pending or self._flight):
+                return
+            self._flush_asked += 1
+            asked = self._flush_asked
+            self._wake()
+            self._await(lambda: self._flushed >= asked)
+
+    def settle(self, within: float = 5.0) -> bool:
+        """Wait, `within` seconds at most, for every line written so far to have been dealt with (written, or kept
+        back): before Kelvin quits, or a test reads the file itself. Whether it was."""
+        end = time.monotonic() + within
+        with self._lock:
+            seq = self._seq
+            while self._done < seq or self._pending or self._flight:
+                left = end - time.monotonic()
+                if left <= 0:
+                    return False
+                if self._pending:
+                    self._wake()
+                self._turn.wait(min(left, 0.05))
+        return True
+
+    def events(self) -> List[Dict[str, Any]]:
+        if not self.path:
+            return list(self._memory)
+        with self._lock:   # what isn't in the file (yet), taken first: a line written meanwhile is read from the file
+            unwritten = [json.loads(line) for line in self._back] + [dict(e) for e in self._flight] + \
+                [dict(e) for e in self._pending]
+        try:
+            if not self.path.exists():
+                on_file: List[Dict[str, Any]] = []
+            else:
+                with open(self.path, encoding="utf-8") as f:
+                    on_file = [_unchained(json.loads(line)) for line in f if line.strip()]
+        except OSError:   # the file can't be read now: what is kept back, at least
+            on_file = []
+        seen = {(e.get("seq"), e.get("wall"), e.get("type")) for e in on_file}
+        out = list(on_file)
+        for e in unwritten:
+            key = (e.get("seq"), e.get("wall"), e.get("type"))
+            if key not in seen:
+                seen.add(key)
+                out.append(e)
+        return out
+
+    def _ask_hold(self, want: bool) -> None:
+        """(holding the lock) The files kept open opened (want) or let go of, by the writer, waited for a moment."""
+        self._hold_want = want
+        self._hold_asked += 1
+        asked = self._hold_asked
+        self._wake()
+        self._await(lambda: self._hold_done >= asked)
+
+    def _wake(self) -> None:
+        """(holding the lock) The writer to its work: started when there is none."""
+        if self._writer is None or not self._writer.is_alive():
+            self._writer = threading.Thread(target=self._write_on, name="kelvin-record", daemon=True)
+            self._writer.start()
+        self._turn.notify_all()
+
+    def _await(self, done: Callable[[], bool]) -> None:
+        """(holding the lock) Wait for the writer to have done it, WRITE_WAIT_S at most: not at all while the file is
+        known to be away and not due to be tried again (the line is kept back, and goes once it can), nor while a file
+        call has been under way longer than that (its drive doesn't answer: the line goes on by itself)."""
+        if self._trouble and time.monotonic() < self._retry_at:
+            return
+        end = time.monotonic() + WRITE_WAIT_S
+        while not done():
+            now = time.monotonic()
+            since = self._io_since
+            if now >= end or (since is not None and now - since > WRITE_WAIT_S):
+                return
+            self._turn.wait(min(end - now, 0.05))
+
+    # ------------------------------------------------------------------ the writer's side: the record's own thread
+
+    def _write_on(self) -> None:
+        """The record's own thread: takes the lines in order and writes them (_append, _share), opens and lets go of
+        the files kept open (holding), tries the lines kept back again when asked (flush); it ends after IDLE_S with
+        nothing to do, and the next line starts it again. Never ends on an error: a line it couldn't deal with is
+        kept back, or (the lab's log, a copy) left out."""
+        me = threading.current_thread()
+        while True:
+            with self._lock:
+                idle = time.monotonic() + IDLE_S
+                while not (self._pending or self._flush_asked > self._flushed or self._hold_asked > self._hold_done):
+                    left = idle - time.monotonic()
+                    if left <= 0:
+                        if self._writer is me:
+                            self._writer = None
+                        return
+                    self._turn.wait(left)
+                batch, self._pending = self._pending, []
+                self._flight = batch
+                flush, hold = self._flush_asked, self._hold_asked
+                want = self._hold_want
+                change = hold > self._hold_done
             try:
-                _chained(self.path, self._held, self._tail, event)
+                if change and want:
+                    self._open_held()
+                if self.path and (batch or flush > self._flushed):
+                    self._append(batch)
+                if self.shared:
+                    for event in batch:
+                        self._share(event)
+                if change and not want:
+                    self._let_go_held()
+            except Exception:   # never: each step catches what the file says; this keeps the thread for the next
+                pass
+            finally:
+                with self._lock:
+                    self._flight = []
+                    if batch:
+                        self._done = max(self._done, batch[-1]["seq"])
+                    self._flushed = max(self._flushed, flush)
+                    self._hold_done = max(self._hold_done, hold)
+                    self._turn.notify_all()
+
+    def _io(self, what: Any, call: Callable[[], Any]) -> Any:
+        """A file call, noted while it is under way (trouble says one that takes STALL_S or more)."""
+        self._io_since, self._io_what = time.monotonic(), what
+        try:
+            return call()
+        finally:
+            self._io_since = None
+
+    def _open_held(self) -> None:
+        if self.path and self._held is None:
+            try:
+                self._held = self._io(self.path, lambda: open(self.path, "ab", buffering=0))
+            except OSError:
+                self._held = None
+        if self.shared:
+            with _SHARED:
+                if self._held_shared is None:
+                    try:
+                        def opening() -> BinaryIO:
+                            self.shared.parent.mkdir(parents=True, exist_ok=True)
+                            return open(self.shared, "ab", buffering=0)
+                        self._held_shared = self._io(self.shared, opening)
+                    except OSError:
+                        self._held_shared = None
+
+    def _let_go_held(self) -> None:
+        _let_go(self._held)
+        self._held = None
+        with _SHARED:
+            _let_go(self._held_shared)
+            self._held_shared = None
+
+    def _append(self, events: List[Dict[str, Any]]) -> None:
+        """Events onto the file, after those kept back. While the file can't be written, they are kept back with them,
+        and chained only as they are written; the file is tried again once RETRY_S has passed, never at every line (a
+        network share that is away can take seconds to say so)."""
+        if events and not self._back:   # the usual way: straight onto the file
+            try:
+                self._io(self.path, lambda: _chained(self.path, self._held, self._tail, *events))
                 return
             except OSError as e:
                 self._unwritten(e)
-        if event is not None:
-            self._back.append(json.dumps(event, ensure_ascii=False))
-            if len(self._back) > KEEP_BACK:
-                self._dropped += len(self._back) - KEEP_BACK
-                del self._back[:-KEEP_BACK]
-        if not self._back or time.monotonic() < self._retry_at:
+        with self._lock:
+            if events:
+                self._back.extend(json.dumps(e, ensure_ascii=False) for e in events)
+                if len(self._back) > KEEP_BACK:
+                    self._dropped += len(self._back) - KEEP_BACK
+                    del self._back[:-KEEP_BACK]
+            due = bool(self._back) and time.monotonic() >= self._retry_at
+            lines = [json.loads(line) for line in self._back] if due else []
+        if not due:
             return
         try:
-            _chained(self.path, self._held, self._tail, *[json.loads(line) for line in self._back])
+            self._io(self.path, lambda: _chained(self.path, self._held, self._tail, *lines))
         except OSError as e:
             self._unwritten(e)
             return
-        self._back.clear()
-        self.trouble, self._dropped = None, 0
+        with self._lock:   # only this thread adds to them: those written are the first len(lines)
+            del self._back[:len(lines)]
+            if not self._back:
+                self._trouble, self._dropped = None, 0
 
     def _unwritten(self, e: OSError) -> None:
         """The file couldn't be written: why, and when to try again. A file kept open is let go of (its drive may
         have gone and come back): it is opened for each line from then on."""
         self._retry_at = time.monotonic() + RETRY_S
-        self.trouble = "%s could not be written (%s)%s" % (
+        self._trouble = "%s could not be written (%s)%s" % (
             self.path, e.strerror or e, "; %d older events could not be kept" % self._dropped if self._dropped else "")
         _let_go(self._held)
         self._held = None
 
-    def flush(self) -> None:
-        """The lines kept back, written now if the file can be (no more often than RETRY_S apart)."""
-        if self.path:
-            with self._lock:
-                self._append(None)
-
-    def events(self) -> List[Dict[str, Any]]:
-        if not self.path:
-            return list(self._memory)
-        with self._lock:
-            back = [json.loads(line) for line in self._back]
+    def _share(self, event: Dict[str, Any]) -> None:
+        """The event's copy in the lab's instrument log: its own numbering (each person's record numbers its events,
+        own_seq, and those mixed in here read 34, 1, 35: a field test's log, as Kelvin set up on start with nobody
+        signed in). A line it can't take is left out: the person's own record has it."""
         try:
-            if not self.path.exists():
-                return back
-            with open(self.path, encoding="utf-8") as f:
-                return [_unchained(json.loads(line)) for line in f if line.strip()] + back
-        except OSError:   # the file can't be read now: what is kept back, at least
-            return back
+            with _SHARED:
+                key = str(self.shared)
+
+                def write() -> None:
+                    self.shared.parent.mkdir(parents=True, exist_ok=True)
+                    if key not in _SHARED_SEQ:
+                        _SHARED_SEQ[key], last, size = _tail(self.shared)
+                        _SHARED_TAIL[key] = [last, size]
+                    _SHARED_SEQ[key] += 1
+                    _chained(self.shared, self._held_shared, _SHARED_TAIL[key],
+                             dict(event, seq=_SHARED_SEQ[key], own_seq=event["seq"], user=self.user))
+                try:
+                    self._io(self.shared, write)
+                except OSError:   # a file kept open that failed is let go of: the next line opens it anew
+                    _let_go(self._held_shared)
+                    self._held_shared = None
+                    raise
+        except OSError:   # the person's own record has it; the lab's log is a copy
+            pass
+
+
+def settle_all(within: float = 5.0) -> None:
+    """Every record's lines dealt with, `within` seconds at most in all: as Kelvin quits (and as Python ends: its
+    records' own threads end with it, and a line still on its way would be lost)."""
+    end = time.monotonic() + within
+    for log in list(_LOGS):
+        try:
+            log.settle(max(0.0, end - time.monotonic()))
+        except Exception:
+            pass
+
+
+atexit.register(settle_all, 3.0)
 
 
 class RunRecord:

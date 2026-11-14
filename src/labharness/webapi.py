@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -72,6 +73,26 @@ def as_text(value: Any) -> str:
     return json.dumps(value)
 
 
+MAX_BODY = 16 * 1024 * 1024   # the most of a reply read (a stream that never ends never ends one either)
+
+
+def _body(r: Any, seconds: float, name: str) -> bytes:
+    """A reply's body, read a piece at a time: MAX_BODY at most, and for at most its timeout and a margin overall (the
+    timeout bounds each read, not a stream that keeps coming slowly)."""
+    end, parts, size = time.monotonic() + seconds + 5.0, [], 0
+    while True:
+        chunk = r.read(65536)
+        if not chunk:
+            return b"".join(parts)
+        parts.append(chunk)
+        size += len(chunk)
+        if size > MAX_BODY:
+            raise AdapterError("%s: its answer is longer than %d bytes (a stream that never ends?)" % (name, MAX_BODY))
+        if time.monotonic() > end:
+            from .adapters import NoAnswer
+            raise NoAnswer("%s: its answer kept coming for over %g s (a stream that never ends?)" % (name, seconds))
+
+
 class HttpInstrument:
     """write(command) / query(command) / close(), like a VISA backend. Each request makes its own connection, so
     nothing is left to remake; one the instrument refused or didn't answer is said as a lost instrument (LinkLost,
@@ -101,7 +122,8 @@ class HttpInstrument:
             self.context.check_hostname = False
             self.context.verify_mode = ssl.CERT_NONE
         self.open = module or urllib.request.urlopen   # tests pass a fake
-        self.lock = threading.Lock()
+        # re-entrant, so a wait for it (behind another request) is one a person's Stop ends (Instrument._turn)
+        self.lock = threading.RLock()
 
     def _request(self, method: str, path: str, body: Optional[bytes]) -> Any:
         path, _, field = path.partition("#")
@@ -116,7 +138,7 @@ class HttpInstrument:
                 if self.context is not None:
                     kw["context"] = self.context
                 with self.open(req, **kw) as r:
-                    raw = r.read()
+                    raw = _body(r, self.timeout, self.name)
         except urllib.error.HTTPError as e:
             detail = e.read()[:200].decode("utf-8", "replace") if hasattr(e, "read") else ""
             raise AdapterError("%s: %s %s answered HTTP %d %s" % (self.name, method, path, e.code, detail.strip()))

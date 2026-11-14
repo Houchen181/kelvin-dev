@@ -11,18 +11,19 @@ Connecting changes nothing on either: a spectrometer keeps its integration time 
 read back, so Kelvin shows it once it has set it); a spectrograph keeps its grating, wavelength, slits and shutter."""
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import os
 import sys
 import threading
 import time
 import urllib.parse
-from typing import Any, List, Optional, Tuple
+from typing import Any, Iterator, List, Optional, Tuple
 
 from . import envs
 from .adapters import AdapterError
 from .cards import Card
-from .drivers import DriverBackend
+from .drivers import DRIVER_CALL_S, DriverBackend
 
 FRESH_S = 0.2   # readings of a spectrum (peak...) taken within this long of it use it, not a new one
 
@@ -58,6 +59,17 @@ class OceanSpectrometer(DriverBackend):
                                % (name, serial or "", e, ", ".join(seen) or "none")) from e
         self.averages, self.dark, self.nonlinear = 1, False, False
         self._last: Optional[Tuple[float, List[float]]] = None
+        try:   # until it is set: as long as it may be (another program may have left it long)
+            self.integration_s = float(self.spec.integration_time_micros_limits[1]) / 1e6
+        except Exception:
+            self.integration_s = 0.0
+
+    @property   # type: ignore[override]
+    def call_s(self) -> float:
+        """A spectrum takes averages x integration: its call is waited for that long and a margin, ten minutes at least
+        (DRIVER_CALL_S), so one at the card's longest (600 s, 10000 averages) is never taken for a driver that won't
+        return."""
+        return max(DRIVER_CALL_S, self.averages * self.integration_s * 1.5 + 60.0)
 
     def _spectrum(self, fresh: bool = True) -> List[float]:
         if not fresh and self._last is not None and time.monotonic() - self._last[0] < FRESH_S:
@@ -96,7 +108,7 @@ class OceanSpectrometer(DriverBackend):
             if not low <= us <= high:
                 raise AdapterError("%s: integration time must be %g to %g s" % (self.name, low / 1e6, high / 1e6))
             self.spec.integration_time_micros(us)
-            self._last = None
+            self.integration_s, self._last = us / 1e6, None
         elif path == "averages":
             if not 1 <= int(value) <= 10000:
                 raise AdapterError("%s: averages is 1 to 10000" % self.name)
@@ -147,11 +159,36 @@ SHUTTER_OPEN = 1   # 0 closed, 1 open, 2 BNC
 _shamrock_users = [0]
 _shamrock_lib: List[Any] = []
 SHAMROCK_LOCK = threading.RLock()
+# how long a call waits for the library's one call at a time (a grating's move takes seconds): past it the library is
+# said to be stuck in a call that never returned, never waited for with no end (a CCD's run reading its calibration
+# waited for good behind a spectrograph call that hung)
+SHAMROCK_WAIT_S = 120.0
+
+
+@contextlib.contextmanager
+def _shamrock_turn() -> Iterator[None]:
+    """Andor's spectrograph library, one call at a time: waited for SHAMROCK_WAIT_S at most, and never past a person's
+    Stop (the waiting thread's own: adapters.stoppable)."""
+    from .adapters import _waits
+    now = getattr(_waits, "now", None)
+    stopped = now[0] if now else None
+    end = time.monotonic() + SHAMROCK_WAIT_S
+    while not SHAMROCK_LOCK.acquire(timeout=0.2):
+        if stopped is not None and stopped():
+            from .instrument import Stopped
+            raise Stopped("stopped by a person while it waited for Andor's spectrograph library")
+        if time.monotonic() > end:
+            raise AdapterError("Andor's spectrograph library is still in another call after %d s (stuck in its "
+                               "driver?): restart Kelvin if it stays so" % round(SHAMROCK_WAIT_S))
+    try:
+        yield
+    finally:
+        SHAMROCK_LOCK.release()
 
 
 def load_shamrock() -> Any:
     """Andor's spectrograph library, loaded once, its calls declared (load_shamrock_dll)."""
-    with SHAMROCK_LOCK:
+    with _shamrock_turn():
         if not _shamrock_lib:
             _shamrock_lib.append(load_shamrock_dll())
         return _shamrock_lib[0]
@@ -159,7 +196,7 @@ def load_shamrock() -> Any:
 
 def open_shamrock(lib: Any) -> None:
     """One more user of the library: the first initializes it (Andor's link; it sets nothing on a spectrograph)."""
-    with SHAMROCK_LOCK:
+    with _shamrock_turn():
         if not _shamrock_users[0]:
             code = lib.ShamrockInitialize(b"")
             if code != SHAMROCK_OK:
@@ -168,7 +205,7 @@ def open_shamrock(lib: Any) -> None:
 
 
 def close_shamrock(lib: Any) -> None:
-    with SHAMROCK_LOCK:
+    with _shamrock_turn():
         _shamrock_users[0] = max(0, _shamrock_users[0] - 1)
         if not _shamrock_users[0]:
             try:
@@ -179,7 +216,7 @@ def close_shamrock(lib: Any) -> None:
 
 def shamrock_count(lib: Any) -> int:
     n = ctypes.c_int()
-    with SHAMROCK_LOCK:
+    with _shamrock_turn():
         code = lib.ShamrockGetNumberDevices(ctypes.byref(n))
     if code != SHAMROCK_OK:
         raise AdapterError("Andor's spectrograph library could not count its spectrographs (code %s)" % code)
@@ -190,7 +227,7 @@ def calibration(lib: Any, idx: int, pixels: int, pixel_um: float) -> List[float]
     """Each pixel column's wavelength (nm) on a detector of `pixels` columns `pixel_um` wide, at the spectrograph's
     present grating and centre (Andor's ShamrockGetCalibration). Host-side arithmetic: the spectrograph doesn't move."""
     values = (ctypes.c_float * pixels)()
-    with SHAMROCK_LOCK:
+    with _shamrock_turn():
         for fn, args in (("ShamrockSetNumberPixels", (idx, int(pixels))),
                          ("ShamrockSetPixelWidth", (idx, ctypes.c_float(float(pixel_um)))),
                          ("ShamrockGetCalibration", (idx, values, int(pixels)))):
@@ -265,7 +302,7 @@ class AndorSpectrograph(DriverBackend):
             raise
 
     def _call(self, fn: str, *args: Any) -> None:
-        with SHAMROCK_LOCK:
+        with _shamrock_turn():
             code = getattr(self.lib, fn)(*args)
         if code != SHAMROCK_OK:
             raise AdapterError("%s: Andor %s failed (code %s)" % (self.name, fn.replace("Shamrock", ""), code))
@@ -324,7 +361,7 @@ def discover_shamrock(module: Any = None) -> List[Tuple[str, str]]:
         lib = module if module is not None else load_shamrock()
     except Exception:   # not installed here (or not Windows): nothing to list
         return []
-    with SHAMROCK_LOCK:
+    with _shamrock_turn():
         if _shamrock_users[0]:
             return []
         try:

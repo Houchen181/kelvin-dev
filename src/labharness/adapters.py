@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import threading
+import time
 import warnings
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -41,6 +42,19 @@ WAIT_SLICE_MS = 1000   # a long wait on an instrument is read a second at a time
 SYNC_MS = 2000         # after a timeout: how long its identity, asked to check it is back in step, may take
 REOPEN_MS = 5000       # how long making a session that died anew may wait for the instrument (pyvisa's open_timeout)
 AFTER_MS = 1000        # and its error queue, asked right after a query it didn't answer
+RESYNC_S = 10.0        # after a bus's clear: how long an instrument's check waits for its connection (resync)
+# every call into a VISA driver is made on its session's own thread (Courier) and waited for at most this long beyond
+# twice the session's timeout: a call that never returns (a wedged GPIB-USB adapter's) can't hold the instrument, the
+# run waiting on it, or the lab, past that. Its session is set aside and the instrument connected anew
+CALL_GRACE_S = 10.0
+CALL_FLOOR_S = 20.0    # the least any call is waited for (a 3 s timeout's call: 20 s)
+OPEN_CALL_S = 30.0     # opening a session (on top of its own open_timeout), and asking or setting one of its attributes
+CLOSE_CALL_S = 10.0    # closing one
+STOP_SLICE_S = 0.2     # how often a caller waiting on its call looks for a person's Stop
+POST_WAIT_S = 0.2      # how long setting a session's timeout waits for it to be in place (Session.__setattr__)
+# a transfer whose length its timeout doesn't bound (a scope's deep-memory waveform, a trace read to its end: the driver
+# reads it a chunk at a time, each within the timeout) is waited for this long: a 20 MB waveform over GPIB takes 20 s
+BULK_CALL_S = 600.0
 
 
 class AdapterError(RuntimeError):
@@ -64,6 +78,297 @@ class LinkLost(AdapterError, ConnectionError):
 class NoAnswer(AdapterError, TimeoutError):
     """An instrument reached through a maker's link didn't answer in time. lost_kind calls it silent. A driver raises
     it, and a reply that may still come late is never taken for the next command's (review of 0.3.45, 4.4 and 4.5)."""
+
+
+class Hung(LinkLost):
+    """A call into an instrument's driver that didn't return in its time (Courier): its session is set aside (broken),
+    the call is left where it is (Python can't end it; it holds nothing of Kelvin's), and the instrument is connected
+    anew to go on. lost_kind calls it gone."""
+
+
+_waits = threading.local()   # this thread's own stop and patience, while it waits on a call (stoppable)
+
+
+def looking() -> bool:
+    """Whether this thread's wait on a call is a look's (stoppable with patience: the monitor's)."""
+    now = getattr(_waits, "now", None)
+    return now is not None and now[1] is not None
+
+
+def stoppable(stopped: Callable[[], bool], patience: Optional[float] = None) -> Any:
+    """While this thread waits on a call into a driver (a with block): stopped() ends its wait, a person's Stop
+    coming back at once (instrument.Stopped), and patience (a look's: the monitor's, a run's record of the
+    instruments it doesn't use) is the most it waits behind the session's earlier calls (instrument.Busy). A call it
+    stops waiting for that hasn't started is taken back; one under way goes on on its session's thread, its late reply
+    dropped before the next command (owed). Instrument._io gives it the lab's Stops and this thread's own."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def waiting() -> Any:
+        before = getattr(_waits, "now", None)
+        _waits.now = (stopped, patience)
+        try:
+            yield
+        finally:
+            _waits.now = before
+    return waiting()
+
+
+class _Job:
+    __slots__ = ("fn", "args", "kwargs", "limit", "what", "box", "done", "taken_back", "began", "lock")
+
+    def __init__(self, fn: Callable[..., Any], args: Tuple[Any, ...], kwargs: Dict[str, Any], limit: float,
+                 what: str):
+        self.fn, self.args, self.kwargs, self.limit, self.what = fn, args, kwargs, limit, what
+        self.box: Dict[str, Any] = {}
+        self.done = threading.Event()
+        self.taken_back = False          # its caller stopped waiting before it began: it never runs
+        self.began: Optional[float] = None
+        self.lock = threading.Lock()     # taken back, or begun: one or the other, never both
+
+
+class Courier:
+    """One session's calls into its driver, made one after another on a thread of its own, each waited for by the
+    thread that asked. A call that runs past its own limit leaves this thread to it (dead): the session it served is
+    set aside, and every caller waiting on it, that one's and those behind it, gets Hung at once and lets go of what
+    it holds. Nothing else is ever held by a driver that doesn't return. A field test's queue, and a person's Stop,
+    Skip and Clear GPIB0, all waited behind one such call until Kelvin was restarted, with nobody in the lab."""
+
+    def __init__(self, name: str):
+        import queue
+        self.name, self.dead, self.ended = name, "", False
+        self._jobs: Any = queue.Queue()
+        self._now: Optional[_Job] = None   # the call under way
+        self._thread = threading.Thread(target=self._run, name="kelvin-%s-driver" % name, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                return
+            with job.lock:
+                skip = job.taken_back
+                if not skip:
+                    job.began = time.monotonic()
+            if skip:
+                job.done.set()
+                continue
+            self._now = job
+            try:
+                job.box["value"] = job.fn(*job.args, **job.kwargs)
+            except BaseException as e:   # the caller's to raise, if it still waits
+                job.box["error"] = e
+            finally:
+                self._now = None
+                job.done.set()
+
+    def _overdue(self) -> Optional[str]:
+        """The call under way, when it has run past its own limit: in words; None otherwise."""
+        now = self._now
+        if now is not None and now.began is not None and time.monotonic() - now.began > now.limit:
+            return "its driver didn't return from %s within %d s" % (now.what, round(now.limit))
+        return None
+
+    def call(self, limit: float, what: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """fn(*args, **kwargs) on this courier's thread: its result, its error, or Hung once the call under way (this
+        one, or an earlier one this one waits behind) runs past its own limit; this thread's own stop ends the wait at
+        once (instrument.Stopped), and a look's patience after that long (instrument.Busy) (stoppable)."""
+        return self._call(limit, what, fn, args, kwargs, False)
+
+    def kept(self, limit: float, what: str, fn: Callable[..., Any], *args: Any) -> Any:
+        """As call, but never taken back once asked: it is made in its turn even when its caller stops waiting for it
+        (a Stop, a look's patience). A session's timeout, put back after a short wait (VisaBackend.brief, a check
+        that it is back in step), so is never left short by a Stop that came meanwhile, and every call after finds
+        it put back."""
+        return self._call(limit, what, fn, args, {}, True)
+
+    def look(self, limit: float, give_up: float, what: str, fn: Callable[..., Any], *args: Any) -> Any:
+        """As call, for a look (the monitor's): past give_up seconds of its own call, the look stops waiting (Busy) and
+        the call goes on, its own limit unchanged: a slow reading is never taken for a driver that won't return, and
+        the connection the work uses isn't ended for it; a later caller finds it hung once past its limit."""
+        return self._call(limit, what, fn, args, {}, False, give_up)
+
+    def post(self, what: str, fn: Callable[..., Any], *args: Any) -> Optional[threading.Event]:
+        """fn(*args) in its turn, after the calls asked before it and before any asked after, not waited for: a
+        session's timeout, set around a call (Session.__setattr__). A thread a Stop let go of is never held again
+        putting a timeout back behind the call it left in the driver. Its done event, to wait on a moment if wanted;
+        nothing, once the courier is dead or ended."""
+        if self.dead or self.ended:
+            return None
+        job = _Job(fn, args, {}, OPEN_CALL_S, what)
+        self._jobs.put(job)
+        return job.done
+
+    def _call(self, limit: float, what: str, fn: Callable[..., Any], args: Tuple[Any, ...], kwargs: Dict[str, Any],
+              keep: bool, give_up: Optional[float] = None) -> Any:
+        if self.dead:
+            raise Hung("%s: %s" % (self.name, self.dead))
+        if self.ended:   # its session was closed: nothing runs its calls any more
+            raise LinkLost("%s: its connection was closed" % self.name)
+        job = _Job(fn, args, kwargs, limit, what)
+        self._jobs.put(job)
+        stopped, patience = getattr(_waits, "now", None) or (None, None)
+        waited = time.monotonic()
+        while not job.done.wait(STOP_SLICE_S):
+            if not self._thread.is_alive() and not job.done.is_set():   # closed meanwhile: never made
+                job.taken_back = True
+                raise LinkLost("%s: its connection was closed" % self.name)
+            late = self._overdue()
+            if late or self.dead:
+                if not self.dead:
+                    self.dead = late
+                    log.warning("%s: %s; its session is set aside", self.name, late)
+                job.taken_back = True
+                raise Hung("%s: %s" % (self.name, self.dead))
+            if stopped is not None and stopped():
+                with job.lock:
+                    if job.began is None and not keep:
+                        job.taken_back = True
+                from .instrument import Stopped
+                raise Stopped("%s: stopped by a person while it waited for %s" % (self.name, what))
+            # a look's patience is for waiting behind the session's earlier calls, never for its own call once that
+            # has begun: that one is waited for as any other (its own limit), so a silent instrument is found silent
+            if patience is not None and job.began is None and time.monotonic() - waited > patience:
+                with job.lock:
+                    begun = job.began is not None
+                    if not begun and not keep:
+                        job.taken_back = True
+                if not begun:   # never sent ("nothing was sent" holds); one that began meanwhile is waited for
+                    from .instrument import Busy
+                    under_way = self._now
+                    raise Busy("%s is busy: its driver is still on an earlier call (%s)"
+                               % (self.name, under_way.what if under_way is not None else "one before this"))
+            began = job.began
+            if give_up is not None and began is not None and time.monotonic() - began > give_up:
+                from .instrument import Busy
+                raise Busy("%s is busy: its driver hasn't returned from %s in %d s; a look waits no longer (the call "
+                           "goes on)" % (self.name, what, round(give_up)))
+        if "error" in job.box:
+            raise job.box["error"]
+        return job.box.get("value")
+
+    def end(self) -> None:
+        """No more calls: its thread ends once those under way have (a dead one is left to its call). A call asked of
+        it after is refused at once (LinkLost), never left waiting for a thread that is gone."""
+        if self.ended:
+            return
+        self.ended = True
+        self._jobs.put(None)   # a dead one's thread ends too, should its call ever return
+
+
+# the timeouts NI-488.2 keeps on a GPIB board (T10us ... T1000s), in seconds
+_NI_TIMEOUTS = (1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0)
+
+
+class Session:
+    """A VISA session whose every call into the driver, and every attribute it asks or sets, goes through its Courier,
+    waited for at most its limit: twice its timeout (as it is set now) and CALL_GRACE_S, CALL_FLOOR_S at least. To
+    the backend it is the session itself."""
+    __slots__ = ("_raw", "_courier", "_timeout", "_methods", "_bulk", "_gpib")
+
+    def __init__(self, raw: Any, courier: Courier, gpib: bool = False):
+        object.__setattr__(self, "_raw", raw)
+        object.__setattr__(self, "_courier", courier)
+        object.__setattr__(self, "_timeout", None)
+        object.__setattr__(self, "_methods", {})
+        object.__setattr__(self, "_bulk", 0)
+        object.__setattr__(self, "_gpib", gpib)   # a GPIB board's session: NI-488.2's own timeouts
+
+    def bulk(self) -> Any:
+        """Its calls meanwhile (a with block) may take BULK_CALL_S: a transfer its timeout doesn't bound, read a chunk
+        at a time (a deep-memory waveform, a trace to its end), is never taken for a driver that won't return."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def long() -> Any:
+            object.__setattr__(self, "_bulk", self._bulk + 1)
+            try:
+                yield
+            finally:
+                object.__setattr__(self, "_bulk", self._bulk - 1)
+        return long()
+
+    def _limit(self) -> float:
+        t = self._timeout
+        if t is None:
+            try:
+                t = self._courier.call(OPEN_CALL_S, "its timeout", getattr, self._raw, "timeout", None)
+            except Hung:
+                raise
+            except Exception:
+                t = None
+            object.__setattr__(self, "_timeout", t)
+        try:
+            seconds = float(t) / 1000.0
+        except (TypeError, ValueError):
+            seconds = 0.0
+        if seconds != seconds or seconds == float("inf"):   # none, or for ever: a day's sweep at most
+            seconds = 43200.0
+        if self._gpib:   # NI-488.2 keeps only these timeouts, rounding a VISA one up to the next (31 s waits 100 s)
+            seconds = next((v for v in _NI_TIMEOUTS if v >= seconds - 1e-9), seconds)
+        return max(CALL_FLOOR_S, 2 * seconds + CALL_GRACE_S, BULK_CALL_S if self._bulk else 0.0)
+
+    def __getattr__(self, name: str) -> Any:
+        method = self._methods.get(name)
+        if method is not None:
+            return method
+        if name == "timeout" and self._timeout is not None:
+            return self._timeout   # as last set: in place before any call after it (one after another), not waited for
+        value = self._courier.call(OPEN_CALL_S, "its %s" % name, getattr, self._raw, name)
+        if name == "timeout":
+            object.__setattr__(self, "_timeout", value)
+        if not callable(value):
+            return value
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            return self._courier.call(self._limit(), name, value, *args, **kwargs)
+        self._methods[name] = call
+        return call
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Set in its turn. Its timeout, set around calls (a short wait and back, a long acquisition and back), is
+        never waited for (Courier.post): it is in place for every call asked after it, which is waited for by it
+        (_limit), and a Stop that let a thread go never holds it again behind the call it left in the driver. Anything
+        else is waited for, and never taken back once asked (Courier.kept)."""
+        if name == "timeout":
+            object.__setattr__(self, "_timeout", value)
+            done = self._courier.post("setting its timeout", setattr, self._raw, name, value)
+            if done is not None:   # in place at once when its thread is free; never long behind a call left there
+                done.wait(POST_WAIT_S)
+            return
+        self._courier.kept(OPEN_CALL_S, "setting its %s" % name, setattr, self._raw, name, value)
+
+    def discard(self) -> None:
+        """Closed and let go of: through its courier while that lives; else on a thread of its own, not waited for
+        (closing may free the call that didn't return)."""
+        courier, raw = self._courier, self._raw
+        if courier.ended:   # closed already (a connection made anew that failed keeps the one it closed)
+            return
+        if courier.dead or courier._now is not None:   # a call still in the driver (one a Stop let go): never waited
+            courier.end()                               # behind; closing may end it
+            threading.Thread(target=_close_quietly, args=(raw,), name="kelvin-%s-close" % courier.name,
+                             daemon=True).start()
+            return
+        try:
+            courier.call(CLOSE_CALL_S, "closing it", raw.close)
+        except Exception:
+            pass
+        finally:
+            courier.end()
+
+
+def long_calls(res: Any) -> Any:
+    """res's calls meanwhile may take BULK_CALL_S (Session.bulk); nothing changes for any other session."""
+    import contextlib
+    return res.bulk() if isinstance(res, Session) else contextlib.nullcontext()
+
+
+def _close_quietly(raw: Any) -> None:
+    try:
+        raw.close()
+    except Exception:
+        pass
 
 
 def timed_out(e: BaseException) -> bool:
@@ -236,7 +541,10 @@ def short_code(e: BaseException) -> str:
 def resource_manager() -> Any:
     """The process-wide PyVISA resource manager (created on first use)."""
     global _rm, _rm_own
-    with _rm_lock:
+    if not _rm_lock.acquire(timeout=OPEN_CALL_S):   # another thread is still starting it (the NI services wedged?)
+        raise AdapterError("VISA is still starting on another thread after %d s: check NI-VISA's services (NI MAX), or "
+                           "restart the computer" % round(OPEN_CALL_S))
+    try:
         if _rm is None:
             _rm_own = True   # Kelvin's own, which it closes as it quits (close_resource_manager)
             try:
@@ -253,6 +561,8 @@ def resource_manager() -> Any:
             except Exception:
                 pass
         return _rm
+    finally:
+        _rm_lock.release()
 
 
 def _said(e: BaseException) -> str:
@@ -412,19 +722,41 @@ BUSES = Buses()
 def interface_clear(bus: str, rm: Any = None) -> None:
     """GPIB's interface clear on this bus: every instrument on it stops talking and listening; their settings and
     outputs stay as they are. What brought a field test's hung bus back at once."""
-    if bus.startswith("prologix://"):
+    if bus.startswith("prologix://"):   # on a thread of its own too: an adapter whose link hangs can't hold the person
         from .prologix import held
-        with held(bus[len("prologix://"):]) as adapter:
-            adapter.interface_clear()
-        return
-    res = (rm or resource_manager()).open_resource("%s::INTFC" % bus)
-    try:
-        res.send_ifc()
-    finally:
+
+        def clear() -> None:
+            with held(bus[len("prologix://"):]) as adapter:
+                adapter.interface_clear()
+        courier = Courier(bus)
         try:
-            res.close()
-        except Exception:
-            pass
+            courier.call(OPEN_CALL_S, "its interface clear", clear)
+        except Hung as e:
+            raise AdapterError("%s's interface clear didn't return within %d s: the adapter's link hangs. Unplug and "
+                               "replug the adapter; if that doesn't free it, restart Kelvin" % (bus, round(OPEN_CALL_S))) \
+                from e
+        finally:
+            if not courier.dead:
+                courier.end()
+        return
+    courier = Courier(bus)   # the clear's own: a driver wedged on the bus can't hold the person who asked for it
+    try:
+        rm = rm or courier.call(OPEN_CALL_S, "starting VISA", resource_manager)
+        res = courier.call(OPEN_CALL_S, "opening %s's interface" % bus, rm.open_resource, "%s::INTFC" % bus)
+        try:
+            courier.call(OPEN_CALL_S, "its interface clear", res.send_ifc)
+        finally:
+            try:
+                Session(res, courier).discard()
+            except Exception:
+                pass
+    except Hung as e:
+        raise AdapterError("%s's interface clear didn't return within %d s: its driver hangs. Reset the GPIB adapter "
+                           "(NI MAX: Reset), or unplug and replug a USB one; if that doesn't free it, restart Kelvin"
+                           % (bus, round(OPEN_CALL_S))) from e
+    finally:
+        if not courier.dead:
+            courier.end()
 
 
 def resource_name(address: str) -> str:
@@ -503,6 +835,8 @@ class VisaBackend:
         # instrument has answered as itself (reopen; the monitor's reconnector, or a person's reconnect)
         self.broken = ""
         self.sessions = 1   # sessions opened for it: one more each time it is made anew
+        self.hung_at: Optional[float] = None   # when a call into its driver last didn't return (wall time)
+        self._stuck_open: Optional[Courier] = None   # an open that didn't return: none is tried again beside it
         self._sync = (card.idn_query, card.idn_pattern) if card.idn_pattern else None
         self.bus = bus_of(address)
         self._open()
@@ -523,8 +857,12 @@ class VisaBackend:
             self.write(command)
 
     def _close_res(self) -> None:
+        res = getattr(self, "res", None)
         try:
-            self.res.close()
+            if isinstance(res, Session):   # through its courier, or, if that is lost to a call, beside it
+                res.discard()
+            elif res is not None:
+                res.close()
         except Exception:
             pass   # closing: nothing more to do with it
 
@@ -533,15 +871,28 @@ class VisaBackend:
         read and dropped). Nothing is sent to the instrument. open_timeout (ms): how long a real resource manager may
         wait for it (pyvisa-py's connection to a LAN instrument)."""
         rm = self._rm
+        stuck = getattr(self, "_stuck_open", None)   # (VISA itself started on the courier below: bounded too)
+        if stuck is not None and stuck._now is not None:   # never one more beside it: each would only hang as well
+            raise AdapterError("%s: Kelvin's last try to open %s is still stuck in the VISA driver (%s); clear the bus, "
+                               "or check the adapter (NI MAX's Reset of the board), or restart Kelvin"
+                               % (self.name, self.resource, stuck._now.what))
+        self._stuck_open = None
+        courier = Courier(self.name)   # a session's own: one lost to a call that never returned is never used again
         try:
-            rm = rm or resource_manager()
+            rm = rm or courier.call(OPEN_CALL_S, "starting VISA", resource_manager)
             if open_timeout and hasattr(rm, "visalib"):
-                self.res = rm.open_resource(self.resource, open_timeout=open_timeout)
+                raw = courier.call(OPEN_CALL_S + open_timeout / 1000.0, "opening %s" % self.resource,
+                                   rm.open_resource, self.resource, open_timeout=open_timeout)
             else:
-                self.res = rm.open_resource(self.resource)
+                raw = courier.call(OPEN_CALL_S, "opening %s" % self.resource, rm.open_resource, self.resource)
+            self.res = Session(raw, courier, gpib=self.resource.upper().startswith("GPIB"))
         except AdapterError:
+            if courier.dead:   # the open itself never returned
+                self._stuck_open = courier
+            courier.end()
             raise
         except Exception as e:
+            courier.end()
             from .survey import _is_builtin, ni4882
             gpib = self.resource.upper().startswith("GPIB")
             if gpib and rm is not None and _is_builtin(rm):   # Kelvin's built-in VISA has no GPIB
@@ -641,8 +992,8 @@ class VisaBackend:
             with self.lock:
                 res = self.res
                 before = res.timeout
-                res.timeout = min(int(before or ms), ms)
                 try:
+                    res.timeout = min(int(before or ms), ms)
                     yield
                 finally:
                     if self.res is res:
@@ -650,10 +1001,18 @@ class VisaBackend:
         return short()
 
     def resync(self) -> None:
-        """Back in step after its bus was cleared: a device clear, then asked who it is until it answers as itself."""
-        with self.lock:
+        """Back in step after its bus was cleared: a device clear, then asked who it is until it answers as itself.
+        Its connection is waited for RESYNC_S at most: an exchange still hung in the driver after the interface clear
+        keeps it, and the clear says so rather than wait with it (a field test's clear came while a run's exchange
+        hung on the bus)."""
+        if not self.lock.acquire(timeout=RESYNC_S):
+            raise AdapterError("%s is still held by an exchange that hasn't ended since the clear: reconnect it, or "
+                               "restart Kelvin if it never ends" % self.name)
+        try:
             self.owed = True
             self._settle()
+        finally:
+            self.lock.release()
 
     def write(self, command: str) -> None:
         self._bus_ok()
@@ -696,6 +1055,12 @@ class VisaBackend:
         (session_dead: a power cycle, a replug, a dropped LAN connection) marks it broken: it gave
         VI_ERROR_CONN_LOST to every exchange after, and nothing but switching it off and on brought it back (review
         of 0.3.45, 4.1). It is made anew between exchanges, checked first (reopen)."""
+        from .instrument import Stopped
+        if isinstance(e, Hung):   # its driver didn't return: on GPIB, most likely the adapter or the bus (hung_buses)
+            self.hung_at = time.time()
+        if isinstance(e, Stopped):   # a Stop ended the wait, not the call: its late reply is dropped before the next
+            self.owed = True
+            return
         if timed_out(e):
             self._timed_out()
             return
@@ -751,6 +1116,9 @@ class VisaBackend:
                 self._start()
             except BaseException:
                 self.broken = self.broken or why
+                res = getattr(self, "res", None)
+                if isinstance(res, Session) and res._courier.dead:   # its first call never came back: none beside it
+                    self._stuck_open = res._courier
                 self._close_res()
                 raise
             self.sessions += 1
@@ -873,14 +1241,18 @@ class VisaBackend:
         instruments send a line per point (HP's network analyzers). On a plain socket or a serial line, where only a
         line end marks it, the reply ends there as usual."""
         if not marks_message_end(self.resource) or self.write_only or self.enq or self.echo or self.ack:
-            return self.query(command)
-        with self.lock:
-            before = self.res.read_termination
-            self.res.read_termination = ""   # read to EOI (GPIB) or the message's end (USB, LAN)
-            try:
+            with self.lock, long_calls(self.res):
                 return self.query(command)
+        with self.lock:
+            res = self.res
+            before = res.read_termination
+            try:   # the setting inside: one a Stop ends the wait for is still made, and is put back here
+                res.read_termination = ""   # read to EOI (GPIB) or the message's end (USB, LAN)
+                with long_calls(res):
+                    return self.query(command)
             finally:
-                self.res.read_termination = before
+                if self.res is res:
+                    res.read_termination = before
 
     def query_waiting(self, command: str, seconds: float, stopped: Callable[[], bool]) -> str:
         """A query the instrument answers only once it has finished something long (*OPC? after a sweep): asked once,
@@ -905,6 +1277,10 @@ class VisaBackend:
                 while True:
                     try:
                         return str(res.read())
+                    except Stopped:   # a person's Stop ended the wait for this slice: the instrument is cleared now
+                        with stoppable(lambda: False):   # behind the slice's read (a second at most), never cut short
+                            self._abandon()
+                        raise
                     except Exception as e:
                         if not timed_out(e):
                             self._failed(e)
@@ -1002,8 +1378,9 @@ class VisaBackend:
         with self.lock:
             self._settle()
             try:
-                values = self.res.query_binary_values(command, datatype=BINARY[number],
-                                                      is_big_endian=order.strip() != "little", container=list)
+                with long_calls(self.res):
+                    values = self.res.query_binary_values(command, datatype=BINARY[number],
+                                                          is_big_endian=order.strip() != "little", container=list)
             except (ValueError, TypeError) as e:
                 raise AdapterError("%s: %r did not answer with a block of %s numbers (%s)" % (self.name, command,
                                                                                             number, e)) from e
@@ -1013,11 +1390,16 @@ class VisaBackend:
         return [float(v) for v in values]
 
     def close(self) -> None:
-        with self.lock:
-            try:
-                self.res.close()
-            except Exception:
-                pass
+        """Its session closed: under its lock when that comes within CLOSE_CALL_S; else beside the exchange that has it
+        (switching off or clearing a bus never waits on a call that doesn't return), which then fails, its session gone."""
+        held = self.lock.acquire(timeout=CLOSE_CALL_S)
+        try:
+            if not held:
+                self.broken = self.broken or "closed while an exchange still had it"
+            self._close_res()
+        finally:
+            if held:
+                self.lock.release()
 
 
 def open_backend(name: str, card: Card, address: str, rm: Optional[Any] = None,

@@ -39,7 +39,7 @@ import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import envs
-from .adapters import AdapterError, LinkLost, NoAnswer, timed_out
+from .adapters import AdapterError, Courier, Hung, LinkLost, NoAnswer, looking, timed_out
 from .cards import Card
 
 log = logging.getLogger("kelvin")
@@ -51,6 +51,10 @@ SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http"
 # the lib:// helper starting (30 s) and loading the maker's library (60 s), an Andor spectrograph's library starting,
 # QICK's name server and board each answering within its own time (rfsoc.CALL_S)
 OPEN_S = {"lightfield": 300.0, "picam": 120.0, "lib": 150.0, "shamrock": 120.0, "qick": 150.0}
+# the most one call into a maker's driver is waited for (DriverBackend.call_s): ten minutes, far past any of its
+# calls that work (a driver whose long calls are measurements, a counter's integration, bounds its own)
+DRIVER_CALL_S = 600.0
+LOOK_CALL_S = 60.0      # how long a look (the monitor's) waits for one, the call going on past it
 _COMMAND = re.compile(r"^\s*(SET|GET)\s+(\S+)(?:\s+(\S+))?\s*$", re.I)
 
 
@@ -118,11 +122,60 @@ class DriverBackend:
     # (lab.Lab.reconnect, and switching it off and on in the Lab panel)
     gone = ""
 
+    # the most one call into the maker's driver is waited for (its courier's, as a VISA session's: adapters.Courier),
+    # past which this connection ends (gone) and connecting the instrument again makes a fresh one; a person's Stop ends
+    # the wait at once. None: the driver bounds its own long calls (a camera's exposure, a counter's integration)
+    call_s: Optional[float] = DRIVER_CALL_S
+
     def __init__(self, name: str, card: Card, address: str):
         self.name = name
         self.card = card
         self.address = address
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()   # re-entrant, so a wait for it is one a person's Stop ends (Instrument._turn)
+        self._courier: Optional[Courier] = None
+
+    def _driver_call(self, what: str, fn: Callable[..., Any], *args: Any) -> Any:
+        """fn(*args), a call into the maker's driver, on this connection's own thread (adapters.Courier): waited for
+        at most call_s, or until a person's Stop (the call goes on, unwaited, and the next waits behind it). One that
+        doesn't return in time ends this connection (gone), as bounded does."""
+        if self.call_s is None:
+            return fn(*args)
+        courier = self._courier
+        if courier is not None and courier.dead:   # its driver is still in a call that didn't return (one shared by
+            self.gone = self.gone or courier.dead  # a controller's axes: another axis's): nothing goes in beside it
+            self.check_gone()
+        if courier is None or courier.ended:   # none yet, or its connection was closed and is used again
+            courier = self._courier = Courier(self._courier_name())
+        try:
+            if looking():   # the monitor's look waits a minute at most, the call keeping its own limit (Courier.look)
+                return courier.look(self.call_s, LOOK_CALL_S, what, fn, *args)
+            return courier.call(self.call_s, what, fn, *args)
+        except Hung:
+            self.gone = courier.dead
+            self.check_gone()
+            raise
+
+    def _courier_name(self) -> str:
+        return self.name
+
+    def _end_calls(self) -> None:
+        """Its calls' thread let go of once it is closed: each closed or reconnected connection left one behind."""
+        courier = self.__dict__.get("_courier")
+        if courier is not None:
+            courier.end()
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Every maker's close() also lets go of the connection's calls' thread (_end_calls), whatever else it does."""
+        super().__init_subclass__(**kwargs)
+        own = cls.__dict__.get("close")
+        if own is not None and not getattr(own, "_ends_calls", False):
+            def close(self: Any, *args: Any, **kw: Any) -> Any:
+                try:
+                    return own(self, *args, **kw)
+                finally:
+                    self._end_calls()
+            close.__doc__, close.__name__, close._ends_calls = own.__doc__, own.__name__, True   # type: ignore
+            cls.close = close   # type: ignore
 
     @property
     def quiet_close(self) -> bool:
@@ -172,20 +225,21 @@ class DriverBackend:
         self.check_gone()
         with self.lock:
             self.check_gone()   # again: it may have ended while this waited behind the call that didn't return
-            self.set(path.lower(), _number(value))   # cards write paths in capitals; vendors use lower case
+            # cards write paths in capitals; vendors use lower case
+            self._driver_call("setting %s" % path.lower(), self.set, path.lower(), _number(value))
 
     def query(self, command: str) -> str:
         self.check_gone()
         if command.strip().upper() in ("*IDN?", self.card.idn_query.strip().upper()):
             with self.lock:
                 self.check_gone()
-                return self.identity()
+                return self._driver_call("its identity", self.identity)
         verb, path, _ = parse_command(command)
         if verb != "GET":
             raise AdapterError("%s: %r sets, it does not read" % (self.name, command))
         with self.lock:
             self.check_gone()
-            return _fmt(self.get(path.lower()))
+            return _fmt(self._driver_call("reading %s" % path.lower(), self.get, path.lower()))
 
     def set(self, path: str, value: Any) -> None:
         raise NotImplementedError
@@ -197,7 +251,7 @@ class DriverBackend:
         raise NotImplementedError
 
     def close(self) -> None:
-        pass
+        self._end_calls()
 
 
 # ------------------------------------------------------------------ Zurich Instruments (LabOne)
@@ -517,6 +571,8 @@ class CounterDriver(DriverBackend):
     """A photon counter that reads the gate's alternating signal and reference windows. Paths: integration (s);
     signal, reference, contrast (one acquisition serves one reading of each); rate (counts/s, light on, no gating).
     Subclasses acquire(seconds) -> (signal, reference) and count_rate(seconds)."""
+    # an integration takes as long as asked: it is waited for that long and a margin (waitUntilFinished)
+    call_s = None
 
     def __init__(self, name: str, card: Card, address: str):
         super().__init__(name, card, address)

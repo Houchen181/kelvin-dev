@@ -915,7 +915,7 @@ class RunEngine:
         generation, the lab's stops) from when the caller began (a queue picking its item): a stop since then ends
         it. notes: lines its card adds, if it asks (a dry run of it that just failed). checked: what checked() said of
         this plan just before (the queue's, which reports the item running only once that passed): not asked again."""
-        # a stop while it is checked or approved ends it too
+        # a stop while it is checked or approved ends it too: its card, then, is never shown (gate.work_since)
         since = since or (self.gate.stop_generation, self.lab.stops.count)
         try:
             plan = plan if isinstance(plan, Plan) else load_plan(plan, names=self.lab.config.names)
@@ -975,7 +975,9 @@ class RunEngine:
                 self.gate.auto_approve(request, why)
             elif why:
                 request.items.append("Auto mode does not cover this run: " + "; ".join(why))
-            if not auto and not self.gate.ask(request):
+            with self.gate.work_since(since[0]):
+                asked = auto or self.gate.ask(request)
+            if not asked:
                 why = " (%s)" % request.note if request.note else ""
                 report = RunReport("declined", plan.name, "declined: plan %s not run%s" % (plan.name, why), dry_run=sim)
                 self.gate.log.write("run_declined", by=self.gate.operator, plan=plan.name)
@@ -1071,7 +1073,9 @@ class RunEngine:
         rec = self.store.create(plan.name, plan.source, gate.operator, folder, meta=dict(
             {"lab": lab.config.name, "simulated": all(i.simulated for i in lab.instruments.values())},
             **dict({"ai": ai} if ai else {}, **(meta or {}))))
-        start = lab.snapshot()
+        # the lab as it starts: its own instruments read, every other one only looked at (Lab.snapshot's needed),
+        # so an instrument it doesn't use that hangs never holds it up, and a Stop meanwhile ends it at once
+        start = lab.snapshot(needed=plan.requires)
         try:   # its record's first lines: a folder that can't be written (its drive went away, a full disk) starts none
             rec.snapshot("start", start)
             gate.log.write("run_start", by=gate.operator, run=rec.run_id, plan=plan.name, points=plan.points)
@@ -1546,7 +1550,8 @@ class RunEngine:
                 cleanup = self._on_abort(plan)
             duration = clock.now() - t0
             try:
-                rec.snapshot("end", lab.snapshot())
+                # a run that stopped or failed only looks, its own instruments too: what ended it may hold one
+                rec.snapshot("end", lab.snapshot(needed=plan.requires if status == "done" else ()))
             except Exception:
                 pass
             meta = dict(status=status, reason=reason, points=n, planned_points=plan.points,

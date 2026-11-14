@@ -115,7 +115,11 @@ def test_a_hung_bus_that_answers_again_by_itself_is_noticed(tmp_path, hanging, m
     for d in hanging.devices.values():   # cleared elsewhere (NI MAX), or the culprit power-cycled
         d.silent = False
     monkeypatch.setattr(monitor, "BUS_PROBE_S", 0.0)
-    rt.monitor.tick()
+    rt.monitor.tick()   # asked on a thread of its own: a hung bus's question may hang too
+    import time
+    end = time.monotonic() + 5
+    while "GPIB0" in BUSES.hung and time.monotonic() < end:
+        time.sleep(0.05)
     assert "GPIB0" not in BUSES.hung
 
 

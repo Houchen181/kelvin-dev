@@ -32,7 +32,7 @@ from ..cards import ParamSpec, num, plot_points, thin, trace_x
 from ..engine import RunEngine, RunReport
 from ..eventlog import EventLog, RunFolderError, RunFolders, RunStore, plan_text
 from ..gate import ApprovalRequest, Approver, SafetyGate, _dur, reading_away
-from ..instrument import ended_by
+from ..instrument import briefly, ended_by
 from ..lab import Lab
 from ..lablock import HELD, LabLock
 from ..labconfig import Allowed, ConfigError, Envelope, load_lab_config
@@ -74,6 +74,11 @@ CLOSING_WAIT_S = 0.5   # and for the look at what a change touched, as it ends (
 CONNECT_WAIT_S = 1.0   # how long connect_pending waits for the lab per instrument, before connecting it beside the work
 HANDS_WAIT_S = 10.0    # how long Hands on the sample waits for the stopped work, before finishing in the background
 AFTER_STOP_S = 900.0   # how long the card after a Stop waits, in the background, for the stopped work to end
+STUCK_S = 3.0          # an exchange (or a wait for an instrument's connection) this old: stop_run says what it waits for
+STOP_SETTLE_S = 0.35   # how long a Stop takes to end a wait on an instrument (adapters.STOP_SLICE_S and a margin)
+RESCUE_WAIT_S = 15.0   # how long Bring to safe waits for stopped work stuck on an instrument, then goes beside it
+RESCUE_MAX_S = 120.0   # and for stopped work still on its way to safe (a ramp), then goes beside it all the same
+SCAN_STALL_S = 120.0   # a scan's step (an address asked, a port opened) that hasn't moved on for this long is hung
 SWITCH_CLOSE_S = 15.0   # how long the old lab's connections may take to close as the lab changes (each on its own thread)
 STILL_CLOSING = "(an earlier closing, still under way)"   # close_instruments' answer while another call closes them
 MAX_CONFIG_CHARS = 30000   # of the lab config shown at once; an instrument's own entry is always shown whole
@@ -488,6 +493,10 @@ class ClientCall:
         self.chat: Optional[str] = None     # the portal's chat that made it, if one did (a Stop there cancels it)
 
 
+class _GaveUp(Exception):
+    """Work Kelvin stopped waiting for (LabRuntime._aside): it ends at its next step."""
+
+
 class LabBusy(RuntimeError):
     """A person's action (the Lab panel's switch, Scan, Save and connect, a card's Try) that needs the lab while other
     work has it for longer than the action waits (a run, the queue, an approval card, a ramp): nothing was done, and
@@ -815,6 +824,7 @@ class LabRuntime:
         self.incident: Optional[Dict[str, Any]] = None
         self._incident_due = True
         self._acted = False   # Kelvin drove something since it started: what is on now may be its own doing
+        self._safe_early: Optional[List[str]] = None   # outputs a restart put to safe before its card (_incident_check)
         # the script running now (scriptrun.ScriptRun), whose live inputs set_live changes without the lab's lock
         self._live_run: Any = None
         self.idle_off_s: Optional[float] = IDLE_OFF_S
@@ -1156,10 +1166,9 @@ class LabRuntime:
                     status[name] = {p: v for p, (v, _, _) in self._kept(name).items()}
                     continue
                 settings = not look_s or name in fresh or now - self._settings_at.get(name, 0.0) >= SETTINGS_S
-                brief = getattr(inst.backend, "brief", None) if inst.health.fails else None
                 with self._reading(name, wait) as why:
                     if why is None:
-                        with brief(RETRY_MS) if brief is not None else contextlib.nullcontext():
+                        with briefly(RETRY_MS if inst.health.fails else None):
                             values = self.lab.snapshot([name], settings=settings).get(name) or {}
                         self._keep(name, values, "read")
                         status[name] = dict(kept, **values)   # a setting not read now: as it was read last
@@ -1271,8 +1280,11 @@ class LabRuntime:
         for name, inst in list(self.lab.instruments.items()):
             if inst.enabled and inst.changed_at >= since:
                 names.add(name)
-        if names:
-            self._refresh(CLOSING_WAIT_S, only=names)
+        if names:   # only looked at: a call a Stop left in an instrument's driver is never waited behind here
+            from ..instrument import patience
+            from ..lab import LOOK_S
+            with patience(LOOK_S):
+                self._refresh(CLOSING_WAIT_S, only=names)
 
     def _keep(self, name: str, values: Dict[str, Any], how: str) -> None:
         """These values of an instrument, as its latest (a reading that failed is none: the one before stays)."""
@@ -1438,7 +1450,8 @@ class LabRuntime:
             self.busy, self.last_active = what, time.monotonic()
             started = time.time()
             try:
-                return fn()
+                with gate.work_since(stops):   # a card it would show after a person's Stop is declined instead
+                    return fn()
             finally:
                 self.busy, self._holder, self.last_active = None, held, time.monotonic()
                 self._caps_if_waiting()
@@ -1486,6 +1499,49 @@ class LabRuntime:
         finally:
             self.lock.release()
 
+    def _aside(self, what: str, work: Callable[[Callable[[str], None]], Any],
+               stall_s: Optional[float] = None, since: Optional[int] = None) -> Any:
+        """work(step) on a thread of its own, this thread (which has the lab) waiting for it to end, but never past a
+        person's Stop, nor once its steps (step(words): what it asks now) haven't moved on for stall_s (SCAN_STALL_S):
+        a scan's raw VISA calls, which a wedged GPIB adapter never returns from, then can't hold the lab, and every
+        Stop with it. AdapterError says so, with what it was doing; it ends at its next step, what it found dropped.
+        since: the stop count as the work was asked for (a Stop while it waited for the lab counts too)."""
+        from ..adapters import AdapterError
+        stall_s = SCAN_STALL_S if stall_s is None else stall_s
+        out: Dict[str, Any] = {}
+        done, gave_up = threading.Event(), threading.Event()
+        state = {"doing": "", "at": time.monotonic()}
+
+        def step(words: str) -> None:
+            if gave_up.is_set():
+                raise _GaveUp()
+            state["doing"], state["at"] = words, time.monotonic()
+
+        def run() -> None:
+            try:
+                out["value"] = work(step)
+            except _GaveUp:
+                pass
+            except BaseException as e:   # the caller's to raise, if it still waits
+                out["error"] = e
+            finally:
+                done.set()
+        threading.Thread(target=run, name="kelvin-" + what.split()[0], daemon=True).start()
+        gen = self.gate.stop_generation if since is None else since
+        while not done.wait(0.2):
+            doing = " (it was %s)" % state["doing"] if state["doing"] else ""
+            if self.gate.stop_generation != gen:
+                gave_up.set()
+                raise AdapterError("%s stopped by a person%s" % (what, doing))
+            if time.monotonic() - state["at"] > stall_s:
+                gave_up.set()
+                raise AdapterError("%s gave up: it hadn't moved on for %s%s, hung in the VISA driver (a GPIB adapter "
+                                   "that stopped answering?); clear the bus, or check the adapter" % (
+                                       what, _dur(stall_s), doing))
+        if "error" in out:
+            raise out["error"]
+        return out.get("value")
+
     def running_now(self) -> Optional[str]:
         """What a person's change to the lab's set-up waits for, said at once rather than waited out: a running plan
         or script, or the queue. None when neither runs."""
@@ -1493,6 +1549,14 @@ class LabRuntime:
         if live.get("status") == "running":
             return "the running %s %s" % ("script" if live.get("script") else "plan", live.get("plan"))
         if self.queue.state in ("running", "pausing"):
+            thread = self._queue_thread
+            if thread is not None and not thread.is_alive():   # its thread ended without saying so: paused
+                with self.queue.lock:
+                    if self.queue.state in ("running", "pausing"):
+                        self.queue.state = "paused"
+                        self.queue.reason = self.queue.reason or "the queue's thread ended"
+                        self.queue.save()
+                return None
             return "the queue"
         return None
 
@@ -2016,10 +2080,13 @@ class LabRuntime:
         decline_all = getattr(self.approver, "decline_all", None)
         declined = decline_all("stop button") if decline_all else 0
         with self.queue.lock:   # a stop also stops the queue: nothing else starts after the stopped scan
-            if self.queue.state in ("running", "pausing"):
+            stopping = self.queue.state in ("running", "pausing")
+            if stopping:   # in memory first: the Stop goes out before the queue's file is written (a share may stall)
                 self.queue.state, self.queue.reason = "pausing", "stopped by %s" % by
-                self.queue.save()
         self.gate.request_abort()
+        if stopping:
+            with self.queue.lock:
+                self.queue.save()
         try:
             self.gate.log.write("stop", by=by, account=self.user, declined=declined, note=note or None)
         except Exception:   # the stop went out all the same; a record that can't be written has its own alarm
@@ -2039,20 +2106,27 @@ class LabRuntime:
         declined = self.stop(by, note=" ".join(str(reason or "").split())[:200])
         idle = what is None and not queue and not declined
         lines = ["nothing to stop: no run, ramp, wait or queue was going"] if idle else []
-        if run:
+        # said as it is, at once: work stuck on an instrument (an exchange that hasn't come back, a wait for a connection
+        # another exchange has, for STUCK_S or more) hasn't stopped yet (a field test's stop_run said "stopped" of a run
+        # that went on waiting on a hung GPIB bus); any other ends within moments
+        still = None if idle else self.still_after_stop()
+        ended = still is None
+        if not ended:
+            lines.append("asked %s to stop; it hasn't ended yet: %s. It ends as soon as that does%s" % (
+                what or "the queue", "it waits for " + still if still else "it is finishing its safe-stop steps",
+                "; a GPIB bus that hangs: clear_bus (it goes ahead beside the work); one that never answers: a "
+                "restart of Kelvin" if still else ""))
+        elif run:
             lines.append("stopped %s: it ends now, and the drives it touched go to safe (or hold where the lab config "
                          "says hold)" % what)
         elif what:
             lines.append("stopped %s: it ends now (a ramp stops where it is)" % what)
-        if queue:
+        if queue and ended:
             lines.append("the queue stops after the scan it is on; queue_start starts it again")
         if declined:
             lines.append("%d open approval request%s declined" % (declined, "" if declined == 1 else "s"))
-        if self.lock.acquire(blocking=False):   # what is left on, when nothing is still stopping (a stop never waits)
-            try:
-                left = self.left_on()
-            finally:
-                self.lock.release()
+        if self.lock.owner()[0] is None:   # what is left on, when nothing is still stopping: only looked at (a stop
+            left = self.left_on(look=True)    # never waits, nor holds the lab for its report)
             if left:
                 lines.append("still on: %s (the person can press Bring to safe)" % ", ".join(left))
             elif not idle:
@@ -2060,6 +2134,29 @@ class LabRuntime:
         else:
             lines.append("once it has stopped, lab_status says what is still on")
         return "; ".join(lines)
+
+    def still_after_stop(self) -> Optional[str]:
+        """After a Stop or a Skip: what the stopped work still waits for (an exchange with an instrument that hasn't
+        come back for STUCK_S, or a wait for its connection), looked at again once the Stop has had a moment to land
+        (STOP_SETTLE_S, only then); None when it ended or is ending. What stop_run, Skip and the portal's Stop say, so
+        none of them says "stopped" of work that goes on waiting (a field test's did)."""
+        still = self._still(STUCK_S)
+        if still is not None:
+            time.sleep(STOP_SETTLE_S)
+            still = self._still(STUCK_S)
+        return still
+
+    def _still(self, older: float = 0.0) -> Optional[str]:
+        """What the work that has the lab (or the queue's thread) does with an instrument now, in words, when it has
+        for `older` seconds or more: an exchange that hasn't come back, or a wait for an instrument's connection, which
+        another exchange has; None: nothing of the kind."""
+        threads = [t for t in (self.lock.owner()[0], getattr(self._queue_thread, "ident", None)) if t]
+        for inst in list(self.lab.instruments.values()):
+            for t in threads:
+                said = inst.doing(t, older)
+                if said:
+                    return said
+        return None
 
     @contextlib.contextmanager
     def client_call(self, call: ClientCall) -> Iterator[None]:
@@ -2215,8 +2312,8 @@ class LabRuntime:
         if report.dry_run is not None and report.status in ("done", "aborted"):
             lines.append(report.dry_run.message)
         lines.append(report.message)
-        if report.status == "aborted":   # what it leaves on, as it stopped (a laser it didn't set once stayed on)
-            left = self.left_on()
+        if report.status == "aborted":   # what it leaves on, as it stopped (a laser it didn't set once stayed on); only
+            left = self.left_on(look=True)   # looked at: never behind a call the Stop left in a driver
             lines.append("still on: %s" % ", ".join(left) if left else "nothing is left on")
         if report.analysis:
             lines += self._analysis_lines(report.analysis)
@@ -2503,38 +2600,42 @@ class LabRuntime:
         in the run folder). Kelvin does this when it starts and when the data folder or the person changes, in the
         background. A run being recorded, by this Kelvin or another, is left alone."""
         with self._tidy_lock:
-            root = self.runs
-            done = {"interrupted": 0, "upgraded": 0, "failed": 0, "sealed": 0}
-            for d in root.iterdir():
-                try:
-                    if (d / rundata.RECORD).exists():
-                        if rundata.being_recorded(d) or (rundata.closed(d) and not rundata.have_h5()):
-                            continue
-                        crashed = not rundata.closed(d)
-                        rundata.finish(d)
-                        self._log_seal(d, late=False)
-                        done["interrupted"] += crashed
-                        if crashed:
-                            self.interrupted.append(d.name)
-                    elif rundata.have_h5() and (d / "data.jsonl").exists() and not (d / rundata.RUN_FILE).exists():
-                        if rundata.upgrade(d, self._legacy_columns(d)):
-                            done["upgraded"] += 1
-                            self._log_seal(d, late=True)
-                    elif (rundata.have_h5() and (d / rundata.RUN_FILE).exists() and not (d / rundata.SEAL).exists()
-                          and not self._running_id()):   # kept before seals: sealed now, saying it was late
-                        s = rundata.seal(d)
-                        if s and s["new"]:
-                            done["sealed"] += 1
-                            self.gate.log.write("run_sealed", by="kelvin", run=d.name, sha256=s["sha256"],
-                                                late=True)
-                except Exception as e:   # that run stays as it is; the next start tries again
-                    done["failed"] += 1
-                    self.gate.log.write("run_not_kept", by="kelvin", run=d.name, error=str(e)[:300])
-            running = self._running_id()
-            self.catalog.sync(root, skip=[running] if running else ())
-            if done["interrupted"] or done["upgraded"] or done["sealed"]:
-                self.gate.log.write("runs_kept", by="kelvin", **done)
-            return done
+            return self._tidy_now()
+
+    def _tidy_now(self) -> Dict[str, int]:
+        """tidy_runs' work, its lock held by the caller."""
+        root = self.runs
+        done = {"interrupted": 0, "upgraded": 0, "failed": 0, "sealed": 0}
+        for d in root.iterdir():
+            try:
+                if (d / rundata.RECORD).exists():
+                    if rundata.being_recorded(d) or (rundata.closed(d) and not rundata.have_h5()):
+                        continue
+                    crashed = not rundata.closed(d)
+                    rundata.finish(d)
+                    self._log_seal(d, late=False)
+                    done["interrupted"] += crashed
+                    if crashed:
+                        self.interrupted.append(d.name)
+                elif rundata.have_h5() and (d / "data.jsonl").exists() and not (d / rundata.RUN_FILE).exists():
+                    if rundata.upgrade(d, self._legacy_columns(d)):
+                        done["upgraded"] += 1
+                        self._log_seal(d, late=True)
+                elif (rundata.have_h5() and (d / rundata.RUN_FILE).exists() and not (d / rundata.SEAL).exists()
+                      and not self._running_id()):   # kept before seals: sealed now, saying it was late
+                    s = rundata.seal(d)
+                    if s and s["new"]:
+                        done["sealed"] += 1
+                        self.gate.log.write("run_sealed", by="kelvin", run=d.name, sha256=s["sha256"],
+                                            late=True)
+            except Exception as e:   # that run stays as it is; the next start tries again
+                done["failed"] += 1
+                self.gate.log.write("run_not_kept", by="kelvin", run=d.name, error=str(e)[:300])
+        running = self._running_id()
+        self.catalog.sync(root, skip=[running] if running else ())
+        if done["interrupted"] or done["upgraded"] or done["sealed"]:
+            self.gate.log.write("runs_kept", by="kelvin", **done)
+        return done
 
     def _log_seal(self, d: Path, late: bool) -> None:
         """A run kept here, as tidy_runs keeps it: its seal into the lab's record (run_sealed)."""
@@ -3772,40 +3873,48 @@ class LabRuntime:
                 self.lock.release()
 
         def later() -> None:
-            if not self.lock.acquire(timeout=AFTER_STOP_S):
-                self.gate.log.write("hands_on", by=by, steps=["the stopped work had not ended after %s: nothing was "
-                                                              "put to safe by the hands-on lock" % _dur(AFTER_STOP_S)])
-                return
-            try:
-                if self.hands is hands:   # still on (a person may have unlocked, or locked again, meanwhile)
-                    self._hands_to_safe(by)
-            finally:
-                self.lock.release()
+            # as Bring to safe waits (_rescue_lab): for stopped work still on its way to safe, RESCUE_MAX_S at most;
+            # for work stuck on an instrument, RESCUE_WAIT_S; then beside it. Hands on the sample once waited up to
+            # 15 minutes behind a run stuck on a hung adapter, sources and lasers on meanwhile
+            with self._rescue_lab() as beside:
+                if self.hands is not hands:   # a person unlocked, or locked again, meanwhile
+                    return
+                lines = self._hands_to_safe(by, beside=bool(beside))
+                if beside:   # never gone ahead beside without a word: what it reached, and what is still on, said
+                    left = self.left_on(look=True)
+                    self.notifier("alarm", "Hands on: the stopped work hadn't ended", "%s; what reaches the sample "
+                                  "went to safe: %s%s" % (beside, "; ".join(lines)[:600],
+                                                          "; still on: %s" % ", ".join(left) if left else ""))
         threading.Thread(target=later, daemon=True, name="kelvin-hands-on").start()
         return ["Kelvin stopped %s, which is still ending: everything that reaches the sample goes to safe as soon as "
                 "it has. Nothing moves away from safe meanwhile." % what]
 
-    def _hands_to_safe(self, by: str) -> List[str]:
-        """Hands on the sample, with the lab: what reaches the sample to safe, outputs off; the rest held or kept."""
+    def _hands_to_safe(self, by: str, beside: bool = False) -> List[str]:
+        """Hands on the sample, with the lab (beside: without it, the stopped work never having let go): what reaches
+        the sample to safe, outputs off; the rest held or kept."""
         started = time.time()
         lines: List[str] = []
         kept: List[str] = []
         held: List[str] = []
         with self.gate.acting_as(by):
+            sample: List[str] = []
             for name, inst in self.lab.instruments.items():
                 if not inst.enabled:
                     continue
                 if protection.applies_to_sample(inst.card):
-                    lines += [r.message for r in self.gate.to_safe(name)]
+                    sample.append(name)
                 else:
                     (held if protection.holds_position(inst.card) else kept).append(name)
+            # side by side: one held by a hung call never keeps another's output on (gate.to_safe_many)
+            lines += [r.message for r in self.gate.to_safe_many(sample)]
         lines = lines or ["everything that reaches the sample was already at safe"]
         if kept:
             lines.append("kept as they are (they don't touch the sample): %s" % ", ".join(kept))
         if held:
             lines.append("held where they are, nothing on them moves until you unlock: %s" % ", ".join(held))
-        self.gate.log.write("hands_on", by=by, steps=lines)
-        self._look_after(started)
+        self.gate.log.write("hands_on", by=by, steps=lines, beside=beside or None)
+        if not beside:
+            self._look_after(started)
         return lines
 
     def owner_check(self, pin: Any) -> None:
@@ -4412,7 +4521,13 @@ class LabRuntime:
                 except ValueError as e:
                     return "not changed: %s" % e
         self.gate.log.write("queue_skip", by=by, item=item.id, name=item.name, running=running or None)
-        return "skipping %s: it ends now, and the queue goes on" % item.name if running else "skipped %s" % item.name
+        if not running:
+            return "skipped %s" % item.name
+        still = self.still_after_stop()   # a skip ends a wait on an instrument within a moment: said as it is
+        if still:
+            return ("skipping %s: it hasn't ended yet, it waits for %s; it ends as soon as that does, and the queue "
+                    "goes on" % (item.name, still))
+        return "skipping %s: it ends now, and the queue goes on" % item.name
 
     def queue_duplicate(self, ref: Any, by: str = "agent") -> str:
         """A copy of an item right after it, waiting: the same text and note, filed as it is (whose work it is)."""
@@ -4804,7 +4919,10 @@ class LabRuntime:
         now is said with the start (_queue_preflight). An item reads running only once its own checks passed."""
         since = self.gate.stop_generation
         with self.queue.lock:
-            if self.queue.state in ("running", "pausing"):
+            if self.queue.state == "pausing":   # said as it is: stopping, not running (queue_pause says the same)
+                return "the queue is stopping: %s; start it again once it has paused\n%s" % (self._stopping_words(),
+                                                                                           self._queue_text())
+            if self.queue.state == "running":
                 return "the queue is already running\n" + self._queue_text()
             items = [dataclasses.replace(i) for i in self._queue_window(self.queue.waiting())]
         if not items:
@@ -4858,7 +4976,8 @@ class LabRuntime:
                 # a start with a pause point (Run and Run again make one) is for these items alone, by id
                 self._queue_only = [i.id for i in items] if items[-1].then_pause else None
                 self._queue_thread = threading.Thread(
-                    target=self._queue_loop, args=(got["grants"], by, {i.id: i.text for i in items}, self._queue_only),
+                    target=self._queue_guarded, args=(got["grants"], by, {i.id: i.text for i in items},
+                                                      self._queue_only),
                     daemon=True, name="kelvin-queue")
                 self._queue_thread.start()
             self.gate.log.write("queue_start", by=by, items=len(items),
@@ -4951,6 +5070,14 @@ class LabRuntime:
         return {"ok": True, "grants": grants, "actions": frozenset(starting) | frozenset(running), "title": title,
                 "duration": duration}
 
+    def _stopping_words(self) -> str:
+        """What a stopping queue still waits for, in words: its item's exchange with an instrument that hasn't come back
+        (or its wait for an instrument's connection), else that the item is ending."""
+        running = next((i for i in self.queue.items if i.status in ("running", "starting")), None)
+        still = self._still(STUCK_S)
+        name = running.name if running is not None else "its item"
+        return ("%s still waits for %s" % (name, still)) if still else ("%s is ending" % name)
+
     def queue_pause(self, by: str = "agent", want: Optional[str] = None) -> str:
         """Finish the item that is running, then stop there. Stop (the Stop button) also ends the running scan.
         want: the state a person's Pause showed as it was pressed (the portal's), so a screen a poll out of date never
@@ -4971,8 +5098,9 @@ class LabRuntime:
                 q.state, q.reason = "running", ""   # the loop, still on its item, goes on after it
                 q.save()
             elif q.state != "running":
-                if want is None:
-                    return "the queue is not running\n" + self._queue_text()
+                if want is None:   # pausing: it is stopping already (queue_start says so too: never "not running")
+                    return ("the queue is %s\n" % ("stopping already: %s" % self._stopping_words()
+                                                   if q.state == "pausing" else "not running")) + self._queue_text()
                 return "not changed: " + ("already " + q.state if q.state in ("pausing", "paused") else "not running")
             else:
                 q.state, q.reason = "pausing", "paused by %s" % by
@@ -5009,6 +5137,29 @@ class LabRuntime:
             "Kelvin" if q.reason.startswith("paused by ") else "Stop" if q.reason.startswith("stopped by ") else
             "Pause after" if q.reason.startswith("paused after ") else
             "a change" if q.reason.endswith("(added or changed after the queue was approved)") else "a failure")
+
+    def _queue_guarded(self, *args: Any) -> None:
+        """The queue's thread: its loop, and should anything Kelvin didn't foresee end it, the queue paused saying
+        so, the item it was on failed, and people told. A queue whose thread had died stayed "running" until Kelvin
+        restarted: no Start, no sign-in, no Scan, and the idle check never put a laser left on to safe."""
+        try:
+            self._queue_loop(*args)
+        except BaseException as e:
+            logging.getLogger("kelvin").exception("the queue's thread ended: %s", e)
+            why = "the queue stopped: Kelvin met an error it didn't foresee (%s)" % (
+                str(e).splitlines()[0][:200] if str(e) else type(e).__name__)
+            try:
+                with self.queue.lock:
+                    for i in self.queue.items:
+                        if i.status == "running":
+                            i.status, i.message = "failed", why
+                    self.queue.state, self.queue.reason = "paused", why
+                    self.queue.starting = None
+                    self.queue.save()
+                self.gate.log.write("queue_paused", by="kelvin", reason=why)
+                self.notifier("alarm", "The queue stopped", why)
+            except Exception:
+                pass
 
     def _queue_loop(self, grants: Dict[str, Allowed], by: str, approved: Optional[Dict[str, str]] = None,
                     only: Optional[List[str]] = None) -> None:
@@ -5120,13 +5271,31 @@ class LabRuntime:
         self.tell("run", "Queue finished" if q.state == "idle" else "Queue paused", "\n".join(lines)[:1500],
                   bool((q.last or {}).get("unshared")))
 
+    @contextlib.contextmanager
+    def _queue_lab(self, gen: int) -> Iterator[bool]:
+        """The lab for the queue's next step, waited for as long as the work that has it takes, but never past a Stop
+        or a Skip (the gate's stops since gen): then it yields False, holding nothing, and the item doesn't start. A
+        field test's queue waited here with no end, its item "starting", so it could be neither skipped nor removed."""
+        took = True
+        while not self.lock.acquire(timeout=STOP_SETTLE_S):
+            if self.gate.stop_generation != gen:
+                took = False
+                break
+        try:
+            yield took
+        finally:
+            if took:
+                self.lock.release()
+
     def _queue_ask_again(self, items: List[Item], by: str, grants: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Items added or changed after the queue's approval (copies, as they are now), checked as its start checks
         them, the lab held as then, inside what was approved already (grants): only what they drive beyond it asks a
         person, and an item that drives nothing new (a measurement) asks nobody. Their approval ({grants: theirs,
         ...}), or None, the queue pausing before them and saying why."""
         q = self.queue
-        with self.lock:
+        with self._queue_lab(self.gate.stop_generation) as took:
+            if not took:   # a Stop while it waited for the lab: the queue is pausing anyway
+                return None
             self.busy = "the queue: checking %s added after its approval" % self._queue_counts(items)
             try:
                 with self.lock.only(self._involved(self._uses("\n".join(i.text for i in items)))), \
@@ -5194,7 +5363,7 @@ class LabRuntime:
         q = self.queue
         since = since or (self.gate.stop_generation, self.lab.stops.count)
         stops = since[0]
-        with self.lock:
+        with self._queue_lab(stops):
             if self.gate.stop_generation != stops:   # stopped while it waited for the lab: it never starts
                 q.mark(item, "stopped", "a person pressed Stop before it started")
                 return False, "stopped before it started"
@@ -6824,14 +6993,19 @@ class LabRuntime:
                   if not ic.address.startswith("sim://")}
         if self.running_now():
             raise LabBusy("Kelvin is busy with %s; scan when it has finished, or stop it first." % self.held_by())
+        asked = self.gate.stop_generation
 
-        def asking(what: str) -> None:   # one port that takes long (a port another program holds) shows which
-            self.busy = "scanning for instruments: " + what
-            if progress is not None:
-                progress(what)
-        with self._person_work("scanning for instruments"):
-            found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network,
-                                        catalog=self.collection, progress=asking)
+        def asking(step: Callable[[str], None]) -> Callable[[str], None]:
+            def said(what: str) -> None:   # one port that takes long (a port another program holds) shows which
+                step(what)
+                self.busy = "scanning for instruments: " + what
+                if progress is not None:
+                    progress(what)
+            return said
+        with self._person_work("scanning for instruments"):   # on a thread of its own (_aside)
+            found, looked = self._aside("the scan", lambda step: scan_survey(
+                self.lab.registry, in_lab=in_lab, network=self.scan_network, catalog=self.collection,
+                progress=asking(step)), since=asked)
         self._moved(found)
         self._remember_scan(found, looked)
         taken = [n for n in self.lab.config.instruments if not self.lab.config.instruments[n].address.startswith("sim://")]
@@ -7337,45 +7511,65 @@ class LabRuntime:
         """Who answers at each address a survey found that the lab doesn't have yet, asked as a scan asks (*IDN?, and
         the likely card's own identity query): an identity reply decides the card. A serial port isn't asked (its
         framing takes long to find: Scan tries each card's), nor an NI-DAQmx device."""
+        if self._take_lab() is not None:   # never waits out a run: said, and nothing is asked
+            for item in items:
+                if not item.get("in_lab"):
+                    item["asked"] = "not asked: Kelvin is busy with %s" % self.held_by()
+            return
+        try:
+            self.busy = busy
+            try:
+                self._aside("asking the instruments found", lambda step: self._ask_each(
+                    items, instruments, registry, step), stall_s=30.0)
+            except Exception as e:   # a Stop, or an address whose VISA call never came back: the rest not asked
+                why = str(e).splitlines()[0][:200] if str(e) else type(e).__name__
+                for item in items:
+                    if not item.get("in_lab") and "asked" not in item and not item.get("idn"):
+                        item["asked"] = "not asked: %s" % why
+            finally:
+                self.busy = None
+        finally:
+            self.lock.release()
+
+    def _ask_each(self, items: List[Dict[str, Any]], instruments: List[Any], registry: Any,
+                  step: Callable[[str], None]) -> None:
+        """Each address a survey found asked who it is (_ask_found), step(words) before each: on a thread of its
+        own, so an address whose VISA call never comes back can't hold the lab (_aside)."""
         from .. import scripts as lab_scripts
         from ..adapters import is_serial, resource_name
         from ..discovery import identify
-        with self.lock:
-            self.busy = busy
+        for item, inst in zip(items, instruments):
+            if not inst.address or item["in_lab"]:
+                continue
+            if inst.address.startswith("serial://") or is_serial(resource_name(inst.address)):
+                item["asked"] = "not asked: a serial port (Scan tries each card's framing on it)"
+                continue
+            if inst.address.startswith("nidaq://"):
+                item["asked"] = "not asked: an NI-DAQmx device (connecting it asks NI-DAQmx)"
+                continue
+            queries = ["*IDN?"]   # and the likely card's own identity query
+            likely = registry.get(item["card"]["id"]) if item["card"] else None
+            if likely is not None and likely.idn_query not in queries:
+                queries.append(likely.idn_query)
+            step("asking %s who it is" % inst.address)
             try:
-                for item, inst in zip(items, instruments):
-                    if not inst.address or item["in_lab"]:
-                        continue
-                    if inst.address.startswith("serial://") or is_serial(resource_name(inst.address)):
-                        item["asked"] = "not asked: a serial port (Scan tries each card's framing on it)"
-                        continue
-                    if inst.address.startswith("nidaq://"):
-                        item["asked"] = "not asked: an NI-DAQmx device (connecting it asks NI-DAQmx)"
-                        continue
-                    queries = ["*IDN?"]   # and the likely card's own identity query
-                    likely = registry.get(item["card"]["id"]) if item["card"] else None
-                    if likely is not None and likely.idn_query not in queries:
-                        queries.append(likely.idn_query)
-                    try:
-                        answer = identify(inst.address, registry, timeout_ms=800, queries=queries)
-                    except Exception as e:   # no VISA on this computer
-                        why = str(e).splitlines()[0][:160] if str(e) else type(e).__name__
-                        item["asked"] = "not asked: %s" % why
-                        continue
-                    item["idn"] = answer.idn
-                    if not answer.idn:
-                        item["asked"] = "no answer at its address now"
-                    if answer.card_id and (not item["card"] or item["card"]["id"] != answer.card_id):
-                        card = registry.get(answer.card_id)
-                        item["card"] = {"id": card.id, "model": card.model, "kind": card.kind, "sure": True,
-                                        "why": "it answered %s" % answer.idn[:60],
-                                        "mapped": lab_scripts.mapping(card, inst.commands),
-                                        "limits": lab_scripts.limits(card, inst.commands)}
-                    elif answer.card_id:
-                        item["card"]["why"] += "; it answered %s" % answer.idn[:60]
-                        item["card"]["sure"] = True
-            finally:
-                self.busy = None
+                answer = identify(inst.address, registry, timeout_ms=800, queries=queries)
+            except Exception as e:   # no VISA on this computer
+                why = str(e).splitlines()[0][:160] if str(e) else type(e).__name__
+                item["asked"] = "not asked: %s" % why
+                continue
+            item["idn"] = answer.idn
+            if not answer.idn:
+                item["asked"] = "no answer at its address now"
+            if answer.card_id and (not item["card"] or item["card"]["id"] != answer.card_id):
+                card = registry.get(answer.card_id)
+                item["card"] = {"id": card.id, "model": card.model, "kind": card.kind, "sure": True,
+                                "why": "it answered %s" % answer.idn[:60],
+                                "mapped": lab_scripts.mapping(card, inst.commands),
+                                "limits": lab_scripts.limits(card, inst.commands)}
+            elif answer.card_id:
+                item["card"]["why"] += "; it answered %s" % answer.idn[:60]
+                item["card"]["sure"] = True
 
     def _name_found(self, items: List[Dict[str, Any]]) -> None:
         """A name for each instrument a survey found that the lab hasn't got: the survey's (as the lab names it in its
@@ -9196,10 +9390,13 @@ class LabRuntime:
         from ..adapters import AdapterError, resource_name
         from ..discovery import scan_prologix
 
+        asked = self.gate.stop_generation
+
         def run() -> str:
             in_lab = {resource_name(ic.address): name for name, ic in self.lab.config.instruments.items()}
-            try:
-                found, words = scan_prologix(adapter, self.lab.registry, in_lab, catalog=self.collection)
+            try:   # on a thread of its own (_aside): an adapter whose link hangs never holds the lab, nor a Stop
+                found, words = self._aside("the look behind %s" % adapter, lambda step: scan_prologix(
+                    adapter, self.lab.registry, in_lab, catalog=self.collection), stall_s=90.0, since=asked)
             except (AdapterError, OSError) as e:
                 return str(e).splitlines()[0] if str(e) else "the Prologix %s could not be asked" % adapter
             lines = ["%s: %s" % (words, "each GPIB address from 1 to 30 asked who it is" if found else
@@ -9237,8 +9434,15 @@ class LabRuntime:
         query = (query or "*IDN?").strip()
         if "?" not in query or len(query) > 40:
             return "only an identity query (with a ?, as the manual gives it) is sent to an instrument Kelvin doesn't know"
-        with self.lock:   # one thing at a time on the ports
-            res = probe.inspect_serial(name, query, [baud] if baud else None)
+        if self._take_lab() is not None:   # one thing at a time on the ports, never waiting out a run
+            return self._busy_answer()
+        try:   # on a thread of its own: a USB-serial adapter's driver that never returns can't hold the lab (_aside)
+            res = self._aside("the look at %s" % name, lambda step: probe.inspect_serial(
+                name, query, [baud] if baud else None), stall_s=90.0)
+        except Exception as e:
+            return "%s: %s" % (name, str(e).splitlines()[0][:300] if str(e) else type(e).__name__)
+        finally:
+            self.lock.release()
         if res.get("error"):
             return "could not open %s: %s (another program may have it open)" % (name, res["error"])
         lines = []
@@ -10893,16 +11097,21 @@ class LabRuntime:
         """The monitor raised or cleared an alarm: kept with the alarm history, then told to people. One that says
         the note of a watch unshared work added is marked so: phones through the Kelvin hub get its reading, not its
         note."""
-        self._save_alarms()
         notes = [w.note for i, w in list(self.monitor.watches.items()) if i in self.unshared_watches and w.note] \
             if getattr(self, "monitor", None) is not None else []
-        return self.tell(kind, title, text, any(n in text for n in notes))
+        try:   # people first: the alarms' file after, never in their way (a data folder on a share may stall)
+            return self.tell(kind, title, text, any(n in text for n in notes))
+        finally:
+            self._save_alarms()
 
     def _save_alarms(self) -> None:
+        """The alarms kept, as the monitor keeps them: every one nobody has said Got it to, and the newest of the
+        others. Written by a thread of its own, the latest only (scanqueue._write_later): never waited for here."""
+        from ..scanqueue import _write_later
         try:
-            # as the monitor keeps them: every one nobody has said Got it to, and the newest of the others
-            _write_json(self.data_dir / self.ALARMS, {"alarms": [a.view() for a in list(self.monitor.alarms)]})
-        except OSError:
+            _write_later(self.data_dir / self.ALARMS, json.dumps(
+                {"alarms": [a.view() for a in list(self.monitor.alarms)]}, indent=1, ensure_ascii=False))
+        except (OSError, ValueError, TypeError):
             pass
 
     def _restore_alarms(self) -> List[Dict[str, Any]]:
@@ -10911,6 +11120,8 @@ class LabRuntime:
         again if it still holds). Returns those."""
         from ..monitor import Alarm
         try:
+            from ..scanqueue import _written
+            _written(self.data_dir / self.ALARMS, 2.0)
             data = json.loads((self.data_dir / self.ALARMS).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return []
@@ -10937,6 +11148,8 @@ class LabRuntime:
         return [a.view() for n, a in enumerate(alarms) if n < 20 or not a.acknowledged]
 
     def _saved_watches(self) -> Dict[str, Any]:
+        from ..scanqueue import _written
+        _written(self.data_dir / self.WATCHES, 2.0)   # a save of them still being written lands first
         try:
             data = json.loads((self.data_dir / self.WATCHES).read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -10951,9 +11164,11 @@ class LabRuntime:
                                            **({"whose": self.unshared_watches[w.id]}
                                               if w.id in self.unshared_watches else {}))
                                       for w in list(self.monitor.watches.values()) if w.source != "lab"]
+        from ..scanqueue import _write_later   # by a thread of its own, the latest only, waited for a moment at most
         try:
-            _write_json(self.data_dir / self.WATCHES, {"labs": labs})
-        except OSError:
+            _write_later(self.data_dir / self.WATCHES, json.dumps({"labs": labs}, indent=1, ensure_ascii=False)) \
+                .wait(0.5)
+        except (OSError, ValueError, TypeError):
             pass
 
     def _restore_watches(self) -> Dict[str, List[str]]:
@@ -11064,9 +11279,12 @@ class LabRuntime:
                                                           bus_words(bus), inst.health.first_failed or "a command"))
                         said.append("%s left out (it stopped answering first)" % n)
                         continue
-                    resync = getattr(inst.backend, "resync", None)
+                    backend = inst.backend
+                    resync = getattr(backend, "resync", None)
                     try:
-                        if resync is not None:
+                        if getattr(backend, "broken", "") and getattr(backend, "reopen", None) is not None:
+                            inst.reopen(person=True)   # its session was set aside (a call that never came back)
+                        elif resync is not None:
                             resync()
                         inst.health.answered()
                         answered += 1
@@ -11078,9 +11296,20 @@ class LabRuntime:
                 return ("%s still doesn't answer after an interface clear (%s): check the instruments on it, the GPIB "
                         "cables and the adapter (NI MAX's Reset of the board too)" % (bus_words(bus), "; ".join(said)))
             self.monitor.bus_cleared(bus, "%s cleared (%s)" % (bus_words(bus), by))
-            self.gate.log.write("bus_cleared", by=by, bus=bus, results=said, answered=answered)
+            self.gate.log.write("bus_cleared", by=by, bus=bus, results=said, answered=answered,
+                                beside=beside or None)
             self.lab_changed("bus")
-            return "cleared %s: %s" % (bus_words(bus), "; ".join(said) or "nothing on it is switched on")
+            return "cleared %s%s: %s" % (bus_words(bus), " beside %s" % beside if beside else "",
+                                         "; ".join(said) or "nothing on it is switched on")
+        # a bus that isn't answering is cleared beside whatever has the lab: the work that has it may be the very one
+        # waiting on the bus (a field test's queue waited behind a hung GPIB bus, and its person's Clear GPIB0 was
+        # refused, "busy with the queue", until Kelvin was restarted). The clear changes no setting or output
+        beside = ""
+        stuck = any(time.time() - since > STUCK_S for n in names for _, since in list(on[n].asking.values()))
+        if (bus in BUSES.hung or stuck or any(on[n].health.fails for n in names)) and \
+                self.lock.owner()[0] is not None and self.lock.owner()[0] != threading.get_ident():
+            beside = self.held_by()
+            return run()
         return self._do("clearing %s" % bus_words(bus), run, uses=list(on))
 
     def close_instruments(self, within: float) -> List[str]:
@@ -11146,29 +11375,42 @@ class LabRuntime:
     def _outputs_to_safe(self, names: Iterable[str], by: str) -> List[str]:
         lines: List[str] = []
         started = time.time()
-        with self.gate.acting_as(by):
-            for name in names:
-                lines += [r.message for r in self.gate.to_safe(name)]
+        with self.gate.acting_as(by):   # side by side (gate.to_safe_many)
+            lines += [r.message for r in self.gate.to_safe_many(list(names))]
         self._look_after(started)
         return lines
 
-    def left_on(self) -> List[str]:
+    def left_on(self, look: bool = False) -> List[str]:
         """What is away from safe now, read from the instruments, in words: what a stop left on (a stop once left a
         laser emitting 6 mW with its shutter open, and a magnet at -2.5 T, and nothing said so). Each output that
         reaches the sample with its levels, and temperature, field and the like, a set point with its reading: one set
         to safe whose reading is still away too (a field ramping down, or held up by a rate of 0, which it says; one
         at 2.5 T was once left out). A level whose switch is off doesn't reach the sample and isn't listed, nor is how
         a drive is applied (its rate, range, current limit). What reaches the sample comes first. The caller holds the
-        lock."""
+        lock; look: it doesn't, and each instrument is only looked at (Lab.snapshot's looks: one that isn't answering
+        now is named, not waited for, and none waits behind other work that has its connection)."""
+        from ..instrument import patience
+        from ..lab import LOOK_S, not_now
         out: List[str] = []
         for name, inst in sorted(self.lab.instruments.items(),
                                  key=lambda kv: not protection.applies_to_sample(kv[1].card)):
-            if inst.enabled:
+            if not inst.enabled:
+                continue
+            if not look:
                 out += self._left_on_of(name, inst)
+                continue
+            why = not_now(inst)
+            if why and inst.card.drives:
+                out.append("%s couldn't be read (%s)" % (name, why))
+                continue
+            with patience(LOOK_S):
+                out += self._left_on_of(name, inst, look=True)
         return out
 
-    def _left_on_of(self, name: str, inst: Any) -> List[str]:
-        """What of one instrument is away from safe now, as left_on says it."""
+    def _left_on_of(self, name: str, inst: Any, look: bool = False) -> List[str]:
+        """What of one instrument is away from safe now, as left_on says it. look: a drive that couldn't be read now
+        (the call a Stop left in its driver still there, its connection busy) is said as such, as it may be on: a
+        report of "nothing is left on" never stands for one Kelvin didn't read."""
         out: List[str] = []
         hows = {n for p in inst.card.drives for n in (p.rate_param, p.range_param, p.autorange_param,
                                                       p.current_limit) if n}
@@ -11188,7 +11430,10 @@ class LabRuntime:
                     continue
                 switch = self.gate._switch_of(inst, spec)
                 state = self.gate._current(inst, switch) if switch is not None else None
-            except Exception:
+            except Exception as e:
+                if look:
+                    out.append("%s.%s couldn't be read now (%s)" % (
+                        name, spec.name, str(e).splitlines()[0][:100] if str(e) else type(e).__name__))
                 continue
             if state is not None and switch.distance(state) == 0:
                 continue   # its switch is off: it doesn't reach the sample
@@ -11210,14 +11455,17 @@ class LabRuntime:
         as a notice, and on a card above the chat with Bring to safe (unless the restart's card is showing). A later
         stop says it instead. Never raises: lab_status says what is on anyway."""
         try:
-            if not self.lock.acquire(timeout=AFTER_STOP_S):
-                return
-            try:
-                if self.gate.stop_generation != gen:
+            # the stopped work lets go of the lab first; meanwhile nothing is taken (a field test's every Stop held the
+            # whole lab for its report, the lab frozen again behind an instrument still hung), then each instrument is
+            # only looked at: one that isn't answering is named, not waited for
+            end = time.monotonic() + AFTER_STOP_S
+            while self.lock.owner()[0] is not None or self.queue.state == "pausing":
+                if time.monotonic() >= end or self.gate.stop_generation != gen:
                     return
-                left = self.left_on()
-            finally:
-                self.lock.release()
+                time.sleep(0.2)
+            if self.gate.stop_generation != gen:
+                return
+            left = self.left_on(look=True)
             self.gate.log.write("left_on", by="kelvin", stopped_by=by, left=left or None)
             if self.incident is not None and self.incident.get("kind") != "stop":
                 return   # the restart's card says more, and stays
@@ -11230,18 +11478,51 @@ class LabRuntime:
         except Exception:
             pass
 
+    @contextlib.contextmanager
+    def _rescue_lab(self) -> Iterator[str]:
+        """The lab for a person's rescue (Bring to safe, the restart card's Safe), once the work a Stop ended lets go of
+        it, waited for RESCUE_WAIT_S at most; past that the rescue goes ahead beside it (moves toward safe only, each
+        instrument's exchanges bounded), and the line yielded says so ("" when it has the lab). A field test's Bring to
+        safe waited with no end behind a run stuck on a hung bus, then acted, unannounced, when that run let go."""
+        # stopped work still on its way to safe (a ramp's steps) is waited for, up to RESCUE_MAX_S: two ramps of one
+        # drive would interleave; one stuck on an instrument (an exchange that hasn't come back) only RESCUE_WAIT_S
+        took, began, stuck = False, time.monotonic(), None
+        while not took:
+            took = self.lock.acquire(timeout=0.5)
+            if took:
+                break
+            waited = time.monotonic() - began
+            owner, scope = self.lock.owner()
+            if owner is not None and scope is not None and not scope:
+                stuck = "its report, which uses no instrument"   # nothing of it touches an instrument: beside at once
+                break
+            stuck = self._still(STUCK_S)
+            if (stuck is not None and waited >= RESCUE_WAIT_S) or waited >= RESCUE_MAX_S:
+                break
+        said = "" if took else ("the stopped work (%s) hadn't let go of the lab after %s%s, so this went ahead beside it"
+                                % (self.held_by(), _dur(time.monotonic() - began),
+                                   " (it waits for %s)" % stuck if stuck else ""))
+        try:
+            yield said
+        finally:
+            if took:
+                self.lock.release()
+
     def bring_to_safe(self, by: str = "human") -> List[str]:
         """A person's Bring to safe (the Lab panel; the card after a Stop): what runs stops, then every instrument
         goes to the safe values its card declares (gate.all_to_safe): outputs off, levels to safe, a field ramped
         down, a heater off. Positions and a drive's rate stay. Pressing it is the approval: nothing asks. Says what it
         did, and what is still on."""
         self.stop(by, note="bring to safe", report=False)
-        with self.lock:
+        with self._rescue_lab() as beside:
             started = time.time()
             with self.gate.acting_as(by):
                 lines = [r.message for r in self.gate.all_to_safe(by)] or ["everything was at safe already"]
-            left = self.left_on()
-            self._look_after(started)
+            left = self.left_on(look=True)   # only looked at: never behind a call a Stop left in a driver
+            if not beside:
+                self._look_after(started)
+        if beside:
+            lines.insert(0, beside)
         if self.incident is not None and self.incident.get("kind") == "stop":
             self.incident = None   # done: the card goes
         self.gate.log.write("bring_to_safe", by=by, steps=lines, left=left or None)
@@ -11257,8 +11538,19 @@ class LabRuntime:
         if not self.lock.acquire(timeout=1.0):
             return   # Kelvin is busy: next time
         try:
-            self._incident_due = False
-            self.tidy_runs()   # the runs a crash ended, found now if the start's tidy hasn't yet
+            if not self._tidy_lock.acquire(False):
+                # the start's tidy still walks the runs (minutes on a big share): never waited for with the lab held.
+                # What an unattended queue left on goes to safe now; the card waits for the tidy (next round)
+                if not self._acted and getattr(self.queue, "cut_short", None) and self._safe_early is None:
+                    outputs = self._outputs_on()
+                    self._safe_early = self._outputs_to_safe(sorted(outputs), "kelvin (after a restart)") \
+                        if outputs else []
+                return
+            try:
+                self._incident_due = False
+                self._tidy_now()   # the runs a crash ended, found now if the start's tidy hasn't yet
+            finally:
+                self._tidy_lock.release()
             outputs = {} if self._acted else self._outputs_on()
             away = []   # temperature, field, positions: as they were (a person decides; going to safe could warm up)
             for inst in self.lab.instruments.values():
@@ -11289,6 +11581,8 @@ class LabRuntime:
                 "unattended": unattended, "safe": [], "marks": marks}
             if unattended and outputs:   # nobody was there when it stopped: what reaches the sample goes to safe now
                 incident["safe"] = self._outputs_to_safe(sorted(outputs), "kelvin (after a restart)")
+            if self._safe_early:   # gone to safe already, while the start's tidy went on
+                incident["safe"] = list(self._safe_early) + list(incident["safe"])
             self.incident = incident
             with self.viewing(Viewer()):   # what everyone reads (the record, the notice): unshared work unnamed
                 shown, said = self.incident_view() or {}, "; ".join(self.incident_lines())
@@ -11370,9 +11664,11 @@ class LabRuntime:
         field and positions stay). On the card after a Stop: Bring to safe (bring_to_safe)."""
         if self.incident is not None and self.incident.get("kind") == "stop":
             return self.bring_to_safe(by)
-        with self.lock:
+        with self._rescue_lab() as beside:
             on = self._outputs_on()
             lines = self._outputs_to_safe(sorted(on), by) if on else ["nothing that reaches the sample is on"]
+        if beside:
+            lines.insert(0, beside)
         if self.incident is not None:
             self.incident["safe"] = lines
         self.gate.log.write("incident_safe", by=by, steps=lines)
@@ -11514,7 +11810,10 @@ class LabRuntime:
             still = old.close(within=SWITCH_CLOSE_S) if old is not lab else []
             if still:
                 logging.getLogger("kelvin").warning("still closing as the lab changed: %s", ", ".join(still))
-            for name in lab.connecting:   # one that can't be connected (or open in time) is set aside, with why
+            asked = self.gate.stop_generation
+            for name in list(lab.connecting):   # one that can't be connected (or open in time) is set aside, with why
+                if self.gate.stop_generation != asked:   # a person's Stop: the rest are connected later, by a person
+                    break
                 try:
                     lab.reconnect(name)
                 except Exception:
@@ -11580,15 +11879,18 @@ class LabRuntime:
 
     def scan(self) -> str:
         """Which instruments are connected, matched to cards. Read-only: it only asks who they are."""
+        asked = self.gate.stop_generation
+
         def run() -> str:
             from ..adapters import AdapterError
             from ..discovery import scan_survey
             from ..survey import reason
             in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()
                       if not ic.address.startswith("sim://")}
-            try:
-                found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network,
-                                            catalog=self.collection)
+            try:   # on a thread of its own: a Stop, or a step that never comes back, never holds the lab (_aside)
+                found, looked = self._aside("the scan", lambda step: scan_survey(
+                    self.lab.registry, in_lab=in_lab, network=self.scan_network, catalog=self.collection,
+                    progress=step), since=asked)
             except AdapterError as e:
                 return str(e)
             self._moved(found)

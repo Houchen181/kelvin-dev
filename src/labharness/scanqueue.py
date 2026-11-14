@@ -308,6 +308,66 @@ def span_words(seconds: float) -> str:
     return "%g h" % round(seconds / 3600, 1)
 
 
+# queue.json is written by a thread of its own, the latest content only; an edit waits this long for it, then goes on
+# (the write going on by itself). A data folder on a network share that stalls (a NAS rebooting, a VPN dropping) held
+# the queue's lock, every edit and a person's Stop behind one write for as long as the share took
+SAVE_WAIT_S = 0.5
+_writes: Dict[str, Any] = {}          # path -> [latest text, [events to set once written]]
+_writing: Dict[str, threading.Thread] = {}
+_writes_lock = threading.Lock()
+
+
+def _write_later(path: Path, text: str) -> threading.Event:
+    """text to be written to path, after any earlier one: the event is set once it (or a later one) is."""
+    done = threading.Event()
+    key = str(path)
+    with _writes_lock:
+        pending = _writes.get(key)
+        if pending is None:
+            _writes[key] = [text, [done]]
+        else:   # the one waiting is replaced: only the latest is ever written
+            pending[0] = text
+            pending[1].append(done)
+        writer = _writing.get(key)
+        if writer is None or not writer.is_alive():
+            writer = _writing[key] = threading.Thread(target=_writer, args=(path,), daemon=True,
+                                                      name="kelvin-queue-save")
+            writer.start()
+    return done
+
+
+def _writer(path: Path) -> None:
+    key = str(path)
+    while True:
+        with _writes_lock:
+            pending = _writes.pop(key, None)
+            if pending is None:
+                _writing.pop(key, None)
+                return
+        text, events = pending
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass
+        finally:
+            for e in events:
+                e.set()
+
+
+def _written(path: Path, seconds: float) -> None:
+    """Wait (seconds at most) until no write of path is pending: what a queue loads is what was saved last."""
+    end = time.monotonic() + seconds
+    key = str(path)
+    while time.monotonic() < end:
+        with _writes_lock:
+            if key not in _writes and key not in _writing:
+                return
+        time.sleep(0.01)
+
+
 class ScanQueue:
     """The items, in order, and where they are kept. Thread-safe; every change is saved."""
 
@@ -333,6 +393,7 @@ class ScanQueue:
     # ------------------------------------------------------------------ kept on disk
 
     def _load(self) -> None:
+        _written(self.path, 5.0)   # a save of it still being written (this process's) lands first
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError, AttributeError):
@@ -358,18 +419,15 @@ class ScanQueue:
             self.state, self.reason = "paused", "Kelvin restarted; start the queue again when you are ready"
 
     def save(self) -> None:
+        """Kept in queue.json: what it holds now, taken at once (under the caller's lock), written by a thread of its
+        own and waited for SAVE_WAIT_S at most (_write_later): never longer, wherever the data folder is."""
         self.changed = time.time()
         if self.path is None:
             return
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"items": [i.view() for i in self.items], "on_error": self.on_error,
-                                       "last": self.last, "name": self.name, "name_kept": self.name_kept or None},
-                                      indent=1, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, self.path)
-        except OSError:
-            pass
+        text = json.dumps({"items": [i.view() for i in self.items], "on_error": self.on_error,
+                           "last": self.last, "name": self.name, "name_kept": self.name_kept or None},
+                          indent=1, ensure_ascii=False)
+        _write_later(self.path, text).wait(SAVE_WAIT_S)
 
     def move_to(self, path: Path) -> None:
         with self.lock:

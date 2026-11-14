@@ -152,6 +152,8 @@ def test_hands_on_finishes_in_the_background_when_the_stopped_work_takes_long(tm
         assert rt.lab.read("laser", "emission") is True
         work.release.set()
     wait_until(lambda: rt.lab.read("laser", "emission") is False, "the laser never went to safe")
+    # said once every instrument's way to safe has ended (they go side by side: gate.to_safe_many)
+    wait_until(lambda: [e for e in rt.gate.log.events() if e["type"] == "hands_on"], "Hands on was never said")
     [event] = [e for e in rt.gate.log.events() if e["type"] == "hands_on"]
     assert any("laser" in s for s in event["steps"]), event
 
