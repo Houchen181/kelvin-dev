@@ -425,6 +425,113 @@ def writable_folder(path: Any) -> Path:
     return new
 
 
+def _writable(path: str) -> None:
+    """A kept file's read-only mark cleared (a run.h5 and its seal have one: rundata._read_only)."""
+    import os
+    import stat
+    try:
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+    except OSError:
+        pass
+
+
+def _remove(path: Path) -> None:
+    """A file or folder deleted, read-only marks and all; OSError when some of it can't be."""
+    import os
+    import shutil
+    if not os.path.lexists(str(path)):
+        return
+    if path.is_dir() and not path.is_symlink():
+        for root, dirs, files in os.walk(str(path)):
+            for name in dirs + files:
+                _writable(os.path.join(root, name))
+        shutil.rmtree(str(path))
+    else:
+        _writable(str(path))
+        os.unlink(str(path))
+
+
+def _copy_differs(src: Path, copy: Path) -> Optional[str]:
+    """Why a copy isn't whole (a file missing or of another size, a run's run.h5 that isn't what its seal says), or
+    None."""
+    import os
+    if not src.is_dir():
+        return None if copy.is_file() and copy.stat().st_size == src.stat().st_size else "the copy isn't whole"
+    for root, _, files in os.walk(str(src)):
+        for name in files:
+            a = Path(root) / name
+            b = copy / a.relative_to(src)
+            if not b.is_file() or b.stat().st_size != a.stat().st_size:
+                return "%s wasn't copied whole" % a.relative_to(src).as_posix()
+    seal = rundata.sealed(src)
+    if seal and (copy / rundata.RUN_FILE).exists() and rundata.sha256_file(copy / rundata.RUN_FILE) != seal:
+        return "the copy of run.h5 isn't what its seal says"
+    return None
+
+
+def _restore(copy: Path, original: Path) -> None:
+    """What a delete that stopped part-way took of the original, put back from its copy."""
+    import os
+    import shutil
+    if not copy.is_dir():
+        if not original.exists():
+            shutil.copy2(str(copy), str(original))
+        return
+    for root, _, files in os.walk(str(copy)):
+        for name in files:
+            a = Path(root) / name
+            b = original / a.relative_to(copy)
+            if not b.exists():
+                b.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(a), str(b))
+
+
+def move_item(src: Path, dst: Path, staging: Path) -> Optional[str]:
+    """A file or folder of the data folder moved to dst, which isn't there: renamed on one drive; across drives
+    copied into staging (beside dst, so a copy half made is never taken for a run), checked (each file's size, a
+    run's run.h5 against its seal), put in its place, then the original deleted, read-only marks cleared first. A
+    kept run.h5 and its seal are read-only, so a plain move copied a run, failed to delete it, and left it in both
+    places, the move ending there at every try (audit 0.3.52, R14). None when moved; else why not, and then the
+    original is whole where it was and nothing is at dst."""
+    import errno
+    import os
+    import shutil
+    try:
+        os.rename(str(src), str(dst))
+        return None
+    except OSError as e:
+        if e.errno != errno.EXDEV:   # on one drive: nothing changed
+            return "it couldn't be moved (%s), so it stays here" % (e.strerror or e)
+    part = staging / dst.name
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+        _remove(part)   # what an earlier try left
+        if src.is_dir():
+            shutil.copytree(str(src), str(part))
+        else:
+            shutil.copy2(str(src), str(part))
+        why = _copy_differs(src, part)
+        if why:
+            raise OSError(why)
+        os.rename(str(part), str(dst))
+    except OSError as e:
+        try:
+            _remove(part)
+        except OSError:
+            pass
+        return "it couldn't be copied there (%s), so it stays here" % (e.strerror or e)
+    try:
+        _remove(src)
+    except OSError as e:   # part of it is in use (another program has a file open): made whole here again
+        try:
+            _restore(dst, src)
+            _remove(dst)
+        except OSError:
+            pass
+        return "it couldn't be deleted here (%s), so it stays here whole" % (e.strerror or e)
+    return None
+
+
 def _installed_by_a_maker(folder: str) -> bool:
     """A folder a maker's installer wrote: in Program Files (only an administrator writes there), /Applications or
     /opt."""
@@ -1963,11 +2070,21 @@ class LabRuntime:
                 if (self.data_dir / "reports").exists() else 0,
                 "elsewhere": sum(1 for d in self.runs.iterdir() if d.parent != runs)}   # in chats' own folders
 
+    # what a data folder holds that follows it, with "Move what is saved now": each item of these folders (a run, a
+    # report, a written sequence, a saved queue, a figure...), and these files. It moved runs, reports, sequences, the
+    # record and the library only, so the notebook, the samples and the saved queues stayed behind while the answer
+    # said nothing was kept back (audit 0.3.52, R15)
+    DATA_FOLDERS = ("runs", "reports", "sequences", "notebook", "queues", "figures", "frames", "exports", "eln",
+                    "python")
+    # (watches.json keeps every lab's watches: this lab's are written into the new folder's after, the others' kept)
+    DATA_FILES = ("events.jsonl", "library.json", "chains.json", "home.json", "sm-imports.json", "watches.json")
+
     def set_data_dir(self, path: Any, move: bool = False, by: str = "human") -> Dict[str, Any]:
-        """Keep runs, the lab record (events.jsonl) and reports in another folder: a person's choice, from Settings.
-        Refused while Kelvin is busy. With move, what is saved now goes along, but nothing there is overwritten:
-        a run or report whose name is taken, or a record the new folder already has, stays where it was."""
-        import shutil
+        """Keep runs, the lab record (events.jsonl), reports and the rest of what Kelvin keeps for the person in
+        another folder: a person's choice, from Settings. Refused while Kelvin is busy. With move, what is saved now
+        goes along (_move_data), but nothing there is overwritten: what the new folder already has stays, and what it
+        would replace stays where it was (kept); what can't be moved stays where it was, whole (failed). The mounted
+        sample goes with the setup either way, so its protection holds after a restart (_carry_mounted)."""
         if not Path(str(path or "").strip()).expanduser().is_absolute():
             raise ValueError("give the folder's full path, such as D:\\Data\\Kelvin or /Users/me/Data/Kelvin")
         if not self.lock.acquire(blocking=False):
@@ -1978,34 +2095,18 @@ class LabRuntime:
             new = writable_folder(path)
             old = self.data_dir
             if new.resolve() == old.resolve():
-                return dict(self.data_summary(), moved=0, kept=[])
-            moved, kept = 0, []
+                return dict(self.data_summary(), moved=0, kept=[], failed=[])
+            moved, kept, failed = 0, [], []   # type: int, List[str], List[str]
             if move:
-                for sub in ("runs", "reports", "sequences"):   # the lab's written pulse sequences go along too
-                    src = old / sub
-                    if not src.is_dir():
-                        continue
-                    (new / sub).mkdir(exist_ok=True)
-                    for item in sorted(src.iterdir()):
-                        target = new / sub / item.name
-                        if target.exists():
-                            kept.append("%s/%s" % (sub, item.name))
-                            continue
-                        shutil.move(str(item), str(target))
-                        moved += 1
-                # the record, and the person's library of scans and scripts (the scripts they imported run from it)
-                for name in ("events.jsonl", "library.json"):
-                    if not (old / name).exists():
-                        continue
-                    if (new / name).exists():
-                        kept.append(name)
-                    else:
-                        shutil.move(str(old / name), str(new / name))
-                        moved += 1
+                self.gate.log.settle(2.0)   # the record's lines in its file before the file moves
+                moved, kept, failed = self._move_data(old, new)
                 for f in RunFolders(old).chat_folders():   # the chats' folders keep their runs; Kelvin still finds them
                     RunFolders(new).remember(f)
+                if any(k.startswith("runs/") for k in kept + failed):   # runs that stayed are still found by their ids
+                    RunFolders(new).remember(old / "runs")
                 (old / RunFolders.INDEX).unlink(missing_ok=True)
-            if not move or kept:
+            mounted_before = self._carry_mounted(old, new, move, failed)
+            if not move or kept or failed:
                 self.gate.log.write("data_folder", by=by, moved_to=str(new),
                                     note="what stays here was not moved" if move else "earlier data stay here")
             self.data_dir = new
@@ -2017,11 +2118,100 @@ class LabRuntime:
             self.events_path = new / "events.jsonl"
             self.gate.log = self._new_log()
             self.engine.store = self._store()
-            self.gate.log.write("data_folder", by=by, previous=str(old), moved=moved, kept=len(kept))
+            self.gate.log.write("data_folder", by=by, previous=str(old), moved=moved, kept=len(kept),
+                                failed=failed or None, mounted_before=mounted_before)
             self.tidy_later()
-            return dict(self.data_summary(), moved=moved, kept=kept, previous=str(old))
+            return dict(self.data_summary(), moved=moved, kept=kept, failed=failed, previous=str(old))
         finally:
             self.lock.release()
+
+    def _move_data(self, old: Path, new: Path) -> Tuple[int, List[str], List[str]]:
+        """What the data folder old holds, moved into new (set_data_dir): (how many moved, what stayed because new
+        has it already, what couldn't be moved and why). Each item on its own (move_item): one that fails leaves
+        the others moving."""
+        moved, kept, failed = 0, [], []   # type: int, List[str], List[str]
+        staging = new / ".kelvin-moving"
+
+        def one(rel: str, src: Path, dst: Path) -> bool:
+            nonlocal moved
+            if dst.exists():
+                kept.append(rel)
+                return False
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                failed.append("%s: %s" % (rel, e.strerror or e))
+                return False
+            why = move_item(src, dst, staging)
+            if why:
+                failed.append("%s: %s" % (rel, why))
+                return False
+            moved += 1
+            return True
+        files = list(self.DATA_FILES)
+        if getattr(self, "lab_memory_dir", None) is None:   # a script's or a test's: the lab's memory and timings here
+            files += ["timing.json", "lab-memory.json"]
+        for name in files:
+            if (old / name).exists() and one(name, old / name, new / name) and name == "events.jsonl":
+                self._carry_end(old / name, new / name)
+        # the samples' register with their pictures: the pictures go only with the register that names them
+        register = (old / "samples.json").exists()
+        with_register = not register or one("samples.json", old / "samples.json", new / "samples.json")
+        for sub in self.DATA_FOLDERS + ("samples",):
+            src = old / sub
+            if not src.is_dir():
+                continue
+            if sub == "samples" and not with_register:
+                kept.append("samples/ (the samples' pictures, with their register)")
+                continue
+            for item in sorted(src.iterdir()):
+                one("%s/%s" % (sub, item.name), item, new / sub / item.name)
+            try:
+                src.rmdir()   # empty now; one that still holds something stays
+            except OSError:
+                pass
+        try:
+            staging.rmdir()
+        except OSError:
+            pass
+        return moved, kept, failed
+
+    def _carry_end(self, old: Path, new: Path) -> None:
+        """The record's end kept outside it (eventlog.keep_end), for the record at its new place."""
+        from ..eventlog import move_end
+        where = self._ends_path()
+        if where is not None:
+            try:
+                move_end(where, old, new)
+            except OSError:
+                pass
+
+    def _carry_mounted(self, old: Path, new: Path, move: bool, failed: List[str]) -> Optional[str]:
+        """The sample in the setup now, written into the new folder's mounted.json, whether what is saved moves or
+        not: Kelvin reads it there at its next start, and without it the device's protection was gone after a
+        restart, 12 V going to a ±6 V gate on an ordinary yes (audit 0.3.52, R9, R15). A record there of another
+        sample, from when that folder was last in use, names a sample that isn't in the setup: it is replaced, and
+        what it named is returned for the lab's record. With move, the old folder's record goes."""
+        if not self.mounted:
+            return None
+        there, text = new / "mounted.json", json.dumps(self.mounted, indent=1)
+        try:
+            before = there.read_text(encoding="utf-8") if there.exists() else None
+            if before != text:
+                there.write_text(text, encoding="utf-8")
+            if move:
+                (old / "mounted.json").unlink(missing_ok=True)
+        except OSError as e:
+            failed.append("mounted.json: %s (mount the sample again there)" % (e.strerror or e))
+            return None
+        if before is None or before == text:
+            return None
+        try:
+            named = json.loads(before)
+        except ValueError:
+            return "a record that isn't one"
+        return str(named.get("device_name") or named.get("device") or "another sample") if isinstance(named, dict) \
+            else "a record that isn't one"
 
     def _new_log(self, clock: Any = None) -> EventLog:
         return EventLog(self.events_path, clock or self.lab.clock, shared=self.shared_log, user=self.user,
@@ -3415,12 +3605,14 @@ class LabRuntime:
             consider("procedures", "", "%s v%d" % (name, n), t)
         figures = Path(self.data_dir) / "figures"
         if figures.exists():
+            hidden = self._hidden_runs()   # a figure of a run the viewer may not see is that run's (audit 0.3.52, R13)
             for p in figures.glob("*.json"):
                 try:
                     rec = _json.loads(p.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
-                if isinstance(rec, dict):
+                if isinstance(rec, dict) and not any(isinstance(s, dict) and s.get("run") in hidden
+                                                     for s in rec.get("runs") or []):
                     consider("figures", rec.get("made"), "%s (from %s)" % (rec.get("figure"), ", ".join(
                         s.get("run", "") for s in rec.get("runs") or [])), _json.dumps(rec.get("spec") or {}) +
                         str(rec.get("figure")))
