@@ -3201,8 +3201,9 @@ class LabRuntime:
             found = book.find(None, s)[1]
             if found:
                 recs.append(found)
-        recs += [e for e in self.seen_events(self.gate.log.events()) if str(e.get("wall", "")).startswith(day)
-                 or str(e.get("at", "")).startswith(day)]
+        from ..numbercheck import without_bookkeeping   # an event's line number is no measurement (audit 0.3.52, D5)
+        recs += [without_bookkeeping(e) for e in self.seen_events(self.gate.log.events())
+                 if str(e.get("wall", "")).startswith(day) or str(e.get("at", "")).startswith(day)]
         return recs, missing
 
     def write_entry(self, title: str = "", body: str = "", aim: str = "", runs: Any = None, samples: Any = None,
