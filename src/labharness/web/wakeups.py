@@ -9,7 +9,8 @@ sets their own number in Settings, from 1 to MOST_WAKES: Waker.limit), and only 
 open (on a shared computer, another person may be signed in meanwhile). Each wake_me says how many are left, a
 continuation near the last says so, and the last one tells the person. Readings at intervals belong in a plan
 (time: every, for), which measures them without a model's turn. Wake-ups are kept in the person's chat folder
-(_wakes.json), so a restart (an update, a crash) during a long wait loses none."""
+(_wakes.json), so a restart (an update, a crash) during a long wait loses none, with when each chat was continued, so
+the daily limit holds over a restart; one set more than MAX_HOURS before Kelvin starts again is dropped."""
 from __future__ import annotations
 
 import asyncio
@@ -31,6 +32,7 @@ WAKES_PER_DAY = 12
 MOST_WAKES = 96
 WARN_LEFT = 2   # a continuation with this many or fewer left says so in its <wake>
 MAX_HOURS = 48.0
+WOKEN = "_woken"   # in _wakes.json beside the wake-ups (by chat id): when each chat was continued, for the daily limit
 INTERVALS = ("readings at intervals (a log every 30 min overnight) belong in a plan with time: {every, for} "
              "(run_plan, or queue_add and queue_start): it measures them as one run without waking the chat")
 
@@ -84,6 +86,7 @@ class Waker:
         self.agent = agent
         self.pending: Dict[str, Wake] = {}
         self.history: Dict[str, List[float]] = {}   # when each chat was woken, for the daily limit
+        self.woken_in: Dict[str, str] = {}          # whose chats (the chat folder) each of those is, to keep it there
         self.last: Optional[Dict[str, Any]] = None   # the latest wake-up, for the portal
         self.loaded: Optional[str] = None            # the chat folder whose kept wake-ups are read
         self.waking: Set[asyncio.Future] = set()     # the turns of chats being continued now, each its own task
@@ -211,9 +214,13 @@ class Waker:
         return Path(self._root()) / "_wakes.json"
 
     def _keep(self) -> None:
-        """Write the signed-in person's wake-ups to their chat folder."""
+        """Write the signed-in person's wake-ups to their chat folder, and when their chats were continued in the
+        last 24 hours (WOKEN): the daily limit holds over a restart too."""
         root = self._root()
-        mine = {w.chat_id: w.kept() for w in self.pending.values() if w.root == root}
+        mine: Dict[str, Any] = {w.chat_id: w.kept() for w in list(self.pending.values()) if w.root == root}
+        woken = {c: self.recent(c) for c, r in list(self.woken_in.items()) if r == root and self.recent(c)}
+        if woken:
+            mine[WOKEN] = woken
         path = self._file()
         try:
             if not mine:
@@ -228,7 +235,9 @@ class Waker:
             pass   # kept in memory all the same
 
     def _restore(self) -> None:
-        """The wake-ups kept in the signed-in person's chat folder, once per folder (at start, at each sign-in)."""
+        """The wake-ups kept in the signed-in person's chat folder, once per folder (at start, at each sign-in), and
+        when their chats were continued (WOKEN). One set more than MAX_HOURS ago (Kelvin was closed meanwhile) is
+        dropped, never continued now, as one whose person stays away that long is (tick)."""
         root = self._root()
         if root == self.loaded:
             return
@@ -238,7 +247,16 @@ class Waker:
         except (OSError, ValueError):
             return
         now, wall = time.monotonic(), time.time()
+        dropped = False
         for chat_id, k in (kept if isinstance(kept, dict) else {}).items():
+            if chat_id == WOKEN:
+                for c, times in (k if isinstance(k, dict) else {}).items():
+                    try:
+                        self.history[str(c)] = sorted(set(self.history.get(str(c), [])) | {float(t) for t in times})
+                    except (TypeError, ValueError):
+                        continue
+                    self.woken_in[str(c)] = root
+                continue
             try:
                 cond = parse_condition(k["until"]) if k.get("until") else None
                 w = Wake(chat_id, str(k["kind"]), str(k["note"]), str(k["text"]), now + float(k["due_at"]) - wall,
@@ -246,7 +264,12 @@ class Waker:
                          restored=True)
             except (KeyError, TypeError, ValueError):
                 continue
+            if now - w.created > MAX_HOURS * 3600:
+                dropped = True
+                continue
             self.pending.setdefault(chat_id, w)
+        if dropped:
+            self._keep()
 
     # -------------------------------------------------------------- watching
 
@@ -340,6 +363,8 @@ class Waker:
         except (KeyError, ValueError):
             return   # its model is no longer there
         self.history.setdefault(w.chat_id, []).append(time.time())
+        self.woken_in[w.chat_id] = w.root
+        self._keep()   # kept with the person's wake-ups: a restart forgets none of it
         last = self.last = {"chat_id": w.chat_id, "at": time.time(), "why": why, "title": chat.get("title"),
                             "root": w.root}
         most = self.limit()

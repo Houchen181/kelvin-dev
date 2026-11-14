@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import re
+import secrets
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -125,6 +126,12 @@ def safe_id(value: Any, n: int) -> str:
     """A tool-call id every provider accepts."""
     text = re.sub(r"[^A-Za-z0-9_-]", "_", str(value or ""))
     return text or "lh_call_%d" % n
+
+
+def own_call_id() -> str:
+    """An id for a tool call the model service gave none: never the same twice, in a chat's later steps (a chat
+    that goes on with Claude sends every id once) or in another chat (a call's pictures are kept by its id)."""
+    return "lh_call_" + secrets.token_hex(8)
 
 
 def update_block(text: str) -> str:

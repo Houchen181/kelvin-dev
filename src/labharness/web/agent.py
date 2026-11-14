@@ -837,6 +837,7 @@ class ChatAgent:
         self.draw: Optional[Any] = None   # PDF pages -> [(mime, picture)], drawn by the Kelvin hub (app.py)
         self.team: Optional[Any] = None   # the lab's team chat (teamchat.py), which team_chat reads (app.py)
         self._steer: Dict[str, List[str]] = {}   # what the person wrote while Kelvin worked, by chat, until read
+        self._before_outside: Dict[str, int] = {}   # how many of those were waiting when the chat last read outside text
         self.waker = Waker(self)   # chats continued later (wake_me), when the time or the lab says
         self.notices = Notices(self)   # what the person did to the sequence or Home, for the chats it concerns
         self.know = Know(store)    # skills and recipes (skills.py)
@@ -1282,15 +1283,18 @@ class ChatAgent:
         """The messages the person wrote meanwhile, into the chat before the model's next step."""
         await self.notices.at_step(chat, emit)   # the person's changes to the sequence or Home meanwhile
         waiting = self._steer.pop(chat["id"], [])
+        before = self._before_outside.pop(chat["id"], 0)
         if not waiting:
             return
         for text in waiting:
             message = {"role": "user", "text": text, "steer": True}
             self._sent(chat, message)
             chat["messages"].append(message)
-        # the person wrote: what the chat read before no longer pauses auto mode (its next lab call sets the gate's
-        # mark from the chat; the gate's mark now may be another chat's, working the lab meanwhile)
-        chat.pop("outside", None)
+        # the person wrote after the outside text came back: what the chat read before no longer pauses auto mode
+        # (its next lab call sets the gate's mark from the chat; the gate's mark now may be another chat's, working
+        # the lab meanwhile). A message typed while it was being read keeps the mark: they hadn't seen it yet
+        if len(waiting) > before:
+            chat.pop("outside", None)
         await self._save(chat)
         await emit({"type": "steered", "texts": waiting})
 
@@ -1624,6 +1628,22 @@ class ChatAgent:
         verb = {"saved": "kept in", "known": "already in", "updated": "updated in"}[what]
         return "%s %s: [%s] %s (id %s)" % (verb, where, note["kind"], note["text"], note["id"]), False
 
+    async def _remember_note(self, chat: Dict[str, Any], context: Dict[str, Any], call: Dict[str, Any],
+                             emit: Emit) -> Tuple[str, bool]:
+        """remember in the person's notes for every conversation, or the project's: as for the lab's memory, a chat
+        that has read text from outside the lab since the person last wrote asks the person first, since the note
+        comes back in later chats."""
+        args = call["input"]
+        scope = args.get("scope") if isinstance(args, dict) else None
+        outside = self.runtime.gate.outside_reason(chat.get("outside") or "")
+        if outside and (scope == "global" and not context.get("private") or scope == "project" and context["project"]):
+            where = "your notes for every conversation" if scope == "global" else "this project's notes"
+            request = ApprovalRequest("Keep this in %s?" % where, [str(args.get("text") or "")[:2000],
+                                                                    "Not kept by Kelvin itself: " + outside])
+            if not await self._ask_human(call["id"], emit, request):   # declined, or nobody answered
+                return "not saved: " + (request.note or "the person declined"), True
+        return self._remember(chat, context, args)
+
     async def _remember_lab(self, chat: Dict[str, Any], call: Dict[str, Any], emit: Emit) -> Tuple[str, bool]:
         """remember with scope lab: kept in the lab's memory, which every chat and everyone here sees (labmemory.py),
         as Kelvin's in this person's chat. A chat that has read text from outside the lab since the person last wrote
@@ -1928,6 +1948,7 @@ class ChatAgent:
             SESSION.reset(session)
             EFFORT.reset(effort)
             self._steer.pop(chat_id, None)   # not read in time: the portal sends it as the next message
+            self._before_outside.pop(chat_id, None)
 
     def _effort(self, text: str) -> str:
         """How hard the model thinks in this answer: Settings → Models → Thinking, or the deepest (xhigh) when the
@@ -2231,6 +2252,7 @@ class ChatAgent:
                         "images": [k["file"] for k in kept] or None})
         if call["name"] in OUTSIDE_TOOLS and not is_error and "<outside_text from=" in content:   # remembered
             chat["outside"] = OUTSIDE_TOOLS[call["name"]]   # the gate reads it with the chat's next lab call
+            self._before_outside[chat["id"]] = len(self._steer.get(chat["id"], []))   # typed before it came back
         entry = {"id": call["id"], "name": call["name"], "content": content, "is_error": is_error}
         if kept:
             entry["images"] = kept   # the files, kept with the chat; the model gets them with each request
@@ -2262,7 +2284,7 @@ class ChatAgent:
         if name == "remember" and context["learn"]:
             if isinstance(args, dict) and args.get("scope") == "lab" and not context.get("private"):
                 return _without_opinion(await self._remember_lab(chat, call, emit))
-            return _without_opinion(self._remember(chat, context, args))
+            return _without_opinion(await self._remember_note(chat, context, call, emit))
         if name == "wake_me" and not chat.get("incognito"):
             return _without_opinion(self.waker.add(chat["id"], args))
         if name == "wait" and _seconds(args) > WAIT_S:   # other chats would wait too
@@ -2318,7 +2340,8 @@ class ChatAgent:
         rt = self.runtime
         if name == "stop_run":
             return rt.stop_work(str(args.get("reason") or ""), by="agent (in “%s”)" % chat.get("title", "a chat")), False
-        with rt.attributed(self._attribution(chat)):
+        # and what the chat read from outside the lab since its person last wrote: the queue's auto mode asks for it
+        with rt.attributed(dict(self._attribution(chat), outside=chat.get("outside"))):
             if name == "queue_load":
                 text = rt.queue_load(str(args.get("name") or ""))
                 return text, not text.startswith("added")
@@ -2387,7 +2410,7 @@ class ChatAgent:
             [sys.executable, "-m", "labharness.screen"]
         config.write_text(json.dumps({"mcpServers": {"screen": {"type": "stdio", "command": command[0],
                                                                 "args": command[1:]}}}), encoding="utf-8")
-        argv = ["-p", task, "--output-format", "stream-json", "--verbose", "--tools", "", "--mcp-config", str(config),
+        argv = ["-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--mcp-config", str(config),
                 "--strict-mcp-config", "--allowedTools", "mcp__screen__*", "--permission-mode", "dontAsk",
                 "--no-session-persistence", "--max-turns", "100", "--model", alias,
                 "--append-system-prompt", COMPUTER_RULES]
@@ -2397,8 +2420,8 @@ class ChatAgent:
         steps: List[str] = []
         ends: List[Dict[str, Any]] = []
         try:
-            async for ev in claudecode.stream(provider.cmd, argv, "", provider.cwd, should_stop=lambda: self._stop,
-                                              timeout=minutes * 60):
+            async for ev in claudecode.stream(provider.cmd, argv, task, provider.cwd, should_stop=lambda: self._stop,
+                                              timeout=minutes * 60):   # the task on standard input, never argv
                 if ev.get("type") in ("result", "exit"):
                     ends.append(ev)
                 if ev.get("type") != "assistant":

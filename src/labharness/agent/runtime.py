@@ -3020,6 +3020,16 @@ class LabRuntime:
         flag_now = runnotes.flag_of(runnotes.read(d))
         return "kept on %s: %s%s" % (d.name, runnotes.line(note), "; flagged %s" % flag_now if flag_now else "")
 
+    def _own_project(self) -> Optional[str]:
+        """The project a new sample of this call is filed under: this thread's own work's (a queue item's), else the
+        calling chat's (its viewer: a chat keeps samples beside the lab, while another chat's call may have it), else
+        that of the work that has the lab."""
+        mine = getattr(self._attributed, "value", None)
+        if mine is not None:
+            return mine.get("project")
+        viewer = _VIEWER.get()
+        return viewer.project if viewer is not None else self.attribution.get("project")
+
     def update_sample(self, sample: str = "", **fields: Any) -> str:
         """Keep what a LIMS keeps about a sample (samples.py): its kind, what it was made from (parent), its source,
         state, location, material and description, each change with who and when. sample: its name (default: the
@@ -3034,7 +3044,7 @@ class LabRuntime:
             return "not kept: %s is unshared work (another project's)" % name
         m = self.mounted or {}
         project = there.get("project") if there else (m.get("project") if dev_id and dev_id == m.get("device")
-                                                       else self.attribution.get("project"))
+                                                       else self._own_project())
         refused = self._record_ok("Keep this about sample %s?" % name, ["%s: %s" % kv for kv in fields.items() if kv[1]])
         if refused:
             return refused
@@ -3068,7 +3078,7 @@ class LabRuntime:
             return refused
         m = self.mounted or {}
         project = there.get("project") if there else (m.get("project") if dev_id and dev_id == m.get("device")
-                                                       else self.attribution.get("project"))
+                                                       else self._own_project())
         by = "agent" if self._actor_now() else "human"
         try:
             pic = book.add_picture(dev_id, name, data, ext, caption, source, by, account=self.user,
@@ -4573,7 +4583,8 @@ class LabRuntime:
                               incognito=bool(whose.get("incognito")), unshared=bool(whose.get("unshared")),
                               folder=whose.get("folder"), chat=whose.get("chat"), rules=whose.get("rules"),
                               confidential=bool(whose.get("confidential")), unpublished=bool(whose.get("unpublished")),
-                              then_pause=then_pause, legacy=bool(whose.get("legacy")), library=library)
+                              then_pause=then_pause, legacy=bool(whose.get("legacy")), library=library,
+                              outside=whose.get("outside"))
         self.gate.log.write("queue_add", by=by, item=item.id, kind=item.kind, name=item.name,
                             position=self.queue.items.index(item) + 1, then_pause=then_pause or None)
         return item
@@ -5250,6 +5261,10 @@ class LabRuntime:
                     return cut
                 rehearsal = type("Rehearsal", (), {"ok": not failed})()
                 covered, why = self.gate.auto_plan(grants, rehearsal)
+                read = [i.outside for i in items if i.outside]
+                if read:   # queued by a chat that had read outside text: as that chat's own lab calls, a person
+                    covered, why = False, why + ["a chat queued an item after it read text from outside the lab (%s), "
+                                                 "which could steer a model, so a person approves" % read[0]]
                 if starting:   # an action that drives the sample is a person's to start, as with do_action
                     covered, why = False, why + ["its scans start %s" % ", ".join(starting)]
                 if running:   # nothing watches inside a technique: a person approves it

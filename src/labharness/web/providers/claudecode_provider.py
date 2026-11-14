@@ -414,14 +414,16 @@ class ClaudeCodeProvider(Provider):
         return native.CLAIMED
 
     async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
-        """Claude Code's WebSearch on the person's plan: one `claude -p` run with only that tool allowed."""
+        """Claude Code's WebSearch on the person's plan: one `claude -p` run with only that tool allowed. The model's
+        query goes on standard input, never on the command line (claudecode.command)."""
         from ..websearch import PROMPT, results_in
-        args = ["-p", PROMPT.format(query=query, limit=limit), "--output-format", "stream-json", "--verbose",
+        args = ["-p", "--output-format", "stream-json", "--verbose",
                 "--tools", "WebSearch", "--allowedTools", "WebSearch", "--permission-mode", "dontAsk",
                 "--strict-mcp-config", "--no-session-persistence", "--max-turns", "8", "--model", model or "sonnet"]
         words: List[str] = []
         ends: List[Dict[str, Any]] = []
-        async for ev in claudecode.stream(self.cmd, args, "", self.cwd, timeout=300):
+        async for ev in claudecode.stream(self.cmd, args, PROMPT.format(query=query, limit=limit), self.cwd,
+                                          timeout=300):
             if ev.get("type") in ("result", "exit"):
                 ends.append(ev)
             elif ev.get("type") == "assistant" and not ev.get("parent_tool_use_id"):

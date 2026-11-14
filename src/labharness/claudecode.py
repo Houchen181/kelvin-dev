@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import queue
+import re
 import shutil
 import signal
 import subprocess
@@ -46,6 +47,27 @@ def find_cli(configured: str = "") -> Optional[str]:
         if c and Path(c).is_file():
             return c
     return None
+
+
+def command(cli: str) -> List[str]:
+    """How Kelvin starts the `claude` find_cli() found. An npm install's is a launcher (claude.CMD) that Windows runs
+    through cmd.exe, which reads its command line again (a quote ends the quoting, & starts another command, %NAME%
+    is replaced): Kelvin starts the launcher's node and script itself. Anything else, or a launcher it can't read,
+    as it is (what it is given to do goes on standard input, never on its command line)."""
+    if not cli.lower().endswith((".cmd", ".bat")):
+        return [cli]
+    folder = Path(cli).parent
+    try:
+        text = Path(cli).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [cli]
+    scripts = re.findall(r'"%~?dp0%?\\?([^"%]+\.[cm]?js)"', text, re.IGNORECASE)   # npm's cmd-shim: "%dp0%\...\cli.js"
+    node = folder / "node.exe"
+    program = str(node) if node.is_file() else shutil.which("node")
+    script = folder / scripts[-1] if scripts else None
+    if not program or script is None or not script.is_file():
+        return [cli]
+    return [program, str(script)]
 
 
 def child_env() -> Dict[str, str]:

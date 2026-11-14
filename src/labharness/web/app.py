@@ -147,7 +147,8 @@ def make_providers(settings: Settings, signin: Optional[SignIn] = None) -> Dict[
         cli = claudecode.find_cli(settings.get("claude_code_path") or "")
         if cli:
             from .providers.claudecode_provider import ClaudeCodeProvider
-            providers["claudecode"] = ClaudeCodeProvider([cli], claudecode.workdir(Path(settings.path).parent))
+            providers["claudecode"] = ClaudeCodeProvider(claudecode.command(cli),
+                                                         claudecode.workdir(Path(settings.path).parent))
     return providers
 
 
@@ -1469,7 +1470,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if not claudecode.enabled():
             return JSONResponse({"enabled": False})
         cli = claudecode.find_cli(settings.get("claude_code_path") or "")
-        state = await asyncio.to_thread(claudecode.status, [cli]) if cli else {"signed_in": False}
+        state = await asyncio.to_thread(claudecode.status, claudecode.command(cli)) if cli else {"signed_in": False}
         return JSONResponse(dict(state, enabled=True, cli=cli, on=settings.get("claude_code") != "off",
                                  active="claudecode" in agent.providers, operating=runtime.operating))
 
@@ -1644,13 +1645,25 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         # up to 2 s (ChatStore._again), and Stop and the polls waited meanwhile
         return JSONResponse(await asyncio.to_thread(store.list))
 
+    def forget_chat(chat_id: str) -> None:
+        """A chat deleted: its file and media, and the Claude Code sessions the bridge kept for its answers (Claude
+        Code bridge)."""
+        from .providers import claudecode_native
+        try:
+            sessions = claudecode_native.sessions_of(store.load(chat_id).get("messages"))
+        except (KeyError, ValueError, OSError):
+            sessions = []
+        store.delete(chat_id)
+        if sessions:
+            claudecode_native.forget(sessions)
+
     async def chat(request: Request) -> Response:
         chat_id = request.path_params["chat_id"]
         try:
             if request.method == "DELETE":
                 if agent.answering(chat_id):
                     return error(409, "This conversation is still running.")
-                await asyncio.to_thread(store.delete, chat_id)
+                await asyncio.to_thread(forget_chat, chat_id)
                 agent.waker.cancel(chat_id)
                 return JSONResponse({"ok": True})
             data = await asyncio.to_thread(store.load, chat_id)
