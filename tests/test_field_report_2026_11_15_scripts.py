@@ -165,17 +165,21 @@ def test_connected_devices_flags_a_light_source_and_says_who_holds_its_port(lab,
     monkeypatch.setattr(probe, "network_adapters", lambda: [])
     asked = []
 
-    def holders_of(names, timeout=portholders.LOOK_S):
-        asked.append(sorted(names))
+    def holders_of(names, timeout=portholders.LOOK_S, likely=True):
+        asked.append((sorted(names), likely))
         return {n: [COBOLT_MONITOR] if n == "COM11" else [] for n in names}
     monkeypatch.setattr(portholders, "holders_of", holders_of)
+    monkeypatch.setattr(portholders, "waiting", lambda: [
+        {"pid": 99, "name": "VendorTool.exe", "path": "", "kelvin": False, "likely": True}])
     monkeypatch.setattr(portholders, "visa_users", lambda timeout=portholders.LOOK_S, names=None: [
         {"pid": 77, "name": "LabVIEW.exe", "path": "", "kelvin": False}])
     said = script_runtime(lab, folder, tmp_path).connected_devices()
-    assert asked == [["COM11", "COM7"]]                                    # one look for every port
+    assert asked == [(["COM11", "COM7"], False)]                           # one look for every port, sure ones only
     assert "serial port COM11 (open in CoboltMonitor.exe, process 4242)" in said, said
     assert "a light source not in this lab" in said and "add_instrument COM11" in said, said
     assert "COM7 (Communications Port (COM7); the lab's laser)" in said, said
+    assert ("Also holding a serial port whose name Kelvin couldn't ask (a read is waiting on it): VendorTool.exe "
+            "(process 99)") in said, said                                    # said apart, not on every port
     assert "Programs with VISA loaded (one may hold an instrument's VISA session): LabVIEW.exe (process 77)" in said
 
 
@@ -258,18 +262,17 @@ def test_a_port_nobody_can_name_says_nothing_and_never_raises():
 
 
 def test_a_look_that_blocks_never_holds_kelvin():
-    """A handle whose name never comes (a console's, waiting for input, which Windows answers only after the input) is
-    left after STEP_S, remembered, and never asked again; the walk goes on with the rest, and the whole look ends by
-    its deadline whatever happens."""
-    release = threading.Event()
+    """A handle whose name doesn't come (a synchronous read is pending on it in its process) is left after STEP_S and
+    not asked again while it waits; the walk goes on with the rest, and the whole look ends by its deadline whatever
+    happens. Once its answer has come, it is asked again (review of these fixes, finding 3: it was skipped for good)."""
+    release, stop = threading.Event(), threading.Event()
     seen = []
 
     def step(item, found):
         seen.append(item)
         if item == "stuck":
             release.wait(30)
-        else:
-            found.add(item)
+        found.add(item)   # (a step left to wait adds nothing to the walk that left it)
     skip = set()
     t0 = time.monotonic()
     found = portholders._walk(["a", "stuck", "b"], step, skip, timeout=5.0, step_s=0.3)
@@ -277,12 +280,167 @@ def test_a_look_that_blocks_never_holds_kelvin():
     assert found == {"a", "b"} and skip == {"stuck"}
     seen.clear()
     assert portholders._walk(["a", "stuck", "b"], step, skip, timeout=5.0, step_s=0.3) == {"a", "b"}
-    assert "stuck" not in seen                                            # never asked again
+    assert "stuck" not in seen                                            # not asked again while it waits
+    release.set()                                                         # its answer comes
+    for _ in range(100):
+        if not skip:
+            break
+        time.sleep(0.02)
+    assert skip == set()
+    assert portholders._walk(["a", "stuck", "b"], step, skip, timeout=5.0, step_s=0.3) == {"a", "stuck", "b"}
     t0 = time.monotonic()
-    portholders._walk(["x%d" % k for k in range(3)] + ["slow"], lambda item, found: release.wait(30), set(),
+    portholders._walk(["x%d" % k for k in range(3)] + ["slow"], lambda item, found: stop.wait(30), set(),
                       timeout=0.5, step_s=10.0)
     assert time.monotonic() - t0 < 2.0                                    # the deadline, whatever the steps do
-    release.set()
+    stop.set()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' handles")
+def test_a_holder_whose_port_cant_be_asked_is_named_as_likely(monkeypatch):
+    """Review of these fixes, finding 3, for real: asking a handle its name waits for as long as a synchronous read
+    pending on it in its process (a maker's program reading its port without overlapped I/O). The handle is left, and
+    its process named as the port's likely holder, never "run as administrator"; the next look doesn't ask it again;
+    once the read is over, it is asked again. A child's stdin pipe, with a read pending, stands in for the port."""
+    child = subprocess.Popen([sys.executable, "-c", "import os, sys, msvcrt, time\n"
+                              "print('reading', os.getpid(), msvcrt.get_osfhandle(0), flush=True)\n"
+                              "sys.stdin.buffer.read(1)\nprint('read', flush=True)\ntime.sleep(60)\n"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        said = child.stdout.readline().split()
+        assert said[:1] == [b"reading"], said
+        pid, handle = int(said[1]), int(said[2])
+        time.sleep(0.3)
+        monkeypatch.setattr(portholders, "device_of", lambda name: r"\Device\VCP0")
+        monkeypatch.setattr(portholders, "_file_handles", lambda api: [(pid, handle, 0)])
+        monkeypatch.setattr(portholders, "ASKED", portholders.ASKED | {0x11})    # a pipe's type, as a port's here
+        monkeypatch.setattr(portholders, "SERIAL", portholders.SERIAL | {0x11})
+        monkeypatch.setattr(portholders, "STEP_S", 0.3)
+        t0 = time.monotonic()
+        found = portholders.holders("COM11")
+        assert time.monotonic() - t0 < 2.0
+        assert [(h["pid"], h["likely"]) for h in found] == [(pid, True)], found
+        t0 = time.monotonic()
+        held = portholders.held_text("COM11")                              # not asked again: at once
+        assert time.monotonic() - t0 < 0.25
+        assert held == ("COM11 is probably open in %s (process %d), whose serial port couldn't be asked its name (a "
+                        "read is waiting on it)" % (found[0]["name"], pid)), held
+        assert portholders.holders("NUL") == []                            # likely only for a serial port
+        assert scriptrun.held_ports("could not open port 'COM11': PermissionError(13, 'Access is denied.', None, "
+                                    "5)").startswith("COM11 is probably open in")
+        child.stdin.write(b"x")                                            # the read is over: asked again
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == b"read"
+        for _ in range(100):
+            if not portholders.waiting():
+                break
+            time.sleep(0.02)
+        assert portholders.waiting() == [] and portholders.holders("COM11") == []
+    finally:
+        _end(child)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' sessions")
+def test_a_look_opens_no_process_of_another_session(monkeypatch):
+    """Review of these fixes, note 5: run as administrator, a look opened every process to duplicate its handles,
+    lsass among them, which security software flags. Only this Windows session's processes are opened (never 0 or 4),
+    for handles and for the modules VISA's users have loaded."""
+    api = portholders._api()
+    real = api.k32
+    opened = []
+
+    class K32:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def OpenProcess(self, access, inherit, pid):
+            opened.append(pid)
+            return real.OpenProcess(access, inherit, pid)
+
+        def CreateToolhelp32Snapshot(self, flags, pid):
+            if pid:
+                opened.append(pid)
+            return real.CreateToolhelp32Snapshot(flags, pid)
+    path, _ = _device()
+    child = subprocess.Popen([sys.executable, "-c", HOLD, path], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        pid = _started(child, b"held")
+        session = portholders._session(api, os.getpid())
+        assert isinstance(session, int)
+        monkeypatch.setattr(api, "k32", K32())
+        others = {pid}
+        real_session = portholders._session
+        monkeypatch.setattr(portholders, "_session", lambda a, p: 0 if p in others else real_session(a, p))
+        assert pid not in [h["pid"] for h in portholders.holders(path)]   # as if it were a service's: never opened
+        assert pid not in opened and 0 not in opened and 4 not in opened
+        portholders.visa_users(names=("_ctypes",), keep=False)
+        assert pid not in opened and 0 not in opened and 4 not in opened
+        others.clear()                                                     # in this session: opened, and found
+        assert pid in [h["pid"] for h in portholders.holders(path)] and pid in opened
+    finally:
+        _end(child)
+
+
+def test_a_permission_error_on_a_file_is_never_blamed_on_a_port(lab, folder, tmp_path):
+    """Review of these fixes, finding 2: a script that opens COM11 (outside the lab) failed because its CSV was open in
+    Excel, [Errno 13], and its failure said another program had COM11 open."""
+    if sys.platform != "win32" and os.geteuid() == 0:
+        pytest.skip("root writes any file")
+    csv = tmp_path / "odmr.csv"
+    csv.write_text("f,c\n")
+    held = None
+    if sys.platform == "win32":   # held without sharing, as Excel holds a workbook
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        held = k32.CreateFileW(str(csv), 0xC0000000, 0, None, 3, 0, None)
+    else:
+        csv.chmod(0o444)
+    try:
+        write(folder, "odmr.py", """
+            import serial
+            with open(%r, "w") as f:      # the results file, open in Excel
+                f.write("1,2\\n")
+            laser = serial.Serial("COM11", 115200, timeout=1)
+            """ % str(csv))
+        gate, request, report = run(lab, folder, tmp_path, "odmr.py")
+    finally:
+        if held is not None:
+            k32.CloseHandle(held)
+    assert "Permission denied" in report.message, report.message
+    assert "COM11" not in report.message and "another program has" not in report.message, report.message
+
+
+def test_which_lines_say_a_port_is_held(monkeypatch):
+    """Review of these fixes, finding 2: only a line about a port names one (never one about a file, nor /dev/null);
+    the ports a script opens stand in only for an error that is a port's or an instrument's alone (VISA's busy
+    resource), never for a plain Errno 13."""
+    asked = []
+    monkeypatch.setattr(portholders, "holders", lambda port, timeout=portholders.LOOK_S: asked.append(port) or [])
+    for line in ("PermissionError: [Errno 13] Permission denied: 'C:\\\\data\\\\odmr.csv'",
+                 "PermissionError: [Errno 13] Permission denied: 'C:\\\\data\\\\COM11.csv'",
+                 "PermissionError: [Errno 13] Permission denied: '/dev/null'",
+                 "OSError: [Errno 16] Device or resource busy: '/home/lab/run.lock'",
+                 "PermissionError: [WinError 5] Access is denied: 'C:\\\\Program Files\\\\nvpulse\\\\cfg.ini'",
+                 "PermissionError: [Errno 13] Permission denied"):
+        assert scriptrun.held_ports(line, ["serial://COM11"]) == "", line
+    assert asked == []
+    assert portholders.ports_in("Permission denied: '/dev/null' or /dev/shm/x") == []
+    assert portholders.ports_in("busy: /dev/ttyUSB3, /dev/ttyACM0, /dev/serial/by-id/usb-FTDI_A6-if00-port0, "
+                                "/dev/cu.usbserial-A6, /dev/tty.usbmodem14101 and COM11") == [
+        "/dev/ttyUSB3", "/dev/ttyACM0", "/dev/serial/by-id/usb-FTDI_A6-if00-port0", "/dev/cu.usbserial-A6",
+        "/dev/tty.usbmodem14101", "COM11"]
+    for line, port in (("[Errno 16] could not open port /dev/ttyUSB3: [Errno 16] Device or resource busy: "
+                        "'/dev/ttyUSB3'", "/dev/ttyUSB3"),
+                       ("could not open port 'COM11': PermissionError(13, 'Access is denied.', None, 5)", "COM11"),
+                       ("VI_ERROR_RSRC_BUSY (-1073807246): The resource is valid, but VISA cannot currently access "
+                        "it.", "COM11")):   # names no port: the one the script opens
+        asked.clear()
+        assert "another program has %s open" % port in scriptrun.held_ports(line, ["serial://COM11"]), line
+        assert asked == [port]
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="a Mac doesn't say which programs have a library loaded")
@@ -413,8 +571,8 @@ def _scripts_lab(tmp_path):
 
 
 def test_kelvin_saves_a_report_in_a_new_subfolder_of_the_scripts_folder(tmp_path):
-    """The field report: write_file of kelvin_reports\\nv_bringup.md was refused. A new subfolder is Kelvin's own: it
-    saves notes, tables and pictures there, and finds it its own after a restart (a marker in it)."""
+    """The field report: write_file of kelvin_reports\\nv_bringup.md was refused. A new folder named kelvin_... is
+    Kelvin's own: it saves notes, tables and pictures there, and finds it its own after a restart (a marker in it)."""
     lab, kw = _scripts_lab(tmp_path)
     target, kept = folderfiles.save(lab, r"kelvin_reports/nv_bringup.md", "# NV bring-up\n", **kw)
     assert target == (lab / "kelvin_reports" / "nv_bringup.md").resolve() and kept is None
@@ -442,8 +600,8 @@ def test_in_the_scripts_folder_kelvin_never_saves_code_nor_in_the_persons_folder
         "kelvin_reports/sweep.vi": "notes, tables", "kelvin_reports/Makefile": "notes, tables",
         "newpkg/__init__.py": "notes, tables", "kelvin_reports/x.pth": "notes, tables",
         # the person's own folders, and the scripts folder itself
-        "report.md": "a new subfolder", "data/odmr.csv": "a new subfolder", "nvpulse/notes.md": "a new subfolder",
-        "tools/README.md": "a new subfolder",
+        "report.md": "named kelvin_", "data/odmr.csv": "named kelvin_", "nvpulse/notes.md": "named kelvin_",
+        "tools/README.md": "named kelvin_",
     }
     for rel, why in refused.items():
         with pytest.raises(folderfiles.FolderError, match="only a person changes it") as e:
@@ -468,6 +626,87 @@ def test_in_the_scripts_folder_kelvin_never_saves_code_nor_in_the_persons_folder
     assert not (lab / "data" / folderfiles.MADE).exists()
 
 
+def test_a_new_folder_of_any_other_name_is_refused(tmp_path):
+    """Review of these fixes, finding 1: a new folder of any name took notes, so cal/offsets.csv, which pulse.py reads
+    when it is there, set the laser power of a script a person had approved as it was; and nidaqmx/ would be a
+    package. Only a folder named kelvin_... (or kelvin-...) is Kelvin's to make, right in the scripts folder, then
+    any folder it made inside one; never one of those names the person made, nor one in the person's folders."""
+    lab, kw = _scripts_lab(tmp_path)
+    script = lab / "pulse.py"
+    script.write_text("import os\n"
+                      "p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cal', 'offsets.csv')\n"
+                      "power_mW = float(open(p).read().split(',')[1]) if os.path.exists(p) else 1.0\n"
+                      "print('laser power', power_mW)\n")
+    before = subprocess.run([sys.executable, str(script)], capture_output=True, text=True).stdout
+    for rel in ("cal/offsets.csv", "nidaqmx/notes.md", "output/notes.md", "kelvin/notes.md", "kelvin_/notes.md",
+                "kelvin_shim/notes.md", "kelvin_api/notes.md", "KELVINreports/notes.md"):
+        with pytest.raises(folderfiles.FolderError, match="no name of Kelvin's") as e:
+            folderfiles.save(lab, rel, "power_mW,80\n", **kw)
+        assert "named kelvin_" in str(e.value) and "only a person changes it" in str(e.value), (rel, str(e.value))
+    assert not (lab / "cal").exists() and not (lab / "nidaqmx").exists()
+    assert subprocess.run([sys.executable, str(script)], capture_output=True, text=True).stdout == before
+    assert "laser power 1.0" in before
+
+    for rel in ("kelvin-notes/odmr.csv", "Kelvin_Reports2/x.md", "kelvin_cal/offsets.csv",
+                "kelvin_reports/day 1/cal/offsets.csv"):   # inside a folder of Kelvin's own: any name
+        folderfiles.save(lab, rel, "power_mW,80\n", **kw)
+    assert subprocess.run([sys.executable, str(script)], capture_output=True, text=True).stdout == before
+    (lab / "kelvin_old").mkdir()                       # a folder so named that the person made: theirs
+    (lab / "data" / "kelvin_cal").mkdir()
+    for rel in ("kelvin_old/x.md", "data/kelvin_cal/x.md", "data/kelvin_new/x.md"):
+        with pytest.raises(folderfiles.FolderError, match="person's own folders"):
+            folderfiles.save(lab, rel, "x\n", **kw)
+    assert not (lab / "data" / "kelvin_new").exists()
+
+
+def test_a_folder_that_appears_while_kelvin_saves_is_never_claimed(tmp_path, monkeypatch):
+    """Review of these fixes, finding 4: a folder a running script made between write_file's check and its mkdir was
+    marked as Kelvin's, and Kelvin then saved among that script's output. Each folder is made by this call or refused,
+    and only one it made is marked."""
+    lab, kw = _scripts_lab(tmp_path)
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *a, **k):   # the person's script makes kelvin_output/ and writes in it, just before Kelvin's mkdir
+        if self.name == "kelvin_output" and not self.exists():
+            real_mkdir(self)
+            (self / "trace.csv").write_text("person's data\n")
+        return real_mkdir(self, *a, **k)
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    with pytest.raises(folderfiles.FolderError, match="appeared while Kelvin was saving"):
+        folderfiles.save(lab, "kelvin_output/notes.md", "x\n", **kw)
+    monkeypatch.setattr(Path, "mkdir", real_mkdir)
+    with pytest.raises(folderfiles.FolderError, match="person's own folders"):
+        folderfiles.save(lab, "kelvin_output/more.csv", "kelvin's\n", **kw)
+    assert folderfiles.made(lab / "kelvin_output") is None
+    assert sorted(p.name for p in (lab / "kelvin_output").iterdir()) == ["trace.csv"]
+
+
+def test_a_file_that_couldnt_be_saved_is_never_listed_as_kelvins(tmp_path, monkeypatch):
+    """Found with the review's probe: a save that failed (AUX.csv, a name Windows keeps for itself) was listed in the
+    folder's mark all the same, so a person's file of that name would have been Kelvin's to replace. And .KELVIN-OLD
+    is .kelvin-old on Windows: no file is saved among the versions Kelvin kept, however it is written."""
+    lab, kw = _scripts_lab(tmp_path)
+    folderfiles.save(lab, "kelvin_reports/a.md", "x\n", **kw)
+    real = os.replace
+
+    def replace(src, dst):
+        if str(dst).endswith("b.md"):
+            raise PermissionError(13, "Permission denied")
+        return real(src, dst)
+    monkeypatch.setattr(os, "replace", replace)
+    with pytest.raises(folderfiles.FolderError, match="could not save"):
+        folderfiles.save(lab, "kelvin_reports/b.md", "x\n", **kw)
+    monkeypatch.setattr(os, "replace", real)
+    assert folderfiles.made(lab / "kelvin_reports") == [os.path.normcase("a.md")]
+    (lab / "kelvin_reports" / "b.md").write_text("the person's\n")
+    with pytest.raises(folderfiles.FolderError, match="didn't save"):
+        folderfiles.save(lab, "kelvin_reports/b.md", "x\n", **kw)
+    assert (lab / "kelvin_reports" / "b.md").read_text() == "the person's\n"
+    for rel in ("kelvin_reports/.KELVIN-OLD/x.md", "kelvin_reports/.Kelvin-Old/a.2026-11-15_101010.md"):
+        with pytest.raises(folderfiles.FolderError, match="the versions Kelvin kept"):
+            folderfiles.save(lab, rel, "x\n", **kw)
+
+
 def test_a_python_environment_in_the_scripts_folder_stays_the_persons(tmp_path):
     lab, kw = _scripts_lab(tmp_path)
     (lab / ".venv").mkdir()
@@ -486,7 +725,9 @@ def test_an_imported_scripts_folder_alike(tmp_path):
     kw = dict(own=[], data=tmp_path / "kelvin-data", kept=[str(script)])
     with pytest.raises(folderfiles.FolderError, match="in the folder of measure.py") as e:
         folderfiles.save(chat, "notes.md", "x\n", **kw)
-    assert "a new subfolder" in str(e.value)
+    assert "named kelvin_" in str(e.value)
+    with pytest.raises(folderfiles.FolderError, match="no name of Kelvin's"):
+        folderfiles.save(chat, "results/notes.md", "x\n", **kw)
     folderfiles.save(chat, "kelvin_reports/notes.md", "x\n", **kw)
     with pytest.raises(folderfiles.FolderError, match="only a person changes it"):
         folderfiles.save(chat, "kelvin_reports/helpers.py", "x = 1\n", **kw)
@@ -500,7 +741,7 @@ def test_a_chat_whose_folder_is_the_scripts_folder_saves_its_report(lab, folder,
     from labharness.web.agent import ChatAgent, WRITE_FILE
     from labharness.web.store import ChatStore
     from test_web import Scripted
-    assert "new subfolder" in WRITE_FILE["description"]
+    assert "named kelvin_" in WRITE_FILE["description"]
     write(folder, "sweep.py", "print('sweep')\n")
     rt = script_runtime(lab, folder, tmp_path)
     provider = Scripted([[{"type": "tool_call", "id": "w1", "name": "write_file",
@@ -527,7 +768,7 @@ def test_a_chat_whose_folder_is_the_scripts_folder_saves_its_report(lab, folder,
             await agent.close()
     asyncio.run(day())
     code, report = [r for m in store.load(chat["id"])["messages"] if m["role"] == "tool" for r in m["results"]]
-    assert code["is_error"] and "new subfolder" in code["content"], code
+    assert code["is_error"] and "named kelvin_" in code["content"], code
     assert not report["is_error"] and "nv_bringup.md" in report["content"], report
     assert not (folder / "fit.py").exists()
     on_disk = Path(folder) / "kelvin_reports" / "nv_bringup.md"

@@ -7,16 +7,19 @@ the program that has it is the answer. Kelvin names it wherever a port couldn't 
 own open of an instrument, a scan, inspect_serial, and connected_devices for every port.
 
     Windows  the port's device (QueryDosDevice: COM11 is \\Device\\VCP0), then every handle open on this computer
-             (NtQuerySystemInformation's extended handle list). Each File handle of a process Kelvin may look into is
-             duplicated here and asked its device's type, which never waits; one on a character device is asked its
-             name, and a name that is the port's device is that process's. A console's handle is never asked its name:
-             that waits for as long as a read waiting on it (a console waiting for input), for ever if nobody types.
+             (NtQuerySystemInformation's extended handle list). Each File handle of a process in this Windows session
+             that Kelvin may look into is duplicated here and asked its device's type, which never waits; one on a
+             character device is asked its name, and a name that is the port's device is that process's. A name waits
+             for as long as a synchronous read pending on the handle in its process: a console's handle is never asked
+             (a console waits for input, for ever if nobody types), and a serial port's whose name doesn't come names
+             its process as the port's likely holder (a maker's program reading its port without overlapped I/O).
     Linux    /proc/<pid>/fd: an open file that is the port's device (by its device number, so a link to it, as
              /dev/serial/by-id/... is, names the same holder).
 
 Anything else (a Mac), and what Kelvin may not look into (a program run as administrator, another user's), names
 nobody: never an error. A look runs on threads of its own with a deadline, and a handle whose answer doesn't come in
-time is left and never asked again (_walk), so a look never holds Kelvin.
+time is left to wait (_walk), so a look never holds Kelvin; it is asked again once that answer has come. Processes of
+other Windows sessions (services, lsass) are never opened: security software takes that for an attack.
 
 A VISA session can't be traced to its program. Where a VISA instrument can't be opened because something holds it,
 Kelvin names the programs that have VISA's library loaded (visa32.dll / visa64.dll, libvisa.so): one of them may."""
@@ -34,19 +37,25 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 
 WIN = sys.platform.startswith("win")
 LOOK_S = 4.0         # one look at who holds a port, at most
-STEP_S = 0.5         # one handle (on Linux, one process's open files), at most: past it, left and never asked again
+STEP_S = 0.5         # one handle (on Linux, one process's open files), at most: past it, left to wait, not asked again
 VISA_KEEP_S = 10.0   # a look at the programs with VISA loaded holds this long (each takes about a second on Windows)
 VISA_LIBRARIES = ("visa32.dll", "visa64.dll", "libvisa.so")
 # what an open failure says when something else has the port or the instrument: Windows' Access is denied (pyserial's
 # PermissionError 13), Linux's Errno 16 (busy) and pyserial's lock, VISA's busy or locked resource
 BUSY = re.compile(r"access is denied|permissionerror\(13|errno 13\]|errno 16\]|resource busy|could not exclusively "
                   r"lock port|rsrc_busy|rsrc_locked|-1073807246|-1073807345|visa cannot currently access it", re.I)
+# of those, what can only be about a port or an instrument, never a file: VISA's busy or locked resource, and
+# pyserial's own words (which name the port)
+OPENING = re.compile(r"could not (?:open|exclusively lock) port|rsrc_busy|rsrc_locked|-1073807246|-1073807345|"
+                     r"visa cannot currently access it", re.I)
 # the device types a handle on a serial port may have (Windows' FILE_DEVICE_*): those GetFileType calls character
 # devices (keyboard, mouse, null, parallel and serial ports, printer, screen, sound, modem), and the unknown kind that
 # some USB-serial drivers give their ports. Never a console's (0x50), whose name waits on its input
 ASKED = frozenset((0x0B, 0x0F, 0x15, 0x16, 0x18, 0x1B, 0x1C, 0x1D, 0x2B, 0x22))
+SERIAL = frozenset((0x1B, 0x2B))   # a serial port's and a modem's (FILE_DEVICE_SERIAL_PORT, FILE_DEVICE_MODEM)
 
-_SKIP: Set[Any] = set()     # what never answered in time: (process, handle, object) on Windows, a process on Linux
+_SKIP: Set[Any] = set()     # what still waits on its answer: (process, handle, object) on Windows, a process on Linux
+_WAITING: Dict[Any, Tuple[int, int]] = {}   # Windows: a handle being asked its name -> (its process, its device's type)
 _OURS: Set[int] = set()     # handles this process holds for a look: never taken for Kelvin's own on a port
 _LOOKING = threading.Lock()  # one look at a time (another's duplicated handles are in this process meanwhile)
 _visa_lock = threading.Lock()
@@ -56,7 +65,11 @@ _API: Any = None
 _COM = re.compile(r"^(?:serial://)?(?:\\\\\.\\)?(?:ASRL)?(COM\d+):?(?:::INSTR)?$", re.I)
 _ASRL = re.compile(r"^ASRL(\d+)(?:::INSTR)?$", re.I)
 _DEV = re.compile(r"^(?:serial://)?(?:ASRL)?(/dev/\S+?)(?:::INSTR)?$")
-_NAMED = re.compile(r"\b(COM\d+)\b|\bASRL(\d+)::INSTR|(/dev/[\w./-]*\w)", re.I)
+# a serial port in a text: COM11, ASRL11::INSTR, or a serial device's path (Linux's ttyS, ttyUSB, ttyACM and ttyAMA, its
+# /dev/serial/by-id and by-path links; a Mac's cu.* and tty.*), never another /dev path (/dev/null, /dev/shm/...)
+_NAMED = re.compile(r"\b(COM\d+)\b|\bASRL(\d+)::INSTR|(/dev/(?:tty(?:S|USB|ACM|AMA)\d+|serial/by-(?:id|path)/"
+                    r"[\w.:+-]*\w|(?:cu|tty)\.[\w.-]*\w))", re.I)
+_QUOTED = re.compile(r"'([^']*)'|\"([^\"]*)\"")
 
 
 def port_name(address: Any) -> Optional[str]:
@@ -88,17 +101,32 @@ def busy(error: Any) -> bool:
     return bool(BUSY.search(str(error or "")))
 
 
+def about_a_file(line: str) -> bool:
+    """Whether an error's line names a file that is no serial port (Permission denied: 'C:\\\\data\\\\odmr.csv', a
+    workbook Excel holds): the error is that file's, whatever port the script also opens. A port in a file's name
+    (COM11.csv) is the file's too."""
+    for m in _QUOTED.finditer(line or ""):
+        quoted = (m.group(1) if m.group(1) is not None else m.group(2)).replace("\\\\", "\\").strip()
+        port = _COM.match(quoted) or _ASRL.match(quoted) or _NAMED.fullmatch(quoted)
+        if ("/" in quoted or "\\" in quoted or re.search(r"\.\w{1,5}$", quoted)) and not port:
+            return True
+    return False
+
+
 # ------------------------------------------------------------------ who holds a port
 
 def holders(port: str, timeout: float = LOOK_S) -> List[Dict[str, Any]]:
     """The programs that have a serial port open (or another character device: NUL, a pseudo-terminal), each as
-    {pid, name (its program's file), path, kelvin (Kelvin itself)}; [] when none does, or when Kelvin can't tell (see
-    above). Never raises, and never takes much longer than timeout."""
+    {pid, name (its program's file), path, kelvin (Kelvin itself), likely}; [] when none does, or when Kelvin can't tell
+    (see above). likely: a program with a serial port whose name Kelvin couldn't ask (a synchronous read waiting on
+    it), given for a serial port only when nobody is seen holding it for sure. Never raises, and never takes much
+    longer than timeout."""
     return holders_of([port], timeout).get(port, [])
 
 
-def holders_of(ports: Iterable[str], timeout: float = LOOK_S) -> Dict[str, List[Dict[str, Any]]]:
-    """holders for several ports in one look: {each port as given: its holders}."""
+def holders_of(ports: Iterable[str], timeout: float = LOOK_S, likely: bool = True) -> Dict[str, List[Dict[str, Any]]]:
+    """holders for several ports in one look: {each port as given: its holders}. likely: with the likely ones where
+    none is sure (connected_devices, which lists every port, says them apart instead: waiting)."""
     asked = list(dict.fromkeys(str(p) for p in ports if p))
     out: Dict[str, List[Dict[str, Any]]] = {p: [] for p in asked}
     names = {p: port_name(p) or p.strip() for p in asked}
@@ -111,9 +139,19 @@ def holders_of(ports: Iterable[str], timeout: float = LOOK_S) -> Dict[str, List[
     finally:
         _LOOKING.release()
     who: Dict[int, Dict[str, Any]] = {}
+    maybe = waiting() if likely else []
     for p in asked:
-        out[p] = [who.setdefault(pid, _who(pid)) for pid in sorted(found.get(names[p], ()))]
+        sure = [who.setdefault(pid, _who(pid)) for pid in sorted(found.get(names[p], ()))]
+        out[p] = sure or ([dict(h) for h in maybe] if port_name(p) else [])
     return out
+
+
+def waiting() -> List[Dict[str, Any]]:
+    """The programs with a serial port whose name Kelvin couldn't ask (a synchronous read pending on it, so asking
+    waits with it: a maker's program reading its port without overlapped I/O), as holders gives them, likely: one of
+    them may be the holder of a port nobody is seen holding."""
+    pids = sorted({pid for pid, kind in list(_WAITING.values()) if kind in SERIAL})
+    return [dict(_who(pid), likely=True) for pid in pids]
 
 
 def named(found: Sequence[Dict[str, Any]]) -> str:
@@ -122,10 +160,24 @@ def named(found: Sequence[Dict[str, Any]]) -> str:
                                           h["pid"]) for h in found)
 
 
+def say(port: str, found: Sequence[Dict[str, Any]]) -> str:
+    """Who has a port open, in words: "COM11 is open in CoboltMonitor.exe (process 4242)"; for a likely holder only
+    (holders), "COM11 is probably open in VendorTool.exe (process 77), whose serial port couldn't be asked its name (a
+    read is waiting on it)"; "" for nobody."""
+    name = port_name(port) or port
+    sure = [h for h in found if not h.get("likely")]
+    if sure:
+        return "%s is open in %s" % (name, named(sure))
+    maybe = [h for h in found if h.get("likely")]
+    if maybe:
+        return ("%s is probably open in %s, whose serial port couldn't be asked its name (a read is waiting on it)"
+                % (name, named(maybe)))
+    return ""
+
+
 def held_text(port: str) -> str:
-    """"COM11 is open in CoboltMonitor.exe (process 4242)", or "" when Kelvin sees nobody holding it."""
-    found = holders(port)
-    return "%s is open in %s" % (port_name(port) or port, named(found)) if found else ""
+    """Who has a port open, in words (say), or "" when Kelvin sees nobody holding it."""
+    return say(port, holders(port))
 
 
 def device_of(port: str) -> Optional[str]:
@@ -207,41 +259,51 @@ class _Found:
 def _walk(items: Sequence[Any], step: Callable[[Any, Any], None], skip: Set[Any], timeout: float = LOOK_S,
           step_s: float = STEP_S) -> Set[Any]:
     """step(item, found) for each item not in skip, on a thread of its own, never past timeout: an item whose step
-    takes longer than step_s is left to it and put in skip (never stepped again), and the rest go on, on a new thread.
-    What the steps found.add(...)ed, as it is when the walk ends."""
+    takes longer than step_s is left to it and put in skip, and the rest go on, on a new thread. It stays in skip only
+    while its step waits: once that returns, it is stepped again by the next walk (a review of the 2026-11-15 fixes: a
+    holder whose read was pending for a moment was never named again). What the steps found.add(...)ed, as it is when
+    the walk ends."""
     end = time.monotonic() + timeout
     found: Set[Any] = set()
     start = 0
     while start < len(items) and time.monotonic() < end:
-        state: Dict[str, Any] = {"at": None, "left": False}
+        state: Dict[str, Any] = {"at": None, "left": False, "stuck": None}
         box = _Found()
+        lock = threading.Lock()   # the walk's thread and its caller each see the other's at and stuck whole
 
-        def go(first: int = start, state: Dict[str, Any] = state, box: _Found = box) -> None:
+        def go(first: int = start, state: Dict[str, Any] = state, box: _Found = box, lock: Any = lock) -> None:
             for i in range(first, len(items)):
-                if state["left"]:
-                    return
+                with lock:
+                    if state["left"]:
+                        return
                 if items[i] in skip:
                     continue
-                state["at"] = (i, time.monotonic())
+                at = (i, time.monotonic())
+                state["at"] = at
                 try:
                     step(items[i], box)
                 except Exception:   # one that fails tells nothing: the others still may
                     pass
-                state["at"] = None
+                with lock:
+                    state["at"] = None
+                    if state["stuck"] is at:   # it was left waiting on this one: its answer came, so asked again
+                        skip.discard(items[i])
         thread = threading.Thread(target=go, name="kelvin-port-holders", daemon=True)
         thread.start()
         stuck = None
         while thread.is_alive() and time.monotonic() < end:
             thread.join(0.02)
-            at = state["at"]
-            if at is not None and time.monotonic() - at[1] > step_s:
-                stuck = at
-                break
-        state["left"] = True
+            with lock:
+                at = state["at"]
+                if at is not None and time.monotonic() - at[1] > step_s:
+                    stuck = state["stuck"] = at
+                    skip.add(items[at[0]])   # while it waits on: not asked again meanwhile
+                    break
+        with lock:
+            state["left"] = True
         found |= box.close()
         if stuck is None:   # it went through them all, or the deadline came
             break
-        skip.add(items[stuck[0]])   # it waits on: never again
         start = stuck[0] + 1
     return found
 
@@ -278,7 +340,7 @@ def _who(pid: int) -> Dict[str, Any]:
         except Exception:
             pass
     name = re.split(r"[\\/]", path)[-1] if path else ""
-    return {"pid": pid, "name": name, "path": path, "kelvin": pid == os.getpid()}
+    return {"pid": pid, "name": name, "path": path, "kelvin": pid == os.getpid(), "likely": False}
 
 
 # ------------------------------------------------------------------ Windows
@@ -334,6 +396,8 @@ def _api() -> Any:
     k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
                                                ctypes.POINTER(wintypes.DWORD)]
     k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    k32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    k32.ProcessIdToSessionId.restype = wintypes.BOOL
     k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
     k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
     for fn, entry in (("Process32FirstW", ProcessEntry), ("Process32NextW", ProcessEntry),
@@ -392,7 +456,8 @@ def _windows(names: List[str], timeout: float) -> Dict[str, Set[int]]:
     ctypes, k32 = api.ctypes, api.k32
     rows = _file_handles(api)
     me, here = os.getpid(), k32.GetCurrentProcess()
-    opened: Dict[int, Any] = {}   # process -> a handle to it (0: one Kelvin may not look into)
+    session = _session(api, me)
+    opened: Dict[int, Any] = {}   # process -> a handle to it (0: one Kelvin may not look into, or doesn't)
     lock = threading.Lock()
     done = []                     # once the look has ended: a step left to itself opens no process
 
@@ -403,7 +468,13 @@ def _windows(names: List[str], timeout: float) -> Dict[str, Set[int]]:
                 return
             proc = opened.get(pid)
             if proc is None:
-                proc = opened[pid] = here if pid == me else k32.OpenProcess(0x40, False, pid) or 0   # PROCESS_DUP_HANDLE
+                if pid == me:
+                    proc = here
+                elif pid in (0, 4) or session is None or _session(api, pid) != session:
+                    proc = 0   # only this session's processes (a program a person runs), never a service's (lsass)
+                else:
+                    proc = k32.OpenProcess(0x40, False, pid) or 0   # PROCESS_DUP_HANDLE
+                opened[pid] = proc
         if not proc:
             return
         dup = api.wintypes.HANDLE()
@@ -415,7 +486,11 @@ def _windows(names: List[str], timeout: float) -> Dict[str, Set[int]]:
             if api.nt.NtQueryVolumeInformationFile(dup, ctypes.byref(io), ctypes.byref(info), ctypes.sizeof(info),
                                                    4) != 0 or info.DeviceType not in ASKED:   # FileFsDeviceInformation
                 return
-            name = _object_name(api, dup).lower()
+            _WAITING[row] = (pid, info.DeviceType)   # while its name is asked: one left waiting stays (waiting)
+            try:
+                name = _object_name(api, dup).lower()
+            finally:
+                _WAITING.pop(row, None)
         finally:
             k32.CloseHandle(dup)
             _OURS.discard(dup.value)
@@ -423,7 +498,7 @@ def _windows(names: List[str], timeout: float) -> Dict[str, Set[int]]:
             if name == device or name.startswith(device + "\\"):
                 found.add((device, pid))
     try:
-        hits = _walk(rows, step, _SKIP, timeout)
+        hits = _walk(rows, step, _SKIP, timeout, STEP_S)
     finally:
         with lock:
             done.append(True)
@@ -436,6 +511,12 @@ def _windows(names: List[str], timeout: float) -> Dict[str, Set[int]]:
         for n in devices[device]:
             out[n].add(pid)
     return out
+
+
+def _session(api: Any, pid: int) -> Optional[int]:
+    """The Windows session a process runs in (0: the services'), or None when Windows doesn't say."""
+    sid = api.wintypes.DWORD()
+    return int(sid.value) if api.k32.ProcessIdToSessionId(pid, api.ctypes.byref(sid)) else None
 
 
 def _object_name(api: Any, handle: Any) -> str:
@@ -525,7 +606,7 @@ def _linux(names: List[str], timeout: float) -> Dict[str, Set[int]]:
                 continue
             if stat.S_ISCHR(st.st_mode) and st.st_rdev in devices:
                 found.add((st.st_rdev, pid))
-    hits = _walk(pids, step, _SKIP, timeout)
+    hits = _walk(pids, step, _SKIP, timeout, STEP_S)
     out: Dict[str, Set[int]] = {n: set() for n in names}
     for device, pid in hits:
         for n in devices[device]:
@@ -566,11 +647,12 @@ def _loading(wanted: Sequence[str], timeout: float) -> Set[int]:
     me = os.getpid()
     if WIN:
         api = _api()
+        session = _session(api, me)
 
         def step(pid: int, found: _Found) -> None:
-            if _has(_windows_modules(api, pid), wanted):
-                found.add(pid)
-        return _walk([p for p in _windows_processes(api) if p not in (0, 4, me)], step, set(), timeout)
+            if session is not None and _session(api, pid) == session and _has(_windows_modules(api, pid), wanted):
+                found.add(pid)   # (only this session's programs: a service's modules, lsass's, are never read)
+        return _walk([p for p in _windows_processes(api) if p not in (0, 4, me)], step, set(), timeout, STEP_S)
     if sys.platform.startswith("linux"):
         def step(pid: int, found: _Found) -> None:   # noqa: F811 (one per system)
             try:
@@ -584,5 +666,5 @@ def _loading(wanted: Sequence[str], timeout: float) -> Set[int]:
             pids = [int(p) for p in os.listdir("/proc") if p.isdigit() and int(p) != me]
         except OSError:
             return set()
-        return _walk(pids, step, set(), timeout)
+        return _walk(pids, step, set(), timeout, STEP_S)
     return set()
