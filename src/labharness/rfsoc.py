@@ -10,8 +10,9 @@ The name server gives the address the board's server registered, which isn't alw
 start_server, its name server on the board (ns_host "localhost"), registers the address of one network interface,
 iface, eth0 unless told. A field report's RFSoC 4x2 was reached at 192.168.3.1 over its USB network (usb0) and
 registered 192.168.2.99, its eth0's; every call then waited out its connection (2026-11-15). Kelvin looks up where the
-server is before connecting (look_up), and says so with the fix when this computer can't reach it (cant_reach), and
-again when a call to the board gets no answer (Qick._lost). The card's notes have a service that starts both at boot.
+server is before connecting (look_up, a few seconds at most). Where this computer surely can't reach it (cant_reach),
+the connect fails at once with the fix; where it may not, Pyro tries, and its error says so. A call to the board that
+gets no answer says why when Kelvin can tell (Qick._lost). The card's notes have a service that starts both at boot.
 
 Kelvin plays one generator channel and reads one readout channel (set in the card's vars):
     output     drive: off sends soc.reset_gens(), which drives every generator with zeros
@@ -30,6 +31,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import ipaddress
+import logging
 import math
 import socket
 import sys
@@ -42,6 +44,8 @@ from .adapters import AdapterError, NoAnswer
 from .cards import Card
 from .drivers import DriverBackend
 
+log = logging.getLogger("kelvin")
+
 DEFAULTS = {"output": 0, "gain": 0.0, "frequency": 100.0, "nqz": 1, "mixer": 0.0, "mode": "tone", "length": 1.0,
             "readout_length": 1.0, "trigger_delay": 0.2, "reps": 100, "phase0": 0.0}
 READINGS = ("i", "q", "magnitude", "phase")
@@ -50,6 +54,7 @@ READINGS = ("i", "q", "magnitude", "phase")
 CALL_S = 60.0
 PYNQ_USB = "192.168.3.1"   # a PYNQ board on its USB network (usb0), as its image sets it up
 REACH_S = 2.0              # how long a connection to where the board's server is may take before Kelvin says it can't
+LOOKUP_S = 5.0             # how long the board's name server is waited for, to say where its QICK server is
 # Pyro4's errors of the connection itself (no answer in time, refused, closed, no such name), never the board's own
 PYRO_COMMS = ("CommunicationError", "TimeoutError", "ConnectionClosedError", "NamingError")
 # The modules a numpy 1.x pickle names, which numpy 2 moved from numpy.core to numpy._core: an array is
@@ -169,11 +174,11 @@ def _ip(host: str) -> Optional[Any]:
         return None
 
 
-def takes_connection(host: str, port: int) -> bool:
-    """Whether host:port takes a connection from this computer within REACH_S (closed at once; nothing sent)."""
+def takes_connection(host: str, port: int, seconds: float = REACH_S) -> bool:
+    """Whether host:port takes a connection from this computer within `seconds` (closed at once; nothing sent)."""
     from . import probe
     try:
-        sock = probe._connect(host, port, REACH_S)
+        sock = probe._connect(host, port, seconds)
     except OSError:
         return False
     try:
@@ -192,27 +197,61 @@ def networks_here() -> List[Dict[str, Any]]:
         return []
 
 
-def cant_reach(host: str, port: int, ns_host: str) -> str:
-    """Why this computer can't reach the QICK server at host:port, where the board's name server at ns_host (which
-    answered) says it is; "" when it can: the name server's own address, an address on one of this computer's networks
-    (a cable of its own, a board's USB network), or one that takes a connection (a lab network behind a router)."""
-    ip, ns_ip = _ip(host), _ip(ns_host)
-    if host == ns_host or (ip is not None and ip == ns_ip):
-        return ""
-    if ip is not None and ip.is_loopback:   # the board's own, unless the name server is on this computer too
-        return "" if ns_ip is not None and ns_ip.is_loopback else "%s is the board's own loopback address" % host
-    nets = networks_here()
+def _on(ip: Any, nets: List[Dict[str, Any]]) -> bool:
+    """Whether an address is on one of these networks of this computer's."""
     for a in nets:
         try:
             if ip is not None and ip in ipaddress.ip_network(a["network"], strict=False):
-                return ""
+                return True
         except (KeyError, TypeError, ValueError):
             continue
-    if takes_connection(host, port):
-        return ""
+    return False
+
+
+def cant_reach(host: str, port: int, ns_host: str) -> Tuple[str, bool]:
+    """Whether this computer reaches the QICK server at host:port, where the board's name server at ns_host (which
+    answered) says it is: ("", False) when it does (the name server's own address, an address on one of this
+    computer's networks, or one that takes a connection); else (why, sure). Sure: the board's own loopback, or a private
+    address on none of this computer's networks while the name server's is on one (the board's own other network,
+    as eth0's 192.168.2.99 beside its usb0), which takes no connection twice (REACH_S, then 2.5 times as long): the
+    connect then fails at once, with the fix. Otherwise not sure (a router between, a packet lost, a network this
+    computer can't list): Pyro tries, the words kept for its error. One 2 s try once decided it (review of 2026-11-15),
+    and a lost packet would have stopped a board that works."""
+    ip, ns_ip = _ip(host), _ip(ns_host)
+    if host == ns_host or (ip is not None and ip == ns_ip):
+        return "", False
+    if ip is not None and ip.is_loopback:   # the board's own, unless the name server is on this computer too
+        return ("", False) if ns_ip is not None and ns_ip.is_loopback else \
+            ("%s is the board's own loopback address" % host, True)
+    nets = networks_here()
+    if _on(ip, nets) or takes_connection(host, port):
+        return "", False
     on = ", ".join("%s on %s" % (a.get("network"), a.get("name")) for a in nets if a.get("network"))
-    return "%s takes no connection from this computer%s" % (host, ", and is on none of its networks (%s)" % on
-                                                            if on else "")
+    why = "%s takes no connection from this computer%s" % (host, ", and is on none of its networks (%s)" % on
+                                                           if on else "")
+    sure = ip is not None and ip.is_private and _on(ns_ip, nets) and not takes_connection(host, port, REACH_S * 2.5)
+    return why, sure
+
+
+def _within(seconds: float, fn: Callable[..., Any], *args: Any) -> Tuple[str, Any]:
+    """fn(*args) on a thread of its own, waited for `seconds` at most: ("ok", what it returned), ("error", what it
+    raised), or ("late", None), the call left to end by itself. A name server's lookup waited Pyro's COMMTIMEOUT (a
+    minute) on a board that didn't answer, after a call that had already failed (review of 2026-11-15)."""
+    import threading
+    box: Dict[str, Any] = {}
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            box["value"] = fn(*args)
+        except BaseException as e:   # the caller's to say
+            box["error"] = e
+        finally:
+            done.set()
+    threading.Thread(target=run, name="kelvin-qick-lookup", daemon=True).start()
+    if not done.wait(seconds):
+        return "late", None
+    return ("error", box["error"]) if "error" in box else ("ok", box.get("value"))
 
 
 def load_qick() -> Any:
@@ -351,20 +390,25 @@ class Qick(DriverBackend):
         # where the board's name server says its server is, looked up first: one this computer can't reach is said at
         # once, with the fix, where make_proxy's first call waited out its connection (a minute) and said only that
         self.registered: Optional[Tuple[str, int]] = None
+        self.doubt = ""   # an address it registered that this computer may not reach: said if Pyro can't either
         lookup = getattr(self.qick, "lookup", None)
-        if lookup is not None:
-            try:
-                self.registered = tuple(lookup(url.hostname, url.port or 8888, proxy))   # type: ignore[assignment]
-            except Exception:
-                self.registered = None   # no name server there, or no server of that name: make_proxy says which
+        if lookup is not None:   # waited LOOKUP_S at most; no name server there, or no such server: make_proxy says
+            state, got = _within(LOOKUP_S, lookup, url.hostname, url.port or 8888, proxy)
+            self.registered = tuple(got) if state == "ok" else None   # type: ignore[assignment]
         if self.registered is not None:
-            why = cant_reach(self.registered[0], self.registered[1], url.hostname)
-            if why:
+            why, sure = cant_reach(self.registered[0], self.registered[1], url.hostname)
+            if why and sure:
                 raise AdapterError("%s: %s" % (name, self._cant_reach_words(self.registered, why)))
+            if why:
+                self.doubt = self._cant_reach_words(self.registered, why, "may not reach")
+                log.warning("%s: %s; Pyro tries all the same", name, self.doubt)
         try:
             self.soc, self.soccfg = self.qick.make_proxy(ns_host=url.hostname, ns_port=url.port or 8888,
                                                          proxy_name=proxy)
         except Exception as e:   # Pyro's NamingError, CommunicationError...
+            if self.doubt:
+                raise AdapterError("%s: could not reach the QICK server %r (%s): %s" % (name, proxy, e, self.doubt)) \
+                    from e
             raise AdapterError("%s: could not reach the QICK server %r through the name server at %s:%d (%s). On the "
                                "board, start the Pyro4 name server, then the QICK server under that name: on a PYNQ "
                                "board, in its Jupyter (http://%s:9090), run qick/pyro4/00_nameserver.ipynb, then "
@@ -407,10 +451,10 @@ class Qick(DriverBackend):
                    if usb else "iface set to the board's interface on that network (usb0 for its USB network, eth0 for "
                                "its Ethernet)", ns_host, ns_host))
 
-    def _cant_reach_words(self, at: Tuple[str, int], why: str) -> str:
+    def _cant_reach_words(self, at: Tuple[str, int], why: str, reach: str = "can't reach") -> str:
         ns_host, ns_port, proxy = self.ns
-        return ("the board's name server (%s:%d) has its QICK server %r at %s:%d, which this computer can't reach: %s. "
-                "%s" % (ns_host, ns_port, proxy, at[0], at[1], why, self._fix()))
+        return ("the board's name server (%s:%d) has its QICK server %r at %s:%d, which this computer %s: %s. %s"
+                % (ns_host, ns_port, proxy, at[0], at[1], reach, why, self._fix()))
 
     def _lost(self, e: BaseException) -> Optional[BaseException]:
         """A call to the board that got no answer (Pyro4's errors of the connection): why, in words with what to do,
@@ -445,23 +489,29 @@ class Qick(DriverBackend):
                     "back, start them again (run_on_board), or have them start at every boot (the card's notes: "
                     "qick/rfsoc); then connect %s again" % (ns_host, ns_port, self.name))
         lookup = getattr(self.qick, "lookup", None)
-        if lookup is not None:
-            try:
-                now = tuple(lookup(ns_host, ns_port, proxy))
-            except Exception:
+        if lookup is not None:   # waited LOOKUP_S at most, never Pyro's minute on top of a call that already failed
+            state, got = _within(LOOKUP_S, lookup, ns_host, ns_port, proxy)
+            if state == "late" or (state == "error" and type(got).__name__ != "NamingError"):
+                return ("the board's name server at %s:%d takes a connection but didn't answer%s: the board may be "
+                        "busy or restarting. Once it answers, connect %s again; a reboot ends the name server and "
+                        "QICK server unless they start at every boot (the card's notes: qick/rfsoc)" % (
+                            ns_host, ns_port, " within %g s" % LOOKUP_S if state == "late" else " (%s)" % got,
+                            self.name))
+            if state == "error":   # Pyro's NamingError: it answered, and has no server of that name
                 return ("the board's name server at %s:%d answers, but has no QICK server %r now (it stopped, or was "
                         "started under another name): start it again (run_on_board), or at every boot (the card's "
                         "notes: qick/rfsoc); then connect %s again" % (ns_host, ns_port, proxy, self.name))
+            now = tuple(got)
             if now != (host, port):
-                why = cant_reach(now[0], now[1], ns_host)
+                why, _ = cant_reach(now[0], now[1], ns_host)
                 if why:
                     return ("its QICK server was started again and registered %s:%d, which this computer can't reach: "
                             "%s. %s" % (now[0], now[1], why, self._fix()))
                 return ("its QICK server was started again: the board's name server has it at %s:%d now, not %s:%d; "
                         "connect %s again" % (now[0], now[1], host, port, self.name))
-        why = cant_reach(host, port, ns_host)
-        return "this computer can't reach its QICK server at %s:%d: %s. %s" % (host, port, why, self._fix()) \
-            if why else ""
+        why, sure = cant_reach(host, port, ns_host)
+        return "this computer %s its QICK server at %s:%d: %s. %s" % (
+            "can't reach" if sure else "may not reach", host, port, why, self._fix()) if why else ""
 
     def _use(self, tproc: Optional[int]) -> None:
         """Programs for this tProc generation (None: not known yet; the first program says how to set it)."""

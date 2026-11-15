@@ -44,8 +44,16 @@ NAME = re.compile(r"^[a-z][a-z0-9_-]{0,40}$")
 _PKG_NAME = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
 _CLAUSE = r"(?:===|==|!=|~=|>=|<=|<|>) *[A-Za-z0-9._*+!-]+"
 _CLAUSES = r"%s(?: *, *%s)*" % (_CLAUSE, _CLAUSE)
-_A_FILE = r"\.(?:whl|zip|tar|gz|tgz|bz2|xz|egg)\Z"   # pkg-1.0-py3-none-any.whl: a file uv would look for here
-PACKAGE = re.compile(r"^(?!.*%s)(%s) *(?:\[ *(%s(?: *, *%s)*)? *\])? *(\( *%s *\)|%s)?\Z"
+# what pip and uv take for a file here, by its suffix (pkg-1.0-py3-none-any.whl, pkg-1.0.tar.zst, x.tbz): a wheel or
+# an archive's, at the end or before another suffix or the versions
+ARCHIVES = ("whl", "zip", "egg", "tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz", "lz", "tlz", "lzma", "tlzma",
+            "zst", "tzst", "7z", "rar")
+_A_FILE = r"\.(?i:%s)(?=\Z|[.\[<>=!~ (,;@])" % "|".join(ARCHIVES)
+MOST = 200   # characters in one package to install, at most: none is longer, and nothing longer is read further
+# No two runs of spaces side by side, which the expression would try every split of: quadratic, with re holding the
+# GIL, so a package of 50,000 spaces froze the whole of Kelvin (its monitor, Stop, the portal) for minutes (review of
+# 2026-11-15); and nothing longer than MOST is matched (not_a_package)
+PACKAGE = re.compile(r"^(?!.*?%s)(%s)(?: *\[ *(?:(%s(?: *, *%s)*) *)?\])?(?: *(\( *%s *\)|%s))?\Z"
                      % (_A_FILE, _PKG_NAME, _PKG_NAME, _PKG_NAME, _CLAUSES, _CLAUSES))
 WIN = sys.platform.startswith("win")
 HOME: Dict[str, Path] = {"path": Path.home() / "Kelvin"}
@@ -87,10 +95,14 @@ def base_name(spec: str) -> str:
     return re.split(r"[\[<>=!~\s(;@,]", spec.strip(), maxsplit=1)[0]
 
 
-def _not_a_package(text: str) -> str:
-    """Why a package to install isn't one Kelvin takes from PyPI, in words; "" when it is (requirement)."""
+def not_a_package(text: str) -> str:
+    """Why a package to install isn't one Kelvin takes from PyPI, in words; "" when it is (requirement). Its length
+    first: nothing longer than MOST characters is read further (a card's requires, install_for_instrument's packages)."""
     if not text:
         return "an empty package name"
+    if len(text) > MOST:
+        return ("%r... is %d characters long: no package's name and versions are longer than %d"
+                % (text[:40], len(text), MOST))
     if re.search(r"[^\x20-\x7e]", text):   # \t \n \r, a no-break or zero-width space, a look-alike letter
         return ("%r holds a tab, a line break or a character that only looks like a letter or a space: write it "
                 "plainly" % text)
@@ -104,7 +116,7 @@ def _not_a_package(text: str) -> str:
     if "://" in text or "@" in text or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", text):
         return ("%r is a URL (or name @ URL): Kelvin installs a package from PyPI by its name; a maker's download "
                 "goes in files" % text)
-    if re.search(r"[\\/]", text) or text.startswith((".", "~")) or re.search(_A_FILE, text, re.I):
+    if re.search(r"[\\/]", text) or text.startswith((".", "~")) or re.search(_A_FILE, text):
         return path
     if not PACKAGE.match(text):
         return "%r is not a package name with the versions it may have" % text
@@ -119,7 +131,7 @@ def requirement(spec: Any) -> str:
     name @ URL, a path or a file, a marker or a command after ';', a tab, a line break or a character that only looks
     like another."""
     text = spec.strip() if isinstance(spec, str) else ""
-    why = _not_a_package(text)
+    why = not_a_package(text)
     if why:
         raise ValueError(why)
     m = PACKAGE.match(text)
@@ -401,7 +413,7 @@ def _pip(name: str, what: List[str], home: Any, run: Run) -> Dict[str, Any]:
 def install(name: str, packages: List[str], home: Any = None, run: Optional[Run] = None) -> Dict[str, Any]:
     """Install packages from PyPI into an environment, each as requirement() writes it (one argument of uv's list,
     never read by a shell), then record the versions it got."""
-    bad = [_not_a_package(p.strip() if isinstance(p, str) else "") for p in packages]
+    bad = [not_a_package(p.strip() if isinstance(p, str) else "") for p in packages]
     if any(bad):
         raise ValueError("not package names: %s" % "; ".join(b for b in bad if b))
     packages = [requirement(p) for p in packages]
@@ -547,7 +559,7 @@ def needed(text: str) -> Optional[Dict[str, Any]]:
         packages = json.loads(m.group(2)) if m else None
     except ValueError:
         return None
-    if not packages or not all(isinstance(p, str) and PACKAGE.match(p) for p in packages):
+    if not packages or not all(isinstance(p, str) and not not_a_package(p) for p in packages):
         return None
     return {"env": m.group(1), "packages": packages}
 
