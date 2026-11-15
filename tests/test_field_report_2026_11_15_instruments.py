@@ -264,7 +264,7 @@ def test_a_qick_server_registered_where_this_computer_cant_reach_is_said_at_once
     assert "start_server(ns_host='localhost', ns_port=8888, proxy_name='myqick', iface='usb0')" in said
     assert "or with ns_host='192.168.3.1' (qick.pyro_cli: -n 192.168.3.1" in said
     assert "run_on_board" in said and "at every boot" in said
-    assert field_pc.tried == [("192.168.2.99", 41234)]   # one short knock, nothing sent
+    assert field_pc.tried == [("192.168.2.99", 41234)] * 2   # two short knocks (2 s, then 5 s), nothing sent
 
 
 @pytest.mark.parametrize("registered, knocks", [
@@ -363,12 +363,79 @@ def test_the_qick_cards_notes_start_the_server_at_boot_as_qicks_own_files_do_not
     assert argv[:2] == ["/bin/bash", "-c"] and len(argv) == 3
     words = shlex.split(argv[2].replace(";", " ; ").replace("&", " & "))
     at = words.index("pyro4-ns")
-    assert words[at:at + 5] == ["pyro4-ns", "-n", "0.0.0.0", "-p", "8888"]
+    # review of 2026-11-15: no name server on every network of the board's (-n 0.0.0.0, pickle, as root, at every
+    # boot): it listens on the USB network's address, where start_server registers too (its ns_host's)
+    assert words[at:at + 5] == ["pyro4-ns", "-n", "192.168.3.1", "-p", "8888"] and "0.0.0.0" not in unit
     assert "PYRO_SERIALIZERS_ACCEPTED=pickle" in words and words[-2:] == ["wait", "-n"]
     code = words[words.index("python3") + 2]
     call = ast.parse(code).body[1].value
     assert call.func.id == "start_server" and {k.arg: k.value.value for k in call.keywords} == {
-        "ns_host": "localhost", "ns_port": 8888, "proxy_name": "myqick", "iface": "usb0"}
+        "ns_host": "192.168.3.1", "ns_port": 8888, "proxy_name": "myqick"}
+    said = " ".join(boot.split())
+    assert "The Pyro server has no password: anyone who reaches it can run code on the board, as root" in said
+    assert "keeps it listening across reboots" in said and "Keep the board on a private network" in said
+
+
+def test_a_server_this_computer_may_not_reach_is_left_to_pyro_and_its_error_says_why(field_pc):
+    """Review of 2026-11-15: one 2 s connection decided, and a lost packet would have stopped a board that works. Only
+    a private address on none of this computer's networks, beside a name server on one, which takes no connection
+    twice, fails at once; anywhere else Pyro tries, and its error says what Kelvin found."""
+    from labharness import builtin_registry
+    from labharness.adapters import AdapterError
+    from labharness.rfsoc import Qick
+    card = builtin_registry().get("qick/rfsoc")
+    for address, registered in (("qick://192.168.3.1:8888/myqick", ("8.8.4.4", 41234)),   # public: a router
+                                ("qick://10.20.0.9:8888/myqick", ("10.30.0.5", 41234))):  # a name server routed too
+        field_pc.tried.clear()
+        module, _ = board_at(registered)
+        board = Qick("rfsoc", card, address, module)
+        assert board.registered == registered and field_pc.tried == [registered]   # one knock, then Pyro's turn
+        assert "which this computer may not reach: %s takes no connection" % registered[0] in board.doubt
+
+        def refused(**kw):
+            raise pyro_error("CommunicationError", "cannot connect to %s: timed out" % (registered,))
+        module.make_proxy = refused
+        with pytest.raises(AdapterError, match=r"could not reach the QICK server 'myqick' \(cannot connect .*\): the "
+                                               r"board's name server .* which this computer may not reach"):
+            Qick("rfsoc", card, address, module)
+
+
+def test_a_name_server_that_doesnt_answer_a_lookup_is_waited_for_seconds_not_pyros_minute(field_pc, monkeypatch):
+    """Review of 2026-11-15: after a call that had already failed, the name server's lookup could wait Pyro's
+    COMMTIMEOUT (a minute and more) and then say the server wasn't registered. It is waited for LOOKUP_S, and a
+    name server that didn't answer is said so; one that answered without the server, that."""
+    import time
+    from labharness import rfsoc
+    from labharness.drivers import MODULES
+    from labharness.homelab import build_lab
+    from labharness.instrument import InstrumentLost
+    monkeypatch.setattr(rfsoc, "LOOKUP_S", 0.3)
+    module, soc = board_at(("192.168.3.1", 41234))
+    MODULES["qick"] = module
+    inst = build_lab(QICK_LAB).instruments["rfsoc"]
+    soc.fail = pyro_error()
+
+    def slow(ns_host, ns_port, name):
+        time.sleep(5)
+        return ("192.168.3.1", 41234)
+    module.lookup = slow
+    t0 = time.monotonic()
+    with pytest.raises(InstrumentLost, match=r"the board's name server at 192\.168\.3\.1:8888 takes a connection but "
+                                             r"didn't answer within 0\.3 s: the board may be busy or restarting"):
+        inst.write("output", 0)
+    assert time.monotonic() - t0 < 2.0
+
+    def refusing(ns_host, ns_port, name):
+        raise pyro_error("CommunicationError", "connection closed")
+    module.lookup = refusing
+    with pytest.raises(InstrumentLost, match=r"takes a connection but didn't answer \(connection closed\)"):
+        inst.write("output", 0)
+
+    def unknown(ns_host, ns_port, name):
+        raise pyro_error("NamingError", "unknown name: myqick")
+    module.lookup = unknown
+    with pytest.raises(InstrumentLost, match=r"answers, but has no QICK server 'myqick' now"):
+        inst.write("output", 0)
 
 
 # ---------------------------------------------------------------------- item 9: a ZeroMQ instrument, and MACs
