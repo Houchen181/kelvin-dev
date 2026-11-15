@@ -913,6 +913,107 @@ def add_to_config(text: str, items: Sequence[Dict[str, Any]], registry: CardRegi
     return "\n".join(lines[:end] + blocks + lines[end:]) + "\n"
 
 
+def _instruments_block(lines: List[str]) -> Optional[Tuple[int, int]]:
+    """Where a lab config's instruments: block is, as line numbers (its heading, the line after its last entry)."""
+    start = next((i for i, l in enumerate(lines) if re.match(r"^instruments\s*:", l)), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if lines[i] and not lines[i][0].isspace()
+                and not lines[i].startswith("#")), len(lines))
+    return start, end
+
+
+def _entry_lines(text: str, name: str) -> Optional[List[str]]:
+    """One instrument's entry in a lab config text, as its lines (comments and layout as written); None if not there."""
+    lines = text.rstrip("\n").split("\n")
+    block = _instruments_block(lines)
+    if block is None:
+        return None
+    start, end = block
+    indent = None
+    for i in range(start + 1, end):
+        m = re.match(r"^(\s+)(['\"]?)([A-Za-z_]\w*)\2\s*:", lines[i])
+        if not m:
+            continue
+        indent = m.group(1) if indent is None else indent
+        if m.group(1) != indent or m.group(3) != name:
+            continue
+        j = i + 1
+        while j < end and (not lines[j].strip() or len(lines[j]) - len(lines[j].lstrip()) > len(indent)):
+            j += 1
+        while j > i + 1 and not lines[j - 1].strip():
+            j -= 1
+        return lines[i:j]
+    return None
+
+
+def merge_added(text: str, base: str, now: str) -> Tuple[Optional[str], List[str]]:
+    """A person's edit of the lab config (text), made from the file as their editor read it (base), when the file has
+    changed since (now): the instruments added to it meanwhile (Kelvin adding one from a chat, beside the person's open
+    Lab setup) join the person's text as the file has them, and are listed. (None, []) when anything else changed
+    meanwhile, or the person's text has an instrument of that name or at that address already: then the person sees
+    the file as it is and makes their edit again. A field report's QICK board left the lab so: the editor, opened
+    before Kelvin added it, was saved over it."""
+    from .yamlio import load_yaml
+    try:
+        old, new, mine = (load_yaml(s) if s.strip() else {} for s in (base, now, text))
+    except Exception:
+        return None, []
+    if not all(isinstance(d, dict) for d in (old, new, mine)):
+        return None, []
+    was, has, wanted = (d.get("instruments") or {} for d in (old, new, mine))
+    if not all(isinstance(d, dict) for d in (was, has, wanted)):
+        return None, []
+    added = [str(n) for n in has if n not in was]
+    rest = {k: v for k, v in new.items() if k != "instruments"}
+    if not added or rest != {k: v for k, v in old.items() if k != "instruments"} or \
+            {n: e for n, e in has.items() if str(n) not in added} != was:
+        return None, []
+    taken = {instrument_key(e)[0] for e in wanted.values() if isinstance(e, dict)}
+    blocks: List[str] = []
+    for name in added:
+        entry = has[name]
+        lines = _entry_lines(now, name)
+        if name in wanted or not isinstance(entry, dict) or lines is None or \
+                instrument_key(entry)[0] in taken:
+            return None, []
+        blocks += lines
+    lines = text.rstrip("\n").split("\n")
+    block = _instruments_block(lines)
+    if block is None or not isinstance(mine.get("instruments"), dict):   # none in the person's text: theirs as it is
+        return None, []
+    start, end = block
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    merged = "\n".join(lines[:end] + blocks + lines[end:]) + "\n"
+    try:   # the entries as the file has them, in the person's text as theirs are: else (another indent) it is theirs
+        got = load_yaml(merged)
+    except Exception:
+        return None, []
+    if not isinstance(got, dict) or got.get("instruments") != dict(wanted, **{n: has[n] for n in added}) or \
+            {k: v for k, v in got.items() if k != "instruments"} != {k: v for k, v in mine.items() if k != "instruments"}:
+        return None, []
+    return merged, added
+
+
+def config_change_words(base: str, now: str) -> str:
+    """What changed in a lab config between two of its texts, in a few words: the instruments added and taken out, by
+    name; else that an instrument's entry or the lab's own settings changed."""
+    from .yamlio import load_yaml
+
+    def names(text: str) -> set:
+        data = load_yaml(text) if text.strip() else {}
+        entries = data.get("instruments") if isinstance(data, dict) else None
+        return {str(n) for n in entries} if isinstance(entries, dict) else set()
+    try:
+        was, has = names(base), names(now)
+    except Exception:
+        return "it was changed elsewhere"
+    parts = (["%s added" % ", ".join(sorted(has - was))] if has - was else []) + (
+        ["%s taken out" % ", ".join(sorted(was - has))] if was - has else [])
+    return "; ".join(parts) or "an instrument's entry or the lab's own settings changed"
+
+
 def add_names(text: str, names: Dict[str, str]) -> str:
     """A lab config text with the lab's own names for settings (names: name: instrument.parameter) added, keeping
     what is there: a name it has already keeps its meaning."""

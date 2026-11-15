@@ -5724,7 +5724,9 @@
   const KIND_NAME = { "source-meter": "smu", "lock-in": "lockin", "temperature-controller": "tc", "magnet-supply": "magnet",
     "laser": "laser", "laser-driver": "laser", "power-meter": "pm", "preamp": "preamp", "multimeter": "dmm",
     "nanovoltmeter": "nvm", "function-generator": "fg", "voltage-source": "vsrc", "vna": "vna" };
-  const LAB = { cards: [], found: [], scripts: null, scriptsFolder: "" };   // scripts: the last survey, of scripts or LabVIEW
+  // scripts: the last survey, of scripts or LabVIEW; base: the lab config as Set up read it, which a person's edit is of
+  // (a save of an edit made before Kelvin added an instrument from a chat once took that instrument out of the lab)
+  const LAB = { cards: [], found: [], scripts: null, scriptsFolder: "", base: null };
 
   function cardSelect(selected, placeholder) {
     const sel = h("select", { "aria-label": "Card" });
@@ -8058,7 +8060,9 @@
       }
     }
     const editing = document.activeElement && (document.activeElement === $("lab-yaml") || document.activeElement.classList.contains("entry-text"));
-    if (!editing) { $("lab-yaml").value = r.yaml || ""; renderLabConfig(); }
+    // the person's edit, not saved yet, stays as it is (its save says what changed meanwhile: LAB.base)
+    const unsaved = LAB.base !== null && $("lab-yaml").value !== LAB.base;
+    if (!editing && !unsaved) { $("lab-yaml").value = LAB.base = r.yaml || ""; renderLabConfig(); }
   }
 
   async function openLabSetup() {
@@ -8069,7 +8073,8 @@
     showSetup(r.setup, r.unreviewed);
     renderFolders(r.folders || []);
     $("lab-card").replaceWith(Object.assign(cardSelect("", "Card…"), { id: "lab-card" }));
-    $("lab-yaml").value = r.yaml || "";
+    $("lab-yaml").value = LAB.base = r.yaml || "";
+    $("lab-mine").hidden = true;
     LABCFG.open = null;
     $("lab-find").value = LABCFG.find = "";
     renderLabConfig();
@@ -8468,16 +8473,24 @@
     try {
       const r = await api("/api/lab", { body });
       showLabState(r.info, r.name);
+      if (typeof r.yaml === "string") { $("lab-yaml").value = LAB.base = r.yaml; $("lab-mine").hidden = true; renderLabConfig(); }
       const bad = r.health.filter((line) => /FAIL/.test(line));
       $("lab-health").replaceChildren(...r.health.map((line) => h("li", { class: /FAIL/.test(line) ? "bad" : "good" },
         icon(/FAIL/.test(line) ? "warn" : "check"), h("span", {}, line))));
       $("lab-health").hidden = !r.health.length;
-      $("lab-msg").textContent = bad.length ? bad.length + " instrument(s) need attention before use."
+      const kept = (r.kept || []).length ? " Kelvin added " + andList(r.kept) + " while this was open: kept." : "";
+      $("lab-msg").textContent = (bad.length ? bad.length + " instrument(s) need attention before use."
         : body.reviewed && !r.health.length ? "Marked reviewed: Kelvin treats them like your other instruments now."
-        : "Connected to " + r.name + ". Every instrument answered as expected.";
+        : "Connected to " + r.name + ". Every instrument answered as expected.") + kept;
       pollState();
       refreshLabSetup();   // each instrument's row (its Limits…), and the scripts' instruments now in the lab
     } catch (e) {
+      if (e.data && e.data.changed && typeof e.data.yaml === "string") {   // changed since it was opened: never saved over
+        $("lab-mine").querySelector("pre").textContent = body.yaml || "";
+        $("lab-mine").hidden = !body.yaml;
+        $("lab-yaml").value = LAB.base = e.data.yaml;
+        renderLabConfig();
+      }
       $("lab-msg").replaceChildren(h("span", {}, e.message), ...installOffer(e.data && e.data.install));
     } finally { save.disabled = false; }
   }
@@ -10971,7 +10984,8 @@
     $("lab-add-scripts").addEventListener("click", addScripts);
     $("lab-recipes").addEventListener("click", recipesFromScripts);
     $("lab-add").addEventListener("click", addByAddress);
-    $("lab-save").addEventListener("click", () => connectLab({ yaml: $("lab-yaml").value, why: $("lab-change-why").value.trim() }));
+    $("lab-save").addEventListener("click", () => connectLab({ yaml: $("lab-yaml").value, why: $("lab-change-why").value.trim(),
+                                                               base: LAB.base }));
     for (const b of document.querySelectorAll("#lab-view button")) b.addEventListener("click", () => {
       LABCFG.view = b.dataset.view;
       store("lh.labView", LABCFG.view);

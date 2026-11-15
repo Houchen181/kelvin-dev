@@ -623,7 +623,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
         defaults: params changes them for a run), an experiment's actions, and the one approval a person would be
         asked (the lab instruments it opens, the drive ranges it uses, what Kelvin can't check) for that action
         (action; "": its main one). module and python as run_script takes them. Only to see a script's settings, or
-        when the person asks: run_script checks by itself."""
+        when the person asks: run_script checks by itself. It never waits for a run or the queue: beside one, it uses
+        the latest values Kelvin has seen."""
         return outside(rt, "the lab's scripts", rt.check_script(script, params or {}, action, module=module,
                                                                 python=python))
 
@@ -730,7 +731,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
         every output change on it asks the person until they review its limits. An address the scan did not find
         asks the person first. At an address the lab's Special Measure rack has (survey_specialmeasure, or the lab's
         scripts folder), it takes the rack's name, and the rack's limits and ramp rates wait in its review for the
-        person to accept: the result says which; never set them yourself."""
+        person to accept: the result says which; never set them yourself. A run or the queue going on doesn't keep it
+        waiting unless that work uses every instrument, or the GPIB bus of its address."""
         return rt.add_instrument(address, card, name, connection, vars)
 
     @server.tool(annotations=ACT, structured_output=False)
@@ -781,7 +783,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def reconnect_instrument(instrument: str) -> str:
         """Connect an instrument of the lab that could not be connected (lab_status says why), once that is fixed:
         its package installed (install_for_instrument does this by itself), the instrument switched on or plugged in.
-        Connecting changes nothing on it."""
+        Connecting changes nothing on it; it goes beside a run or the queue that doesn't use it, nor its GPIB bus."""
         return rt.reconnect_instrument(instrument)
 
     @server.tool(annotations=ACT, structured_output=False)

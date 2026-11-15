@@ -46,7 +46,8 @@ from ..cards import plot_points, trace_x
 from .. import autocard
 from .. import profiles
 from ..collection import Collection
-from ..discovery import add_to_config, instrument_key, listed as config_lists, set_limits
+from ..discovery import (add_to_config, config_change_words, instrument_key, listed as config_lists, merge_added,
+                         set_limits)
 from ..labconfig import ConfigError, load_lab_config, same_setup
 from .. import carddraft
 from .. import protection
@@ -2955,11 +2956,26 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                     return JSONResponse({"ok": True, "name": runtime.lab.config.name, "info": runtime.lab_info,
                                          "health": [], "unreviewed": [], "versions": [v["n"] for v in made]})
             body, use, by = {"yaml": text}, None, "human (portal, reviewed)"
+        kept: List[str] = []   # instruments added to the file while the person's editor was open, kept in their edit
+        seen: Optional[str] = None   # the file as this save found it: it is written only if still so
         try:
             text = str(body.get("yaml") or "") if use != "mine" else (
                 lab_file.read_text(encoding="utf-8") if lab_file.exists() else "")
             if not text.strip():
                 return error(400, "There is no lab config yet; scan for instruments or write one first.")
+            base = body.get("base")   # the file as the person's editor read it: their edit is of that
+            if use != "mine" and isinstance(base, str):
+                now = await asyncio.to_thread(lambda: lab_file.read_text(encoding="utf-8") if lab_file.exists()
+                                              else "")
+                seen = now
+                if now != base:   # changed since (Kelvin added an instrument from a chat; another window saved)
+                    merged, kept = merge_added(text, base, now)
+                    if merged is None:   # never saved over: a field report's QICK board left the lab so
+                        return JSONResponse({"error": "The lab config changed since you opened it (%s), so your edit "
+                                             "was not saved. The editor shows it as it is now; make your edit again, "
+                                             "then Save and connect." % config_change_words(base, now),
+                                             "yaml": now, "changed": True}, status_code=409)
+                    text = merged
             registry = lab_registry(lab_file.parent, runtime.collection)   # Kelvin's, the collection's, the user's
             load_lab_config(text, registry)   # check it before touching any instrument
             # opened before connecting: the switch closes the old lab's instruments first and keeps the ones
@@ -2967,6 +2983,15 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             lab = await asyncio.to_thread(build_lab, text, None, 0, registry, settings.switched_off, True, True)
             envelope, info = None, {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
             if use != "mine":
+                if seen is not None:   # connecting took a while: one more change meanwhile is never saved over
+                    again = await asyncio.to_thread(lambda: lab_file.read_text(encoding="utf-8")
+                                                    if lab_file.exists() else "")
+                    if again != seen:
+                        await asyncio.to_thread(lab.close)
+                        return JSONResponse({"error": "The lab config changed while Kelvin connected your edit (%s), "
+                                             "so it was not saved. The editor shows it as it is now; make your edit "
+                                             "again, then Save and connect." % config_change_words(seen, again),
+                                             "yaml": again, "changed": True}, status_code=409)
                 tmp = lab_file.with_suffix(".tmp")
                 tmp.write_text(text, encoding="utf-8")
                 tmp.replace(lab_file)
@@ -2986,7 +3011,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if auto_setup:   # give new instruments their folders, settings and manuals
             setup.start("lab changed")
         return JSONResponse({"ok": True, "name": lab.config.name, "info": runtime.lab_info, "health": health,
-                             "unreviewed": lab.config.unreviewed(), "versions": [v["n"] for v in made]})
+                             "unreviewed": lab.config.unreviewed(), "versions": [v["n"] for v in made],
+                             "kept": kept, "yaml": text})
 
     async def lab_install(request: Request) -> Response:
         """POST {env, packages}: install the makers' packages the lab's instruments need, from the Install button

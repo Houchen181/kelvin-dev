@@ -822,6 +822,9 @@ body:not(.incognito) #empty-sub { display: none; }
 .health-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
 .health-list li { display: flex; gap: 8px; align-items: flex-start; }
 .health-list li svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }
+.lab-mine { font-size: 13px; }
+.lab-mine pre { max-height: 220px; overflow: auto; margin: 6px 0 0; padding: 8px; border: 1px solid var(--line, #ddd);
+  border-radius: 6px; white-space: pre; font-size: 12px; }
 .health-list li.good svg { color: var(--ok); }
 .health-list li.bad { color: var(--text); }
 .health-list li.bad svg { color: var(--warn); }

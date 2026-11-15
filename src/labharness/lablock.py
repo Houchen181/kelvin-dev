@@ -14,6 +14,12 @@ looks things up and edits the queue; Stop takes no lock at all.
 
 The field tests found one lock for everything: a run or a queue held every chat's readings, lookups and queue edits
 for its whole length, and the refusal blamed the cable.
+
+Work that drives nothing on instruments the work with the lab doesn't use goes beside it (runtime._beside: adding
+an instrument, connecting one again, trying a card), holding those instruments' own locks: a field report's
+43-hour pressure log on one instrument kept a QICK board on a network of its own out of the lab for two days. It
+never touches an instrument the work said it uses at any point of this hold (declared), and the work waits for it
+(BESIDE_WAIT_S at most, ending at a Stop) before it holds one of that work's instruments again (beside).
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ import time
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 SETTLE_S = 30.0   # the longest work waits, as it starts, for the readings of its instruments under way to finish
+BESIDE_WAIT_S = 60.0   # the longest it waits for work beside it on one of its instruments (a connection being made)
 
 HELD, SLOW = "held", "slow"   # why a reading doesn't go ahead (LabLock.reading)
 
@@ -38,6 +45,12 @@ class LabLock:
         self._now: Tuple[Optional[int], Optional[frozenset]] = (None, None)
         self._buses: Dict[str, threading.RLock] = {}
         self._guard = threading.Lock()
+        # every instrument the owner said it uses since it took the lab (acquire names, only), whatever it holds now:
+        # between a run's steps it holds none (its report written, the queue between items), yet uses them again next
+        self._declared: frozenset = frozenset()
+        self._beside: Dict[str, int] = {}     # the instruments work beside the owner's has now (beside), how often
+        self._beside_cv = threading.Condition()
+        self.stops: Callable[[], int] = lambda: 0   # the lab's count of Stops: a wait for work beside ends at one
 
     # ------------------------------------------------------------------ the work that changes the lab
 
@@ -53,6 +66,10 @@ class LabLock:
         me = threading.get_ident()
         was = self._stack[-1] if self._stack else frozenset()   # free: it held none
         new = None if names is None or was is None else was | frozenset(names)
+        if not self._stack:
+            self._declared = frozenset()
+        if names is not None:
+            self._declared = self._declared | frozenset(names)
         self._stack.append(new)
         self._now = (me, new)
         if was is not None and new != was:
@@ -85,6 +102,7 @@ class LabLock:
             raise RuntimeError("only the work that has the lab's lock says which instruments it uses")
         old = self._stack[-1]
         new = frozenset(names) if old is None else old | frozenset(names)
+        self._declared = self._declared | frozenset(names)
         self._stack[-1] = new
         self._now = (me, new)
         if old is not None and new != old:
@@ -94,6 +112,8 @@ class LabLock:
         finally:
             self._stack[-1] = old
             self._now = (me, old)
+            if old != new:   # it holds again what it held before: never beside work still on one of those
+                self._wait_beside(lambda name: (old is None or name in old) and name not in new)
 
     @contextlib.contextmanager
     def aside(self) -> Iterator[None]:
@@ -114,6 +134,8 @@ class LabLock:
         finally:
             self._stack[-1] = old
             self._now = (me, old)
+            if old != frozenset():   # holding again: never beside work still on one of its instruments
+                self._wait_beside(lambda name: old is None or name in old)
 
     def holds(self, name: str) -> bool:
         """Whether work on another thread holds this instrument now (its own work reads it as it likes)."""
@@ -123,6 +145,48 @@ class LabLock:
     def owner(self) -> Tuple[Optional[int], Optional[frozenset]]:
         """(the thread of the work that has the lock, the instruments it holds: None for all); (None, None): free."""
         return self._now
+
+    def declared(self) -> frozenset:
+        """Every instrument the work that has the lock said it uses since it took it (acquire names, only)."""
+        return self._declared if self._now[0] is not None else frozenset()
+
+    # ------------------------------------------------------------------ work beside the owner's
+
+    @contextlib.contextmanager
+    def beside(self, names: Iterable[str]) -> Iterator[Callable[[str], None]]:
+        """Work beside the work that has the lock (runtime._beside) has these instruments: that work waits for it
+        (BESIDE_WAIT_S at most, ending at a Stop) before it holds one of them, as it takes more of the lab (acquire,
+        only, and back from only or aside). Yields also(name): one more, named as the work goes on (one being
+        added)."""
+        mine: List[str] = []
+
+        def also(name: str) -> None:
+            with self._beside_cv:
+                self._beside[name] = self._beside.get(name, 0) + 1
+                mine.append(name)
+        for name in names:
+            also(name)
+        try:
+            yield also
+        finally:
+            with self._beside_cv:
+                for name in mine:
+                    left = self._beside.get(name, 0) - 1
+                    if left > 0:
+                        self._beside[name] = left
+                    else:
+                        self._beside.pop(name, None)
+                self._beside_cv.notify_all()
+
+    def _wait_beside(self, which: Callable[[str], bool]) -> None:
+        """Wait until no work beside has one of these instruments: BESIDE_WAIT_S at most, and never past a Stop."""
+        end, stops = time.monotonic() + BESIDE_WAIT_S, self.stops()
+        with self._beside_cv:
+            while any(which(name) for name in self._beside):
+                left = end - time.monotonic()
+                if left <= 0 or self.stops() != stops:
+                    return
+                self._beside_cv.wait(min(left, 0.25))
 
     # ------------------------------------------------------------------ readings
 
@@ -150,7 +214,9 @@ class LabLock:
 
     def _settle(self, which: Callable[[str], bool]) -> None:
         """Wait until the readings under way of these instruments have finished: SETTLE_S at most, as a reading that
-        takes longer has an instrument that isn't answering (the work then waits on the connection's own lock)."""
+        takes longer has an instrument that isn't answering (the work then waits on the connection's own lock); and
+        first for work beside on them (_wait_beside)."""
+        self._wait_beside(which)
         with self._guard:
             buses = [bus for name, bus in self._buses.items() if which(name)]
         end = time.monotonic() + SETTLE_S
