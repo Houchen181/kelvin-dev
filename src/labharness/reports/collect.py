@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import yaml
 
 from ..cards import ParamSpec, num, si, trace_x
+from . import numbers
 from .chart import PALETTE, Chart, Series, Table
 from .model import Report, RunPart
 
@@ -51,6 +52,12 @@ def _duration(seconds: Any) -> str:
     if seconds < 5400:
         return "%.1f min" % (seconds / 60)
     return "%.1f h" % (seconds / 3600)
+
+
+def _fit_value(value: Any, err: Any, unit: str) -> str:
+    """A kept fit's value as reports show it (numbers.py); a carrier type (electrons, holes) is a word."""
+    from .. import fitting
+    return fitting.fmt(value, err, unit) if unit in ("electrons", "holes") else numbers.shown(value, err, unit)
 
 
 def _numbers(v: Any) -> bool:
@@ -165,7 +172,7 @@ class Collector:
                        points="%s of %s" % (meta.get("points", len(rows)), meta.get("planned_points", len(rows))),
                        operator=str(meta.get("operator") or "?"), reason=str(meta.get("reason") or ""),
                        plan_text=plan_text)
-        part.assessment = str(analysis.get("assessment") or "")
+        part.assessment = numbers.prose(str(analysis.get("assessment") or ""))   # rounded as reports show
         part.next = str(analysis.get("next") or "")
         part.issues = [str(i) for i in analysis.get("issues") or []]
         part.setup = ["%s %s" % (k, self._show(k, v)) for k, v in (plan.get("setup") or {}).items()]
@@ -314,7 +321,7 @@ class Collector:
         for y, series in by_y.items():
             if len(series) == 1 and not series[0].get("group"):
                 s = series[0]
-                tables.append(Table(["Quantity", "Value"], [[r["name"], str(r["value"])] for r in s["results"]],
+                tables.append(Table(["Quantity", "Value"], [[r["name"], numbers.result(r)] for r in s["results"]],
                                     ("%s vs %s (%s)" % (y, s.get("x") or "", s.get("kind", "")) if s.get("x") else y)
                                     + (", the accepted fit" if s.get("accepted") else "")))
                 continue
@@ -326,7 +333,7 @@ class Collector:
             names = names[:4]
             rows = []
             for s in series[:MAX_GROUPS]:
-                values = {r["name"]: str(r["value"]) for r in s["results"]}
+                values = {r["name"]: numbers.result(r) for r in s["results"]}
                 rows.append([s.get("group") or ""] + [values.get(n, "") for n in names])
             first = series[0]
             tables.append(Table([""] + names, rows, "%s vs %s (%s)" % (y, first.get("x") or "", first.get("kind", ""))))
@@ -378,10 +385,10 @@ class Collector:
                           "; reduced chi-squared %s" % num(chi2) if _numbers(chi2) else ""))
         held = set(f.get("held") or [])
         rows = [["failed", failed]] if failed else []
-        rows += [[str(p), fitting.fmt(v, e, u or "") + (" (held)" if p in held else "")]
+        rows += [[str(p), _fit_value(v, e, u or "") + (" (held)" if p in held else "")]
                  for p, v, e, u in zip(f.get("params") or [], f.get("values") or [], f.get("errors") or [],
                                        f.get("units") or [])]
-        rows += [[str(d.get("name")), fitting.fmt(d.get("value"), d.get("error"), d.get("unit") or "")]
+        rows += [[str(d.get("name")), _fit_value(d.get("value"), d.get("error"), d.get("unit") or "")]
                  for d in f.get("derived") or [] if isinstance(d, dict)]
         if _numbers(chi2):
             rows.append(["reduced chi-squared", num(chi2)])

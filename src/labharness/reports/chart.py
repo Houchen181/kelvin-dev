@@ -7,7 +7,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Sequence, Tuple
 
-from ..cards import si_parts, thin
+from ..cards import thin
+from .numbers import prefixed
 
 PALETTE = ["2a78d6", "eb6834", "1baf7a", "eda100", "e87ba4", "008300", "6250d6", "e34948"]
 FIT = "3c4651"
@@ -83,7 +84,7 @@ def ticks(lo: float, hi: float, n: int = 5) -> List[float]:
 def scale_of(values: Sequence[float], unit: str) -> Tuple[float, str]:
     """One divisor and shown unit for a whole axis (µV for every tick, not a mix of nV and µV)."""
     big = max((abs(v) for v in values), default=0.0)
-    _, factor, shown = si_parts(big, unit) if big else (0, 1.0, unit)
+    factor, shown = prefixed(big, unit) if big else (1.0, unit)   # A/V too: pA/V, never 0.000000000001
     return factor, shown
 
 

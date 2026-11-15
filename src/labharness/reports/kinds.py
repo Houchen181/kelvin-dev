@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import yaml
 
 from ..cards import num
+from . import numbers
 from .chart import Chart, Series, Table
 from .document import Document, Section
 from .model import RunPart
@@ -107,7 +108,8 @@ class Digest:
 
     def key_result(self) -> str:
         r = next((r for r in self.results if not r.get("group")), self.results[0] if self.results else None)
-        return "%s %s" % (r["name"], r["value"]) if r else (_first_sentence(self.assessment) or self.reason or "")
+        return "%s %s" % (r["name"], numbers.result(r)) if r else (_first_sentence(self.assessment) or self.reason
+                                                                    or "")
 
 
 def digest(run_dir: Path) -> Optional[Digest]:
@@ -146,7 +148,8 @@ def digest(run_dir: Path) -> Optional[Digest]:
                   operator=str(meta.get("operator") or "?"), reason=str(meta.get("reason") or ""),
                   project=meta.get("project"), project_name=str(meta.get("project_name") or "General"),
                   device=meta.get("device"), device_name=str(meta.get("device_name") or ""),
-                  assessment=str(analysis.get("assessment") or ""), next=str(analysis.get("next") or ""),
+                  assessment=numbers.prose(str(analysis.get("assessment") or "")),
+                  next=str(analysis.get("next") or ""),
                   issues=[str(i) for i in analysis.get("issues") or []], results=results, ranges=ranges,
                   setup={str(k): v for k, v in (plan.get("setup") or {}).items()}, queue=meta.get("queue"),
                   attributed="project" in meta, lab=str(meta.get("lab") or ""),
@@ -176,7 +179,7 @@ SECONDARY = {"background", "signal / noise", "noise (rms)", "intercept", "drift 
 def _trends(ds: Sequence[Digest], limit: int = 4) -> Tuple[List[Chart], List[str]]:
     """A fitted quantity followed across repeated scans of the same measurement (finished scans only); the main
     results first (centre, width, slope, time constants), not backgrounds or noise."""
-    series: "OrderedDict[Tuple[str, str, str], List[Tuple[datetime, float, str, str]]]" = OrderedDict()
+    series: "OrderedDict[Tuple[str, str, str], List[Tuple[datetime, float, str, Optional[float]]]]" = OrderedDict()
     for d in sorted(ds, key=lambda d: d.started):
         if not d.ok:
             continue
@@ -188,7 +191,7 @@ def _trends(ds: Sequence[Digest], limit: int = 4) -> Tuple[List[Chart], List[str
             if r.get("group") or r.get("num") is None or not math.isfinite(r["num"]) or r["name"] in SECONDARY:
                 continue
             series.setdefault((d.plan, str(r["y"]), str(r["name"])), []).append((when, r["num"], r["unit"],
-                                                                                str(r["value"])))
+                                                                                r.get("err")))
     charts, lines = [], []
     for (plan, y, name), pts in series.items():
         if len(pts) < 2 or len(charts) >= limit:
@@ -199,7 +202,14 @@ def _trends(ds: Sequence[Digest], limit: int = 4) -> Tuple[List[Chart], List[str
         xs = [(t - t0).total_seconds() / scale for t, _, _, _ in pts]
         charts.append(Chart("%s: %s %s" % (plan, y, name), "time since %s" % t0.strftime("%b %d %H:%M").replace(" 0", " "),
                             unit_t, pts[-1][2], [Series(name, xs, [v for _, v, _, _ in pts])], "%d scans" % len(pts)))
-        lines.append("%s, %s %s: %s, then %s (%d scans)." % (plan, y, name, pts[0][3], pts[-1][3], len(pts)))
+        # rounded, the first and last values often read the same: the change says how far it moved
+        (_, first, unit, e0), (_, last, _, e1) = pts[0], pts[-1]
+        err = math.hypot(e0, e1) if all(isinstance(e, (int, float)) and math.isfinite(e) for e in (e0, e1)) \
+            else None
+        scale = numbers.prefixed(max(abs(first), abs(last)), unit)   # the two values in one unit; the change in its own
+        lines.append("%s, %s %s: %s, then %s; a change of %s (%d scans)." % (
+            plan, y, name, numbers.shown(first, e0, unit, scale), numbers.shown(last, e1, unit, scale),
+            numbers.shown(last - first, err, unit), len(pts)))
     return charts, lines
 
 
@@ -421,7 +431,7 @@ def _by_result(ds: Sequence[Digest]) -> Dict[Tuple[str, str, str], Dict[str, str
             continue
         for r in d.results:
             if not r.get("group"):
-                out.setdefault((d.plan, str(r["y"]), str(r["name"])), {})[d.device_name] = str(r["value"])
+                out.setdefault((d.plan, str(r["y"]), str(r["name"])), {})[d.device_name] = numbers.result(r)
     return out
 
 
