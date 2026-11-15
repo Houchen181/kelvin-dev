@@ -10172,8 +10172,8 @@ class LabRuntime:
             lines.append(("MAC %s is %s, in this computer's neighbour table after the sweep%s" % (
                 wanted, ", ".join(lab_at + ["%s (on %s)" % (ip, macs[ip][1]) for ip in at if ip not in in_lab]),
                 ": looked at on every port below" if any(ip not in in_lab for ip in at) else "")) if at else
-                ("No address on %s has MAC %s in this computer's neighbour table after the sweep: the device is off, on "
-                 "a network this computer has no address on (a cable straight to it needs one on its network: the "
+                ("No address on %s has MAC %s in this computer's neighbour table after the sweep: the device is off, "
+                 "on a network this computer has no address on (a cable straight to it needs one on its network: the "
                  "address it was set to says which, 169.254.x.x a link-local one), or behind a router, whose own MAC "
                  "stands for what is behind it" % (", ".join(map(str, nets)) + "".join(
                      ", the link-local %s" % a["network"] for a in near["looked"]) or "no network", wanted)))

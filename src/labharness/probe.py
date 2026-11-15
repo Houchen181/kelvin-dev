@@ -289,9 +289,9 @@ def rpc_identity(found: Dict[str, Any]) -> str:
 
 # ------------------------------------------------------------------ ZeroMQ (ZMTP 3.0), spoken without pyzmq
 
-# A ZeroMQ peer greets a connection at once with a signature: 0xFF, eight bytes of padding, 0x7F (libzmq's padding is its
-# identity's length plus one, as ZMTP 1.0 read it). Then the version, the security mechanism and READY commands, then
-# messages of frames. A field report's IDQ Time Controller answered port 5555 so, which Kelvin showed as one odd
+# A ZeroMQ peer greets a connection at once with a signature: 0xFF, eight bytes of padding, 0x7F (libzmq's padding is
+# its identity's length plus one, as ZMTP 1.0 read it). Then the version, the security mechanism and READY commands,
+# then messages of frames. A field report's IDQ Time Controller answered port 5555 so, which Kelvin showed as one odd
 # character, and its *IDN?, sent as SCPI's text, never came back (2026-11-15).
 ZMTP_SIGNATURE = b"\xff\x00\x00\x00\x00\x00\x00\x00\x01\x7f"
 ZMTP_ASKS = ("REP", "ROUTER")   # the sockets that answer what a REQ socket asks
