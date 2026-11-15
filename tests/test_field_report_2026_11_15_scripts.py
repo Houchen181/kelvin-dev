@@ -413,8 +413,8 @@ def _scripts_lab(tmp_path):
 
 
 def test_kelvin_saves_a_report_in_a_new_subfolder_of_the_scripts_folder(tmp_path):
-    """The field report: write_file of kelvin_reports\\nv_bringup.md was refused. A new subfolder is Kelvin's own: it
-    saves notes, tables and pictures there, and finds it its own after a restart (a marker in it)."""
+    """The field report: write_file of kelvin_reports\\nv_bringup.md was refused. A new folder named kelvin_... is
+    Kelvin's own: it saves notes, tables and pictures there, and finds it its own after a restart (a marker in it)."""
     lab, kw = _scripts_lab(tmp_path)
     target, kept = folderfiles.save(lab, r"kelvin_reports/nv_bringup.md", "# NV bring-up\n", **kw)
     assert target == (lab / "kelvin_reports" / "nv_bringup.md").resolve() and kept is None
@@ -442,8 +442,8 @@ def test_in_the_scripts_folder_kelvin_never_saves_code_nor_in_the_persons_folder
         "kelvin_reports/sweep.vi": "notes, tables", "kelvin_reports/Makefile": "notes, tables",
         "newpkg/__init__.py": "notes, tables", "kelvin_reports/x.pth": "notes, tables",
         # the person's own folders, and the scripts folder itself
-        "report.md": "a new subfolder", "data/odmr.csv": "a new subfolder", "nvpulse/notes.md": "a new subfolder",
-        "tools/README.md": "a new subfolder",
+        "report.md": "named kelvin_", "data/odmr.csv": "named kelvin_", "nvpulse/notes.md": "named kelvin_",
+        "tools/README.md": "named kelvin_",
     }
     for rel, why in refused.items():
         with pytest.raises(folderfiles.FolderError, match="only a person changes it") as e:
@@ -468,6 +468,87 @@ def test_in_the_scripts_folder_kelvin_never_saves_code_nor_in_the_persons_folder
     assert not (lab / "data" / folderfiles.MADE).exists()
 
 
+def test_a_new_folder_of_any_other_name_is_refused(tmp_path):
+    """Review of these fixes, finding 1: a new folder of any name took notes, so cal/offsets.csv, which pulse.py reads
+    when it is there, set the laser power of a script a person had approved as it was; and nidaqmx/ would be a
+    package. Only a folder named kelvin_... (or kelvin-...) is Kelvin's to make, right in the scripts folder, then
+    any folder it made inside one; never one of those names the person made, nor one in the person's folders."""
+    lab, kw = _scripts_lab(tmp_path)
+    script = lab / "pulse.py"
+    script.write_text("import os\n"
+                      "p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cal', 'offsets.csv')\n"
+                      "power_mW = float(open(p).read().split(',')[1]) if os.path.exists(p) else 1.0\n"
+                      "print('laser power', power_mW)\n")
+    before = subprocess.run([sys.executable, str(script)], capture_output=True, text=True).stdout
+    for rel in ("cal/offsets.csv", "nidaqmx/notes.md", "output/notes.md", "kelvin/notes.md", "kelvin_/notes.md",
+                "kelvin_shim/notes.md", "kelvin_api/notes.md", "KELVINreports/notes.md"):
+        with pytest.raises(folderfiles.FolderError, match="no name of Kelvin's") as e:
+            folderfiles.save(lab, rel, "power_mW,80\n", **kw)
+        assert "named kelvin_" in str(e.value) and "only a person changes it" in str(e.value), (rel, str(e.value))
+    assert not (lab / "cal").exists() and not (lab / "nidaqmx").exists()
+    assert subprocess.run([sys.executable, str(script)], capture_output=True, text=True).stdout == before
+    assert "laser power 1.0" in before
+
+    for rel in ("kelvin-notes/odmr.csv", "Kelvin_Reports2/x.md", "kelvin_cal/offsets.csv",
+                "kelvin_reports/day 1/cal/offsets.csv"):   # inside a folder of Kelvin's own: any name
+        folderfiles.save(lab, rel, "power_mW,80\n", **kw)
+    assert subprocess.run([sys.executable, str(script)], capture_output=True, text=True).stdout == before
+    (lab / "kelvin_old").mkdir()                       # a folder so named that the person made: theirs
+    (lab / "data" / "kelvin_cal").mkdir()
+    for rel in ("kelvin_old/x.md", "data/kelvin_cal/x.md", "data/kelvin_new/x.md"):
+        with pytest.raises(folderfiles.FolderError, match="person's own folders"):
+            folderfiles.save(lab, rel, "x\n", **kw)
+    assert not (lab / "data" / "kelvin_new").exists()
+
+
+def test_a_folder_that_appears_while_kelvin_saves_is_never_claimed(tmp_path, monkeypatch):
+    """Review of these fixes, finding 4: a folder a running script made between write_file's check and its mkdir was
+    marked as Kelvin's, and Kelvin then saved among that script's output. Each folder is made by this call or refused,
+    and only one it made is marked."""
+    lab, kw = _scripts_lab(tmp_path)
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *a, **k):   # the person's script makes kelvin_output/ and writes in it, just before Kelvin's mkdir
+        if self.name == "kelvin_output" and not self.exists():
+            real_mkdir(self)
+            (self / "trace.csv").write_text("person's data\n")
+        return real_mkdir(self, *a, **k)
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    with pytest.raises(folderfiles.FolderError, match="appeared while Kelvin was saving"):
+        folderfiles.save(lab, "kelvin_output/notes.md", "x\n", **kw)
+    monkeypatch.setattr(Path, "mkdir", real_mkdir)
+    with pytest.raises(folderfiles.FolderError, match="person's own folders"):
+        folderfiles.save(lab, "kelvin_output/more.csv", "kelvin's\n", **kw)
+    assert folderfiles.made(lab / "kelvin_output") is None
+    assert sorted(p.name for p in (lab / "kelvin_output").iterdir()) == ["trace.csv"]
+
+
+def test_a_file_that_couldnt_be_saved_is_never_listed_as_kelvins(tmp_path, monkeypatch):
+    """Found with the review's probe: a save that failed (AUX.csv, a name Windows keeps for itself) was listed in the
+    folder's mark all the same, so a person's file of that name would have been Kelvin's to replace. And .KELVIN-OLD
+    is .kelvin-old on Windows: no file is saved among the versions Kelvin kept, however it is written."""
+    lab, kw = _scripts_lab(tmp_path)
+    folderfiles.save(lab, "kelvin_reports/a.md", "x\n", **kw)
+    real = os.replace
+
+    def replace(src, dst):
+        if str(dst).endswith("b.md"):
+            raise PermissionError(13, "Permission denied")
+        return real(src, dst)
+    monkeypatch.setattr(os, "replace", replace)
+    with pytest.raises(folderfiles.FolderError, match="could not save"):
+        folderfiles.save(lab, "kelvin_reports/b.md", "x\n", **kw)
+    monkeypatch.setattr(os, "replace", real)
+    assert folderfiles.made(lab / "kelvin_reports") == [os.path.normcase("a.md")]
+    (lab / "kelvin_reports" / "b.md").write_text("the person's\n")
+    with pytest.raises(folderfiles.FolderError, match="didn't save"):
+        folderfiles.save(lab, "kelvin_reports/b.md", "x\n", **kw)
+    assert (lab / "kelvin_reports" / "b.md").read_text() == "the person's\n"
+    for rel in ("kelvin_reports/.KELVIN-OLD/x.md", "kelvin_reports/.Kelvin-Old/a.2026-11-15_101010.md"):
+        with pytest.raises(folderfiles.FolderError, match="the versions Kelvin kept"):
+            folderfiles.save(lab, rel, "x\n", **kw)
+
+
 def test_a_python_environment_in_the_scripts_folder_stays_the_persons(tmp_path):
     lab, kw = _scripts_lab(tmp_path)
     (lab / ".venv").mkdir()
@@ -486,7 +567,9 @@ def test_an_imported_scripts_folder_alike(tmp_path):
     kw = dict(own=[], data=tmp_path / "kelvin-data", kept=[str(script)])
     with pytest.raises(folderfiles.FolderError, match="in the folder of measure.py") as e:
         folderfiles.save(chat, "notes.md", "x\n", **kw)
-    assert "a new subfolder" in str(e.value)
+    assert "named kelvin_" in str(e.value)
+    with pytest.raises(folderfiles.FolderError, match="no name of Kelvin's"):
+        folderfiles.save(chat, "results/notes.md", "x\n", **kw)
     folderfiles.save(chat, "kelvin_reports/notes.md", "x\n", **kw)
     with pytest.raises(folderfiles.FolderError, match="only a person changes it"):
         folderfiles.save(chat, "kelvin_reports/helpers.py", "x = 1\n", **kw)
@@ -500,7 +583,7 @@ def test_a_chat_whose_folder_is_the_scripts_folder_saves_its_report(lab, folder,
     from labharness.web.agent import ChatAgent, WRITE_FILE
     from labharness.web.store import ChatStore
     from test_web import Scripted
-    assert "new subfolder" in WRITE_FILE["description"]
+    assert "named kelvin_" in WRITE_FILE["description"]
     write(folder, "sweep.py", "print('sweep')\n")
     rt = script_runtime(lab, folder, tmp_path)
     provider = Scripted([[{"type": "tool_call", "id": "w1", "name": "write_file",
@@ -527,7 +610,7 @@ def test_a_chat_whose_folder_is_the_scripts_folder_saves_its_report(lab, folder,
             await agent.close()
     asyncio.run(day())
     code, report = [r for m in store.load(chat["id"])["messages"] if m["role"] == "tool" for r in m["results"]]
-    assert code["is_error"] and "new subfolder" in code["content"], code
+    assert code["is_error"] and "named kelvin_" in code["content"], code
     assert not report["is_error"] and "nv_bringup.md" in report["content"], report
     assert not (folder / "fit.py").exists()
     on_disk = Path(folder) / "kelvin_reports" / "nv_bringup.md"

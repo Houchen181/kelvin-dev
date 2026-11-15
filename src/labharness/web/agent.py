@@ -602,8 +602,9 @@ WRITE_FILE = {
                    "kept in .kelvin-old beside it. Only inside that folder, and no programs, batch or PowerShell "
                    "scripts or shortcuts. In the lab's scripts folders (and the folder of a script the person "
                    "imported), which are the person's, it saves only notes, tables and pictures (.md, .txt, .csv, "
-                   ".tsv, .log, .png, .jpg, .svg, .pdf), in a new subfolder of its own (kelvin_reports/report.md, "
-                   "say): never code or settings there, nor anything in the person's own folders. Python code in a "
+                   ".tsv, .log, .png, .jpg, .svg, .pdf), in a folder of its own named kelvin_... "
+                   "(kelvin_reports/report.md, say): never code or settings there, nor in a folder of another name, "
+                   "nor anything in the person's own folders. Python code in a "
                    "folder an instrument's maker's library loads from (the folder in the instrument's lib:// address) "
                    "shows in the chat whole, since it runs on the instrument when it connects.",
     "schema": {"type": "object", "required": ["path", "content"], "properties": {

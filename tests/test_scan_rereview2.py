@@ -53,11 +53,9 @@ def test_the_whole_folder_of_an_imported_script_is_the_persons(tmp_path, scripts
     code = "open(%r, 'w').write('x')\nVALUE = 1\n" % str(ran)
     planted = "cbuiltins\nexec\n(V%s\ntR." % ("open(%r, 'w').write('x')" % str(ran)).replace("\\", "\\u005c")
     package = str(site.relative_to(lab) / "labutil" / "__init__.py")   # in the .venv Kelvin picked for it
-    # (settings even in a new subfolder; since 2026-11-15 a note in a new subfolder of Kelvin's own is fine there, never
-    # in the person's own folders: test_field_report_2026_11_15_scripts.py)
-    for rel, text in [("proj/helpers.py", code), ("proj/sub/x.py", code), ("proj/newpkg/settings.json", "{}"),
+    for rel, text in [("proj/helpers.py", code), ("proj/sub/x.py", code), ("proj/newpkg/notes.txt", "hi\n"),
                       ("proj/settings.json", '{"vmax": 10}'), ("proj/cal.pkl", planted),
-                      ("proj/sub/results.csv", "x,y\n"), (package, code), (".venv/pyvenv.cfg", "home = elsewhere\n"),
+                      ("proj/data/results.csv", "x,y\n"), (package, code), (".venv/pyvenv.cfg", "home = elsewhere\n"),
                       (".venv/notes.txt", "hi\n")]:
         with pytest.raises(folderfiles.FolderError, match="only a person changes it"):
             folderfiles.save(lab, rel, text, **kw)
