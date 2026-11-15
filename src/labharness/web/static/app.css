@@ -823,8 +823,8 @@ body:not(.incognito) #empty-sub { display: none; }
 .health-list li { display: flex; gap: 8px; align-items: flex-start; }
 .health-list li svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }
 .lab-mine { font-size: 13px; }
-.lab-mine pre { max-height: 220px; overflow: auto; margin: 6px 0 0; padding: 8px; border: 1px solid var(--line, #ddd);
-  border-radius: 6px; white-space: pre; font-size: 12px; }
+.lab-mine pre { max-height: 220px; margin: 6px 0 0; padding: 8px; border: 1px solid var(--line, #ddd);
+  border-radius: 6px; white-space: pre; font-size: 12px; }   /* scrolls as a region (data-region) */
 .health-list li.good svg { color: var(--ok); }
 .health-list li.bad { color: var(--text); }
 .health-list li.bad svg { color: var(--warn); }
