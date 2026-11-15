@@ -17,7 +17,8 @@ or one of the lab's own scripts, run as run_script runs it (scriptrun.py), with 
 
 Items can be added at any position, moved, edited or removed while the queue runs; only the item that is running
 is fixed. A person approves the whole queue once, before it starts: every drive range its scans and steps use. A
-script can't be rehearsed, so it asks its own approval when it starts. A scan or step that needs more than was
+script can't be rehearsed, so it asks its own approval when it starts, unless auto mode covers it then, as it
+covers run_script's run (scriptrun.auto_cover). A scan or step that needs more than was
 approved asks again. The queue pauses when an item fails, is declined or stopped, after an item marked then_pause,
 or when Kelvin closes; it never starts by itself.
 The queue is kept per lab in queue.json, next to its runs, with an account of its last run for the morning: what was

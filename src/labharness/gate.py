@@ -743,6 +743,14 @@ class SafetyGate:
             return False, [outside]
         if dry_run is None or not getattr(dry_run, "ok", False):
             return False, ["the dry run did not finish cleanly"]
+        ok, why = self.auto_drives(grants)
+        return (True, why + ["the dry run finished cleanly"]) if ok else (False, why)
+
+    def auto_drives(self, grants: Dict[str, Allowed]) -> Tuple[bool, List[str]]:
+        """Are these drive ranges low-risk enough for auto mode, each on an instrument Kelvin is sure about, with no
+        rate that keeps a drive from getting back to safe and nothing its card lists that they set off? (ok, why: what
+        holds for each, or what doesn't.) What auto mode judges of a plan's drives, and of a script's, which has no dry
+        run (scriptrun.auto_cover)."""
         fine, blockers = [], []
         ranges = {k: sorted(a.values, key=str) if a.values is not None else [a.lo, a.hi] for k, a in grants.items()}
         for key, allowed in grants.items():
@@ -764,7 +772,7 @@ class SafetyGate:
                 blockers.append("%s sets off what its card lists: %s" % (key, "; ".join(tripped)))
         if blockers:
             return False, blockers
-        return True, fine + ["the dry run finished cleanly"]
+        return True, fine
 
     def auto_simple(self, request: ApprovalRequest, why: str, chat: Optional[str] = None) -> bool:
         """Kelvin's own yes to a request that drives nothing (trying a card, adding an instrument at an address,

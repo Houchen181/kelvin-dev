@@ -9,8 +9,9 @@ own connection, as if the agent had sent it. So a script gets what a plan gets:
     before   the script is read, never run (scripts.py): the lab instruments it opens and the drive values it uses
              become one approval by a person, like a plan's; what Kelvin can't check is said there (an instrument not
              in the lab, the Prologix adapter lab instruments are behind, a maker's library that reaches instruments
-             past the gate). A script can't be rehearsed on the twins, so a person approves every run, in auto mode
-             too.
+             past the gate). In auto mode it runs without asking as a plan does, what reading it ahead found standing
+             in for the dry run a script can't have: every drive it sets low-risk, and nothing in it that reaches past
+             the gate (auto_cover). A script Kelvin wrote says so on its card, with its code (kelvin_wrote).
     while    measurements and settings run; drives are checked against the limits, ramped and watched; a change
              beyond what was approved asks the person, and one beyond the limits is refused. A refusal or a person's
              stop ends the script (its own finally: still runs, through the gate); one that does not end is ended.
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import difflib
 import hashlib
 import hmac
 import json
@@ -88,6 +90,16 @@ PAST_THE_LAB = ("ctypes", "_ctypes", "cffi", "_cffi_backend", "subprocess", "mul
                 "win32service", "pythoncom", "pywintypes", "comtypes", "clr", "pythonnet", "usb", "libusb_package",
                 "libusb1", "hid", "ftd2xx", "pyftdi", "pylibftdi")
 PROGRAMS = ("system", "popen", "startfile", "posix_spawn", "posix_spawnp", "fork", "forkpty", "kill", "killpg")
+# what else a script reaches past the gate, which reading it for the lab's addresses misses, for auto mode, which runs a
+# script nobody looked at (auto_cover: _unread_reach): the network's clients (an instrument's web page or REST interface,
+# a server that drives one), device files a script opens itself (a serial port, a USB instrument's usbtmc, a GPIO pin),
+# and code a script puts together as it runs, which nobody can read ahead
+NETWORK = ("requests", "urllib3", "httpx", "aiohttp", "websocket", "websockets", "paramiko", "telnetlib", "ftplib",
+           "smtplib", "socketserver", "asyncssh", "paho", "zmq", "grpc", "pycurl", "httplib2", "vxi11",
+           "urllib.request", "http.client", "http.server", "xmlrpc.client", "xmlrpc.server")
+_DEVICE = re.compile(r"^(?:/dev/(?!(?:null|zero|u?random|full|stdin|stdout|stderr|tty)$|(?:fd|shm|pts)/)\S+|/sys/\S+|"
+                     r"(?:\\\\|//)[.?][\\/](?![A-Za-z]:[\\/]|UNC[\\/])\S+|(?:COM[1-9][0-9]*|LPT[1-9]):?)$", re.I)
+BUILT = ("exec", "eval", "compile", "__import__", "import_module")
 _PLACE = re.compile(r"\{([^{}]*)\}")
 # a script named as python -m names a module: "-m nvpulse", "python -m nvpulse.cli" (its arguments go in args)
 _DASH_M = re.compile(r"^\s*(?:(?:python[\w.]*|py)(?:\.exe)?\s+(?:-[\d.]+\s+)?)?-m\s+(\S+)\s*$", re.I)
@@ -1720,6 +1732,9 @@ class Prepared:
     # folder above its top package; "" and None: a script, run as a file from its own folder
     module: str = ""
     home: Optional[Path] = None
+    # of a script Kelvin wrote: the latest run of it a person approved, and the text that run ran (its script.py),
+    # which its card shows what changed since (the runtime finds it: LabRuntime._approved_before); None: none
+    before: Optional[Tuple[str, str]] = None
 
     @property
     def name(self) -> str:
@@ -1835,9 +1850,69 @@ def prepare(lab: Any, path: str, folders: Sequence[Any], params: Optional[Dict[s
                     beside(script, package=_package_of(module, home)), action, live, module=module, home=home)
 
 
+CODE_LINES = 80   # of a script Kelvin wrote, shown on its card; and of the change since a run a person approved
+# the card's last line: who approves a run (auto mode covers one as it covers a plan, auto_cover)
+SCRIPT_ASKS = ("A script can't be rehearsed on the simulated lab: a person approves each run, unless auto mode is on "
+               "and covers it (every drive it sets low-risk, and nothing in it past the gate); a maker's library it "
+               "loads on the way comes with it, and anything else beyond this asks again, or is refused")
+EXPERIMENT_ASKS = ("A person approves each run of this experiment, unless auto mode is on and covers it as it covers a "
+                   "script; run_script with dry_run rehearses it on the simulated lab first")
+# a card a run auto mode approved asks as it goes, for what the gate can't check that reading it ahead missed
+AUTO_ASKS = "Auto mode approved this run, and covers only what the gate checks: a person says whether it may"
+
+
+def kelvin_wrote(prep: Prepared) -> List[str]:
+    """A card's lines for a script Kelvin wrote (folderfiles.written: its folder's mark lists it; one a person put in
+    a folder of Kelvin's is theirs, and gets none): that Kelvin wrote it, plainly, and what runs, its code up to
+    CODE_LINES; or, when a person approved a run of it before (prep.before), what changed since that run, as a unified
+    diff, as long at most. And the Python files beside it that it imports which Kelvin wrote too. [] for any other
+    script. Asked for 2026-11-15: Kelvin may write a script and run it with run_script, its card the person's say."""
+    from . import folderfiles
+    info = folderfiles.written(prep.path)
+    if info is None:
+        return []
+    where = "%s/%s" % (prep.path.parent.name, prep.path.name)
+    edited = False
+    if info["sha256"] and not prep.version:   # the file's bytes as Kelvin saved them? (a version: its run's text)
+        try:
+            edited = hashlib.sha256(prep.path.read_bytes()).hexdigest() != info["sha256"]
+        except OSError:
+            edited = False
+    head = "Kelvin wrote this script (%s%s)%s" % (where, ", saved %s" % info["at"] if info["at"] else "",
+                                                  ", changed since outside Kelvin" if edited else "")
+    if prep.before is not None:
+        run_id, then = prep.before
+        change = [d for d in difflib.unified_diff(then.splitlines(), prep.source.splitlines(), "run " + run_id, "now",
+                                                  n=2, lineterm="")][2:]
+        if not change:
+            lines = [head + "; the same code as run %s, which a person approved" % run_id]
+        else:
+            lines = [head + "; what changed since run %s, which a person approved:" % run_id]
+            lines += ["  " + d for d in change[:CODE_LINES]]
+            if len(change) > CODE_LINES:
+                lines.append("  … %d more lines of the change (the whole script: %s)" % (len(change) - CODE_LINES,
+                                                                                        prep.path))
+    else:
+        code = prep.source.splitlines()
+        lines = [head + ":"] + ["  " + c for c in code[:CODE_LINES]]
+        if len(code) > CODE_LINES:
+            lines.append("  … %d more lines (the whole script: %s)" % (len(code) - CODE_LINES, prep.path))
+    for m in _local_modules(prep.path, prep.source, prep.home):
+        also = folderfiles.written(m) if m.is_file() else None
+        if also is not None:
+            try:
+                count = len(m.read_text(encoding="utf-8", errors="replace").splitlines())
+            except OSError:
+                count = 0
+            lines.append("It imports %s beside it, which Kelvin wrote too (%d lines%s): the whole file at %s"
+                         % (m.name, count, ", saved %s" % also["at"] if also["at"] else "", m))
+    return lines
+
+
 def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[str, Allowed], List[str]]:
     """The one request a person answers before the script runs, the drive ranges it grants, and refusals (a drive
-    nothing may move now: hands on the sample, an interlock)."""
+    nothing may move now: hands on the sample, an interlock). A script Kelvin wrote says so, with its code or what
+    changed since a run a person approved (kelvin_wrote). In auto mode the run may go without it (auto_cover)."""
     lab = gate.lab
     values, whole, open_lines = prep.drive_values(lab)
     items, grants, problems = gate.plan_approval(values, noun="the script")
@@ -1858,7 +1933,7 @@ def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[st
         head += "; with " + "; ".join(prep.changes)
     if prep.args:
         head += "; arguments: " + " ".join(prep.args)
-    lines = [head]
+    lines = [head] + kelvin_wrote(prep)
     opened = {n: a for n, a in found.instruments.items() if n not in found.named}
     if opened:
         lines.append("It opens %s; every command goes through the safety gate as it is sent" % ", ".join(
@@ -1877,13 +1952,7 @@ def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[st
     if prep.live:
         lines.append("While it runs, these may change (set_live): %s; a change that moves a drive still passes the "
                      "safety gate" % ", ".join(k if v is None else "%s (now %s)" % (k, v) for k, v in prep.live.items()))
-    if found.experiment:
-        lines.append("A person approves each run of a script, this experiment too, in auto mode as well; run_script "
-                     "with dry_run rehearses it on the simulated lab first")
-    else:
-        lines.append("A script can't be rehearsed on the simulated lab, so a person approves each run; a maker's "
-                     "library it loads on the way comes with it, and anything else beyond this asks again, or is "
-                     "refused")
+    lines.append(EXPERIMENT_ASKS if found.experiment else SCRIPT_ASKS)
     return ApprovalRequest("Run script %s?" % prep.name, lines), grants, problems
 
 
@@ -2111,6 +2180,10 @@ class ScriptRun:
         self.pid: Optional[int] = None
         self.bye_at = 0.0     # when its main script said it ended (bye): its process should end soon after
         self.store, self.grants, self.meta, self.folder = store, grants, dict(meta or {}), folder
+        # auto mode approved it, no person (its record's approved: auto_cover): what the gate can't check that its
+        # reading missed asks a person as it comes, as nobody's yes covers it (an address outside the lab it works out
+        # as it runs, a socket too; a maker's library another loads)
+        self.auto = self.meta.get("approved") == "auto mode"
         self.told: List[str] = []   # what its preflight couldn't read (a script that drives nothing): its record's warnings
         # unknown addresses a person allowed, as VISA resources however they are spelled (the approval's serial://COM5
         # is the script's COM5 or ASRL5::INSTR), and makers' libraries, by name
@@ -2823,11 +2896,12 @@ class ScriptRun:
             return {"instrument": name}
         if self.rehearsal:
             raise _Refuse("refused: a rehearsal reaches only the simulated lab, not %s" % address)
-        if canonical(address) in self.allowed or kind == "socket" and not behind(self.lab, address) \
-                and not same_device(self.lab, address):
-            return {}   # a person allowed it, or a socket that reaches no lab instrument
+        if canonical(address) in self.allowed or kind == "socket" and not self.auto \
+                and not behind(self.lab, address) and not same_device(self.lab, address):
+            return {}   # a person allowed it, or a socket that reaches no lab instrument in a run a person approved
         request = ApprovalRequest("Let %s open %s?" % (self.prep.name, address), [
-            "%s opens %s, so it runs as the script wrote it" % (self.prep.name, outside(self.lab, address))])
+            "%s opens %s, so it runs as the script wrote it" % (self.prep.name, outside(self.lab, address))]
+            + [AUTO_ASKS] * self.auto)
         if not self._ask(request):
             raise _Refuse("declined: %s may not open %s%s" % (self.prep.name, address,
                                                                " (%s)" % request.note if request.note else ""))
@@ -2839,7 +2913,8 @@ class ScriptRun:
         """A maker's library the reading missed (one another loads, as pylablib loads pyusb and nidaqmx, or an import
         the script builds): it drives nothing itself, and the run a person approved is what uses it, so Kelvin lets it
         through with the run, in the chat and the record, never waiting for anyone. Not while the run stops, and never
-        in a rehearsal (nobody approved one)."""
+        in a rehearsal (nobody approved one); in a run auto mode approved (self.auto), a person says whether it may, as
+        no person's yes covers it."""
         if self.rehearsal:
             raise _Refuse("refused: a rehearsal reaches only the simulated lab, so it may not use %s" % module)
         if module in self.allowed:
@@ -2848,10 +2923,15 @@ class ScriptRun:
             raise _Refuse("declined: %s may not use %s as it stops" % (self.prep.name, module))
         request = ApprovalRequest("Let %s use %s?" % (self.prep.name, module), [
             "%s imports %s, which reaches instruments without Kelvin seeing the commands: the safety gate can't "
-            "check what it does through it" % (self.prep.name, module)])
-        self.gate.auto_approve(request, ["a maker's library the script loads on the way drives nothing itself; the "
-                                         "person's yes to the run covers what the script does with it"],
-                               "approved with the script's run")
+            "check what it does through it" % (self.prep.name, module)] + [AUTO_ASKS] * self.auto)
+        if self.auto:   # no person's yes to the run: one says whether it may
+            if not self._ask(request):
+                raise _Refuse("declined: %s may not use %s%s" % (self.prep.name, module,
+                                                                 " (%s)" % request.note if request.note else ""))
+        else:
+            self.gate.auto_approve(request, ["a maker's library the script loads on the way drives nothing itself; "
+                                             "the person's yes to the run covers what the script does with it"],
+                                   "approved with the script's run")
         self.allowed.add(module)
         self.through.append(module)
         return {}
@@ -3318,9 +3398,10 @@ ENDED = {"by itself": "it ended by itself", "on Stop": "it ended on Stop", "fail
          "not on Stop": "it did not end on Stop", "stopped by a person": "a person stopped it"}
 
 
-def _reaches_past(source: str) -> Optional[str]:
-    """What in this Python reaches past the simulated lab, in words, or None: a module of PAST_THE_LAB it imports (the
-    standard library's too), or a program it starts through os."""
+def _reaches_past(source: str, where: str = "the simulated lab", skip: Sequence[str] = ()) -> Optional[str]:
+    """What in this Python reaches past the simulated lab (where: or past the gate, for auto mode), in words, or None:
+    a module of PAST_THE_LAB it imports (the standard library's too) but those in skip (said already), or a program it
+    starts through os."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -3331,14 +3412,14 @@ def _reaches_past(source: str) -> Optional[str]:
         if isinstance(node, ast.Import):
             for a in node.names:
                 top = a.name.partition(".")[0]
-                if top in PAST_THE_LAB:
-                    found.append((node.lineno, "it imports %s, which reaches past the simulated lab" % top))
+                if top in PAST_THE_LAB and top not in skip:
+                    found.append((node.lineno, "it imports %s, which reaches past %s" % (top, where)))
                 elif a.name == "os":
                     aliases.add(a.asname or "os")
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
             top = node.module.partition(".")[0]
-            if top in PAST_THE_LAB:
-                found.append((node.lineno, "it imports %s, which reaches past the simulated lab" % top))
+            if top in PAST_THE_LAB and top not in skip:
+                found.append((node.lineno, "it imports %s, which reaches past %s" % (top, where)))
             elif node.module == "os":
                 for a in node.names:
                     if a.name in PROGRAMS or a.name.startswith(("spawn", "exec")):
@@ -3351,6 +3432,48 @@ def _reaches_past(source: str) -> Optional[str]:
     return min(found)[1] if found else None
 
 
+def _unread_reach(source: str, placed: Sequence[str] = ()) -> Optional[str]:
+    """What else in this Python may reach past the gate, which reading it for the lab's addresses misses, in words, or
+    None; for auto mode, which runs a script nobody looked at (auto_cover): code it puts together as it runs (exec,
+    eval, __import__, import_module: BUILT), which nobody can read ahead; a network client (NETWORK); a device file it
+    names (_DEVICE: /dev/usbtmc0, \\\\.\\COM11, a GPIO pin under /sys), but an address reading it found it opens
+    (placed, as canonical has them: a lab instrument's, through the gate, or one outside the lab, said already)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    said = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Expr)}   # a docstring, or a string on its own
+    found: List[Tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) and \
+                isinstance(f.value, ast.Name) and f.value.id == "importlib" else None
+            if name in BUILT:
+                found.append((node.lineno, "it runs code it puts together as it goes (%s), which Kelvin can't read "
+                                           "ahead" % name))
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            else:
+                names = [node.module] + ["%s.%s" % (node.module, a.name) for a in node.names] \
+                    if node.module and not node.level else []
+            hit = next((m for n in names for m in NETWORK if n == m or n.startswith(m + ".")), None)
+            if hit:
+                found.append((node.lineno, "it uses %s, which reaches the network past the gate" % hit))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in said:
+            text = node.value.strip()
+            if len(text) < 200 and _DEVICE.match(text):
+                try:
+                    lab_address = canonical(text) in placed
+                except Exception:
+                    lab_address = False
+                if not lab_address:
+                    found.append((getattr(node, "lineno", 0), "it names the device %s, which a script can open "
+                                                              "past the gate" % text))
+    return min(found)[1] if found else None
+
+
 def rehearsal_problem(prep: Prepared) -> Optional[str]:
     """Why Kelvin won't rehearse this experiment, in words; None when it may. A rehearsal is approved by nobody, so
     it runs only an experiment whose code, and the lab's own modules it imports, reach no further than kelvin.lab and
@@ -3360,22 +3483,75 @@ def rehearsal_problem(prep: Prepared) -> Optional[str]:
                 % tuple(prep.python.version[:2]))
     if prep.found.libraries:
         return "it uses %s, which reaches instruments past the gate" % ", ".join(prep.found.libraries)
+    for text in _texts(prep):
+        why = _reaches_past(text)
+        if why:
+            return why
+    return None
+
+
+def _texts(prep: Prepared) -> List[str]:
+    """The Python a run of this script runs: its own text as it runs, and the lab's own modules it imports beside it
+    (a package's module: every module of its package), as package_files reads them (Python environments left out, a
+    few hundred files at most)."""
     texts = [prep.source]
-    package = _package_of(prep.module, prep.home)   # a package's module: every module of its package too
+    package = _package_of(prep.module, prep.home)
     modules = ([package] if package is not None else []) + _local_modules(prep.path, prep.source, prep.home)
-    for m in modules:   # a package's own files, as package_files reads them: Python environments left out, a few
-        for f in (package_files(m)[0] if m.is_dir() else [m]):   # hundred at most (never a venv inside it)
+    for m in modules:
+        for f in (package_files(m)[0] if m.is_dir() else [m]):
             if _same_path(f, prep.path):
                 continue
             try:
                 texts.append(f.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 continue
-    for text in texts:
-        why = _reaches_past(text)
-        if why:
-            return why
-    return None
+    return texts
+
+
+def auto_cover(gate: Any, prep: Prepared, grants: Dict[str, Allowed],
+               now: bool = True) -> Tuple[bool, List[str]]:
+    """Whether auto mode runs this script without asking a person, as it runs a plan (gate.auto_plan), what reading it
+    ahead found standing in for the dry run a script can't have: the model hasn't read text from outside the lab
+    (gate.outside_reason), every drive it sets is low-risk on an instrument Kelvin is sure of (gate.auto_drives: the
+    plan's own judgement), it does no card action that drives the sample, and nothing in it reaches an instrument past
+    the gate (no address outside the lab, no maker's library, no ctypes, COM or program, no network client, no device
+    file, in it or the lab's modules it imports), and Kelvin could read it ahead (no code it puts together as it runs).
+    As it runs, what the gate can't check that the reading missed (an address it works out then, a maker's library
+    another loads) asks a person (ScriptRun.auto). Asked for 2026-11-15: a script run, Kelvin's own and the lab's alike,
+    is judged by auto mode as a plan is. (covered, why: its reasons for the record, or what keeps auto mode from
+    covering it.) now: only while auto mode is on; check_script asks as if it were."""
+    if now and not gate.auto:
+        return False, []
+    outside = gate.outside_reason()
+    if outside:
+        return False, [outside]
+    from .portholders import port_name
+    found, blockers = prep.found, []
+    blockers += ["it opens %s, outside the lab: auto mode covers only what the gate checks" % (port_name(a) or a)
+                 for a in found.unknown]
+    blockers += ["it uses %s, which reaches instruments past the gate" % m for m in found.libraries]
+    texts = _texts(prep)
+    past = next((w for w in (_reaches_past(t, "the gate", found.libraries) for t in texts) if w), None)
+    if past:
+        blockers.append(past + ": auto mode covers only what the gate checks")
+    placed = set()   # the addresses it opens that reading it found: the lab's, through the gate; the others, said
+    for a in list(found.instruments.values()) + list(found.unknown):
+        try:
+            placed.add(canonical(a))
+        except Exception:
+            continue
+    unread = next((w for w in (_unread_reach(t, placed) for t in texts) if w), None)
+    if unread:
+        blockers.append(unread + ": auto mode covers only what the gate checks")
+    blockers += ["it does %s, which drives the sample: a person starts that" % a for a in found.actions]
+    if any(n.startswith("Kelvin could not read the script ahead") for n in found.notes):
+        blockers.append("Kelvin could not read it ahead, so it can't say what it drives")
+    ok, why = gate.auto_drives(grants)
+    if not ok:
+        blockers += why
+    if blockers:
+        return False, blockers
+    return True, (why or ["it sets no drive away from safe"]) + ["nothing in it reaches an instrument past the gate"]
 
 
 def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: Any = None,

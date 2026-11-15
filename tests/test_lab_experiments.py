@@ -319,11 +319,19 @@ def test_a_run_beyond_auto_modes_reach_is_not_covered(rt_keysight):
     assert "Auto mode does not cover this run" in asked[-1] and not auto_approved(rt, "wide")
 
 
-def test_a_plain_script_still_asks_in_auto_mode(rt_kept, folder):
+def test_a_plain_script_in_auto_mode_is_covered_as_a_plan_is(rt_kept, folder):
+    """Asked for 2026-11-15 ("this should be covered by auto mode"): a plain script's run in auto mode goes without a
+    card when every drive it sets stays within auto's ranges, as a plan's does; beyond them its card asks, saying why."""
+    rt = rt_kept
     write(folder, "sweep.py", SWEEP)
-    rt_kept.gate.auto = True
-    rt_kept.run_script("sweep.py")
-    assert "a person approves each run" in rt_kept.asked[-1]
+    write(folder, "wide.py", SWEEP.replace("VMAX = 1.0", "VMAX = 5.0"))
+    rt.gate.auto = True
+    asked = len(rt.asked)
+    assert "done" in rt.run_script("sweep.py")
+    assert len(rt.asked) == asked and auto_approved(rt, "sweep.py"), rt.asked[asked:]
+    assert "done" in rt.run_script("wide.py")
+    assert "Auto mode does not cover this run: smu.V goes 50%" in rt.asked[-1], rt.asked[-1]
+    assert "a person approves each run" in rt.asked[-1] and not auto_approved(rt, "wide.py")
 
 
 def test_the_queue_rehearses_and_covers_an_approved_experiment(rt_kept):
