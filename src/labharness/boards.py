@@ -1,7 +1,8 @@
 """Boards that run their own software through Jupyter (PYNQ boards for QICK: RFSoC 4x2, ZCU111, ZCU216; a Red Pitaya;
 any lab computer with a notebook server): Kelvin runs code there the way a person runs a notebook cell, once a person
 has approved that code. QICK's Pyro4 name server and server are started this way, from the board's own notebooks
-(qick/pyro4/00_nameserver.ipynb, then 01_server.ipynb), and the board's QICK version is read.
+(qick/pyro4/00_nameserver.ipynb, then 01_server.ipynb), or installed as a service that starts them at every boot (the
+QICK card's notes: a %%bash cell, run as root), and the board's QICK version is read.
 
 It speaks Jupyter's own interfaces: the login page (a password, or a token), /api/contents for a notebook's cells,
 /api/kernels for a fresh Python kernel, and the kernel's websocket for running code and reading what it prints.

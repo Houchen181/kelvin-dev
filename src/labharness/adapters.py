@@ -88,6 +88,30 @@ class Hung(LinkLost):
     anew to go on. lost_kind calls it gone."""
 
 
+class OutOfStep(AdapterError):
+    """An instrument's replies come one behind its questions: its own identity was read where another question's reply
+    should be (a late reply to an earlier *IDN?), and again after Kelvin put it back in step and asked once more
+    (VisaBackend._asked_again). It answers, so it is never taken for a lost instrument (lost_kind: none): the
+    instrument says it as a comms fault in those words (Instrument._io), not a loose cable or noise."""
+
+    def __init__(self, text: str, command: str = "", reply: str = ""):
+        super().__init__(text)
+        self.command, self.reply = command, reply
+
+
+def only_numbers(text: str) -> bool:
+    """Whether a reply is numbers only (a reading, a list of them), which no instrument's identity is."""
+    fields = [f for f in re.split(r"[\s,;]+", str(text).strip()) if f]
+    if not fields:
+        return False
+    try:
+        for f in fields:
+            float(f)
+    except ValueError:
+        return False
+    return True
+
+
 _waits = threading.local()   # this thread's own stop and patience, while it waits on a call (stoppable)
 _running = threading.local()   # on a courier's own thread: the call it makes now (time_left)
 
@@ -566,6 +590,8 @@ def names_device(resource: str) -> bool:
 # a maker's software an instrument is reached through, by its address's scheme: (where, what to check)
 _SOFTWARE = {"qd": ("MultiVu at %s", "is MultiVu running, with its server started?"),
              "zhinst": ("LabOne at %s", "is the LabOne data server running, and the instrument on?"),
+             "qick": ("the board's QICK server (%s)", "is the board on, with its Pyro4 name server and QICK server "
+                                                     "running (a reboot ends both unless they start at boot)?"),
              "picam": ("PICam (camera %s)", "is it on and cabled, and not open in another program (LightField, "
                                             "another Kelvin)?")}
 
@@ -930,6 +956,9 @@ class VisaBackend:
         self.hung_at: Optional[float] = None   # when a call into its driver last didn't return (wall time)
         self._stuck_open: Optional[Courier] = None   # an open that didn't return: none is tried again beside it
         self._sync = (card.idn_query, card.idn_pattern) if card.idn_pattern else None
+        # the identity it last answered as itself, when asked who it is: read where another reply should be, it is a
+        # late reply to an earlier *IDN?, also for a card with no identity pattern (_in_its_place)
+        self.said_as = ""
         self.bus = bus_of(address)
         self._open()
 
@@ -1070,7 +1099,8 @@ class VisaBackend:
                                    "answered %r, its card wants set_reply: \"^%s$\" instead of ack"
                                    % (self.name, answer.strip(), command, self.ack, self.ack, re.escape(self.ack))) from e
             raise
-        if reply != self.ack:
+        if reply != self.ack:   # a reply read in the ack's place may be a late one, the ack behind it: back in step
+            self.owed = True    # before the next command, never one behind from here
             raise AdapterError("%s: %r answered %r instead of %r" % (self.name, command, reply, self.ack))
 
     def _enq_ack(self, command: str) -> None:
@@ -1083,6 +1113,7 @@ class VisaBackend:
                 return
             if reply == "\x15":
                 raise AdapterError("%s refused %r (it answered NAK)" % (self.name, command))
+        self.owed = True   # its <ACK> may still come, behind the lines read: back in step before the next command
         raise AdapterError("%s did not acknowledge %r" % (self.name, command))
 
     def _bus_ok(self) -> None:
@@ -1150,7 +1181,12 @@ class VisaBackend:
         with self.lock:
             self._settle()
             try:
-                return self._query(command)
+                reply = self._query(command)
+                if self._in_its_place(command, reply):
+                    return self._asked_again(command, reply)
+                if self._asks_identity(command) and self._identity_form(reply):
+                    self.said_as = str(reply).strip()
+                return reply
             except UnicodeDecodeError as e:   # bytes, not text: a binary block where the card expects text
                 self.drain()
                 from .cards import BINARY_REPLY
@@ -1158,6 +1194,49 @@ class VisaBackend:
             except Exception as e:
                 self._failed(e)
                 raise
+
+    def _asks_identity(self, command: str) -> bool:
+        """Whether a question asks who it is (*IDN?, its card's identity query), alone or among others (*IDN?;*OPC?)."""
+        own = {"*IDN?", (self._sync[0] if self._sync else "*IDN?").strip().upper()}
+        return any(part.strip().upper() in own for part in str(command).split(";"))
+
+    def _identity_form(self, reply: Any) -> bool:
+        """Whether a reply to a question of who it is is its identity: its card's pattern; with none, IEEE 488.2's
+        four fields (maker, model, serial, firmware), not numbers."""
+        text = str(reply).strip()
+        if self._sync is not None:
+            return bool(re.search(self._sync[1], text, re.I))
+        return len(text.split(",")) >= 4 and not only_numbers(text)
+
+    def _in_its_place(self, command: str, reply: Any) -> bool:
+        """Whether a reply is the instrument's own identity where another question was asked: a late reply to an
+        earlier *IDN? (one that ran out of time: the monitor's, or a check's own on a slow bus), read in this question's
+        place, this one's own reply still to come. By its card's identity pattern, or the identity it last answered as
+        itself (said_as); never for a question of who it is, nor a reply of numbers only (a lab's own card with a loose
+        pattern). Field report 2026-11-15: lockin's SLVL? got 'Stanford_Research_Systems,SR830,s/n81118,ver1.07', and
+        the monitor called it garbled."""
+        text = str(reply).strip()
+        if not text or self._asks_identity(command) or only_numbers(text):
+            return False
+        if self._sync is not None and re.search(self._sync[1], text, re.I):
+            return True
+        return bool(self.said_as) and text == self.said_as
+
+    def _asked_again(self, command: str, stale: str) -> str:
+        """A late identity read in this question's place (_in_its_place): out of step, not garbled. Put back in step
+        (owed: a device clear, then asked who it is until it answers as itself, what is behind that dropped too), then
+        asked once more. Its identity again: OutOfStep, and it is put back in step before its next command too."""
+        log.warning("%s: its identity (%r) came where %s's reply should be, a late reply to an earlier question: put "
+                    "back in step and asked again", self.name, stale.strip()[:60], command.strip())
+        self.owed = True
+        self._settle()
+        reply = self._query(command)
+        if self._in_its_place(command, reply):
+            self.owed = True
+            raise OutOfStep("%s answers out of step: its reply to %s was its own identity (%r) again after Kelvin put "
+                            "it back in step, a late reply to an earlier question read in this one's place"
+                            % (self.name, command.strip(), str(reply).strip()[:60]), command.strip(), str(reply))
+        return reply
 
     def _failed(self, e: BaseException) -> None:
         """An exchange failed. One that ran out of time may still owe its reply (_timed_out). One whose session died
@@ -1284,7 +1363,11 @@ class VisaBackend:
 
     def _ask_identity(self) -> List[str]:
         """Who it is, asked once within SYNC_MS, its replies read until its own: one stale reply in front of it is read
-        off. The replies, its answer last."""
+        off. Then what may still be queued behind its answer is dropped (_drop_behind): the stale reply in front may be
+        an identity too, a late answer to an earlier *IDN? (the monitor's, or this check's own on a slow bus), taken for
+        this one's, whose own then answered the next command (field report 2026-11-15: lockin's SLVL? got
+        'Stanford_Research_Systems,SR830,s/n81118,ver1.07'). A stale reading read off, then nothing in time: its
+        identity is late, the bus slow (a time out), not another instrument there. The replies, its answer last."""
         query, pattern = self._sync
         res, before = self.res, self.res.timeout
         replies: List[str] = []
@@ -1298,9 +1381,14 @@ class VisaBackend:
                     try:
                         replies.append(str(res.read()))
                     except Exception as e:
+                        if timed_out(e) and all(only_numbers(r) for r in replies):
+                            raise   # readings read off, its own identity not yet in: slow, as a time out
                         if timed_out(e):
                             break   # it answered, and nothing more comes: not as itself (said by the caller)
                         raise
+            if re.search(pattern, replies[-1], re.I):
+                self.said_as = replies[-1].strip()
+                self._drop_behind()
         except Exception as e:
             if timed_out(e):
                 self._timed_out()
@@ -1309,6 +1397,17 @@ class VisaBackend:
             if self.res is res:
                 res.timeout = before
         return replies
+
+    def _drop_behind(self) -> None:
+        """What may still be queued behind an answer just read, dropped: a device clear where the bus marks message
+        ends; on a serial line, what comes until it is quiet. A plain socket checked was connected anew, so nothing of
+        before is behind it."""
+        if marks_message_end(self.resource):
+            clear = getattr(self.res, "clear", None)
+            if clear is not None:
+                clear()
+        elif is_serial(self.resource):
+            self._quiet()
 
     def _quiet(self) -> None:
         """A serial line read until nothing more comes (0.3 s), at most 2 s: a late reply's bytes, dropped."""
@@ -1334,7 +1433,11 @@ class VisaBackend:
             try:
                 res.timeout = min(int(before or AFTER_MS), AFTER_MS)
                 self._settle()
-                return str(self._query(command))
+                reply = str(self._query(command))
+                if self._in_its_place(command, reply):   # a late identity, not its error queue: out of step
+                    self.owed = True
+                    return None
+                return reply
             except Exception as e:
                 if timed_out(e):
                     self.owed = True   # cleared before the next command
@@ -1385,7 +1488,7 @@ class VisaBackend:
                 res.timeout = WAIT_SLICE_MS
                 while True:
                     try:
-                        return str(res.read())
+                        reply = str(res.read())
                     except Stopped:   # a person's Stop ended the wait for this slice: the instrument is cleared now
                         with stoppable(lambda: False):   # behind the slice's read (a second at most), never cut short
                             self._abandon()
@@ -1394,6 +1497,10 @@ class VisaBackend:
                         if not timed_out(e):
                             self._failed(e)
                             raise
+                    else:   # a late identity in front of this one's answer (its own still to come): read on past it
+                        if not self._in_its_place(command, reply):
+                            return reply
+                        log.warning("%s: a late identity came before %s's answer: read on past it", self.name, command)
                     if stopped():
                         self._abandon()
                         raise Stopped("%s: stopped by a person while it was still working on %s" % (self.name, command))
@@ -1490,7 +1597,8 @@ class VisaBackend:
                 with long_calls(self.res):
                     values = self.res.query_binary_values(command, datatype=BINARY[number],
                                                           is_big_endian=order.strip() != "little", container=list)
-            except (ValueError, TypeError) as e:
+            except (ValueError, TypeError) as e:   # its header or length didn't read: the rest of it is dropped,
+                self.drain()                        # never read as the next command's reply
                 raise AdapterError("%s: %r did not answer with a block of %s numbers (%s)" % (self.name, command,
                                                                                             number, e)) from e
             except Exception as e:

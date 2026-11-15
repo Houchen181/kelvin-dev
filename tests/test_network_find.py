@@ -1,5 +1,6 @@
 """Finding instruments on the lab's network whose address nobody knows: those that announce themselves, and every
-address of this computer's networks with a port open that instruments or their gateways use, each asked who it is.
+address of this computer's networks with a port open that instruments or their gateways use, each asked who it is and
+listed with its MAC address from this computer's neighbour table, which the sweep fills (field report 2026-11-15).
 A link-local network, too wide to sweep, through this computer's neighbour table and GigE Vision's discovery instead.
 Only looking: one connection per port, *IDN? only where instruments speak SCPI, the lab's own instruments left alone.
 Nothing here touches a real network: a port on this computer, a pretend network, a pretend cable and neighbour table
@@ -48,6 +49,20 @@ Interface: 169.254.10.20 --- 0x7
   239.255.255.250       01-00-5e-7f-ff-fa     static
   255.255.255.255       ff-ff-ff-ff-ff-ff     static
 """
+# Windows' arp -a -N 192.168.77.10 after a sweep of 192.168.77.0/24: every address there that answered on the cable
+NET_ARP = """
+Interface: 192.168.77.10 --- 0x5
+  Internet Address      Physical Address      Type
+  192.168.77.1          00-0c-29-aa-bb-01     dynamic
+  192.168.77.12         00-19-b9-86-81-12     dynamic
+  192.168.77.20         00-19-b9-86-81-30     dynamic
+  192.168.77.31         80-09-02-33-62-2a     dynamic
+  192.168.77.40         00-90-e8-40-40-40     dynamic
+  192.168.77.45         00-50-c2-45-45-45     dynamic
+  192.168.77.55         00-90-e8-55-55-55     dynamic
+  192.168.77.255        ff-ff-ff-ff-ff-ff     static
+"""
+READ: list = []   # the neighbour tables read, by their commands (the network fixture's)
 
 
 class Cable:
@@ -310,7 +325,9 @@ def network(monkeypatch):
         [("TCPIP0::192.168.77.31::hislip0::INSTR", "network (mDNS)")], []))
     monkeypatch.setattr(discovery, "identify", identify)
     monkeypatch.setattr(probe, "_udp", lambda: pytest.fail("a GigE Vision broadcast with no link-local network"))
-    monkeypatch.setattr(probe, "_run_text", lambda command: pytest.fail("this computer's neighbour table was read"))
+    READ.clear()
+    monkeypatch.setattr(probe, "WIN", True)
+    monkeypatch.setattr(probe, "_run_text", lambda command: READ.append(command) or NET_ARP)
     return touched
 
 
@@ -332,7 +349,8 @@ def cable(network, monkeypatch):
     asked = []
     monkeypatch.setattr(probe, "_connect", connect)
     monkeypatch.setattr(probe, "_udp", lambda: udp)
-    monkeypatch.setattr(probe, "_run_text", lambda command: asked.append(command) or ARP)
+    monkeypatch.setattr(probe, "_run_text", lambda command: asked.append(command) or (
+        ARP if OWN_LINK in command else NET_ARP))
     monkeypatch.setattr(probe, "WIN", True)
     monkeypatch.setattr(probe, "network_adapters", lambda: [
         {"name": "Ethernet", "address": OWN, "network": NET, "link_local": False},
@@ -354,6 +372,8 @@ def test_kelvin_finds_instruments_on_the_network(network, tmp_path):
     srs = next(ln for ln in lines if ln.startswith("- 192.168.77.20:"))
     assert "answers 'Stanford_Research_Systems,SR830,s/n86813,ver1.07' → card srs/sr830" in srs
     assert "add_instrument TCPIP0::192.168.77.20::5025::SOCKET" in srs
+    assert srs.endswith("; MAC 00:19:b9:86:81:30")      # who it is, should its address change (DHCP, a reset)
+    assert READ == [["arp", "-a", "-N", OWN]]            # the table, read once, after the sweep filled it
     gen = next(ln for ln in lines if ln.startswith("- 192.168.77.31:"))
     assert "TCPIP0::192.168.77.31::hislip0::INSTR answers 'Keysight Technologies,33622A" in gen
     assert "draft_card TCPIP0::192.168.77.31::hislip0::INSTR" in gen
@@ -386,7 +406,7 @@ def test_kelvin_finds_what_is_on_a_link_local_cable_without_sweeping_it(cable, n
     assert lines[0].endswith(", the link-local 169.254.0.0/16 (Ethernet 2) without sweeping and for instruments that "
                              "announce themselves: 9 addresses answered")
     assert udp.sent == [(probe.GVCP_DISCOVERY, ("255.255.255.255", 3956))] and udp.bound == (OWN_LINK, 0)
-    assert asked == [["arp", "-a", "-N", OWN_LINK]]
+    assert asked == [["arp", "-a", "-N", OWN_LINK], ["arp", "-a", "-N", OWN]]   # the cable's; the swept network's
 
     camera = next(ln for ln in lines if ln.startswith("- 169.254.12.34:"))
     assert camera == ("- 169.254.12.34: GigE Vision camera Princeton Instruments PyLoN-IR 1024-1.7, serial X045418024 "
@@ -394,7 +414,7 @@ def test_kelvin_finds_what_is_on_a_link_local_cable_without_sweeping_it(cable, n
                       "scan_instruments lists it (picam://<serial>), not a network search")
     srs = next(ln for ln in lines if ln.startswith("- 169.254.7.7:"))
     assert "answers 'Stanford_Research_Systems,SR830,s/n86813,ver1.07' → card srs/sr830" in srs
-    assert "add_instrument TCPIP0::169.254.7.7::5025::SOCKET" in srs
+    assert "add_instrument TCPIP0::169.254.7.7::5025::SOCKET" in srs and srs.endswith("; MAC 00:11:22:33:44:55")
     assert "TCPIP0::169.254.7.7::5025::SOCKET" in rt.last_found
     assert "- 169.254.9.9: in this computer's neighbour table on Ethernet 2 (MAC 00:aa:bb:cc:dd:ee); answers none of " \
            "the ports instruments use" in lines
@@ -411,8 +431,8 @@ def test_kelvin_finds_what_is_on_a_link_local_cable_without_sweeping_it(cable, n
 
     udp.sent.clear()
     asked.clear()
-    rt.find_on_network("192.168.77.16/28")   # a range named: that range only
-    assert not udp.sent and not asked
+    rt.find_on_network("192.168.77.16/28")   # a range named: that range only, the cable not looked at
+    assert not udp.sent and asked == [["arp", "-a", "-N", OWN]]
 
 
 def test_a_range_the_person_names_and_one_kelvin_refuses(network, tmp_path):
@@ -423,6 +443,7 @@ def test_a_range_the_person_names_and_one_kelvin_refuses(network, tmp_path):
     said = rt.find_on_network("192.168.77.16/28")      # .17 to .30: only the SR830 is there
     assert said.splitlines()[0] == "Looked on 192.168.77.16/28 (ports %s): 1 address answered" % " ".join(
         map(str, probe.SWEEP_PORTS))
+    assert said.splitlines()[1].endswith("; MAC 00:19:b9:86:81:30")   # the range's own, from the table
     assert not [t for t in network if t[1] == "visa"]   # a named range: no announcements asked for
 
 

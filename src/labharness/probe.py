@@ -3,10 +3,11 @@ computer (USB devices, serial ports and network adapters, also those no driver c
 drivers are installed, and where their files are.
 
 Everything here only looks. On the network it reads what a port says by itself, asks *IDN? on the ports instruments
-use for SCPI, and loads a web page's title; it looks only at addresses on local networks, never the internet. A
-link-local network (169.254.x.x), too wide to sweep, it doesn't sweep: it reads this computer's neighbour table there
-and sends GigE Vision's discovery broadcast, which cameras answer with who they are. On a serial port it listens
-first, then asks only an identity query, at the speeds and framings instruments use."""
+use for SCPI (as a ZeroMQ request where a port greets as ZeroMQ does), and loads a web page's title; it looks only at
+addresses on local networks, never the internet. A link-local network (169.254.x.x), too wide to sweep, it doesn't
+sweep: it reads this computer's neighbour table there and sends GigE Vision's discovery broadcast, which cameras answer
+with who they are. On a serial port it listens first, then asks only an identity query, at the speeds and framings
+instruments use."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -17,6 +18,7 @@ import os
 import re
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import time
@@ -215,7 +217,10 @@ def probe_port(ip: str, port: int, how: str, seconds: float = 0.8, connect: Opti
             if said:
                 out["banner"] = _clean(said)
         elif how == "idn":
-            said = _read(sock, 0.3, 4096)   # some greet first
+            said = _zmtp_whole(sock, _read(sock, 0.3, 4096))   # some greet first; ZeroMQ greets as soon as it can
+            if zmtp_signature(said):   # asked as a ZeroMQ request instead, never sent SCPI's text it can't read
+                out["zmq"] = zmtp_ask(sock, "*IDN?", seconds + 0.7, said)
+                return out
             if said:
                 out["banner"] = _clean(said)
             sock.sendall(b"*IDN?\n")
@@ -225,7 +230,10 @@ def probe_port(ip: str, port: int, how: str, seconds: float = 0.8, connect: Opti
         elif how == "jsonrpc":   # attocube's JSON-RPC asked who it is; a web server here (Jupyter) read as one
             out.update(rpc_answer(_ask_rpc(sock, seconds + 0.7)))
         elif how == "any":   # a port the person named: what it says by itself, else its answer to *IDN?
-            said = _read(sock, seconds, 4096)
+            said = _zmtp_whole(sock, _read(sock, seconds, 4096))
+            if zmtp_signature(said):
+                out["zmq"] = zmtp_ask(sock, "*IDN?", seconds + 0.7, said)
+                return out
             if said:
                 out["banner"] = _clean(said)
             else:
@@ -277,6 +285,179 @@ def rpc_answer(data: bytes) -> Dict[str, Any]:
 def rpc_identity(found: Dict[str, Any]) -> str:
     """The identity a card is matched to, for a JSON-RPC controller that said what it is ('' for one that didn't)."""
     return "attocube,%s" % found["device"] if found.get("device") else ""
+
+
+# ------------------------------------------------------------------ ZeroMQ (ZMTP 3.0), spoken without pyzmq
+
+# A ZeroMQ peer greets a connection at once with a signature: 0xFF, eight bytes of padding, 0x7F (libzmq's padding is
+# its identity's length plus one, as ZMTP 1.0 read it). Then the version, the security mechanism and READY commands,
+# then messages of frames. A field report's IDQ Time Controller answered port 5555 so, which Kelvin showed as one odd
+# character, and its *IDN?, sent as SCPI's text, never came back (2026-11-15).
+ZMTP_SIGNATURE = b"\xff\x00\x00\x00\x00\x00\x00\x00\x01\x7f"
+ZMTP_ASKS = ("REP", "ROUTER")   # the sockets that answer what a REQ socket asks
+ZMTP_MOST = 65536               # the longest frame read: an identity is a line, not a block
+ZMTP_FRAMES = 16                # the most frames read for one reply
+
+
+class _ZmtpStop(Exception):
+    """A ZeroMQ exchange that can't go on: the peer closed it, the time is up, or it sent what ZMTP doesn't."""
+
+
+def zmtp_signature(data: bytes) -> bool:
+    """Whether the first bytes a port sent are a ZeroMQ greeting's signature: 0xFF, eight bytes, 0x7F."""
+    return len(data) >= 10 and data[0] == 0xFF and data[9] == 0x7F
+
+
+def _zmtp_whole(sock: socket.socket, said: bytes) -> bytes:
+    """What a port said by itself, with the rest of a ZeroMQ signature it began (0xFF, in a packet of its own) read."""
+    if said[:1] == b"\xff" and len(said) < 10:
+        said += _read(sock, 0.3, 10 - len(said))
+    return said
+
+
+def _zmtp_frame(flags: int, body: bytes) -> bytes:
+    """One ZMTP frame: its flags (MORE 0x01, COMMAND 0x04), its size (one byte, or eight as LONG 0x02), its body."""
+    if len(body) < 256:
+        return bytes([flags, len(body)]) + body
+    return bytes([flags | 0x02]) + struct.pack(">Q", len(body)) + body
+
+
+def _zmtp_command(name: bytes, properties: List[Tuple[bytes, bytes]]) -> bytes:
+    """A ZMTP command frame: its name, then each property as its name and its value (READY's Socket-Type)."""
+    body = bytes([len(name)]) + name + b"".join(bytes([len(k)]) + k + struct.pack(">I", len(v)) + v
+                                                for k, v in properties)
+    return _zmtp_frame(0x04, body)
+
+
+def _zmtp_parts(body: bytes) -> Tuple[bytes, bytes]:
+    """A command's name and what follows it."""
+    if not body or len(body) < 1 + body[0]:
+        raise _ZmtpStop("it sent a command ZMTP doesn't have")
+    return body[1:1 + body[0]], body[1 + body[0]:]
+
+
+def _zmtp_properties(data: bytes) -> Dict[str, str]:
+    """A READY command's properties (Socket-Type, Identity...), as far as they are whole."""
+    out: Dict[str, str] = {}
+    i = 0
+    while i < len(data):
+        n = data[i]
+        if i + 1 + n + 4 > len(data):
+            break
+        name = data[i + 1:i + 1 + n].decode("ascii", "replace")
+        size = struct.unpack(">I", data[i + 1 + n:i + 5 + n])[0]
+        out[name] = data[i + 5 + n:i + 5 + n + size].decode("utf-8", "replace")
+        i += 5 + n + size
+    return out
+
+
+def zmtp_ask(sock: socket.socket, query: str = "*IDN?", seconds: float = 1.5, said: bytes = b"") -> Dict[str, Any]:
+    """Ask a ZeroMQ instrument one question (who it is) as a REQ socket does, without pyzmq (ZMTP 3.0, no security:
+    mechanism NULL), on a connection it greeted (said: what it sent so far). The greetings are exchanged (signature and
+    version, then the rest), each side sends READY (this one's Socket-Type REQ), and only a REP or ROUTER is asked: an
+    empty delimiter frame, then the question. Its reply's frames are read, short or long, commands it sends meanwhile
+    passed over. Never more than `seconds` in all, nor a frame longer than ZMTP_MOST. Returns {version, socket: its
+    socket type, reply: what it said} or, where it went no further, {error: why}."""
+    end = time.monotonic() + seconds
+    buf = bytearray(said)
+    out: Dict[str, Any] = {}
+
+    def need(n: int) -> bytes:   # exactly n bytes from the peer
+        while len(buf) < n:
+            left = end - time.monotonic()
+            if left <= 0:
+                raise _ZmtpStop("it sent nothing more within %.1f s" % seconds)
+            sock.settimeout(left)
+            try:
+                chunk = sock.recv(min(ZMTP_MOST, max(4096, n - len(buf))))
+            except socket.timeout:
+                raise _ZmtpStop("it sent nothing more within %.1f s" % seconds)
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):   # Windows' word for a close
+                raise _ZmtpStop("it closed the connection")
+            except OSError as e:
+                raise _ZmtpStop("its connection ended (%s)" % e)
+            if not chunk:
+                raise _ZmtpStop("it closed the connection")
+            buf.extend(chunk)
+        got = bytes(buf[:n])
+        del buf[:n]
+        return got
+
+    def frame() -> Tuple[int, bytes]:
+        flags = need(1)[0]
+        if flags & 0xF8:
+            raise _ZmtpStop("it sent a frame ZMTP doesn't have (flags 0x%02x)" % flags)
+        size = struct.unpack(">Q", need(8))[0] if flags & 0x02 else need(1)[0]
+        if size > ZMTP_MOST:
+            raise _ZmtpStop("it sent a frame of %d bytes, not an answer to who it is" % size)
+        return flags, need(size)
+
+    def refused(data: bytes) -> str:
+        reason = data[1:1 + data[0]].decode("utf-8", "replace") if data else ""
+        return "it refused the connection%s" % (": " + _clean(reason.encode("utf-8"), 120) if reason else "")
+    try:
+        if not zmtp_signature(need(10)):
+            raise _ZmtpStop("its greeting isn't ZeroMQ's")
+        sock.sendall(ZMTP_SIGNATURE + b"\x03")   # this side's signature and major version: 3
+        major = need(1)[0]
+        out["version"] = "%d" % major
+        if major < 3:
+            raise _ZmtpStop("it speaks an older ZeroMQ (ZMTP revision %d, before 3.0), which Kelvin's look doesn't"
+                            % major)
+        sock.sendall(b"\x00" + b"NULL".ljust(20, b"\x00") + b"\x00" + bytes(31))   # 3.0, NULL, not as server, filler
+        rest = need(53)
+        out["version"] = "%d.%d" % (major, rest[0])
+        mechanism = rest[1:21].rstrip(b"\x00").decode("ascii", "replace")
+        if mechanism != "NULL":
+            raise _ZmtpStop("it wants ZeroMQ's %s security, which Kelvin's look doesn't speak" % mechanism)
+        sock.sendall(_zmtp_command(b"READY", [(b"Socket-Type", b"REQ"), (b"Identity", b"")]))
+        properties: Optional[Dict[str, str]] = None
+        while properties is None:
+            flags, body = frame()
+            if not flags & 0x04:
+                raise _ZmtpStop("it sent a message before its READY")
+            name, data = _zmtp_parts(body)
+            if name == b"ERROR":
+                raise _ZmtpStop(refused(data))
+            if name == b"READY":
+                properties = _zmtp_properties(data)
+        out["socket"] = kind = properties.get("Socket-Type", "")
+        if kind not in ZMTP_ASKS:   # nothing is asked of a socket that takes no requests (PUB, PUSH...)
+            raise _ZmtpStop("its socket is %s, which takes no questions: Kelvin asked it nothing" % (kind or "unnamed"))
+        sock.sendall(_zmtp_frame(0x01, b"") + _zmtp_frame(0x00, query.encode("ascii")))
+        parts: List[bytes] = []
+        while True:
+            flags, body = frame()
+            if flags & 0x04:   # a command meanwhile (PING): passed over, unless it ends the connection
+                name, data = _zmtp_parts(body)
+                if name == b"ERROR":
+                    raise _ZmtpStop(refused(data))
+                continue
+            parts.append(body)
+            if not flags & 0x01:
+                break
+            if len(parts) >= ZMTP_FRAMES:
+                raise _ZmtpStop("its reply went on past %d frames" % ZMTP_FRAMES)
+        if parts and parts[0] == b"":   # the empty delimiter in front of a REP's reply
+            parts = parts[1:]
+        out["reply"] = _clean(b" | ".join(parts), 200)   # a reply of several frames: each shown
+    except _ZmtpStop as e:
+        out["error"] = str(e)
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):   # sending, to a peer that closed
+        out["error"] = "it closed the connection"
+    except OSError as e:   # sending: the connection ended
+        out["error"] = "its connection ended (%s)" % e
+    return out
+
+
+def zmtp_words(z: Dict[str, Any]) -> str:
+    """What a ZeroMQ port's answer says, in words (zmtp_ask's)."""
+    if z.get("reply"):
+        return "a ZeroMQ (REQ) instrument; it says: %s" % z["reply"]
+    if z.get("socket") and z["socket"] not in ZMTP_ASKS:
+        return "a ZeroMQ instrument whose socket is %s, which takes no questions: Kelvin asked it nothing" % z["socket"]
+    return "a ZeroMQ instrument%s" % (" (asked who it is as a REQ socket asks: %s)" % z["error"] if z.get("error")
+                                      else ", which said nothing to *IDN?")
 
 
 def lxi_identity(ip: str, connect: Optional[Connect] = None, seconds: float = 1.5) -> Dict[str, str]:
@@ -417,6 +598,8 @@ def identify_host(ip: str, ports: Iterable[int], seconds: float = 0.8, connect: 
 def what_answers(f: Dict[str, Any]) -> str:
     """One port's finding in words, with what it likely is."""
     port, bits = f["port"], []
+    if f.get("zmq") is not None:   # not SCPI over a socket, whatever usually answers there
+        return "port %d: %s. Kelvin has no card or connection for ZeroMQ instruments yet" % (port, zmtp_words(f["zmq"]))
     if f.get("jsonrpc"):
         bits.append("answers attocube's JSON-RPC: %s" % ("it is an %s" % f["device"] if f.get("device") else
                                                          "not a cryostat controller (it said %r)" % f.get("rpc_error")))
@@ -555,9 +738,10 @@ def look_on_link_local(adapters: Iterable[Dict[str, Any]], skip: Iterable[str] =
     """What is on this computer's link-local networks, found without sweeping them: on each, the GigE Vision cameras
     that answer a discovery broadcast from this computer's address there, then the addresses in its neighbour table
     there (the cameras' answers put them in it too). {looked: [the adapters], cameras: [...], hosts: {ip: how it was
-    found}, problems: [...]}: hosts are the addresses on those networks, except skip, to look at as any other."""
+    found}, problems: [...], macs: {ip: (mac, adapter)}}: hosts are the addresses on those networks, except skip, to
+    look at as any other."""
     left_out = set(skip)
-    out: Dict[str, Any] = {"looked": [], "cameras": [], "hosts": {}, "problems": []}
+    out: Dict[str, Any] = {"looked": [], "cameras": [], "hosts": {}, "problems": [], "macs": {}}
     for a in adapters:
         net = ipaddress.ip_network(a["network"], strict=False)
         if not (a.get("link_local") or net.is_link_local):
@@ -579,9 +763,49 @@ def look_on_link_local(adapters: Iterable[Dict[str, Any]], skip: Iterable[str] =
             table = {}
             out["problems"].append("This computer's neighbour table for %s could not be read (%s)" % (a["name"], e))
         for ip, mac in table.items():
+            out["macs"].setdefault(ip, (mac, a["name"]))   # {ip: (mac, adapter)}, as macs_on's
             if ip not in left_out:
                 out["hosts"].setdefault(ip, "in this computer's neighbour table on %s (MAC %s)" % (a["name"], mac))
     return out
+
+
+def mac_of(text: str) -> Optional[str]:
+    """A MAC address as the neighbour table gives it (70:b3:d5:65:78:cf), from the way a label, a front panel or a
+    maker's program writes it: 70-B3-D5-65-78-CF, 70:b3:d5:65:78:cf, 70b3.d565.78cf, 70B3D56578CF; None for anything
+    else (a network, an address)."""
+    t = str(text or "").strip().lower()
+    if not (re.fullmatch(r"([0-9a-f]{2}[:-]){5}[0-9a-f]{2}", t) or re.fullmatch(r"([0-9a-f]{4}\.){2}[0-9a-f]{4}", t)
+            or re.fullmatch(r"[0-9a-f]{12}", t)):
+        return None
+    digits = re.sub(r"[^0-9a-f]", "", t)
+    return ":".join(digits[i:i + 2] for i in range(0, 12, 2))
+
+
+def macs_on(adapters: Iterable[Dict[str, Any]], nets: Iterable[ipaddress.IPv4Network],
+            run: Optional[Callable[[List[str]], str]] = None) -> Tuple[Dict[str, Tuple[str, str]], List[str]]:
+    """The MAC addresses this computer's neighbour table has for these networks, after a sweep: its connections put
+    every address there that answered on the cable in it, a port open or not. {ip: (mac, the adapter's name)}, and the
+    problems reading it. Only the adapters whose networks the sweep was on are read (link-local ones are
+    look_on_link_local's): a range behind a router is none of them, and the router's own MAC stands for all of it."""
+    nets = list(nets)
+    out: Dict[str, Tuple[str, str]] = {}
+    problems: List[str] = []
+    for a in adapters:
+        try:
+            net = ipaddress.ip_network(a["network"], strict=False)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if a.get("link_local") or net.is_link_local or not any(net.overlaps(n) for n in nets):
+            continue
+        try:
+            table = neighbours(a, run)
+        except (OSError, subprocess.SubprocessError) as e:
+            problems.append("This computer's neighbour table for %s could not be read (%s)" % (a.get("name"), e))
+            continue
+        for ip, mac in table.items():
+            if any(ipaddress.ip_address(ip) in n for n in nets):
+                out.setdefault(ip, (mac, a.get("name") or ""))
+    return out, problems
 
 
 def gige_line(cam: Dict[str, str]) -> str:

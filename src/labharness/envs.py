@@ -36,8 +36,17 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 DRIVERS = "drivers"   # the environment Kelvin's built-in vendor drivers import from, inside the app
 UV_RELEASE = "https://github.com/astral-sh/uv/releases/latest/download/"
 NAME = re.compile(r"^[a-z][a-z0-9_-]{0,40}$")
-# a package as pip names it, with extras and a version if wanted: qick, qick==0.2.436, zhinst-core>=24.1
-PACKAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?\s*((==|>=|<=|~=|!=|<|>)\s*[A-Za-z0-9.*+!_-]+)?$")
+# A package from PyPI as pip and uv take it (PEP 508 without a URL or a marker): its name, extras if wanted, and the
+# versions it may have, PEP 440's clauses separated by commas, PEP 508's plain spaces between the parts allowed: qick,
+# qick==0.2.436, numpy>=2.1,<2.3, qick[full]~=0.2, pkg===1.0+local, pyvisa (>=1.13, <2). A field report's
+# numpy>=2.1,<2.3 was refused, the pattern taking one clause (2026-11-15). Only these characters, so nothing in it is an
+# option, a URL or a path to uv (requirement() says which a refused one is)
+_PKG_NAME = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+_CLAUSE = r"(?:===|==|!=|~=|>=|<=|<|>) *[A-Za-z0-9._*+!-]+"
+_CLAUSES = r"%s(?: *, *%s)*" % (_CLAUSE, _CLAUSE)
+_A_FILE = r"\.(?:whl|zip|tar|gz|tgz|bz2|xz|egg)\Z"   # pkg-1.0-py3-none-any.whl: a file uv would look for here
+PACKAGE = re.compile(r"^(?!.*%s)(%s) *(?:\[ *(%s(?: *, *%s)*)? *\])? *(\( *%s *\)|%s)?\Z"
+                     % (_A_FILE, _PKG_NAME, _PKG_NAME, _PKG_NAME, _CLAUSES, _CLAUSES))
 WIN = sys.platform.startswith("win")
 HOME: Dict[str, Path] = {"path": Path.home() / "Kelvin"}
 Run = Callable[[List[str], Dict[str, str]], Tuple[int, str]]
@@ -75,7 +84,47 @@ def app_python() -> Tuple[str, int]:
 
 
 def base_name(spec: str) -> str:
-    return re.split(r"[\[<>=!~\s]", spec.strip(), maxsplit=1)[0]
+    return re.split(r"[\[<>=!~\s(;@,]", spec.strip(), maxsplit=1)[0]
+
+
+def _not_a_package(text: str) -> str:
+    """Why a package to install isn't one Kelvin takes from PyPI, in words; "" when it is (requirement)."""
+    if not text:
+        return "an empty package name"
+    if re.search(r"[^\x20-\x7e]", text):   # \t \n \r, a no-break or zero-width space, a look-alike letter
+        return ("%r holds a tab, a line break or a character that only looks like a letter or a space: write it "
+                "plainly" % text)
+    if ";" in text:
+        return "%r has something after the package, past its ';' (a marker, or a command): name it alone" % text
+    if re.search(r"(^|[\s,])-", text):
+        return "%r is an option for the installer (it starts with -), not a package" % text
+    path = "%r is a path or a file: a maker's package on this computer goes in files" % text
+    if re.match(r"^[A-Za-z]:[\\/]", text):   # C:\..., C:/...
+        return path
+    if "://" in text or "@" in text or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", text):
+        return ("%r is a URL (or name @ URL): Kelvin installs a package from PyPI by its name; a maker's download "
+                "goes in files" % text)
+    if re.search(r"[\\/]", text) or text.startswith((".", "~")) or re.search(_A_FILE, text, re.I):
+        return path
+    if not PACKAGE.match(text):
+        return "%r is not a package name with the versions it may have" % text
+    return ""
+
+
+def requirement(spec: Any) -> str:
+    """A package to install from PyPI, written plainly: its name, extras in [ ] and the versions it may have, as PEP 440
+    writes them, clauses separated by commas, without the spaces PEP 508 allows between them: "numpy >= 2.1, < 2.3"
+    is numpy>=2.1,<2.3. That is what the approval shows and uv gets, one argument of its list. Raises ValueError, saying
+    why, for anything uv would take for more than a package from PyPI: an option (-r, --index-url), a URL or
+    name @ URL, a path or a file, a marker or a command after ';', a tab, a line break or a character that only looks
+    like another."""
+    text = spec.strip() if isinstance(spec, str) else ""
+    why = _not_a_package(text)
+    if why:
+        raise ValueError(why)
+    m = PACKAGE.match(text)
+    extras = [e.strip() for e in (m.group(2) or "").split(",") if e.strip()]
+    return m.group(1) + ("[%s]" % ",".join(extras) if extras else "") + re.sub(r"[ ()]", "", m.group(3) or "")
 
 
 def info(name: str, home: Any = None) -> Optional[Dict[str, Any]]:
@@ -116,11 +165,16 @@ def uv_asset() -> str:
 
 
 def uv_path(home: Any = None) -> Optional[Path]:
+    """Kelvin's own uv, else one on PATH. On Windows only a uv.exe: a uv.cmd or uv.bat (a shim) runs through cmd.exe,
+    which reads a version range's < and > as redirections, where a program started from a list of arguments takes
+    them as they are."""
     exe = "uv.exe" if WIN else "uv"
     mine = root(home) / "tools" / "uv" / exe
     if mine.is_file():
         return mine
     found = shutil.which("uv")
+    if found and WIN and not found.lower().endswith(".exe"):
+        return None
     return Path(found) if found else None
 
 
@@ -345,11 +399,13 @@ def _pip(name: str, what: List[str], home: Any, run: Run) -> Dict[str, Any]:
 
 
 def install(name: str, packages: List[str], home: Any = None, run: Optional[Run] = None) -> Dict[str, Any]:
-    """Install packages into an environment, then record the versions it got."""
-    bad = [p for p in packages if not PACKAGE.match(p.strip())]
-    if bad:
-        raise ValueError("%s: not a package name with an optional version" % ", ".join(bad))
-    rec = _pip(name, [p.strip() for p in packages], home, run or _run)
+    """Install packages from PyPI into an environment, each as requirement() writes it (one argument of uv's list,
+    never read by a shell), then record the versions it got."""
+    bad = [_not_a_package(p.strip() if isinstance(p, str) else "") for p in packages]
+    if any(bad):
+        raise ValueError("not package names: %s" % "; ".join(b for b in bad if b))
+    packages = [requirement(p) for p in packages]
+    rec = _pip(name, packages, home, run or _run)
     for p in packages:
         rec["packages"][base_name(p)] = rec["installed"].get(base_name(p).lower().replace("_", "-"), "?")
     _save(rec, home)
