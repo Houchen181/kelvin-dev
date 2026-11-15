@@ -81,6 +81,8 @@ def test_c1_a_web_search_query_goes_to_claude_code_on_standard_input(tmp_path, m
     assert not any(query[:10] in a for a in seen["argv"])
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="npm's cmd-shim (claude.CMD, run by cmd.exe) is Windows'; "
+                    "elsewhere npm's claude is a script of its own, started as it is")
 def test_c1_an_npm_launcher_is_started_as_its_node_and_script(tmp_path):
     shim = tmp_path / "claude.cmd"
     shim.write_text('@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\n'
