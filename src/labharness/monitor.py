@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .adapters import only_numbers
 from .instrument import Busy, Garbled, InstrumentLost, SensorError, briefly, leave_alone, patience, unstoppable
 
 log = logging.getLogger("kelvin")
@@ -1406,8 +1407,15 @@ class Monitor:
         if inst.card.idn_pattern and not hasattr(inst.backend, "identity"):
             def ask() -> None:   # its identity, which it gave at the start: anything else arrived garbled
                 reply = inst.query_raw(inst.card.idn_query)
-                if not re.search(inst.card.idn_pattern, reply.strip(), re.I):
-                    inst.health.garbled(inst.garble_text(inst.card.idn_query, reply))
+                if re.search(inst.card.idn_pattern, reply.strip(), re.I):
+                    return
+                # a reading where its identity should be is a late reply to an earlier question, read in this one's
+                # place: out of step, not garbled. Back in step (a device clear, then asked who it is), asked once more
+                if only_numbers(reply) and inst.out_of_step():
+                    reply = inst.query_raw(inst.card.idn_query)
+                    if re.search(inst.card.idn_pattern, reply.strip(), re.I):
+                        return
+                inst.health.garbled(inst.garble_text(inst.card.idn_query, reply))
             return ask
         def plain(s: Any) -> bool:   # a reading that only reads: no acquisition, no trace or frame, no switch to wait on
             return s.get_cmd is not None and s.type not in ("trace", "image") and not s.acquires \

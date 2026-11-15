@@ -636,3 +636,262 @@ def test_find_on_network_finds_a_device_by_its_mac(lab_network, tmp_path):
                                            "neighbour table after the sweep: the device is off, on a network this "
                                            "computer has no address on")
     assert rt.find_on_network(mac="70-B3-D5").startswith("'70-B3-D5' is not a MAC address")
+
+
+# ---------------------------------------------------------------------- item 11: a late reply read as another's
+
+class LateLockin:
+    """The field report's SR830 on a slow GPIB bus (an NI GPIB-USB-HS that had lost its connection that day): a reply
+    to a question in `slow` comes after Kelvin stopped waiting for it, and after the device clear that followed. It is
+    in the lock-in's output queue `slow[question]` writes later, in front of the next question's own reply."""
+    IDN = "Stanford_Research_Systems,SR830,s/n81118,ver1.07"
+
+    def __init__(self):
+        self.timeout, self.read_termination, self.write_termination = 3000, None, None
+        self.out, self.later, self.sent, self.cleared = [], [], [], 0
+        self.slow = {}
+        self.answers = {"*IDN?": self.IDN, "SLVL?": "0.004", "FREQ?": "1000.0", "OUTP? 3": "1.2E-06", "*OPC?": "1"}
+
+    def write(self, cmd):
+        self.sent.append(cmd)
+        later = [(n - 1, r) for n, r in self.later]
+        self.out += [r for n, r in later if n <= 0]   # what came too late arrives now, in front
+        self.later = [(n, r) for n, r in later if n > 0]
+        if "?" in cmd:
+            reply = self.answers.get(cmd, "0")
+            if cmd in self.slow:
+                self.later.append((self.slow.pop(cmd), reply))
+            else:
+                self.out.append(reply)
+
+    def read(self):
+        if not self.out:
+            raise TimeoutError("VI_ERROR_TMO")
+        return self.out.pop(0)
+
+    def query(self, cmd, delay=None):
+        self.write(cmd)
+        return self.read()
+
+    def clear(self):   # a device clear: what is queued now goes, not what comes later
+        self.cleared += 1
+        self.out = []
+
+    def close(self):
+        pass
+
+
+class OneLockin:
+    """A VISA resource manager with one instrument on it, the late lock-in, at GPIB0::8 (a GPIB-USB-HS's board)."""
+
+    def __init__(self, res):
+        self.res = res
+
+    def open_resource(self, name, **kw):
+        return self.res
+
+    def list_resources(self, query="?*::INSTR"):
+        return ("GPIB0::8::INSTR",)
+
+
+def lockin(res, card="srs/sr830"):
+    from labharness import builtin_registry
+    from labharness.adapters import VisaBackend
+    return VisaBackend("lockin", builtin_registry().get(card), "GPIB0::8::INSTR", rm=OneLockin(res))
+
+
+def test_a_late_identity_is_never_read_as_the_next_questions_reply():
+    """The monitor asked the lock-in who it is (a second at most, the bus slow) and its reply came late. Before the
+    next command Kelvin cleared it and asked who it is: the late identity came first, was taken for the check's own,
+    and the check's own reply then answered SLVL? ('Stanford_Research_Systems,SR830,...', said to be garbled)."""
+    res = LateLockin()
+    li = lockin(res)
+    assert li.query("SLVL?") == "0.004"
+    res.slow["*IDN?"] = 1
+    with pytest.raises(TimeoutError):
+        li.query("*IDN?")
+    assert li.owed
+    assert li.query("SLVL?") == "0.004"
+    assert li.query("FREQ?") == "1000.0" and not li.owed
+    assert li.said_as == LateLockin.IDN
+
+
+def test_a_check_whose_own_identity_is_late_on_a_slow_bus_is_a_slow_answer_and_then_never_one_behind():
+    """_back_in_step's own *IDN? timed out on the slow bus, after it had read off SLVL?'s late reply: it said the
+    lock-in "answered '0.004' to *IDN?, not who it is ... check it, then reconnect it", and at the next command it took
+    its own late identity for the new check's, one behind from then on (FREQ? got the identity)."""
+    from labharness.adapters import timed_out
+    res = LateLockin()
+    li = lockin(res)
+    res.slow["SLVL?"] = 1
+    with pytest.raises(TimeoutError):
+        li.query("SLVL?")
+    res.slow["*IDN?"] = 1
+    with pytest.raises(Exception) as e:
+        li.query("FREQ?")
+    assert timed_out(e.value) and "out of step" not in str(e.value)   # slow, not another instrument
+    assert li.owed
+    assert li.query("FREQ?") == "1000.0"
+    assert li.query("SLVL?") == "0.004"
+
+
+def test_a_connection_made_anew_on_a_slow_bus_is_never_one_behind():
+    """The field report's lock-ins lost their connection (VI_ERROR_CONN_LOST) and were connected again on a slow bus:
+    the first try's identity came late, the second try took it for its own, and its own then answered SLVL?."""
+    res = LateLockin()
+    li = lockin(res)
+    li.broken = "VI_ERROR_CONN_LOST"
+    res.slow["*IDN?"] = 1
+    with pytest.raises(TimeoutError):
+        li.reopen()
+    assert li.broken
+    assert li.reopen() == LateLockin.IDN and not li.broken
+    assert li.query("SLVL?") == "0.004"
+
+
+def test_an_identity_that_comes_later_still_is_read_off_and_the_question_asked_again():
+    """A late identity that arrives after Kelvin put the lock-in back in step (later than its check) is read where
+    SLVL?'s reply should be: it is its own identity, not a reading, so it is out of step, not garbled. Kelvin puts it
+    back in step and asks SLVL? once more."""
+    res = LateLockin()
+    li = lockin(res)
+    res.slow["*IDN?"] = 2
+    with pytest.raises(TimeoutError):
+        li.query("*IDN?")
+    assert li.query("SLVL?") == "0.004"
+    assert res.sent == ["*IDN?", "*IDN?", "SLVL?", "*IDN?", "SLVL?"]   # back in step (who it is), asked once more
+    assert not li.owed
+    res.slow["*IDN?"] = 3                               # and for *OPC?'s wait, read on past it
+    with pytest.raises(TimeoutError):
+        li.query("*IDN?")
+    assert li.query("FREQ?") == "1000.0"
+    assert li.query_waiting("*OPC?", 5, lambda: False) == "1"
+    res.slow["*IDN?"] = 2                               # the error queue's quick question after a timeout: none
+    with pytest.raises(TimeoutError):
+        li.query("*IDN?")
+    assert li.ask_after_timeout("ERRS?") is None and li.owed
+
+
+def test_a_card_without_an_identity_pattern_knows_its_identity_by_what_it_said():
+    """'What it said at connect': an instrument whose card has no identity pattern is known by the identity it gave
+    when asked who it is, and that, read where another reply should be, is out of step too."""
+    from labharness.adapters import VisaBackend
+    from labharness.cards import parse_card
+    card = parse_card({"card": 1, "id": "acme/widget", "model": "Widget", "vendor": "ACME", "kind": "dmm",
+                       "parameters": {"V": {"kind": "measure", "unit": "V", "get": "V?"}}})
+    res = LateLockin()
+    res.answers.update({"*IDN?": "ACME,WIDGET 9000,1,1.0", "V?": "1.5"})
+    w = VisaBackend("widget", card, "GPIB0::8::INSTR", rm=OneLockin(res))
+    assert w.query("*IDN?") == "ACME,WIDGET 9000,1,1.0" and w.said_as == "ACME,WIDGET 9000,1,1.0"
+    res.out.append("ACME,WIDGET 9000,1,1.0")            # a late one, already there
+    assert w.query("V?") == "1.5" and res.cleared >= 1
+    res.answers["V?"] = "1.0,2.0,3.0,4.0"               # numbers are a reading, never taken for an identity
+    assert w.query("V?") == "1.0,2.0,3.0,4.0"
+
+
+LOCKIN_LAB = """lab: NV
+instruments:
+  lockin:
+    card: srs/sr830
+    address: GPIB0::8::INSTR
+"""
+
+
+@pytest.fixture
+def late_lab(tmp_path):
+    from labharness.adapters import BUSES, set_resource_manager
+    from test_field_test_2026_11_06 import runtime
+    res = LateLockin()
+    set_resource_manager(OneLockin(res))
+    try:
+        yield runtime(tmp_path, LOCKIN_LAB), res
+    finally:
+        set_resource_manager(None)
+        BUSES.hung.clear()
+
+
+def test_the_field_reports_garbled_slvl_alarm_never_comes(late_lab):
+    """18:46:34: "lockin's reply to SLVL? arrived garbled ('Stanford_Research_Systems,SR830,s/n81118,ver1.07')": the
+    lock-in's own identity, the late reply to the monitor's *IDN?, read where SLVL?'s should be."""
+    from labharness.instrument import InstrumentLost
+    rt, res = late_lab
+    lab, monitor = rt.lab, rt.monitor
+    inst = lab.instruments["lockin"]
+    assert lab.read("lockin", "amplitude") == pytest.approx(0.004)
+    res.slow["*IDN?"] = 1                               # the monitor's question whether it is there: late
+    with pytest.raises(InstrumentLost):
+        monitor._probe(inst)()
+    assert lab.read("lockin", "amplitude") == pytest.approx(0.004)
+    assert inst.health.garbles == 0
+    monitor._check_health()
+    assert not [a for a in monitor.alarms if a.kind == "comms"]
+
+
+def test_a_late_reading_in_place_of_the_monitors_identity_question_is_out_of_step_not_garbled(late_lab):
+    """The other way round: SLVL?'s late reply read where the monitor's *IDN? should be answered ('0.004') was said
+    to be garbled. A reading where its identity should be is a late reply too: back in step, and asked once more."""
+    from labharness.instrument import InstrumentLost
+    rt, res = late_lab
+    inst = rt.lab.instruments["lockin"]
+    assert rt.lab.read("lockin", "amplitude") == pytest.approx(0.004)
+    res.slow["SLVL?"] = 2
+    with pytest.raises(InstrumentLost):
+        rt.lab.read("lockin", "amplitude")
+    rt.monitor._probe(inst)()
+    assert inst.health.garbles == 0
+
+
+def test_an_alarm_that_still_goes_up_says_a_late_reply_was_read_not_cables_or_noise(late_lab):
+    from labharness.instrument import Garbled
+    rt, res = late_lab
+    lab, monitor = rt.lab, rt.monitor
+    inst = lab.instruments["lockin"]
+    assert lab.read("lockin", "amplitude") == pytest.approx(0.004)
+    res.answers["SLVL?"] = LateLockin.IDN               # out of step again, after Kelvin put it back in step
+    with pytest.raises(Garbled) as e:
+        lab.read("lockin", "amplitude")
+    said = str(e.value)
+    assert said.startswith("lockin's reply to SLVL? was its own identity ('Stanford_Research_Systems,SR830,s/n81118,"
+                           "ver1.07') on GPIB (address 8), again after Kelvin cleared it and asked who it is: a late "
+                           "reply to an earlier question, read in this one's place")
+    assert "not a loose cable or noise" in said and "a bad adapter or electrical noise" not in said
+    monitor._check_health()
+    [comms] = [a for a in monitor.alarms if a.kind == "comms"]
+    assert comms.text == said
+    assert inst.garble_text("SLVL?", LateLockin.IDN).startswith("lockin's reply to SLVL? was its own identity")
+    assert "loose cable" in inst.garble_text("SLVL?", "0.0\x0704")   # noise is still noise
+
+
+def test_its_identity_for_a_reading_through_any_connection_is_said_out_of_step_and_set_back_in_step(late_lab):
+    """Through a connection without VisaBackend's own check of what came where, its identity for a reading still
+    isn't called garbled, and the connection is put back in step before its next command where it can be."""
+    from labharness.instrument import Garbled
+    rt, res = late_lab
+    inst = rt.lab.instruments["lockin"]
+    assert rt.lab.read("lockin", "amplitude") == pytest.approx(0.004)
+
+    class Plain:
+        lock, owed = None, False
+
+        def query(self, command):
+            return LateLockin.IDN
+    inst.backend = plain = Plain()
+    with pytest.raises(Garbled, match=r"^lockin's reply to SLVL\? was its own identity .*not a loose cable or noise\. "
+                                      r"Kelvin puts it back in step"):
+        inst.read("amplitude")
+    assert plain.owed
+
+
+def test_a_binary_block_kelvin_couldnt_read_is_dropped_before_the_next_command():
+    """A block whose header or length didn't read (ValueError) left the rest of it queued, for the next command."""
+    from labharness.adapters import AdapterError
+    res = LateLockin()
+
+    def query_binary_values(command, datatype, is_big_endian, container):
+        raise ValueError("Could not find valid header")
+    res.query_binary_values = query_binary_values
+    li = lockin(res)
+    before = res.cleared
+    with pytest.raises(AdapterError, match="did not answer with a block"):
+        li.query_binary("CURV?", "int16")
+    assert res.cleared == before + 1

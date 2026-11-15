@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from .adapters import lost_kind, short_code, short_model, stoppable, where_and_cause
+from .adapters import OutOfStep, lost_kind, only_numbers, short_code, short_model, stoppable, where_and_cause
 from .cards import BINARY_REPLY, Card, ParamSpec
 from .clock import Stops
 from .labconfig import Guard, InstrumentConfig
@@ -462,6 +462,10 @@ class Instrument:
                 raise
             except (InstrumentOff, Stopped, InstrumentLost):
                 raise
+            except OutOfStep as e:   # its replies one behind its questions, after it was put back in step and asked
+                self._forget()       # again: a comms fault in those words, never a lost instrument, cables or noise
+                self.health.garbled(self.out_of_step_text(e.command, e.reply, again=True))
+                raise Garbled(self.health.garbled_text) from e
             except Exception as e:
                 kind = lost_kind(e)
                 if kind is None:
@@ -578,13 +582,54 @@ class Instrument:
 
     def garble_text(self, command: str, reply: str) -> str:
         """Its reply arrived garbled, in words: "nvm's reply to :READ? arrived garbled ('k5.1438:127E,04') on GPIB
-        (address 7): a loose cable, a bad adapter or electrical noise; ..."."""
+        (address 7): a loose cable, a bad adapter or electrical noise; ...". A reply that is its own identity, where
+        another question's should be, isn't garbled but out of step (out_of_step_text)."""
+        if self.its_identity(reply) and not self._asks_identity(command):
+            return self.out_of_step_text(command, reply)
         where, _ = where_and_cause(self.config.address)
         return ("%s's reply to %s arrived garbled (%r)%s: a loose cable, a bad adapter or electrical noise; its "
                 "readings can't be trusted until its replies are clean again" % (
                     self.name, command.strip(), reply.strip()[:60], " " + where if where else ""))
 
+    def out_of_step_text(self, command: str, reply: str, again: bool = False) -> str:
+        """Its own identity read where another question's reply should be, in words: a late reply to an earlier
+        question (a *IDN? that ran out of time), not a loose cable or noise (field report 2026-11-15: "lockin's reply
+        to SLVL? arrived garbled ('Stanford_Research_Systems,SR830,s/n81118,ver1.07')"). again: after Kelvin put it
+        back in step and asked once more (adapters.OutOfStep)."""
+        where, _ = where_and_cause(self.config.address)
+        return ("%s's reply to %s was its own identity (%r)%s%s: a late reply to an earlier question, read in this "
+                "one's place, not a loose cable or noise.%s Its readings can't be trusted until its replies come in "
+                "step" % (self.name, command.strip(), str(reply).strip()[:60], " " + where if where else "",
+                          ", again after Kelvin cleared it and asked who it is" if again else "",
+                          " Kelvin puts it back in step (a device clear, then asks who it is) before its next command."
+                          if hasattr(self.backend, "owed") else ""))
+
+    def its_identity(self, reply: Any) -> bool:
+        """Whether a reply is this instrument's own identity, not a reading: its card's identity pattern, or the
+        identity it answered as itself (asked who it is, or connected again)."""
+        text = str(reply).strip()
+        if not text or only_numbers(text):
+            return False
+        if self.card.idn_pattern and re.search(self.card.idn_pattern, text, re.I):
+            return True
+        said = getattr(self.backend, "said_as", "") or self.health.reopened_as
+        return bool(said) and text == str(said).strip()
+
+    def _asks_identity(self, command: str) -> bool:
+        own = {"*IDN?", (self.card.idn_query or "*IDN?").strip().upper()}
+        return any(part.strip().upper() in own for part in str(command).split(";"))
+
+    def out_of_step(self) -> bool:
+        """Its connection is out of step (a reply read in another's place): put back in step before its next command
+        (a device clear, then asked who it is: the backend's owed). False where its connection can't be."""
+        if not hasattr(self.backend, "owed"):
+            return False
+        self.backend.owed = True
+        return True
+
     def _garbled(self, command: str, reply: str) -> Garbled:
+        if self.its_identity(reply) and not self._asks_identity(command):
+            self.out_of_step()   # a late reply read in this one's place: back in step before its next command
         self.health.garbled(self.garble_text(command, reply))
         return Garbled(self.health.garbled_text)
 
