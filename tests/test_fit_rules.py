@@ -267,6 +267,17 @@ def test_only_a_named_region_scrolls():
             assert any(sel in _split_top(s, ",") for name in STYLES for s, _ in _rules(_uncommented_css(name))), sel
 
 
+def test_the_vendored_terminal_is_left_as_released():
+    """xterm.js and its fit addon (static/vendor/xterm, the Terminal's shells) are kept as released, so these rules
+    read the page's own files only (SCRIPTS, STYLES, index.html), never them: xterm's viewport scrolls the terminal's
+    lines itself, inside a shell's tab (.term-shell), which never scrolls. The page's stylesheet only places it."""
+    vendor = {p.name for p in (STATIC / "vendor" / "xterm").iterdir()}
+    assert {"xterm.js", "xterm.css", "addon-fit.js"} <= vendor and not vendor & set(SCRIPTS + STYLES)
+    rules = dict(_rules(_uncommented_css("app.css")))
+    assert "overflow: hidden" in rules[".term-shell"] and "overflow" not in rules[".term-shells"]
+    assert not any("xterm" in sel and re.search(r"overflow(-y)?:\s*(auto|scroll)", body) for sel, body in rules.items())
+
+
 def test_no_function_is_declared_twice():
     # parts written side by side: a second `function name(` in the same script silently replaces the first (both are
     # hoisted), as the Lab's segKeys(seg, choose) once replaced the Runs tabs' segKeys(e), whose arrow keys then threw

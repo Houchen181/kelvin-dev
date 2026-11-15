@@ -26,7 +26,8 @@ nidaq = ["nidaqmx"]             # National Instruments DAQ cards (with NI-DAQmx 
 ocean = ["seabreeze"]           # Ocean Insight spectrometers
 basler = ["pypylon"]            # Basler cameras
 pylablib = ["pylablib"]         # attocube ANC300/ANC350, Andor Shamrock/Kymera spectrographs
-desktop = ["kelvin-lab[web,hardware]", "pywebview>=5"]
+desktop = ["kelvin-lab[web,hardware]", "pywebview>=5",
+           "pywinpty>=2; sys_platform == 'win32'"]   # the Terminal's shells on a pseudo-console (web/shells.py)
 hub = ["starlette", "uvicorn", "websockets>=13",  # the Kelvin hub server (accounts, the phones' relay): `kelvin-hub`
        "pypdfium2>=4",   # draws PDF pages as pictures for Kelvins (hub/pdfdraw.py); never in the app
        "httpx>=0.27", "cryptography>=3.4"]   # the model gateway (hub/llm.py): the services, the sealed keys
@@ -46,7 +47,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 labharness = ["data/*.yaml", "data/*.md", "data/*.json", "data/cards/*.yaml", "data/cards/*/*.yaml", "data/bridge/*.py", "data/sandbox/*.py",
-              "data/labview/*.py", "data/labview/*.yaml", "data/labview/*.md", "data/scriptshim/*.py", "data/skills/*.md", "agent/ui.html", "web/static/*"]
+              "data/labview/*.py", "data/labview/*.yaml", "data/labview/*.md", "data/scriptshim/*.py", "data/skills/*.md", "agent/ui.html", "web/static/*",
+              "web/static/vendor/xterm/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

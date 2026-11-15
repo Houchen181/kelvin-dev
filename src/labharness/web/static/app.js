@@ -8553,16 +8553,22 @@
   }
 
   // ------------------------------------------------------------------ terminal pane: a person's own commands
-  // Type to Kelvin in text, or switch to an instrument and send it its own commands (SCPI...). They go through the
-  // same safety gate as Kelvin's: limits, interlocks and blocked commands apply, and a drive change waits for an
-  // approval, answered here with y/n. The server logs them as the person's, never as Kelvin's.
-  // busy: what the terminal is doing ("chat": Kelvin's answer; "call": a command to calling, an instrument)
+  // Its tabs: the person's own shells on this computer (below: the first tab, and the one it opens on) and the Kelvin
+  // tab, this console. There, type to Kelvin in text, or switch to an instrument and send it its own commands (SCPI...).
+  // They go through the same safety gate as Kelvin's: limits, interlocks and blocked commands apply, and a drive change
+  // waits for an approval, answered here with y/n. The server logs them as the person's, never as Kelvin's.
+  // busy: what the terminal is doing ("chat": Kelvin's answer; "call": a command to calling, an instrument); tab: the
+  // tab on the screen
   const TERM = { open: false, target: null, chatId: null, history: [], hi: 0, busy: false, calling: null, ask: null, askAt: 0,
-                 asked: new Set(), reply: null, progress: new Map() };
+                 asked: new Set(), reply: null, progress: new Map(), tab: null };
+  // the shells' tabs (shellNew), the Kelvin tab (initTerminal), how many of each program were named, xterm.js once loaded
+  const SHELLS = { tabs: [], kelvin: null, named: {}, count: 0, xterm: null, started: false, raf: 0 };
   const TERM_HELP = [
     "Type to Kelvin, or switch to an instrument and type its own commands (*IDN?, SENS?, :SOUR:VOLT 1 ...).",
     "Instrument commands go through the safety gate: limits, interlocks and blocked commands apply,",
     "and a change that drives the sample harder asks you first (y/n).",
+    "Your own shell on this computer is in the tabs before this one (+ opens another). What runs there",
+    "goes past the safety gate, as in any terminal on this computer.",
     "",
     "  /use <instrument>    send what you type to that instrument (or just /<instrument>)",
     "  /kelvin              talk to Kelvin again",
@@ -8604,8 +8610,8 @@
     $("term-input").placeholder = TERM.ask ? "y approves; anything else declines"
       : TERM.target ? "a command for " + TERM.target + ", or /help" : "ask Kelvin, or /help";
     const model = $("model").selectedOptions[0];
-    $("term-target").textContent = TERM.target ? TERM.target + " · through the safety gate"
-      : "Kelvin" + (model ? " · " + model.textContent : "");
+    $("term-target").textContent = TERM.tab && TERM.tab !== SHELLS.kelvin ? "this computer · outside the safety gate"
+      : TERM.target ? TERM.target + " · through the safety gate" : "Kelvin" + (model ? " · " + model.textContent : "");
   }
   function toggleTerm(open) {
     TERM.open = open === undefined ? !TERM.open : open;
@@ -8616,8 +8622,13 @@
     fitLayout();   // full screen, and the top-bar buttons, follow
     if (!TERM.open) return;
     if (!termOut().childElementCount) termLine("Kelvin terminal. Type to Kelvin, or /help for instrument commands.", "dim");
+    if (!SHELLS.started) {   // the first opening: a shell, the first tab, on the screen unless Kelvin's was last
+      SHELLS.started = true;
+      const kelvin = store("lh.termTab") === "kelvin";
+      shellNew(!kelvin);
+      if (kelvin) termTab(SHELLS.kelvin);
+    } else termTab(TERM.tab || SHELLS.tabs[0] || SHELLS.kelvin);
     termSync();
-    $("term-input").focus();
   }
   function setTermHeight(px) {   // in the page's own pixels (the window's divided by the page size)
     const max = Math.max(160, layoutH() - 220);
@@ -8653,7 +8664,21 @@
     });
     $("toggle-term").addEventListener("click", () => pillClick("termpane", toggleTerm));
     $("close-term").addEventListener("click", () => toggleTerm(false));
-    $("term-clear").addEventListener("click", () => { termOut().replaceChildren(); $("term-input").focus(); });
+    const kelvin = $("term-tab-kelvin");
+    SHELLS.kelvin = { kind: "kelvin", btn: kelvin, wrap: kelvin.parentElement, el: $("term-kelvin") };
+    kelvin.addEventListener("click", () => termTab(SHELLS.kelvin));
+    $("term-tabs").addEventListener("keydown", termTabKey);
+    $("term-new").addEventListener("click", () => shellNew(true));
+    $("term-clear").addEventListener("click", () => {   // the tab on the screen: Kelvin's lines, or a shell's screen
+      const tab = TERM.tab;
+      if (tab && tab.term) { tab.term.clear(); tab.term.focus(); return; }
+      termOut().replaceChildren();
+      $("term-input").focus();
+    });
+    new ResizeObserver(() => {   // a shell fits its tab whenever the Terminal changes size
+      cancelAnimationFrame(SHELLS.raf);
+      SHELLS.raf = requestAnimationFrame(() => shellFit(TERM.tab));
+    }).observe($("term-shells"));
     $("term-input").addEventListener("keydown", termKey);
     termOut().addEventListener("mouseup", () => { if (!window.getSelection().toString()) $("term-input").focus(); });
     $("model").addEventListener("change", termSync);
@@ -8919,6 +8944,7 @@
     termSync();
     if (!TERM.open) toggleTerm(true);
     fullShow("termpane");
+    termTab(SHELLS.kelvin);   // asked in the Kelvin tab, whichever was on the screen
     $("term-input").focus();
   }
   function termEndAsk(note) {
@@ -8950,6 +8976,194 @@
       if (p) termAsk(p);
     }
     if (TERM.open) termSync();
+  }
+
+  // ------------------------------------------------------------------ the Terminal's shells: the person's own
+  // A terminal in the page (xterm.js, from this computer, loaded the first time the Terminal opens) on a shell of this
+  // computer (web/shells.py: PowerShell on Windows, the person's own shell elsewhere), over a WebSocket only this page
+  // opens: it offers the access key as a subprotocol. What runs there goes past Kelvin's safety gate, as in any
+  // terminal on this computer, and the lab's record notes each shell opened and closed, never what is typed or shown.
+  // A shell ends with its tab, and with the page. Without a terminal on the server (pipes: no pywinpty), the line is
+  // edited here and sent whole.
+  function xtermLoad() {
+    if (!SHELLS.xterm) {
+      const add = (tag, attrs) => new Promise((done, failed) => {
+        const el = Object.assign(document.createElement(tag), attrs);
+        el.onload = done;
+        el.onerror = () => failed(new Error("couldn't load " + (attrs.src || attrs.href)));
+        document.head.append(el);
+      });
+      SHELLS.xterm = Promise.all([
+        add("link", { rel: "stylesheet", href: "/static/vendor/xterm/xterm.css" }),
+        add("script", { src: "/static/vendor/xterm/xterm.js" }).then(() => add("script", { src: "/static/vendor/xterm/addon-fit.js" })),
+      ]).catch((e) => { SHELLS.xterm = null; throw e; });   // tried again with the next tab
+    }
+    return SHELLS.xterm;
+  }
+  // a new shell's tab, before Kelvin's; select: it comes on the screen
+  async function shellNew(select) {
+    const tab = { id: "shell-" + (++SHELLS.count), kind: "shell", term: null, fit: null, ws: null, ended: false, pipe: false,
+                  line: "", hist: [], hi: 0 };
+    tab.el = h("div", { class: "term-shell", id: "term-" + tab.id, role: "tabpanel", "aria-label": "Shell", hidden: true });
+    tab.btn = h("button", { class: "term-tab-name", type: "button", role: "tab", "aria-selected": "false",
+                            "aria-controls": tab.el.id }, "Shell");
+    const x = h("button", { class: "term-tab-x", type: "button", "aria-label": "Close this shell",
+                            title: "Close: the shell ends with what runs in it" }, icon("x"));
+    tab.wrap = h("div", { class: "term-tab", "data-tab": tab.id }, tab.btn, x);
+    $("term-tabs").insertBefore(tab.wrap, SHELLS.kelvin.wrap);
+    $("term-shells").append(tab.el);
+    SHELLS.tabs.push(tab);
+    tab.btn.addEventListener("click", () => termTab(tab));
+    x.addEventListener("click", () => shellClose(tab));
+    if (select) termTab(tab);
+    try { await xtermLoad(); }
+    catch (e) {
+      tab.el.append(h("p", { class: "term-shell-said" }, "The terminal couldn't load here (" + e.message + "). The Kelvin tab still works."));
+      return tab;
+    }
+    if (SHELLS.tabs.includes(tab)) shellStart(tab);   // unless its tab was closed meanwhile
+    return tab;
+  }
+  function shellStart(tab) {
+    const css = getComputedStyle(document.documentElement), v = (name, or) => css.getPropertyValue(name).trim() || or;
+    const term = new window.Terminal({
+      fontFamily: '"Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, Menlo, monospace', fontSize: 13,
+      lineHeight: 1.15, cursorBlink: true, scrollback: 5000, allowProposedApi: false,
+      theme: { background: v("--term-bg", "#121a23"), foreground: v("--term-text", "#d5dee8"), cursor: v("--term-prompt", "#7cc0ff"),
+               selectionBackground: "rgba(124, 192, 255, 0.35)" },
+    });
+    const fit = new window.FitAddon.FitAddon();
+    term.loadAddon(fit);
+    Object.assign(tab, { term, fit });
+    if (!tab.el.hidden) shellShow(tab);   // a tab off the screen is drawn when it comes on (termTab): measured then
+    term.attachCustomKeyEventHandler((e) => shellKey(tab, e));
+    term.onData((d) => shellInput(tab, d));
+    term.onBinary((d) => shellSend(tab, { t: "in", d, b: true }));   // a mouse report xterm can't write as text
+    term.onResize(({ cols, rows }) => shellSend(tab, { t: "size", cols, rows }));
+    const key = [...new TextEncoder().encode(token)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/api/shell?cols=" +
+      term.cols + "&rows=" + term.rows, ["kelvin.shell", "kelvin.key." + key]);
+    tab.ws = ws;
+    ws.onmessage = (ev) => shellMessage(tab, ev);
+    ws.onclose = () => {   // said once: its end (exit), why not (refused), or the connection
+      if (!tab.ended) shellEnded(tab, tab.hello ? "The connection to Kelvin closed." : tab.refused ? "" : "Kelvin didn't open a shell here.");
+    };
+    if (TERM.tab === tab) term.focus();
+  }
+  function shellMessage(tab, ev) {
+    let m;
+    try { m = JSON.parse(ev.data); } catch (e) { return; }
+    const term = tab.term;
+    if (m.t === "hello") {
+      tab.hello = true;
+      tab.pipe = m.kind === "pipe";
+      SHELLS.named[m.program] = (SHELLS.named[m.program] || 0) + 1;
+      tab.btn.textContent = m.program + (SHELLS.named[m.program] > 1 ? " " + SHELLS.named[m.program] : "");
+      tab.el.setAttribute("aria-label", tab.btn.textContent);
+      if (m.conpty) term.options.windowsPty = { backend: "conpty" };
+      if (m.note) term.write("\x1b[2m" + m.note + "\x1b[0m\r\n");
+      shellSend(tab, { t: "size", cols: term.cols, rows: term.rows });   // a resize while it connected, too
+    } else if (m.t === "out") term.write(m.d);
+    else if (m.t === "note") term.write("\r\n\x1b[33m" + m.d + "\x1b[0m\r\n");
+    else if (m.t === "refused") { tab.refused = true; term.write("\x1b[33m" + m.message + "\x1b[0m\r\n"); }
+    else if (m.t === "exit") {   // why it was closed (a sign-out), or how it exited
+      shellEnded(tab, "The shell ended" + (m.why ? ": " + m.why + "." : m.code ? " (exit " + m.code + ")." : "."));
+    }
+  }
+  function shellShow(tab) {   // its terminal drawn in its tab, the first time the tab is on the screen
+    if (!tab.term || tab.drawn) return;
+    tab.drawn = true;
+    tab.term.open(tab.el);
+    shellFit(tab);
+  }
+  function shellEnded(tab, said) {
+    tab.ended = true;
+    if (tab.term) tab.term.write("\r\n\x1b[2m[" + (said ? said + " " : "") + "Press a key to close this tab.]\x1b[0m");
+  }
+  function shellSend(tab, m) {
+    if (tab.ws && tab.ws.readyState === WebSocket.OPEN) tab.ws.send(JSON.stringify(m));
+  }
+  function shellInput(tab, d) {
+    if (tab.ended) { shellClose(tab); return; }
+    if (!tab.pipe) { shellSend(tab, { t: "in", d }); return; }
+    const term = tab.term;   // without a terminal: the line is edited here, then sent whole
+    const show = (line) => { term.write("\b \b".repeat([...tab.line].length) + line); tab.line = line; };
+    if (d === "\x1b[A" || d === "\x1b[B") {   // Up, Down: the lines sent before
+      tab.hi = Math.max(0, Math.min(tab.hist.length, tab.hi + (d === "\x1b[A" ? -1 : 1)));
+      show(tab.hist[tab.hi] || "");
+      return;
+    }
+    for (const ch of d.replace(/\r\n/g, "\r")) {   // a paste's lines one by one
+      if (ch === "\r" || ch === "\n") {
+        term.write("\r\n");
+        shellSend(tab, { t: "in", d: tab.line + "\n" });
+        if (tab.line && tab.hist[tab.hist.length - 1] !== tab.line) tab.hist.push(tab.line);
+        tab.hi = tab.hist.length;
+        tab.line = "";
+      } else if (ch === "\x7f" || ch === "\b") show([...tab.line].slice(0, -1).join(""));
+      else if (ch === "\x03") { tab.line = ""; shellSend(tab, { t: "in", d: ch }); }
+      else if (ch >= " ") { tab.line += ch; term.write(ch); }
+    }
+  }
+  function shellKey(tab, e) {   // the keys xterm leaves alone: the Terminal's own, and copy and paste as in Windows Terminal
+    if (e.type !== "keydown") return true;
+    if (e.ctrlKey && (e.key === "`" || e.code === "Backquote")) return false;   // shows or hides the Terminal
+    const plain = e.ctrlKey && !e.altKey && !e.metaKey, k = (e.key || "").toLowerCase();
+    if (plain && k === "c" && tab.term.hasSelection()) {   // copies what is selected; without a selection Ctrl+C interrupts
+      if (navigator.clipboard) navigator.clipboard.writeText(tab.term.getSelection()).catch(() => {});
+      tab.term.clearSelection();
+      e.preventDefault();
+      return false;
+    }
+    return !(plain && k === "v");   // the browser pastes, and xterm takes the paste
+  }
+  // a shell fitted to its tab. xterm.js reads the mouse in the window's pixels and lays its cells out in the page's: under
+  // the page size (a CSS zoom on <html>) a click landed columns away from the text under it. So a shell's tab undoes
+  // the page size, and its text is drawn at the page size instead.
+  function shellFit(tab) {
+    if (!tab || !tab.fit || !tab.drawn || tab.el.hidden || !TERM.open) return;
+    const z = layoutZoom();
+    if (tab.el.style.zoom !== String(1 / z)) tab.el.style.zoom = String(1 / z);
+    if (tab.term.options.fontSize !== 13 * z) tab.term.options.fontSize = 13 * z;
+    try { tab.fit.fit(); } catch (e) { /* not laid out yet: the next resize fits it */ }
+  }
+  function shellClose(tab) {   // its tab and its shell, with what runs in it (the server ends them as the socket ends)
+    const i = SHELLS.tabs.indexOf(tab);
+    if (i < 0) return;
+    SHELLS.tabs.splice(i, 1);
+    try { shellSend(tab, { t: "close" }); if (tab.ws) tab.ws.close(1000); } catch (e) { /* closed already */ }
+    if (tab.term) tab.term.dispose();
+    tab.wrap.remove();
+    tab.el.remove();
+    if (TERM.tab === tab) termTab(SHELLS.tabs[Math.min(i, SHELLS.tabs.length - 1)] || SHELLS.kelvin);
+  }
+  // a tab on the screen: a shell (fitted to the Terminal and focused) or Kelvin's console
+  function termTab(tab) {
+    if (!tab) return;
+    TERM.tab = tab;
+    for (const t of [...SHELLS.tabs, SHELLS.kelvin]) {
+      const on = t === tab;
+      t.wrap.classList.toggle("on", on);
+      t.btn.setAttribute("aria-selected", String(on));
+      t.btn.tabIndex = on ? 0 : -1;
+      t.el.hidden = !on;
+    }
+    $("term-shells").hidden = tab === SHELLS.kelvin;
+    store("lh.termTab", tab === SHELLS.kelvin ? "kelvin" : "shell");
+    termSync();
+    if (!TERM.open) return;
+    if (tab === SHELLS.kelvin) { $("term-input").focus(); return; }
+    shellShow(tab);   // laid out now that its tab shows: measured at once
+    shellFit(tab);
+    if (tab.term) tab.term.focus();
+  }
+  function termTabKey(e) {   // ← → among the tabs, as a tablist goes
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" || !e.target.matches('[role="tab"]')) return;
+    const all = [...SHELLS.tabs, SHELLS.kelvin], i = all.findIndex((t) => t.btn === e.target);
+    const next = all[(i + (e.key === "ArrowRight" ? 1 : all.length - 1)) % all.length];
+    e.preventDefault();
+    termTab(next);
+    next.btn.focus();
   }
 
   // ------------------------------------------------------------------ the data folder (Settings)
