@@ -10354,7 +10354,7 @@ class LabRuntime:
         answers after the chat read text from the web (gate.auto_simple)."""
         from .. import envs, profiles
         from ..gate import ApprovalRequest
-        packages = [p.strip() for p in (packages or []) if str(p).strip()]
+        packages = [str(p).strip() for p in (packages or []) if str(p).strip()]
         try:
             envs.env_dir(env, self.home)
         except ValueError as e:
@@ -10363,9 +10363,15 @@ class LabRuntime:
             return "say which packages (pip names, with a version if it must match) or which files to install"
         if bits not in (32, 64):
             return "bits is 32 or 64"
-        bad = [p for p in packages if not envs.PACKAGE.match(p)]
-        if bad or len(packages) > 12:
-            return "not package names: %s" % ", ".join(bad) if bad else "at most 12 packages at a time"
+        # each as uv gets it, written plainly (numpy>=2.1,<2.3); an option, a URL, a path or a line break is refused
+        bad = [why for why in (envs._not_a_package(p) for p in packages) if why]
+        if bad:
+            return ("not package names: %s. A package from PyPI is its name, with extras in [ ] and the versions it "
+                    "may have if they matter: qick, qick==0.2.436, numpy>=2.1,<2.3, qick[full]; a maker's file or "
+                    "folder goes in files" % "; ".join(bad))
+        if len(packages) > 12:
+            return "at most 12 packages at a time"
+        packages = [envs.requirement(p) for p in packages]
         if not self.literature.enabled and (packages or re.match(r"^https?://", files or "")):
             return "searching outside the lab (literature and web) is switched off in Settings, so Kelvin downloads nothing"
         rec = envs.info(env, self.home)

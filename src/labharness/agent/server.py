@@ -910,7 +910,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
                                files: str = "", why: str = "") -> str:
         """Install what an instrument needs on this computer (the chat shows what, which version and from where;
         it drives nothing, so Kelvin approves it itself): its maker's Python packages from PyPI (pip names, with ==version where it must
-        match the instrument's own, e.g. qick==0.2.436), and/or the maker's files (files: a folder or file here, or
+        match the instrument's own, e.g. qick==0.2.436, or a range, numpy>=2.1,<2.3; never an option, a URL or a
+        path), and/or the maker's files (files: a folder or file here, or
         a web address: an SDK's Python package is installed, a DLL is kept). env: drivers for Kelvin's built-in
         drivers (a card's requires, or what a driver says is missing); for a library card, an environment of its own
         (e.g. attodry), with python (3.8...) and bits (32 for a 32-bit DLL) as its library needs, then
