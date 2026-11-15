@@ -10300,7 +10300,9 @@ class LabRuntime:
         from .. import portholders, probe
         from ..scriptrun import bring_in, lab_name, port_device
         ports, devices = probe.serial_ports(), probe.usb_devices()
-        held = portholders.holders_of([p["port"] for p in ports]) if ports else {}
+        # who holds each port for sure; one whose port couldn't be asked (a read waiting on it) is said apart, below:
+        # it holds one of them, not every one nobody else does
+        held = portholders.holders_of([p["port"] for p in ports], likely=False) if ports else {}
         notes = {}   # each port: whose in the lab, and who has it open
         for p in ports:
             ours = lab_name(self.lab, p["port"])
@@ -10333,6 +10335,10 @@ class LabRuntime:
                 if p["description"] or notes.get(p["port"]) else p["port"] for p in other))
             for p in other:
                 lines += light(p, [])
+        waiting = portholders.waiting() if ports else []
+        if waiting:
+            lines.append("Also holding a serial port whose name Kelvin couldn't ask (a read is waiting on it): "
+                         + portholders.named(waiting))
         users = portholders.visa_users()
         if users:
             lines.append("Programs with VISA loaded (one may hold an instrument's VISA session): "

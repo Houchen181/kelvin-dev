@@ -165,17 +165,21 @@ def test_connected_devices_flags_a_light_source_and_says_who_holds_its_port(lab,
     monkeypatch.setattr(probe, "network_adapters", lambda: [])
     asked = []
 
-    def holders_of(names, timeout=portholders.LOOK_S):
-        asked.append(sorted(names))
+    def holders_of(names, timeout=portholders.LOOK_S, likely=True):
+        asked.append((sorted(names), likely))
         return {n: [COBOLT_MONITOR] if n == "COM11" else [] for n in names}
     monkeypatch.setattr(portholders, "holders_of", holders_of)
+    monkeypatch.setattr(portholders, "waiting", lambda: [
+        {"pid": 99, "name": "VendorTool.exe", "path": "", "kelvin": False, "likely": True}])
     monkeypatch.setattr(portholders, "visa_users", lambda timeout=portholders.LOOK_S, names=None: [
         {"pid": 77, "name": "LabVIEW.exe", "path": "", "kelvin": False}])
     said = script_runtime(lab, folder, tmp_path).connected_devices()
-    assert asked == [["COM11", "COM7"]]                                    # one look for every port
+    assert asked == [(["COM11", "COM7"], False)]                           # one look for every port, sure ones only
     assert "serial port COM11 (open in CoboltMonitor.exe, process 4242)" in said, said
     assert "a light source not in this lab" in said and "add_instrument COM11" in said, said
     assert "COM7 (Communications Port (COM7); the lab's laser)" in said, said
+    assert ("Also holding a serial port whose name Kelvin couldn't ask (a read is waiting on it): VendorTool.exe "
+            "(process 99)") in said, said                                    # said apart, not on every port
     assert "Programs with VISA loaded (one may hold an instrument's VISA session): LabVIEW.exe (process 77)" in said
 
 
@@ -258,18 +262,17 @@ def test_a_port_nobody_can_name_says_nothing_and_never_raises():
 
 
 def test_a_look_that_blocks_never_holds_kelvin():
-    """A handle whose name never comes (a console's, waiting for input, which Windows answers only after the input) is
-    left after STEP_S, remembered, and never asked again; the walk goes on with the rest, and the whole look ends by
-    its deadline whatever happens."""
-    release = threading.Event()
+    """A handle whose name doesn't come (a synchronous read is pending on it in its process) is left after STEP_S and
+    not asked again while it waits; the walk goes on with the rest, and the whole look ends by its deadline whatever
+    happens. Once its answer has come, it is asked again (review of these fixes, finding 3: it was skipped for good)."""
+    release, stop = threading.Event(), threading.Event()
     seen = []
 
     def step(item, found):
         seen.append(item)
         if item == "stuck":
             release.wait(30)
-        else:
-            found.add(item)
+        found.add(item)   # (a step left to wait adds nothing to the walk that left it)
     skip = set()
     t0 = time.monotonic()
     found = portholders._walk(["a", "stuck", "b"], step, skip, timeout=5.0, step_s=0.3)
@@ -277,12 +280,167 @@ def test_a_look_that_blocks_never_holds_kelvin():
     assert found == {"a", "b"} and skip == {"stuck"}
     seen.clear()
     assert portholders._walk(["a", "stuck", "b"], step, skip, timeout=5.0, step_s=0.3) == {"a", "b"}
-    assert "stuck" not in seen                                            # never asked again
+    assert "stuck" not in seen                                            # not asked again while it waits
+    release.set()                                                         # its answer comes
+    for _ in range(100):
+        if not skip:
+            break
+        time.sleep(0.02)
+    assert skip == set()
+    assert portholders._walk(["a", "stuck", "b"], step, skip, timeout=5.0, step_s=0.3) == {"a", "stuck", "b"}
     t0 = time.monotonic()
-    portholders._walk(["x%d" % k for k in range(3)] + ["slow"], lambda item, found: release.wait(30), set(),
+    portholders._walk(["x%d" % k for k in range(3)] + ["slow"], lambda item, found: stop.wait(30), set(),
                       timeout=0.5, step_s=10.0)
     assert time.monotonic() - t0 < 2.0                                    # the deadline, whatever the steps do
-    release.set()
+    stop.set()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' handles")
+def test_a_holder_whose_port_cant_be_asked_is_named_as_likely(monkeypatch):
+    """Review of these fixes, finding 3, for real: asking a handle its name waits for as long as a synchronous read
+    pending on it in its process (a maker's program reading its port without overlapped I/O). The handle is left, and
+    its process named as the port's likely holder, never "run as administrator"; the next look doesn't ask it again;
+    once the read is over, it is asked again. A child's stdin pipe, with a read pending, stands in for the port."""
+    child = subprocess.Popen([sys.executable, "-c", "import os, sys, msvcrt, time\n"
+                              "print('reading', os.getpid(), msvcrt.get_osfhandle(0), flush=True)\n"
+                              "sys.stdin.buffer.read(1)\nprint('read', flush=True)\ntime.sleep(60)\n"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        said = child.stdout.readline().split()
+        assert said[:1] == [b"reading"], said
+        pid, handle = int(said[1]), int(said[2])
+        time.sleep(0.3)
+        monkeypatch.setattr(portholders, "device_of", lambda name: r"\Device\VCP0")
+        monkeypatch.setattr(portholders, "_file_handles", lambda api: [(pid, handle, 0)])
+        monkeypatch.setattr(portholders, "ASKED", portholders.ASKED | {0x11})    # a pipe's type, as a port's here
+        monkeypatch.setattr(portholders, "SERIAL", portholders.SERIAL | {0x11})
+        monkeypatch.setattr(portholders, "STEP_S", 0.3)
+        t0 = time.monotonic()
+        found = portholders.holders("COM11")
+        assert time.monotonic() - t0 < 2.0
+        assert [(h["pid"], h["likely"]) for h in found] == [(pid, True)], found
+        t0 = time.monotonic()
+        held = portholders.held_text("COM11")                              # not asked again: at once
+        assert time.monotonic() - t0 < 0.25
+        assert held == ("COM11 is probably open in %s (process %d), whose serial port couldn't be asked its name (a "
+                        "read is waiting on it)" % (found[0]["name"], pid)), held
+        assert portholders.holders("NUL") == []                            # likely only for a serial port
+        assert scriptrun.held_ports("could not open port 'COM11': PermissionError(13, 'Access is denied.', None, "
+                                    "5)").startswith("COM11 is probably open in")
+        child.stdin.write(b"x")                                            # the read is over: asked again
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == b"read"
+        for _ in range(100):
+            if not portholders.waiting():
+                break
+            time.sleep(0.02)
+        assert portholders.waiting() == [] and portholders.holders("COM11") == []
+    finally:
+        _end(child)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' sessions")
+def test_a_look_opens_no_process_of_another_session(monkeypatch):
+    """Review of these fixes, note 5: run as administrator, a look opened every process to duplicate its handles,
+    lsass among them, which security software flags. Only this Windows session's processes are opened (never 0 or 4),
+    for handles and for the modules VISA's users have loaded."""
+    api = portholders._api()
+    real = api.k32
+    opened = []
+
+    class K32:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def OpenProcess(self, access, inherit, pid):
+            opened.append(pid)
+            return real.OpenProcess(access, inherit, pid)
+
+        def CreateToolhelp32Snapshot(self, flags, pid):
+            if pid:
+                opened.append(pid)
+            return real.CreateToolhelp32Snapshot(flags, pid)
+    path, _ = _device()
+    child = subprocess.Popen([sys.executable, "-c", HOLD, path], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        pid = _started(child, b"held")
+        session = portholders._session(api, os.getpid())
+        assert isinstance(session, int)
+        monkeypatch.setattr(api, "k32", K32())
+        others = {pid}
+        real_session = portholders._session
+        monkeypatch.setattr(portholders, "_session", lambda a, p: 0 if p in others else real_session(a, p))
+        assert pid not in [h["pid"] for h in portholders.holders(path)]   # as if it were a service's: never opened
+        assert pid not in opened and 0 not in opened and 4 not in opened
+        portholders.visa_users(names=("_ctypes",), keep=False)
+        assert pid not in opened and 0 not in opened and 4 not in opened
+        others.clear()                                                     # in this session: opened, and found
+        assert pid in [h["pid"] for h in portholders.holders(path)] and pid in opened
+    finally:
+        _end(child)
+
+
+def test_a_permission_error_on_a_file_is_never_blamed_on_a_port(lab, folder, tmp_path):
+    """Review of these fixes, finding 2: a script that opens COM11 (outside the lab) failed because its CSV was open in
+    Excel, [Errno 13], and its failure said another program had COM11 open."""
+    if sys.platform != "win32" and os.geteuid() == 0:
+        pytest.skip("root writes any file")
+    csv = tmp_path / "odmr.csv"
+    csv.write_text("f,c\n")
+    held = None
+    if sys.platform == "win32":   # held without sharing, as Excel holds a workbook
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        held = k32.CreateFileW(str(csv), 0xC0000000, 0, None, 3, 0, None)
+    else:
+        csv.chmod(0o444)
+    try:
+        write(folder, "odmr.py", """
+            import serial
+            with open(%r, "w") as f:      # the results file, open in Excel
+                f.write("1,2\\n")
+            laser = serial.Serial("COM11", 115200, timeout=1)
+            """ % str(csv))
+        gate, request, report = run(lab, folder, tmp_path, "odmr.py")
+    finally:
+        if held is not None:
+            k32.CloseHandle(held)
+    assert "Permission denied" in report.message, report.message
+    assert "COM11" not in report.message and "another program has" not in report.message, report.message
+
+
+def test_which_lines_say_a_port_is_held(monkeypatch):
+    """Review of these fixes, finding 2: only a line about a port names one (never one about a file, nor /dev/null);
+    the ports a script opens stand in only for an error that is a port's or an instrument's alone (VISA's busy
+    resource), never for a plain Errno 13."""
+    asked = []
+    monkeypatch.setattr(portholders, "holders", lambda port, timeout=portholders.LOOK_S: asked.append(port) or [])
+    for line in ("PermissionError: [Errno 13] Permission denied: 'C:\\\\data\\\\odmr.csv'",
+                 "PermissionError: [Errno 13] Permission denied: 'C:\\\\data\\\\COM11.csv'",
+                 "PermissionError: [Errno 13] Permission denied: '/dev/null'",
+                 "OSError: [Errno 16] Device or resource busy: '/home/lab/run.lock'",
+                 "PermissionError: [WinError 5] Access is denied: 'C:\\\\Program Files\\\\nvpulse\\\\cfg.ini'",
+                 "PermissionError: [Errno 13] Permission denied"):
+        assert scriptrun.held_ports(line, ["serial://COM11"]) == "", line
+    assert asked == []
+    assert portholders.ports_in("Permission denied: '/dev/null' or /dev/shm/x") == []
+    assert portholders.ports_in("busy: /dev/ttyUSB3, /dev/ttyACM0, /dev/serial/by-id/usb-FTDI_A6-if00-port0, "
+                                "/dev/cu.usbserial-A6, /dev/tty.usbmodem14101 and COM11") == [
+        "/dev/ttyUSB3", "/dev/ttyACM0", "/dev/serial/by-id/usb-FTDI_A6-if00-port0", "/dev/cu.usbserial-A6",
+        "/dev/tty.usbmodem14101", "COM11"]
+    for line, port in (("[Errno 16] could not open port /dev/ttyUSB3: [Errno 16] Device or resource busy: "
+                        "'/dev/ttyUSB3'", "/dev/ttyUSB3"),
+                       ("could not open port 'COM11': PermissionError(13, 'Access is denied.', None, 5)", "COM11"),
+                       ("VI_ERROR_RSRC_BUSY (-1073807246): The resource is valid, but VISA cannot currently access "
+                        "it.", "COM11")):   # names no port: the one the script opens
+        asked.clear()
+        assert "another program has %s open" % port in scriptrun.held_ports(line, ["serial://COM11"]), line
+        assert asked == [port]
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="a Mac doesn't say which programs have a library loaded")

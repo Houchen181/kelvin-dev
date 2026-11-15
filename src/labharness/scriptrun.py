@@ -1403,23 +1403,27 @@ def bring_in(device: Dict[str, Any]) -> str:
 def held_ports(text: str, opens: Sequence[str] = ()) -> str:
     """Who has the serial ports a failed script couldn't open, in words for its failure: the ports named in the lines
     of its error and output that say a port was held (could not open port 'COM11': PermissionError(13, 'Access is
-    denied.'), Errno 16, busy: portholders.busy), else the ports outside the lab it opens (opens). "" when no line says
-    so. A port Kelvin itself holds is a lab instrument's, which a script reaches through Kelvin, never on its own."""
+    denied.'), Errno 16, busy: portholders.busy), never in a line about a file (Permission denied: 'odmr.csv', a
+    workbook Excel holds: portholders.about_a_file). Where those name no port, the ports outside the lab it opens
+    (opens), only for what is a port's or an instrument's alone (VISA's busy resource, pyserial's could not open port:
+    portholders.OPENING): a review of the 2026-11-15 fixes had a locked CSV blamed on COM11. "" when no line says so. A
+    port Kelvin itself holds is a lab instrument's, which a script reaches through Kelvin, never on its own."""
     from . import portholders
-    lines = [line for line in (text or "").splitlines() if portholders.busy(line)]
+    lines = [line for line in (text or "").splitlines()
+             if portholders.busy(line) and not portholders.about_a_file(line)]
     if not lines:
         return ""
     ports = list(dict.fromkeys(p for line in lines for p in portholders.ports_in(line)))
-    ports = ports or [p for p in dict.fromkeys(portholders.port_name(a) for a in opens) if p]
+    if not ports and any(portholders.OPENING.search(line) for line in lines):
+        ports = [p for p in dict.fromkeys(portholders.port_name(a) for a in opens) if p]
     said = []
     for port in ports[:4]:
         found = portholders.holders(port)
-        if any(h.get("kelvin") for h in found):
+        if any(h.get("kelvin") and not h.get("likely") for h in found):
             said.append("%s is open in Kelvin itself, for the lab's instrument there: a script reaches it through "
                         "Kelvin (pyvisa or pyserial with its address), never with a port of its own" % port)
         elif found:
-            said.append("%s is open in %s: close it there, then run the script again"
-                        % (port, portholders.named(found)))
+            said.append(portholders.say(port, found) + ": close it there, then run the script again")
         else:
             said.append(portholders.nobody(port))
     return "; ".join(said)
