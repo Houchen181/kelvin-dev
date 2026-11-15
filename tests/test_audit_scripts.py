@@ -46,6 +46,8 @@ def test_sc4_other_spellings_of_a_lab_instruments_address_go_through_the_gate():
 
 @pytest.mark.skipif(not os.name == "nt", reason="the escapes are Windows' (O_TEMPORARY, _overlapped)")
 def test_sc5_run_pythons_known_escapes_are_refused():
+    pytest.importorskip("numpy")
+    pytest.importorskip("h5py")                     # the repro keeps and reads runs' run.h5
     out = repro("sandbox_claims")
     assert "lab.yaml now reads: 'limits: { V: [-10, 10] }" in out, out[-3000:]
     assert "the other run's points/v: [np.float64(1.0), np.float64(2.0), np.float64(3.0)]" in out, out[-3000:]
