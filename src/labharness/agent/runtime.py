@@ -10402,14 +10402,14 @@ class LabRuntime:
             return "say which packages (pip names, with a version if it must match) or which files to install"
         if bits not in (32, 64):
             return "bits is 32 or 64"
+        if len(packages) > 12:
+            return "at most 12 packages at a time"
         # each as uv gets it, written plainly (numpy>=2.1,<2.3); an option, a URL, a path or a line break is refused
-        bad = [why for why in (envs._not_a_package(p) for p in packages) if why]
+        bad = [why for why in (envs.not_a_package(p) for p in packages) if why]
         if bad:
             return ("not package names: %s. A package from PyPI is its name, with extras in [ ] and the versions it "
                     "may have if they matter: qick, qick==0.2.436, numpy>=2.1,<2.3, qick[full]; a maker's file or "
                     "folder goes in files" % "; ".join(bad))
-        if len(packages) > 12:
-            return "at most 12 packages at a time"
         packages = [envs.requirement(p) for p in packages]
         if not self.literature.enabled and (packages or re.match(r"^https?://", files or "")):
             return "searching outside the lab (literature and web) is switched off in Settings, so Kelvin downloads nothing"

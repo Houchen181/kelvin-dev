@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from .envs import PACKAGE
+from .envs import not_a_package
 from .expr import CONSTANTS
 from .scpi import Template
 from .yamlio import load_yaml
@@ -950,7 +950,8 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         idn_pattern = "|".join("(?:%s)" % p for p in [str(idn_pattern)] + [v["idn"] for v in variants])
     usb_ids = [str(u).lower() for u in identify.get("usb") or []]
     requires = data.get("requires") or []
-    if not isinstance(requires, list) or not all(isinstance(r, str) and PACKAGE.match(r.strip()) for r in requires):
+    if not isinstance(requires, list) or not all(isinstance(r, str) and not not_a_package(r.strip())
+                                                  for r in requires):
         err("requires", "a list of the maker's Python packages, as pip names them (qick, Pyro4, zhinst-core)")
         requires = []
     for u in usb_ids:

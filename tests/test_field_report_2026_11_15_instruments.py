@@ -133,6 +133,58 @@ def test_a_uv_that_a_shell_would_run_is_never_used_on_windows(tmp_path, monkeypa
     assert str(envs.uv_path(tmp_path)).endswith("uv.exe")
 
 
+LONG = ["qick" + " " * 50000 + "x", "qick[" + " " * 50000 + "x", "qick[full" + " " * 50000 + "x",
+        "qick (>=1" + " " * 50000 + "x", "numpy>=2.1" + " ," * 25000 + "x", "q" * 50000]
+
+
+@pytest.mark.parametrize("spec", LONG, ids=["spaces", "extras", "an extra", "parentheses", "commas", "a name"])
+def test_a_long_package_is_refused_at_once_and_never_freezes_kelvin(spec):
+    """Review of 2026-11-15: the pattern had two runs of spaces side by side, and re tried every split of them:
+    "qick", 16,000 spaces and "x" took 10 s, 50,000 spaces 110 s, with re holding the GIL, so the monitor, Stop and
+    the portal froze with it. The pattern is linear now, and nothing over 200 characters is matched at all."""
+    import time
+    t0 = time.perf_counter()
+    envs.PACKAGE.match(spec)                           # the pattern alone, on all of it (a long name is one)
+    took = time.perf_counter() - t0
+    assert took < 0.5, "the pattern took %.1f s" % took
+    t0 = time.perf_counter()
+    with pytest.raises(ValueError, match="characters long: no package's name and versions are longer than 200"):
+        envs.requirement(spec)
+    assert time.perf_counter() - t0 < 0.05
+
+
+def test_a_cards_requires_and_an_install_with_a_long_package_are_refused_at_once(kelvin):  # noqa: F811
+    import time
+    from labharness.cards import CardError, parse_card
+    card = {"card": 1, "id": "a/b", "model": "B", "vendor": "A", "kind": "dmm", "requires": ["qick" + " " * 12000 + "x"],
+            "parameters": {"V": {"kind": "measure", "unit": "V", "get": "V?"}}}
+    t0 = time.perf_counter()
+    with pytest.raises(CardError, match="the maker's Python packages"):
+        parse_card(card)                                # took 4.6 s
+    assert time.perf_counter() - t0 < 0.5
+    t0 = time.perf_counter()
+    said = kelvin.install_for_instrument("drivers", ["qick" + " " * 50000 + "x"])
+    assert said.startswith("not package names: ") and "characters long" in said
+    assert time.perf_counter() - t0 < 0.5 and kelvin.uv.calls == []
+    assert kelvin.install_for_instrument("drivers", ["q%d" % i for i in range(13)]) == "at most 12 packages at a time"
+
+
+@pytest.mark.parametrize("spec", ["pkg-1.0.tbz", "pkg-1.0.txz", "pkg-1.0.tlz", "pkg-1.0.tar.lz", "pkg-1.0.tar.lzma",
+                                  "pkg-1.0.tar.zst", "pkg-1.0.tzst", "pkg-1.0-py3-none-any.WHL", "numpy.whl==1.0",
+                                  "pkg.tar.gz[full]", "pkg-1.0.7z"])
+def test_every_archive_pip_or_uv_takes_for_a_file_is_refused(spec):
+    """Review of 2026-11-15: .tbz, .txz, .tlz, .tar.lz, .tar.lzma and .tar.zst passed as names, which pip and uv take
+    for files here: any name with an archive's or a wheel's suffix is a path, whatever follows."""
+    with pytest.raises(ValueError, match="a path or a file"):
+        envs.requirement(spec)
+    assert not envs.PACKAGE.match(spec)
+
+
+@pytest.mark.parametrize("spec", ["backports.tarfile", "zope.interface>=6", "jaraco.zipp", "lazr.restfulclient"])
+def test_a_name_that_only_holds_an_archives_letters_is_a_package(spec):
+    assert envs.requirement(spec) == spec
+
+
 # ---------------------------------------------------------------------- item 5: a QICK board on its USB network
 
 FIELD_PC = [{"name": "Ethernet 3", "address": "192.168.3.100", "network": "192.168.3.0/24", "link_local": False},
