@@ -12,7 +12,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from .adapters import OutOfStep, lost_kind, only_numbers, short_code, short_model, stoppable, where_and_cause
+from .adapters import (OutOfStep, an_identity, lost_kind, reading, short_code, short_model, stoppable,
+                       where_and_cause)
 from .cards import BINARY_REPLY, Card, ParamSpec
 from .clock import Stops
 from .labconfig import Guard, InstrumentConfig
@@ -462,9 +463,9 @@ class Instrument:
                 raise
             except (InstrumentOff, Stopped, InstrumentLost):
                 raise
-            except OutOfStep as e:   # its replies one behind its questions, after it was put back in step and asked
-                self._forget()       # again: a comms fault in those words, never a lost instrument, cables or noise
-                self.health.garbled(self.out_of_step_text(e.command, e.reply, again=True))
+            except OutOfStep as e:   # its replies out of step with its questions, read past and put back in step: a
+                self._forget()       # comms fault in those words, never a lost instrument, cables or noise
+                self.health.garbled(self.out_of_step_text(e.command, e.reply, "again" if e.asked_again else "unasked"))
                 raise Garbled(self.health.garbled_text) from e
             except Exception as e:
                 kind = lost_kind(e)
@@ -591,29 +592,40 @@ class Instrument:
                 "readings can't be trusted until its replies are clean again" % (
                     self.name, command.strip(), reply.strip()[:60], " " + where if where else ""))
 
-    def out_of_step_text(self, command: str, reply: str, again: bool = False) -> str:
+    def out_of_step_text(self, command: str, reply: str, how: str = "") -> str:
         """Its own identity read where another question's reply should be, in words: a late reply to an earlier
         question (a *IDN? that ran out of time), not a loose cable or noise (field report 2026-11-15: "lockin's reply
-        to SLVL? arrived garbled ('Stanford_Research_Systems,SR830,s/n81118,ver1.07')"). again: after Kelvin put it
-        back in step and asked once more (adapters.OutOfStep)."""
+        to SLVL? arrived garbled ('Stanford_Research_Systems,SR830,s/n81118,ver1.07')"). how (adapters.OutOfStep):
+        "again", it came again after Kelvin put it back in step and asked once more; "unasked", this question's own
+        reply didn't follow it, and the question, which may change something, wasn't asked again."""
         where, _ = where_and_cause(self.config.address)
+        done = {"again": ", again after Kelvin cleared it and asked who it is",
+                "unasked": ", and that question's own reply didn't follow it"}.get(how, "")
+        then = (" Kelvin put it back in step (a device clear, then asked who it is) and didn't send %s again, as that "
+                "may change what it does: check whether it was done." % command.strip() if how == "unasked" else
+                " Kelvin puts it back in step (a device clear, then asks who it is) before its next command."
+                if hasattr(self.backend, "owed") else "")
         return ("%s's reply to %s was its own identity (%r)%s%s: a late reply to an earlier question, read in this "
                 "one's place, not a loose cable or noise.%s Its readings can't be trusted until its replies come in "
-                "step" % (self.name, command.strip(), str(reply).strip()[:60], " " + where if where else "",
-                          ", again after Kelvin cleared it and asked who it is" if again else "",
-                          " Kelvin puts it back in step (a device clear, then asks who it is) before its next command."
-                          if hasattr(self.backend, "owed") else ""))
+                "step" % (self.name, command.strip(), str(reply).strip()[:60], " " + where if where else "", done,
+                          then))
 
     def its_identity(self, reply: Any) -> bool:
-        """Whether a reply is this instrument's own identity, not a reading: its card's identity pattern, or the
-        identity it answered as itself (asked who it is, or connected again)."""
-        text = str(reply).strip()
-        if not text or only_numbers(text):
-            return False
-        if self.card.idn_pattern and re.search(self.card.idn_pattern, text, re.I):
-            return True
+        """Whether a reply is this instrument's own identity, not a reading (adapters.an_identity): exactly what it
+        answered as itself (asked who it is, or connected again); where that isn't known, its card's identity pattern
+        at the reply's start, in an identity's form."""
         said = getattr(self.backend, "said_as", "") or self.health.reopened_as
-        return bool(said) and text == str(said).strip()
+        return an_identity(reply, self.card.idn_pattern, said)
+
+    def _reads_as(self, spec: ParamSpec, text: str) -> bool:
+        """Whether a reply reads as this plain reading's value (never for a string reading, which any reply is)."""
+        if spec.type == "str":
+            return False
+        try:
+            spec.from_wire(text)
+        except (ValueError, TypeError):
+            return False
+        return True
 
     def _asks_identity(self, command: str) -> bool:
         own = {"*IDN?", (self.card.idn_query or "*IDN?").strip().upper()}
@@ -708,7 +720,12 @@ class Instrument:
         if replies is not None and command in replies:
             reply = replies[command]
         else:
-            reply = self._io(self.backend.query, command)
+            # a plain reading (no acquisition, no trace): one that reads as its value is never taken for a late
+            # identity, and after a late reply in its place it may be asked once more (adapters.reading)
+            plain = reading(lambda text: self._reads_as(spec, text)) if not spec.acquires \
+                and spec.type != "image" else contextlib.nullcontext()
+            with plain:
+                reply = self._io(self.backend.query, command)
             if replies is not None:
                 replies[command] = reply
         value = self._parse(spec, command, reply)

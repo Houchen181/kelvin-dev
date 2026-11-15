@@ -89,14 +89,16 @@ class Hung(LinkLost):
 
 
 class OutOfStep(AdapterError):
-    """An instrument's replies come one behind its questions: its own identity was read where another question's reply
-    should be (a late reply to an earlier *IDN?), and again after Kelvin put it back in step and asked once more
-    (VisaBackend._asked_again). It answers, so it is never taken for a lost instrument (lost_kind: none): the
+    """An instrument's replies came out of step with its questions: its own identity was read where another question's
+    reply should be (a late reply to an earlier *IDN?), and that question's own reply didn't follow it
+    (VisaBackend._past_a_late_one). The instrument is put back in step. asked_again: the question, a plain reading,
+    was asked once more and its identity came again; otherwise it wasn't asked again, as it may change something (an
+    action, the error queue, a buffer). It answers, so it is never taken for a lost instrument (lost_kind: none): the
     instrument says it as a comms fault in those words (Instrument._io), not a loose cable or noise."""
 
-    def __init__(self, text: str, command: str = "", reply: str = ""):
+    def __init__(self, text: str, command: str = "", reply: str = "", asked_again: bool = False):
         super().__init__(text)
-        self.command, self.reply = command, reply
+        self.command, self.reply, self.asked_again = command, reply, asked_again
 
 
 def only_numbers(text: str) -> bool:
@@ -112,8 +114,42 @@ def only_numbers(text: str) -> bool:
     return True
 
 
+def an_identity(text: Any, pattern: Optional[str], said: str = "") -> bool:
+    """Whether a reply is an instrument's own identity: exactly what it said as itself when last asked, where that is
+    known (said); else its card's identity pattern at the reply's start, the reply in an identity's form (letters and a
+    comma) and not numbers. A lab card's pattern found anywhere in a reply (idn: "2700" in '+1.27001E+00VDC,...') made
+    a genuine reading a late identity, thrown away and asked again (review of 2026-11-15)."""
+    text = str(text).strip()
+    if not text or only_numbers(text):
+        return False
+    if said:
+        return text == str(said).strip()
+    return bool(pattern) and re.match(str(pattern), text, re.I) is not None and "," in text \
+        and re.search(r"[A-Za-z]", text) is not None
+
+
 _waits = threading.local()   # this thread's own stop and patience, while it waits on a call (stoppable)
 _running = threading.local()   # on a courier's own thread: the call it makes now (time_left)
+_reading = threading.local()   # this thread's query reads a card's plain value: how a reply of it reads (reading)
+
+
+def reading(reads: Callable[[str], bool]) -> Any:
+    """While this thread asks for a card's plain reading (Instrument.read: the parameter's own get, no acquisition, no
+    trace; a with block): a reply that reads as that value (reads(reply)) is never taken for a late identity, and
+    after a late reply in its place it may be asked once more, which only reads again (VisaBackend._past_a_late_one).
+    Any other question (an action's, the error queue's, a raw one a person approved, a buffer's read) is never asked
+    twice."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def plain() -> Any:
+        before = getattr(_reading, "now", None)
+        _reading.now = reads
+        try:
+            yield
+        finally:
+            _reading.now = before
+    return plain()
 
 
 def time_left() -> Optional[float]:
@@ -1181,7 +1217,7 @@ class VisaBackend:
             try:
                 reply = self._query(command)
                 if self._in_its_place(command, reply):
-                    return self._asked_again(command, reply)
+                    return self._past_a_late_one(command, reply)
                 if self._asks_identity(command) and self._identity_form(reply):
                     self.said_as = str(reply).strip()
                 return reply
@@ -1199,41 +1235,77 @@ class VisaBackend:
         return any(part.strip().upper() in own for part in str(command).split(";"))
 
     def _identity_form(self, reply: Any) -> bool:
-        """Whether a reply to a question of who it is is its identity: its card's pattern; with none, IEEE 488.2's
-        four fields (maker, model, serial, firmware), not numbers."""
+        """Whether a reply to a question of who it is is its identity: its card's pattern, as the lab's identity check
+        reads it; with none, IEEE 488.2's four fields (maker, model, serial, firmware). Never numbers."""
         text = str(reply).strip()
+        if not text or only_numbers(text):
+            return False
         if self._sync is not None:
             return bool(re.search(self._sync[1], text, re.I))
-        return len(text.split(",")) >= 4 and not only_numbers(text)
+        return len(text.split(",")) >= 4
 
     def _in_its_place(self, command: str, reply: Any) -> bool:
         """Whether a reply is the instrument's own identity where another question was asked: a late reply to an
         earlier *IDN? (one that ran out of time: the monitor's, or a check's own on a slow bus), read in this question's
-        place, this one's own reply still to come. By its card's identity pattern, or the identity it last answered as
-        itself (said_as); never for a question of who it is, nor a reply of numbers only (a lab's own card with a loose
-        pattern). Field report 2026-11-15: lockin's SLVL? got 'Stanford_Research_Systems,SR830,s/n81118,ver1.07', and
-        the monitor called it garbled."""
+        place, this one's own reply still to come (field report 2026-11-15: lockin's SLVL? got
+        'Stanford_Research_Systems,SR830,s/n81118,ver1.07', and the monitor called it garbled). Exactly what it last
+        said as itself (said_as), which no reading is; where that isn't known, its card's identity pattern at the
+        reply's start in an identity's form (an_identity), unless the reply reads as the plain reading asked for
+        (reading). Never for a question of who it is."""
         text = str(reply).strip()
-        if not text or self._asks_identity(command) or only_numbers(text):
+        if not text or self._asks_identity(command):
             return False
-        if self._sync is not None and re.search(self._sync[1], text, re.I):
-            return True
-        return bool(self.said_as) and text == self.said_as
+        if self.said_as:
+            return text == self.said_as
+        reads = getattr(_reading, "now", None)
+        if reads is not None and reads(text):   # it reads as the value asked for: a genuine reading, kept
+            return False
+        return an_identity(text, self._sync[1] if self._sync else None)
 
-    def _asked_again(self, command: str, stale: str) -> str:
-        """A late identity read in this question's place (_in_its_place): out of step, not garbled. Put back in step
-        (owed: a device clear, then asked who it is until it answers as itself, what is behind that dropped too), then
-        asked once more. Its identity again: OutOfStep, and it is put back in step before its next command too."""
-        log.warning("%s: its identity (%r) came where %s's reply should be, a late reply to an earlier question: put "
-                    "back in step and asked again", self.name, stale.strip()[:60], command.strip())
+    def _read_past(self, command: str) -> Optional[str]:
+        """This question's own reply, read past a late identity in its place: the question was sent and done, so its
+        reply comes next (two more replies at most). None when it doesn't come in time, or only identities do: the
+        instrument is then owed (put back in step before what is asked next)."""
+        if self.enq or self.echo or self.ack:   # replies framed by the protocol: put back in step instead
+            self.owed = True
+            return None
+        for _ in range(2):
+            try:
+                reply = str(self.res.read())
+            except Exception as e:
+                if not timed_out(e):
+                    raise
+                break
+            if not self._in_its_place(command, reply):
+                return reply
         self.owed = True
-        self._settle()
+        return None
+
+    def _past_a_late_one(self, command: str, stale: str) -> str:
+        """A late identity read in this question's place (_in_its_place): out of step, not garbled. The question was
+        sent, and done, so its own reply comes next: it is read past the late one, nothing asked twice. A review of
+        2026-11-15 found that asking again moved a stage twice (MOVE:REL 1;*OPC?) and lost the error the first
+        SYST:ERR? had taken from the queue; a buffer's read (R?, DATA:REM?) would lose its readings. Its own reply not
+        in time: put back in step (a device clear, then asked who it is), and asked once more only when it is a plain
+        reading of a card's (reading), which only reads again; anything else raises OutOfStep, not asked again."""
+        log.warning("%s: its identity (%r) came where %s's reply should be, a late reply to an earlier question: read "
+                    "past it", self.name, stale.strip()[:60], command.strip())
+        own = self._read_past(command)
+        if own is not None:
+            return own
+        self._settle()   # owed: a device clear, then asked who it is, what is behind that dropped
+        if getattr(_reading, "now", None) is None:
+            raise OutOfStep("%s answers out of step: its own identity (%r), a late reply to an earlier question, came "
+                            "where %s's reply should be, and that reply didn't follow. Kelvin put it back in step and "
+                            "didn't ask %s again, as that may change what the instrument does"
+                            % (self.name, stale.strip()[:60], command.strip(), command.strip()), command.strip(), stale)
         reply = self._query(command)
         if self._in_its_place(command, reply):
             self.owed = True
             raise OutOfStep("%s answers out of step: its reply to %s was its own identity (%r) again after Kelvin put "
-                            "it back in step, a late reply to an earlier question read in this one's place"
-                            % (self.name, command.strip(), str(reply).strip()[:60]), command.strip(), str(reply))
+                            "it back in step and asked once more, a late reply to an earlier question read in this "
+                            "one's place" % (self.name, command.strip(), str(reply).strip()[:60]), command.strip(),
+                            str(reply), asked_again=True)
         return reply
 
     def _failed(self, e: BaseException) -> None:
@@ -1432,9 +1504,8 @@ class VisaBackend:
                 res.timeout = min(int(before or AFTER_MS), AFTER_MS)
                 self._settle()
                 reply = str(self._query(command))
-                if self._in_its_place(command, reply):   # a late identity, not its error queue: out of step
-                    self.owed = True
-                    return None
+                if self._in_its_place(command, reply):   # a late identity in front of its error queue's reply: read
+                    return self._read_past(command)       # past it, the error it took never lost (None: owed)
                 return reply
             except Exception as e:
                 if timed_out(e):

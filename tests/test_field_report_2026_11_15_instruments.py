@@ -701,7 +701,7 @@ class LateLockin:
     def __init__(self):
         self.timeout, self.read_termination, self.write_termination = 3000, None, None
         self.out, self.later, self.sent, self.cleared = [], [], [], 0
-        self.slow = {}
+        self.slow, self.drop = {}, set()
         self.answers = {"*IDN?": self.IDN, "SLVL?": "0.004", "FREQ?": "1000.0", "OUTP? 3": "1.2E-06", "*OPC?": "1"}
 
     def write(self, cmd):
@@ -709,8 +709,13 @@ class LateLockin:
         later = [(n - 1, r) for n, r in self.later]
         self.out += [r for n, r in later if n <= 0]   # what came too late arrives now, in front
         self.later = [(n, r) for n, r in later if n > 0]
+        if cmd in self.drop:   # its reply never comes (an instrument that discards a reply behind an unread one)
+            self.drop.discard(cmd)
+            return
         if "?" in cmd:
             reply = self.answers.get(cmd, "0")
+            if callable(reply):
+                reply = reply()
             if cmd in self.slow:
                 self.later.append((self.slow.pop(cmd), reply))
             else:
@@ -801,27 +806,27 @@ def test_a_connection_made_anew_on_a_slow_bus_is_never_one_behind():
     assert li.query("SLVL?") == "0.004"
 
 
-def test_an_identity_that_comes_later_still_is_read_off_and_the_question_asked_again():
+def test_an_identity_that_comes_later_still_is_read_past_and_nothing_is_asked_twice():
     """A late identity that arrives after Kelvin put the lock-in back in step (later than its check) is read where
-    SLVL?'s reply should be: it is its own identity, not a reading, so it is out of step, not garbled. Kelvin puts it
-    back in step and asks SLVL? once more."""
+    SLVL?'s reply should be: it is its own identity, not a reading, so it is out of step, not garbled. SLVL? was sent
+    and answered, its reply right behind: it is read past the late one, never asked again."""
     res = LateLockin()
     li = lockin(res)
     res.slow["*IDN?"] = 2
     with pytest.raises(TimeoutError):
         li.query("*IDN?")
     assert li.query("SLVL?") == "0.004"
-    assert res.sent == ["*IDN?", "*IDN?", "SLVL?", "*IDN?", "SLVL?"]   # back in step (who it is), asked once more
+    assert res.sent == ["*IDN?", "*IDN?", "SLVL?"]      # read past it: SLVL? once
     assert not li.owed
     res.slow["*IDN?"] = 3                               # and for *OPC?'s wait, read on past it
     with pytest.raises(TimeoutError):
         li.query("*IDN?")
     assert li.query("FREQ?") == "1000.0"
     assert li.query_waiting("*OPC?", 5, lambda: False) == "1"
-    res.slow["*IDN?"] = 2                               # the error queue's quick question after a timeout: none
+    res.slow["*IDN?"] = 2                               # the error queue's quick question after a timeout: its own
     with pytest.raises(TimeoutError):
         li.query("*IDN?")
-    assert li.ask_after_timeout("ERRS?") is None and li.owed
+    assert li.ask_after_timeout("ERRS?") == "0" and not li.owed
 
 
 def test_a_card_without_an_identity_pattern_knows_its_identity_by_what_it_said():
@@ -835,8 +840,8 @@ def test_a_card_without_an_identity_pattern_knows_its_identity_by_what_it_said()
     res.answers.update({"*IDN?": "ACME,WIDGET 9000,1,1.0", "V?": "1.5"})
     w = VisaBackend("widget", card, "GPIB0::8::INSTR", rm=OneLockin(res))
     assert w.query("*IDN?") == "ACME,WIDGET 9000,1,1.0" and w.said_as == "ACME,WIDGET 9000,1,1.0"
-    res.out.append("ACME,WIDGET 9000,1,1.0")            # a late one, already there
-    assert w.query("V?") == "1.5" and res.cleared >= 1
+    res.out.append("ACME,WIDGET 9000,1,1.0")            # a late one, already there: read past
+    assert w.query("V?") == "1.5" and res.sent.count("V?") == 1
     res.answers["V?"] = "1.0,2.0,3.0,4.0"               # numbers are a reading, never taken for an identity
     assert w.query("V?") == "1.0,2.0,3.0,4.0"
 
@@ -932,6 +937,112 @@ def test_its_identity_for_a_reading_through_any_connection_is_said_out_of_step_a
                                       r"Kelvin puts it back in step"):
         inst.read("amplitude")
     assert plain.owed
+
+
+def acme(res, idn, query="*IDN?", parameters=None):
+    """An instrument of a lab's own card (the review's: identity pattern idn) on GPIB, through VISA."""
+    from labharness.adapters import VisaBackend
+    from labharness.cards import parse_card
+    card = parse_card({"card": 1, "id": "lab/dmm", "model": "DMM", "vendor": "ACME", "kind": "dmm",
+                       "identify": {"idn": idn, "query": query},
+                       "parameters": parameters or {"V": {"kind": "measure", "unit": "V", "get": "READ?"}}})
+    return VisaBackend("dmm", card, "GPIB0::8::INSTR", rm=OneLockin(res))
+
+
+def test_a_question_that_may_change_something_is_never_asked_twice_its_reply_read_past_the_late_one():
+    """Review of 2026-11-15: asked once more after a late identity, a relative move went twice
+    (['MOVE:REL 1;*OPC?', '*IDN?', 'MOVE:REL 1;*OPC?']) and the error the first SYST:ERR? took was lost (-113 read, not
+    -222). The question was sent and done, so its reply is right behind the late one: read past it."""
+    res = LateLockin()
+    stage = acme(res, "^ACME,STAGE")
+    res.answers.update({"*IDN?": "ACME,STAGE 1,1,1.0", "MOVE:REL 1;*OPC?": "1"})
+    res.out.append("ACME,STAGE 1,1,1.0")                # late, already there
+    assert stage.query("MOVE:REL 1;*OPC?") == "1"
+    assert res.sent == ["MOVE:REL 1;*OPC?"] and not stage.owed
+    errors = ['-222,"Data out of range"', '-113,"Undefined header"']
+    res.answers["SYST:ERR?"] = lambda: errors.pop(0) if errors else '0,"No error"'
+    res.out.append("ACME,STAGE 1,1,1.0")
+    assert stage.query("SYST:ERR?") == '-222,"Data out of range"'
+    assert stage.query("SYST:ERR?") == '-113,"Undefined header"'
+
+
+def test_a_question_whose_reply_didnt_follow_the_late_one_is_put_back_in_step_and_not_asked_again():
+    """A buffer's read (DATA:REM? takes its readings away) whose own reply didn't follow the late identity (an
+    instrument that discards it): back in step, and not sent again, which would take more readings away. Said so."""
+    from labharness.adapters import OutOfStep
+    res = LateLockin()
+    dmm = acme(res, "^ACME,DMM")
+    res.answers.update({"*IDN?": "ACME,DMM 9,1,1.0", "DATA:REM?": "1.0,2.0,3.0"})
+    res.out.append("ACME,DMM 9,1,1.0")
+    res.drop.add("DATA:REM?")
+    with pytest.raises(OutOfStep, match=r"didn't ask DATA:REM\? again, as that may change what the instrument does") \
+            as e:
+        dmm.query("DATA:REM?")
+    assert res.sent == ["DATA:REM?", "*IDN?"] and not e.value.asked_again   # back in step, once: who it is
+    assert not dmm.owed and dmm.query("DATA:REM?") == "1.0,2.0,3.0"
+
+
+def test_a_plain_reading_whose_reply_didnt_follow_is_asked_once_more_and_a_raw_query_is_not(late_lab):
+    """Only a card's plain reading (its own get: no acquisition, no trace) is asked once more, which only reads again.
+    A raw query a person approved once is never sent twice: its alarm says it wasn't, and why."""
+    from labharness.instrument import Garbled
+    rt, res = late_lab
+    inst = rt.lab.instruments["lockin"]
+    assert inst.query_raw("*IDN?") == LateLockin.IDN    # what it says as itself: known (said_as)
+    res.out.append(LateLockin.IDN)
+    res.drop.add("SLVL?")
+    assert rt.lab.read("lockin", "amplitude") == pytest.approx(0.004)
+    assert res.sent[-3:] == ["SLVL?", "*IDN?", "SLVL?"] and inst.health.garbles == 0
+    res.out.append(LateLockin.IDN)
+    res.drop.add("FREQ?")
+    with pytest.raises(Garbled) as e:
+        inst.query_raw("FREQ?")
+    assert res.sent[-2:] == ["FREQ?", "*IDN?"]          # not sent again
+    assert "and that question's own reply didn't follow it" in str(e.value)
+    assert "didn't send FREQ? again, as that may change what it does: check whether it was done" in str(e.value)
+
+
+@pytest.mark.parametrize("idn, command, reply", [
+    ("2700", "READ?", "+1.27001E+00VDC,+12.345SECS,+5RDNG#"),    # the pattern inside a reading with units
+    (".*", "FUNC?", '"VOLT:DC"'),                                  # a pattern that fits anything
+    ("DMM", "SYST:VERS?", "1999.0"),                               # numbers
+])
+def test_a_loose_identity_pattern_never_throws_a_genuine_reply_away(idn, command, reply):
+    """Review of 2026-11-15: a lab card's pattern found anywhere in a reply (idn: "2700" in '+1.27001E+00VDC,...') made
+    the genuine reading a late identity: thrown away and asked again; with idn ".*" every reply with letters was asked
+    twice, then said out of step. Only an identity at the reply's start, in an identity's form, counts where what it
+    says as itself isn't known yet; where it is, only that, exactly."""
+    res = LateLockin()
+    res.answers.update({"*IDN?": "ACME,DMM 9,1,1.0", command: reply})
+    dmm = acme(res, idn)
+    assert dmm.query(command) == reply and res.sent == [command]
+    dmm.query("*IDN?")
+    res.answers[command] = "ACME,DMM 9,0,9.9"           # identity-like, but not what it says as itself
+    assert dmm.query(command) == "ACME,DMM 9,0,9.9" and res.sent.count(command) == 2
+
+
+def test_a_reading_that_reads_as_itself_is_kept_and_what_it_said_as_itself_is_known_whatever_a_parse_finds(late_lab):
+    """Where what it says as itself isn't known, a reply that reads as the reading asked for is never taken for a late
+    identity (the review's rule). Where it is known, that exact text is no reading, whatever a card's parse would find
+    in it (a serial number read as a value)."""
+    from labharness.adapters import an_identity
+    rt, res = late_lab
+    inst = rt.lab.instruments["lockin"]
+    backend = inst.backend
+    assert not backend.said_as
+    assert not an_identity("+1.27001E+00VDC,+12.345SECS,+5RDNG#", "2700")   # not at the start
+    assert an_identity("Stanford_Research_Systems,SR830,s/n81118,ver1.07", "Stanford_Research_Systems,SR8[13]0")
+    assert not an_identity('"VOLT:DC 10,0.001"', "VOLT")               # not at the start (a quote first)
+    assert not an_identity("SR830", "SR8[13]0")                        # no identity's comma
+    assert an_identity("ACME,DMM 9,1,1.0", "", said="ACME,DMM 9,1,1.0") and not an_identity("1.0", ".*")
+    from labharness.adapters import reading
+    with reading(lambda text: True):                                   # it reads as the reading asked for
+        assert not backend._in_its_place("OUTP? 3", LateLockin.IDN)    # (what it says as itself not known yet)
+    inst.query_raw("*IDN?")
+    assert backend.said_as == LateLockin.IDN
+    with reading(lambda text: True):                                   # known: that exact text is no reading,
+        assert backend._in_its_place("OUTP? 3", LateLockin.IDN)        # whatever a card's parse would find in it
+    assert not backend._in_its_place("OUTP? 3", "Stanford_Research_Systems,SR830,s/n00001,ver1.07")
 
 
 class Streams:
