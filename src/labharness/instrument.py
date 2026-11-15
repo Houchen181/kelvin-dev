@@ -558,6 +558,10 @@ class Instrument:
         power?" of instruments that were on and cabled, one waiting for a trigger, the bus hung behind it."""
         where, cause = where_and_cause(self.config.address)
         code = short_code(e)
+        fix = getattr(e, "fix", "")   # its driver's own words on why and what to do (a QICK board's server registered
+        if fix:                       # at an address this computer can't reach: rfsoc.Qick._lost)
+            cause = fix
+            code = short_code(e.__cause__) if e.__cause__ is not None else code
         model = short_model(self.card.model)
         h = self.health
         if code == "VI_ERROR_TMO" and h.answered_at and not h.fails and time.time() - h.answered_at < 300:

@@ -6,6 +6,13 @@ Needs qick and Pyro4 on the computer that runs Kelvin (Kelvin installs them into
 person approves: envs.py). The board's firmware may have a tProc v1 or v2: Kelvin reads which from the board and runs
 programs written for it (the instrument's tproc var, 1 or 2, overrides that for a firmware it doesn't recognise).
 
+The name server gives the address the board's server registered, which isn't always one this computer reaches: qick's
+start_server, its name server on the board (ns_host "localhost"), registers the address of one network interface,
+iface, eth0 unless told. A field report's RFSoC 4x2 was reached at 192.168.3.1 over its USB network (usb0) and
+registered 192.168.2.99, its eth0's; every call then waited out its connection (2026-11-15). Kelvin looks up where the
+server is before connecting (look_up), and says so with the fix when this computer can't reach it (cant_reach), and
+again when a call to the board gets no answer (Qick._lost). The card's notes have a service that starts both at boot.
+
 Kelvin plays one generator channel and reads one readout channel (set in the card's vars):
     output     drive: off sends soc.reset_gens(), which drives every generator with zeros
     gain       drive: amplitude, 0 to 1 of the generator's full scale (the lab sets its own cap)
@@ -22,14 +29,16 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import ipaddress
 import math
+import socket
 import sys
 import urllib.parse
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import envs
-from .adapters import AdapterError
+from .adapters import AdapterError, NoAnswer
 from .cards import Card
 from .drivers import DriverBackend
 
@@ -39,6 +48,10 @@ READINGS = ("i", "q", "magnitude", "phase")
 # each call to the board waits at most this long (or the card's connection timeout_ms, if longer): Pyro's own default
 # is forever, so a board that stopped answering held the lab for good. QICK's acquisitions are many short calls
 CALL_S = 60.0
+PYNQ_USB = "192.168.3.1"   # a PYNQ board on its USB network (usb0), as its image sets it up
+REACH_S = 2.0              # how long a connection to where the board's server is may take before Kelvin says it can't
+# Pyro4's errors of the connection itself (no answer in time, refused, closed, no such name), never the board's own
+PYRO_COMMS = ("CommunicationError", "TimeoutError", "ConnectionClosedError", "NamingError")
 # The modules a numpy 1.x pickle names, which numpy 2 moved from numpy.core to numpy._core: an array is
 # numpy.core.multiarray._reconstruct (numpy.core.numeric._frombuffer in pickle protocol 5), a numpy number
 # numpy.core.multiarray.scalar, a ufunc one of numpy.core._multiarray_umath's, an error one of numpy.core._exceptions'.
@@ -83,24 +96,123 @@ def plain(value: Any) -> Any:
     return value
 
 
+def pyro_comms(e: BaseException) -> bool:
+    """Whether an error is Pyro4's own of the connection to the board (no answer in time, a connection refused or
+    closed, a name the name server doesn't have), not one the board's QICK raised."""
+    kind = type(e)
+    return kind.__module__.startswith("Pyro4") and any(k.__name__ in PYRO_COMMS for k in kind.__mro__)
+
+
 class Board:
     """The board's Pyro4 proxy, as Kelvin and QICK's programs call it: each call's arguments go as plain Python
     (plain()). What it answers comes as the board pickled it. Its attributes are the proxy's own (QICK checks
-    _pyroUri, and then sends a pulse's samples as lists itself)."""
+    _pyroUri, and then sends a pulse's samples as lists itself). A call that gets no answer (Pyro4's errors of the
+    connection) is said by lost(error), when it can tell why: the error to raise instead, or None."""
 
-    def __init__(self, proxy: Any):
+    def __init__(self, proxy: Any, lost: Optional[Callable[[BaseException], Optional[BaseException]]] = None):
         object.__setattr__(self, "_kelvin_proxy", proxy)
+        object.__setattr__(self, "_kelvin_lost", lost)
 
     def __getattr__(self, name: str) -> Any:
-        if name == "_kelvin_proxy":   # not set yet: a copy being made
+        if name in ("_kelvin_proxy", "_kelvin_lost"):   # not set yet: a copy being made
             raise AttributeError(name)
-        attr = getattr(self._kelvin_proxy, name)
+        try:   # a Pyro4 proxy may ask the board what it has, the first time
+            attr = getattr(self._kelvin_proxy, name)
+        except Exception as e:
+            self._kelvin_said(e)
+            raise
         if name.startswith("_") or not callable(attr):
             return attr
-        return lambda *args, **kwargs: attr(*plain(args), **plain(kwargs))
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return attr(*plain(args), **plain(kwargs))
+            except Exception as e:
+                self._kelvin_said(e)
+                raise
+        return call
+
+    def _kelvin_said(self, e: BaseException) -> None:
+        """Raises why the board didn't answer, in words with what to do, when lost() can tell; else nothing."""
+        lost = self._kelvin_lost
+        if lost is not None and pyro_comms(e):
+            instead = lost(e)
+            if instead is not None:
+                raise instead from e
 
     def __setattr__(self, name: str, value: Any) -> None:
         setattr(self._kelvin_proxy, name, value)
+
+
+def look_up(ns_host: str, ns_port: int, proxy_name: str) -> Tuple[str, int]:
+    """Where the board's Pyro4 name server says its QICK server is: the host and port the board's start_server
+    registered (the proxy's URI). Pyro4's own lookup, as make_proxy's, with its serializer: QICK's name server takes
+    pickle only (PYRO_SERIALIZERS_ACCEPTED), and this lookup comes before make_proxy sets it."""
+    import Pyro4   # type: ignore
+    Pyro4.config.SERIALIZER = "pickle"
+    Pyro4.config.PICKLE_PROTOCOL_VERSION = 4
+    with Pyro4.locateNS(host=ns_host, port=ns_port) as ns:
+        uri = ns.lookup(proxy_name)
+    return str(uri.host), int(uri.port)
+
+
+def _ip(host: str) -> Optional[Any]:
+    """A host as an IP address (its own, or what it resolves to here); None when it isn't one and doesn't resolve."""
+    host = str(host or "").strip("[]")
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    try:
+        return ipaddress.ip_address(socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0])
+    except (OSError, IndexError, UnicodeError, ValueError):
+        return None
+
+
+def takes_connection(host: str, port: int) -> bool:
+    """Whether host:port takes a connection from this computer within REACH_S (closed at once; nothing sent)."""
+    from . import probe
+    try:
+        sock = probe._connect(host, port, REACH_S)
+    except OSError:
+        return False
+    try:
+        sock.close()
+    except OSError:
+        pass
+    return True
+
+
+def networks_here() -> List[Dict[str, Any]]:
+    """This computer's networks (probe.network_adapters): [] when they can't be listed."""
+    from . import probe
+    try:
+        return list(probe.network_adapters())
+    except Exception:
+        return []
+
+
+def cant_reach(host: str, port: int, ns_host: str) -> str:
+    """Why this computer can't reach the QICK server at host:port, where the board's name server at ns_host (which
+    answered) says it is; "" when it can: the name server's own address, an address on one of this computer's networks
+    (a cable of its own, a board's USB network), or one that takes a connection (a lab network behind a router)."""
+    ip, ns_ip = _ip(host), _ip(ns_host)
+    if host == ns_host or (ip is not None and ip == ns_ip):
+        return ""
+    if ip is not None and ip.is_loopback:   # the board's own, unless the name server is on this computer too
+        return "" if ns_ip is not None and ns_ip.is_loopback else "%s is the board's own loopback address" % host
+    nets = networks_here()
+    for a in nets:
+        try:
+            if ip is not None and ip in ipaddress.ip_network(a["network"], strict=False):
+                return ""
+        except (KeyError, TypeError, ValueError):
+            continue
+    if takes_connection(host, port):
+        return ""
+    on = ", ".join("%s on %s" % (a.get("network"), a.get("name")) for a in nets if a.get("network"))
+    return "%s takes no connection from this computer%s" % (host, ", and is on none of its networks (%s)" % on
+                                                            if on else "")
 
 
 def load_qick() -> Any:
@@ -125,7 +237,7 @@ def load_qick() -> Any:
     except ImportError:
         AveragerProgram = None
     return SimpleNamespace(make_proxy=make_proxy, AveragerProgramV2=AveragerProgramV2, AveragerProgram=AveragerProgram,
-                           version=str(getattr(qick, "__version__", "") or ""))
+                           version=str(getattr(qick, "__version__", "") or ""), lookup=look_up)
 
 
 def generation(tprocs: Any) -> Optional[int]:
@@ -235,6 +347,20 @@ class Qick(DriverBackend):
             raise AdapterError("%s: a QICK board's address is qick://<name server host>[:8888]/<proxy name>" % name)
         read_old_numpy()   # before the board's first answer: its numpy may be 1.x
         self.qick = module or load_qick()
+        self.ns: Tuple[str, int, str] = (url.hostname, url.port or 8888, proxy)
+        # where the board's name server says its server is, looked up first: one this computer can't reach is said at
+        # once, with the fix, where make_proxy's first call waited out its connection (a minute) and said only that
+        self.registered: Optional[Tuple[str, int]] = None
+        lookup = getattr(self.qick, "lookup", None)
+        if lookup is not None:
+            try:
+                self.registered = tuple(lookup(url.hostname, url.port or 8888, proxy))   # type: ignore[assignment]
+            except Exception:
+                self.registered = None   # no name server there, or no server of that name: make_proxy says which
+        if self.registered is not None:
+            why = cant_reach(self.registered[0], self.registered[1], url.hostname)
+            if why:
+                raise AdapterError("%s: %s" % (name, self._cant_reach_words(self.registered, why)))
         try:
             self.soc, self.soccfg = self.qick.make_proxy(ns_host=url.hostname, ns_port=url.port or 8888,
                                                          proxy_name=proxy)
@@ -242,13 +368,18 @@ class Qick(DriverBackend):
             raise AdapterError("%s: could not reach the QICK server %r through the name server at %s:%d (%s). On the "
                                "board, start the Pyro4 name server, then the QICK server under that name: on a PYNQ "
                                "board, in its Jupyter (http://%s:9090), run qick/pyro4/00_nameserver.ipynb, then "
-                               "01_server.ipynb (Kelvin runs them with run_on_board once a person approves)."
+                               "01_server.ipynb (Kelvin runs them with run_on_board once a person approves). Over the "
+                               "board's USB network, start the server with iface='usb0' (the notebook's start_server "
+                               "registers eth0's address, which this computer can't reach). A reboot ends both: the "
+                               "card's notes (qick/rfsoc) have a service that starts them at every boot."
                                % (name, proxy, url.hostname, url.port or 8888, e, url.hostname)) from e
         try:   # Pyro4's proxy: each call times out (Pyro4.errors.TimeoutError) instead of waiting forever
             self.soc._pyroTimeout = max(CALL_S, float(card.connection.get("timeout_ms") or 0) / 1000.0)
         except Exception:
             pass
-        self.soc = Board(self.soc)   # what Kelvin and QICK's programs send it: plain Python, which any numpy reads
+        # what Kelvin and QICK's programs send it: plain Python, which any numpy reads; a call that gets no answer says
+        # why, when Kelvin can tell (_lost)
+        self.soc = Board(self.soc, self._lost)
         # the board's QICK and this computer's should be the same version: Pyro hands objects over as they are
         self.versions = (str(self._cfg("sw_version") or ""), str(getattr(self.qick, "version", "") or ""))
         self.firmware = str(((self._cfg("tprocs") or [{}])[0] or {}).get("type") or "")
@@ -260,6 +391,77 @@ class Qick(DriverBackend):
         self.data: Dict[str, float] = {}
         self.taken: set = set()
         self.playing = False
+
+    def _fix(self) -> str:
+        """How to start the board's server so it registers an address this computer reaches, in words (qick's
+        start_server: with its name server on the board, ns_host 'localhost', it registers the address of iface)."""
+        ns_host, ns_port, proxy = self.ns
+        usb = str(_ip(ns_host) or ns_host) == PYNQ_USB
+        return ("qick's start_server, its name server on the board (ns_host='localhost'), registers the address of one "
+                "network interface, iface, eth0 unless told; this computer reaches the board at %s%s. Start the server "
+                "with %s, or with ns_host='%s' (qick.pyro_cli: -n %s, as it takes no iface). Kelvin runs it on the "
+                "board with run_on_board once a person approves; the card's notes (qick/rfsoc) have a service that "
+                "starts the name server and the server at every boot"
+                % (ns_host, ", its USB network (usb0)" if usb else "",
+                   "start_server(ns_host='localhost', ns_port=%d, proxy_name='%s', iface='usb0')" % (ns_port, proxy)
+                   if usb else "iface set to the board's interface on that network (usb0 for its USB network, eth0 for "
+                               "its Ethernet)", ns_host, ns_host))
+
+    def _cant_reach_words(self, at: Tuple[str, int], why: str) -> str:
+        ns_host, ns_port, proxy = self.ns
+        return ("the board's name server (%s:%d) has its QICK server %r at %s:%d, which this computer can't reach: %s. "
+                "%s" % (ns_host, ns_port, proxy, at[0], at[1], why, self._fix()))
+
+    def _lost(self, e: BaseException) -> Optional[BaseException]:
+        """A call to the board that got no answer (Pyro4's errors of the connection): why, in words with what to do,
+        when Kelvin can tell (NoAnswer, its fix also kept for the alarm: Instrument.loss_text); None otherwise, and
+        Pyro's own words go on. The field report's person started the name server and server again by hand three
+        times, after reboots that ended the Jupyter kernels they ran in."""
+        try:
+            words = self._why_silent()
+        except Exception:   # the look itself failed: Pyro's words, as they were
+            return None
+        if not words:
+            return None
+        out = NoAnswer("%s: %s" % (self.name, words))
+        out.fix = words   # type: ignore[attr-defined]
+        return out
+
+    def _why_silent(self) -> str:
+        """Why the board's server doesn't answer, when Kelvin can tell, in words; "" otherwise (a slow board): its
+        name server doesn't answer either (the board off or restarting, or both stopped), it has no server of that
+        name now, or another address (started again), or the server's address is one this computer can't reach."""
+        ns_host, ns_port, proxy = self.ns
+        uri = getattr(self.soc, "_pyroUri", None)   # where the proxy calls: as the name server said at the connect
+        try:
+            host, port = str(uri.host), int(uri.port)
+        except (AttributeError, TypeError, ValueError):
+            if self.registered is None:
+                return ""
+            host, port = self.registered
+        if not takes_connection(ns_host, ns_port):
+            return ("the board's name server at %s:%d doesn't answer either: the board is off or restarting, or its "
+                    "name server and QICK server were stopped (run in Jupyter kernels, a reboot ends both). Once it is "
+                    "back, start them again (run_on_board), or have them start at every boot (the card's notes: "
+                    "qick/rfsoc); then connect %s again" % (ns_host, ns_port, self.name))
+        lookup = getattr(self.qick, "lookup", None)
+        if lookup is not None:
+            try:
+                now = tuple(lookup(ns_host, ns_port, proxy))
+            except Exception:
+                return ("the board's name server at %s:%d answers, but has no QICK server %r now (it stopped, or was "
+                        "started under another name): start it again (run_on_board), or at every boot (the card's "
+                        "notes: qick/rfsoc); then connect %s again" % (ns_host, ns_port, proxy, self.name))
+            if now != (host, port):
+                why = cant_reach(now[0], now[1], ns_host)
+                if why:
+                    return ("its QICK server was started again and registered %s:%d, which this computer can't reach: "
+                            "%s. %s" % (now[0], now[1], why, self._fix()))
+                return ("its QICK server was started again: the board's name server has it at %s:%d now, not %s:%d; "
+                        "connect %s again" % (now[0], now[1], host, port, self.name))
+        why = cant_reach(host, port, ns_host)
+        return "this computer can't reach its QICK server at %s:%d: %s. %s" % (host, port, why, self._fix()) \
+            if why else ""
 
     def _use(self, tproc: Optional[int]) -> None:
         """Programs for this tProc generation (None: not known yet; the first program says how to set it)."""

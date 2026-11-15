@@ -926,7 +926,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
         person approves the code: code, or notebook (the path of one of the board's own notebooks, run cell by
         cell). address: the board (port 9090 unless given). password: the board's Jupyter password (PYNQ's default
         is xilinx). A cell still running after wait seconds (a server) is left running on the board. For QICK: the
-        notebooks qick/pyro4/00_nameserver.ipynb, then 01_server.ipynb, in two calls; the board's QICK version with
+        notebooks qick/pyro4/00_nameserver.ipynb, then 01_server.ipynb, in two calls (over the board's USB network
+        the server needs iface='usb0'); to start both at every boot, the systemd service in the QICK card's notes
+        (code: its script, first line %%bash); the board's QICK version with
         code "import qick; print(qick.__version__)". A board or lab computer without Jupyter: address
         ssh://user@host, code a shell command (this computer's SSH key signs in, or password; Red Pitaya's default is
         root/root); a server is started in the background (nohup ... &)."""
