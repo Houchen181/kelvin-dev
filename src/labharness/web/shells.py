@@ -13,6 +13,11 @@ quits. None outlives Kelvin: on Windows the shell is in a job object (scriptrun'
 and what it started with Kelvin's own process; elsewhere it leads a session of its own on its terminal, whose processes
 Kelvin ends, and which hangs up should Kelvin itself end.
 
+What a shell prints is read as it comes, always: a page that falls behind (a tab the browser throttles or freezes, a
+debugger's pause) never holds up or pauses a person's program, which may be driving an instrument. Kelvin keeps the
+latest MAX_PENDING characters for the page, and the page has at most app.py's SHELL_WINDOW on its way at once; what
+falls between is left out, and the tab says so where it was.
+
 Without a terminal to be had (Kelvin from source on Windows, without pywinpty), a shell runs on pipes instead: a line at
 a time, as the Terminal sends it, with a prompt after each. Programs that draw the whole screen or ask for a password
 need the terminal there, and Ctrl+C ends the shell with what runs in it and starts it fresh in the same folder."""
@@ -28,13 +33,14 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import weakref
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 READ_SIZE = 65536        # of a shell's output, read at once
-MAX_PENDING = 1 << 20    # characters of output waiting for the page: past it the shell waits, as for a slow window
+MAX_PENDING = 1 << 20    # characters of output waiting for the page; past it the oldest of them are left out
 MAX_INPUT = 1 << 20      # characters the page sends at once (a long paste)
 MAX_SHELLS = 12          # shells open at once on this computer
 END_WAIT_S = 5.0         # how long a shell that was closed is waited for to end
@@ -109,8 +115,9 @@ class Shell:
         self._lock = threading.Lock()
         self._out: List[str] = []
         self._size = 0
-        self._room = threading.Event()
-        self._room.set()
+        self.left_out = 0          # characters left out since the page last took its output (all of them: left_out_all)
+        self.left_out_all = 0
+        self._repaint = False      # left out: the next take asks the shell's screen to be drawn again
         self._wake: Callable[[], None] = lambda: None
         self._input: "queue.Queue[Optional[Tuple[str, bool]]]" = queue.Queue()
         self._reader: Optional[threading.Thread] = None
@@ -141,6 +148,14 @@ class Shell:
     def resize(self, cols: int, rows: int) -> None:
         self.cols, self.rows = cols, rows
 
+    def repaint(self) -> None:
+        """After output was left out: the shell's screen drawn again, where its terminal can (a size a column narrower,
+        then its own: ConPTY draws the whole screen anew, and a full-screen program redraws on the change)."""
+        cols, rows = self.cols, self.rows
+        if self.kind == "pty" and cols > 20 and not self.ended.is_set():
+            self.resize(cols - 1, rows)
+            self.resize(cols, rows)
+
     def _again(self) -> bool:
         """Start it fresh after its process ended (the pipe shell's Ctrl+C); False: it ended."""
         return False
@@ -168,20 +183,40 @@ class Shell:
         self._reader.start()
 
     def _put(self, text: str) -> None:
+        """Output, kept for the page: never waiting for it, the latest MAX_PENDING characters at most (the oldest left
+        out, counted)."""
         with self._lock:
             self._out.append(text)
             self._size += len(text)
-            if self._size > MAX_PENDING and not self._closing:
-                self._room.clear()
+            while self._size > MAX_PENDING:
+                over, first = self._size - MAX_PENDING, self._out[0]
+                cut = first if len(first) <= over else first[:over]
+                self._out[0] = first[len(cut):]
+                if not self._out[0]:
+                    self._out.pop(0)
+                self._size -= len(cut)
+                self.left_out += len(cut)
+                self.left_out_all += len(cut)
         self._wake()
-        self._room.wait()   # the page took what waited (take), or the shell is closing
 
     def take(self) -> str:
-        """The output not yet sent to the page; the shell's output goes on."""
+        """The output not yet sent to the page; the shell's output goes on. Where some was left out, a line says how
+        much, and what follows starts at a line's start (the cut can fall inside a colour's or a cursor's sequence)."""
         with self._lock:
             text, self._out, self._size = "".join(self._out), [], 0
-        self._room.set()
-        return text
+            left, self.left_out = self.left_out, 0
+        if not left:
+            return text
+        line = text.find("\n", 0, 4096)
+        text = text[line + 1:] if line >= 0 else text
+        self._repaint = True
+        return ("\x1b[0m\r\n\x1b[2m[%s of output left out here: this tab didn't keep up with it]\x1b[0m\r\n"
+                % _amount(left)) + text
+
+    def repaint_due(self) -> bool:
+        """Whether output was left out since this was last asked: its screen is then drawn again (repaint)."""
+        due, self._repaint = self._repaint, False
+        return due
 
     def listen(self, wake: Callable[[], None]) -> None:
         """wake() is called, from the shell's own threads, when there is output to take or the shell ended."""
@@ -217,7 +252,6 @@ class Shell:
             reader.join(0 if self._closing else LAST_OUTPUT_S)
         self._release()
         self._input.put(None)
-        self._room.set()
         try:
             self.on_end(self)
         finally:
@@ -229,41 +263,98 @@ class Shell:
         if not self.ended.is_set() and self.why is None:
             self.why = why
         self._closing = True
-        self._room.set()
         self._end_tree()
         self.ended.wait(END_WAIT_S)
 
 
+def _amount(chars: int) -> str:
+    """So much output, in words (a character of it is about a byte)."""
+    return ("%.1f MB" % (chars / 1e6) if chars >= 1e6 else "%d kB" % max(1, round(chars / 1e3)) if chars >= 1e3
+            else "%d characters" % chars)
+
+
+_CTRL_C: List[Any] = []   # Kelvin's own console handler (_ctrl_c_reaches_shells), kept for as long as Kelvin runs
+
+
+def _ignoring_ctrl_c() -> bool:
+    """Windows: whether Kelvin's process ignores Ctrl+C, as one started in a process group of its own does: bit 0 of
+    the ConsoleFlags in its process parameters, which a process it starts inherits. Unreadable: as if it did."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Basic(ctypes.Structure):   # PROCESS_BASIC_INFORMATION
+            _fields_ = [(n, ctypes.c_void_p) for n in ("ExitStatus", "PebBaseAddress", "AffinityMask",
+                                                       "BasePriority", "UniqueProcessId", "InheritedFrom")]
+        nt = ctypes.WinDLL("ntdll")
+        nt.NtQueryInformationProcess.argtypes = (wintypes.HANDLE, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong,
+                                                 ctypes.c_void_p)
+        basic = _Basic()
+        if nt.NtQueryInformationProcess(wintypes.HANDLE(-1), 0, ctypes.byref(basic), ctypes.sizeof(basic), None) \
+                or not basic.PebBaseAddress:
+            return True
+        wide = ctypes.sizeof(ctypes.c_void_p) == 8   # PEB.ProcessParameters, then its ConsoleFlags
+        params = ctypes.c_void_p.from_address(basic.PebBaseAddress + (0x20 if wide else 0x10)).value
+        return bool(ctypes.c_ulong.from_address(params + (0x18 if wide else 0x14)).value & 1)
+    except Exception:
+        return True
+
+
 def _ctrl_c_reaches_shells() -> None:
-    """Windows: Ctrl+C typed in a shell reaches what runs there. A process started in a process group of its own (as
-    Kelvin may be, by whatever launched it) ignores Ctrl+C, and so does every process it starts: a shell's ping or
-    Python could then never be interrupted. Kelvin takes Ctrl+C again (its app has no console to take one from; in a
-    console, Ctrl+C stops it, as it does when started there)."""
+    """Windows: Ctrl+C typed in a shell reaches what runs there. Kelvin started in a process group of its own (as
+    whatever launched it may do) ignores Ctrl+C, and so does every process it starts: a shell's ping or Python could
+    then never be interrupted. So Kelvin stops ignoring it, for its shells to inherit, having first taken Ctrl+C for
+    itself with a handler of its own, which no process inherits: a Ctrl+C on Kelvin's own console leaves it running,
+    as before. Ctrl+Break, closing that console, logging off and shutting down reach it as they always did. A Kelvin
+    that never ignored Ctrl+C is left as it is."""
+    if _CTRL_C or not _ignoring_ctrl_c():
+        return
     import ctypes
-    ctypes.WinDLL("kernel32").SetConsoleCtrlHandler(None, False)
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32")
+    taken = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)(lambda event: event == 0)   # CTRL_C_EVENT only
+    if k32.SetConsoleCtrlHandler(taken, True):
+        _CTRL_C.append(taken)
+        k32.SetConsoleCtrlHandler(None, False)
 
 
 class _WinPty(Shell):
-    """Windows: the shell on a pseudo-console (ConPTY) through pywinpty, in a job object with what it starts."""
+    """Windows: the shell on a pseudo-console (ConPTY) through pywinpty, in a job object with what it starts. Its output
+    is read with pywinpty's PTY on a thread of the shell's own, as fast as it comes: PtyProcess's own reader (a read,
+    a millisecond's pause, a socket) fell behind a program printing fast, and what it hadn't read yet piled up inside
+    pywinpty without end (590 MB in 40 s, in a review)."""
+
+    pty: Any = None
 
     def _spawn(self) -> None:
-        from winpty import PtyProcess
+        from winpty import PTY
         from ..scriptrun import _Job
         _ctrl_c_reaches_shells()
-        pty = PtyProcess.spawn(self.argv, cwd=self.folder, env=self.env, dimensions=(self.rows, self.cols))
+        pty = PTY(self.cols, self.rows)
+        exe = shutil.which(self.argv[0], path=self.env.get("PATH")) or self.argv[0]
+        block = "\0".join("%s=%s" % kv for kv in self.env.items()) + "\0"
+        if not pty.spawn(exe, cmdline=" " + subprocess.list2cmdline(self.argv[1:]), cwd=self.folder, env=block):
+            raise OSError("%s didn't start" % self.program)
         try:   # at once, before it starts anything: PowerShell takes a moment to come up
             self._proc = _ByPid(pty.pid)
             self._job = _Job(self._proc)
         except OSError:
-            pty.close(force=True)
+            try:
+                os.kill(pty.pid, signal.SIGTERM)
+            except OSError:
+                pass
             raise
         self.pty, self.pid = pty, pty.pid
 
         def read() -> Optional[str]:
-            try:
-                return pty.read(READ_SIZE)
-            except EOFError:
-                return None
+            while self.pty is not None:   # let go of: its last read was cancelled
+                text = pty.read(blocking=True)
+                if text:
+                    return text
+                if pty.iseof():
+                    return None
+                time.sleep(0.005)
+            return None
         self._read_from(read)
 
     def _send(self, text: str, raw: bool) -> None:
@@ -276,7 +367,7 @@ class _WinPty(Shell):
         pty = self.pty
         if pty is not None:
             try:
-                pty.setwinsize(rows, cols)
+                pty.set_size(cols, rows)
             except Exception:   # it ended meanwhile
                 pass
 
@@ -289,9 +380,9 @@ class _WinPty(Shell):
     def _release(self) -> None:
         self._job.close()
         self._proc.close()
-        pty, self.pty = self.pty, None   # the pseudo-console goes with it
+        pty, self.pty = self.pty, None   # the pseudo-console goes with it, once its reader let go of it too
         try:
-            pty.close(force=True)
+            pty.cancel_io()
         except Exception:
             pass
 
@@ -621,11 +712,13 @@ class Shells:
         return self._turn
 
     def open(self, owner: Optional[str], by: str, folder: str, cols: int = 80, rows: int = 24,
-             pipe: bool = False, turn: Optional[int] = None) -> Shell:
+             pipe: bool = False, turn: Optional[int] = None, still: Optional[Callable[[], bool]] = None) -> Shell:
         """A new shell in folder, started (OSError: it couldn't be; ShellRefused: too many are open, or the person who
-        asked for it is no longer the one signed in: turn, as read when they asked, has passed)."""
+        asked for it is no longer the one signed in: their turn, as read when they asked, has passed, or still() says
+        they are gone). Both are asked again, under the lock, once it has started: a shell started as its person
+        signed out, or another signed in, is closed, and never counts as opened."""
         def refused() -> Optional[str]:
-            if self._held or turn is not None and turn != self._turn:
+            if self._held or turn is not None and turn != self._turn or still is not None and not still():
                 return "The person signed in changed meanwhile: open a new tab."
             if len(self._open) >= MAX_SHELLS:
                 return "%d shells are open already: close one of their tabs first." % MAX_SHELLS
@@ -652,15 +745,15 @@ class Shells:
             shell = _PipeShell(program, argv, folder, env, cols, rows, why=why)
             shell.owner, shell.by, shell.on_end = owner, by, self._ended
             shell.start()
-        with self._lock:   # started as its person signed out, or as others opened: it never counts as opened
+        with self._lock:   # its record before a close_all can close it: opened, then closed
             why_not = refused()
             if why_not is None:
                 self._open[shell.id] = shell
+                self.record("shell_opened", by=by, account=owner, shell=shell.id, program=program, folder=folder,
+                            kind=shell.kind, pid=shell.pid)
         if why_not:
             shell.close("it was refused")
             raise ShellRefused(why_not)
-        self.record("shell_opened", by=by, account=owner, shell=shell.id, program=program, folder=folder,
-                    kind=shell.kind, pid=shell.pid)
         return shell
 
     def _ended(self, shell: Shell) -> None:

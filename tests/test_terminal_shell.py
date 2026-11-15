@@ -63,16 +63,20 @@ def connect(client, token, origin="http://testserver", url="/api/shell?cols=100&
 
 
 class Tab:
-    """A Terminal tab as the page holds it: its socket, and everything the shell sent, read on a thread of its own."""
+    """A Terminal tab as the page holds it: its socket, and everything the shell sent, read on a thread of its own;
+    each output said written once read, as the page's terminal does (acking=False: a page that stalls)."""
 
-    def __init__(self, ws):
-        self.ws, self.got, self.messages = ws, queue.Queue(), []
+    def __init__(self, ws, acking=True):
+        self.ws, self.got, self.messages, self.acking = ws, queue.Queue(), [], acking
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _pump(self):
         try:
             while True:
-                self.got.put(self.ws.receive_json())
+                m = self.ws.receive_json()
+                if m["t"] == "out" and self.acking:
+                    self.ws.send_json({"t": "ack", "n": len(m["d"].encode("utf-16-le")) // 2})
+                self.got.put(m)
         except Exception as e:   # the socket closed
             self.got.put({"t": "<closed>", "error": repr(e)})
 
@@ -427,9 +431,10 @@ def test_kelvin_quitting_ends_every_shell(parts):
     assert closed["why"] == "Kelvin quit"
 
 
-def test_claude_operating_the_screen_never_types_in_a_shell(parts):
+def test_claude_operating_the_screen_never_types_in_sees_or_closes_a_shell(parts):
     """While the Claude Code bridge works the screen, everything in Kelvin but Stop and reading is locked (OPERATING):
-    no shell opens, and an open one takes no typing."""
+    no shell opens; an open one is covered on the page (its screenshots never show it) and takes no typing, and its
+    tab's close is refused, on the page and here."""
     runtime, settings, store = parts
     client, headers = client_for(parts, {"scripted": Scripted([])})
     with client:
@@ -438,21 +443,314 @@ def test_claude_operating_the_screen_never_types_in_a_shell(parts):
             tab.until(lambda m: m["t"] == "hello")
             (shell,) = shells_of(client).list()
             runtime.operating = "check the camera"
+            assert tab.until(lambda m: m["t"] == "lock")["on"] is True   # the page covers the shell
             tab.run(say("typed-while-", "locked"))
             note = tab.until(lambda m: m["t"] == "note")
             assert "Claude is operating this computer" in note["d"]
+            ws.send_json({"t": "close"})                                # Claude pressing x: nothing
+            time.sleep(1.0)
+            assert not shell.ended.is_set() and shells_of(client).list() == [shell]
             runtime.operating = None
+            assert tab.until(lambda m: m["t"] == "lock")["on"] is False
             tab.run(say("typed-after-", "it"))
             tab.shows(r"typed-after-it")
             assert "typed-while-locked" not in tab.text()
             ws.send_json({"t": "close"})
-        assert shell.ended.wait(10)
+            assert shell.ended.wait(10)
+        (closed,) = [e for e in events(runtime) if e["type"] == "shell_closed"]
+        assert closed["why"] == "its tab was closed"
         runtime.operating = "check the camera"
         with connect(client, settings.access_key) as ws:
             refused = Tab(ws).until(lambda m: m["t"] == "refused")
             assert "Claude is operating this computer" in refused["message"]
         runtime.operating = None
         assert not shells_of(client).list()
+
+
+# ---------------------------------------------------------------------------------- the review of 2026-11-15
+
+def test_a_page_gone_as_its_shell_starts_never_leaves_it_running(parts):
+    """The shell's hello went out after it had started, outside what closes it: a page reloaded just then (its socket
+    closed as the shell started) left the shell running. Seven reloads left seven PowerShells, and past twelve every
+    new tab was refused. Now a shell whose page is gone at any moment is closed, and recorded closed."""
+    import asyncio
+    runtime, settings, store = parts
+    client, headers = client_for(parts, {"scripted": Scripted([])})
+    offered = key(settings.access_key)
+    scope = {"type": "websocket", "path": "/api/shell", "raw_path": b"/api/shell", "query_string": b"cols=80&rows=24",
+             "root_path": "", "scheme": "ws", "server": ("testserver", 80), "client": ("127.0.0.1", 50000),
+             "headers": [(b"host", b"testserver"), (b"origin", b"http://testserver"),
+                         (b"sec-websocket-protocol", ", ".join(offered).encode("ascii"))],
+             "subprotocols": offered, "state": {}, "extensions": {}}
+    sent = []
+
+    async def receive():
+        if not sent:
+            return {"type": "websocket.connect"}
+        await asyncio.sleep(60)   # a page that is gone says nothing more
+        return {"type": "websocket.disconnect", "code": 1006}
+
+    async def send(message):
+        sent.append(message)
+        if message["type"] == "websocket.send":   # the hello: the page went as the shell started (uvicorn's OSError)
+            raise OSError("the connection was closed")
+
+    async def page():
+        await asyncio.wait_for(client.app(dict(scope), receive, send), 30)
+    with client:
+        client.portal.call(page)
+        assert [m["type"] for m in sent] == ["websocket.accept", "websocket.send"]
+        assert shells_of(client).list() == []
+        opened, closed = [e for e in events(runtime) if e["type"].startswith("shell_")]
+        assert (opened["type"], closed["type"]) == ("shell_opened", "shell_closed") and closed["shell"] == opened["shell"]
+        assert gone(opened["pid"])
+
+
+def test_an_approval_never_takes_the_keys_from_a_shell():
+    """A request the Kelvin tab asked (a /set that drives harder) moved the screen to that tab and its input, where y
+    approves, while the person typed in a shell: their y and Enter there approved a laser's 10 mW. Now a shell on the
+    screen keeps the screen and the keys; the Kelvin tab is marked, and the person goes there to answer."""
+    from test_fit_rules import _function
+    js = (Path(sh.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    ask = _function(js, "termAsk")
+    assert "termTab(" not in ask   # never another tab for it
+    assert 'if (TERM.tab === SHELLS.kelvin) $("term-input").focus();\n    else termWaiting(true);' in ask
+    assert "termWaiting(false);" in _function(js, "termEndAsk")   # answered (here or elsewhere): unmarked
+    assert "if (tab === SHELLS.kelvin) termWaiting(false);" in _function(js, "termTab")   # the person came to it
+    assert 'wrap.classList.toggle("waiting", !!on);' in _function(js, "termWaiting")
+    css = (Path(sh.__file__).parent / "static" / "app.css").read_text(encoding="utf-8")
+    assert ".term-tab.waiting .term-tab-name::after" in css
+    # the only ways to the Kelvin tab's input: the person's click or arrow key on its tab, and a request asked while
+    # that tab is on the screen
+    assert len(re.findall(r'\$\("term-input"\)\.focus\(\)', js)) == len(re.findall(
+        r'\$\("term-input"\)\.focus\(\)', "".join(_function(js, f) for f in ("termAsk", "termTab", "initTerminal",
+                                                                             "termUse", "termSlash", "termRun"))))
+
+
+def test_a_shell_asked_for_by_someone_no_longer_signed_in_never_opens():
+    """A sign-out moved the turn on while its person was still signed in: a shell asked for in that moment took the new
+    turn and opened after the sign-out, recorded as theirs. Now it is asked again whether that person is still the one
+    signed in, before it starts and once it has, under the shells' lock."""
+    record = []
+    shells = sh.Shells(lambda type_, **f: record.append(type_))
+    signed_in = {"user": "Ada"}
+
+    def still():
+        return signed_in["user"] == "Ada"
+    shells.close_all("its person signed out", hold=True)   # the sign-out begins...
+    turn = shells.turn                                     # ...and the shell is asked for now, with the new turn
+    signed_in["user"] = None                               # the session cleared before the shells resume
+    shells.resume()
+    with pytest.raises(sh.ShellRefused):
+        shells.open("Ada", "human (portal)", str(Path.home()), turn=turn, still=still)
+    answers = iter([True, False])                          # signed out while it started
+    with pytest.raises(sh.ShellRefused):
+        shells.open("Ada", "human (portal)", str(Path.home()), still=lambda: next(answers))
+    assert record == [] and shells.list() == []
+
+
+def test_ctrl_c_in_a_shell_interrupts_what_runs_there(parts, monkeypatch):
+    mode(monkeypatch, "pty")
+    runtime, settings, store = parts
+    client, headers = client_for(parts, {"scripted": Scripted([])})
+    with client, connect(client, settings.access_key) as ws:
+        tab = Tab(ws)
+        tab.until(lambda m: m["t"] == "hello")
+        tab.run("ping -t 127.0.0.1" if WINDOWS else "sleep 120")
+        if WINDOWS:
+            tab.shows(r"Reply from 127\.0\.0\.1")
+        else:
+            time.sleep(1.0)
+        ws.send_json({"t": "in", "d": "\x03"})
+        if WINDOWS:
+            tab.shows(r"Control-C")   # ping says it was interrupted
+        time.sleep(1.0)   # what is typed as Ctrl+C lands is let go of with it, as in a console
+        tab.run(say("after-", "ctrl-c"))   # runs only once what ran was interrupted
+        tab.shows(r"after-ctrl-c", timeout=20)
+        ws.send_json({"t": "close"})
+
+
+CTRL_C_CHILD = r'''
+import ctypes, os, re, sys, time
+ctypes.WinDLL("kernel32").SetConsoleCtrlHandler(None, True)   # Kelvin ignoring Ctrl+C, as a launcher's group makes it
+from labharness.web import shells as sh
+program, argv = sh.shell_command()
+sh.shell_command = lambda: (program, argv + ["-NoProfile"])
+ignoring = getattr(sh, "_ignoring_ctrl_c", lambda: None)
+print("ignoring", ignoring(), flush=True)
+shell = sh.Shells(lambda type_, **f: None).open(None, "test", os.getcwd())
+got = []
+def shows(pattern):
+    end = time.time() + 40
+    while time.time() < end:
+        got.append(shell.take())
+        if re.search(pattern, "".join(got)):
+            return True
+        time.sleep(0.05)
+    return False
+shows(r"PS .*> ")
+shell.write("ping -t 127.0.0.1\r")
+shows(r"Reply from")
+shell.write("\x03")
+print("interrupted", shows(r"Control-C"), flush=True)
+print("ready", ignoring(), flush=True)
+while not os.path.exists(sys.argv[1]):
+    time.sleep(0.05)
+shell.close("test")
+print("alive", flush=True)
+'''
+
+CTRL_C_ON_ITS_CONSOLE = r'''
+import ctypes, sys
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.FreeConsole()
+if not k32.AttachConsole(int(sys.argv[1])):
+    sys.exit(2)
+k32.SetConsoleCtrlHandler(None, True)   # this helper itself ignores it
+sys.exit(0 if k32.GenerateConsoleCtrlEvent(0, 0) else 3)   # Ctrl+C to every process on that console
+'''
+
+
+def test_kelvin_that_ignored_ctrl_c_still_does_once_its_shells_take_it(tmp_path):
+    """Kelvin started ignoring Ctrl+C (in a process group of its own, or by a launcher that ignores it), with a console
+    of its own: so did its shells. Kelvin now lets its shells take Ctrl+C, and a Ctrl+C on Kelvin's own console still
+    leaves Kelvin running (before: once a shell had opened, that Ctrl+C killed Kelvin)."""
+    import subprocess
+    import sys
+    if not WINDOWS or not PTY:
+        pytest.skip("Windows, with pywinpty")
+    stop = tmp_path / "stop"
+    src = str(Path(sh.__file__).parents[2])
+    hidden = subprocess.STARTUPINFO()
+    hidden.dwFlags |= subprocess.STARTF_USESHOWWINDOW   # its console of its own, out of sight
+    kelvin = subprocess.Popen([sys.executable, "-c", CTRL_C_CHILD, str(stop)], cwd=str(tmp_path),
+                              env=dict(os.environ, PYTHONPATH=src), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, startupinfo=hidden, creationflags=subprocess.CREATE_NEW_CONSOLE)
+    said = []
+    try:
+        for line in kelvin.stdout:
+            said.append(line.strip())
+            if line.startswith("ready"):
+                break
+        assert "interrupted True" in said, said   # Ctrl+C in its shell reached what ran there
+        sent = subprocess.run([sys.executable, "-c", CTRL_C_ON_ITS_CONSOLE, str(kelvin.pid)], timeout=30)
+        assert sent.returncode == 0
+        time.sleep(2.0)
+        assert kelvin.poll() is None, kelvin.communicate()[0]   # Kelvin took it, as it ignored it before
+        stop.write_text("stop", encoding="utf-8")
+        rest, _ = kelvin.communicate(timeout=30)
+        assert "alive" in rest and kelvin.returncode == 0, rest
+        assert said[:1] == ["ignoring True"] and said[-1] == "ready False", said   # its shells inherit no ignoring
+    finally:
+        if kelvin.poll() is None:
+            kelvin.kill()
+
+
+def memory_mb():
+    """This process's memory: its private bytes on Windows, its resident set elsewhere."""
+    if WINDOWS:
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+                (n, ctypes.c_size_t) for n in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                               "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                                               "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
+        counters = Counters()
+        counters.cb = ctypes.sizeof(counters)
+        psapi = ctypes.WinDLL("psapi")
+        psapi.GetProcessMemoryInfo.argtypes = (wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD)
+        psapi.GetProcessMemoryInfo(wintypes.HANDLE(-1), ctypes.byref(counters), counters.cb)   # this process
+        return counters.PagefileUsage / 2 ** 20
+    for line in Path("/proc/self/status").read_text().splitlines():
+        if line.startswith("VmRSS:"):
+            return int(line.split()[1]) / 1024
+    return 0.0
+
+
+def flood(count):
+    """A line that prints 4 kB lines for ever, writing how many it printed into count every 500."""
+    if WINDOWS:
+        return ("$n = 0; while ($true) { $n++; [Console]::Out.Write(('0123456789abcdef' * 256) + \"`n\"); "
+                "if ($n %% 500 -eq 0) { [IO.File]::WriteAllText('%s', \"$n\") } }" % count)
+    return ("n=0; s=$(printf '0123456789abcdef%%.0s' $(seq 256)); while :; do echo \"$s\"; n=$((n+1)); "
+            "[ $((n %% 500)) -eq 0 ] && echo $n > '%s'; done" % count)
+
+
+def printed(count):
+    try:
+        return int(count.read_text().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+@pytest.mark.parametrize("which", MODES)
+def test_a_page_that_stops_reading_never_holds_up_the_shell_nor_fills_kelvins_memory(monkeypatch, tmp_path, which):
+    """A tab that stops taking a flooding shell's output (a frozen tab, a debugger's pause): on Windows pywinpty kept
+    what wasn't read without end (Kelvin went from 154 MB to 590 MB in 40 s). Now the output is read as it comes,
+    Kelvin keeps its latest MAX_PENDING characters and leaves out the rest, saying so, and the program goes on: one
+    driving an instrument is never held up by a page."""
+    mode(monkeypatch, which)
+    count = tmp_path / "count.txt"
+    shell = sh.Shells(lambda type_, **f: None).open(None, "human (portal)", str(tmp_path))
+    try:
+        time.sleep(2.0)
+        shell.take()
+        before = memory_mb()
+        shell.write(flood(count) + ("\r" if shell.kind == "pty" else "\n"))
+        deadline = time.time() + 90
+        while printed(count) < 10000 and time.time() < deadline:   # 40 MB printed, nobody reading
+            time.sleep(0.2)
+        first, grown = printed(count), memory_mb() - before
+        time.sleep(3.0)
+        assert printed(count) > first >= 10000, first   # the program goes on, never held up
+        assert grown < 32 and memory_mb() - before < 32, (before, grown, memory_mb())
+        assert shell._size <= sh.MAX_PENDING and shell.left_out > 1e6
+        said = shell.take()
+        assert re.match(r"\x1b\[0m\r\n\x1b\[2m\[\d+\.\d MB of output left out here: this tab didn't keep up with it\]",
+                        said) and len(said) < sh.MAX_PENDING + 200
+        assert shell.repaint_due() and not shell.repaint_due()
+    finally:
+        shell.close("test")
+
+
+def test_a_page_that_stops_saying_it_wrote_gets_no_more_than_its_window(parts, monkeypatch, tmp_path):
+    """The page says what its terminal has written; Kelvin sends no more than SHELL_WINDOW beyond that, so a stalled
+    page holds no more of a shell's output in Kelvin (nor in its socket) than that and the shell's own latest."""
+    from labharness.web.app import SHELL_WINDOW
+    mode(monkeypatch, "pty" if PTY else "pipe")
+    runtime, settings, store = parts
+    count = tmp_path / "count.txt"
+    client, headers = client_for(parts, {"scripted": Scripted([])})
+    with client, connect(client, settings.access_key) as ws:
+        tab = Tab(ws, acking=False)
+        tab.until(lambda m: m["t"] == "hello")
+        (shell,) = shells_of(client).list()
+        tab.run(flood(count))
+        deadline = time.time() + 40
+        while printed(count) < 2000 and time.time() < deadline:   # 8 MB printed
+            time.sleep(0.2)
+        time.sleep(1.0)
+        while not tab.got.empty():
+            tab.messages.append(tab.got.get())
+        units = sum(len(m["d"].encode("utf-16-le")) // 2 for m in tab.messages if m["t"] == "out")
+        assert SHELL_WINDOW <= units <= SHELL_WINDOW + sh.MAX_PENDING + 200, units   # then nothing more came
+        assert shell.left_out_all > 0
+        ws.send_json({"t": "ack", "n": units})   # the page caught up: the rest comes, after the gap said
+        tab.until(lambda m: m["t"] == "out" and "of output left out here" in m["d"])
+        ws.send_json({"t": "in", "d": "\x03"})
+        ws.send_json({"t": "close"})
+
+
+def test_links_a_program_prints_open_only_as_web_pages():
+    from test_fit_rules import _function
+    js = (Path(sh.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    start = _function(js, "shellStart")
+    assert "allowNonHttpProtocols: false" in start
+    assert 'activate: (e, uri) => { if (/^https?:\\/\\//i.test(uri)) window.open(uri, "_blank", "noopener"); }' in start
+    assert "if (i < 0 || tab.locked) return;" in _function(js, "shellClose")   # never closed while Claude works
+    assert "if (tab.locked) return;" in _function(js, "shellInput")
 
 
 # ---------------------------------------------------------------------------------- without a terminal

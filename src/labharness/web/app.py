@@ -84,6 +84,8 @@ VENDOR_FILES = ("xterm.js", "xterm.css", "addon-fit.js")
 # KEY_PROTOCOL (a browser's WebSocket takes no header of the page's own, and the key in the address could be logged)
 SHELL_PROTOCOL = "kelvin.shell"
 KEY_PROTOCOL = "kelvin.key."
+SHELL_WINDOW = 1 << 20   # a shell's output on its way to the page at once (UTF-16 units), until the page says it wrote it
+LOCK_POLL_S = 0.5        # how often a shell's socket looks whether Claude has started or stopped working the screen
 TRACE_POINTS = 400
 ATTACH_MAX = 40 * 2 ** 20   # a photo (the portal shrinks it first), a PDF or a data file
 TEXT_TAIL = 256 * 1024      # of a script run's own text files, the last part a person reads (X-Kelvin-Cut: the whole)
@@ -3336,15 +3338,21 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """A shell in a Terminal tab (shells.py): the signed-in person's own, on this computer, past the safety gate as
         in any terminal there. Only Kelvin's own page on this computer opens one (socket_refused, here again whatever
         the middleware let through): never a phone, nor the AI, which no tool brings here. The page sends {t: "in", d}
-        (keys and pastes), {t: "size", cols, rows} and {t: "close"}; it gets {t: "hello", kind, program, folder, note},
-        {t: "out", d}, {t: "note", d} and, once the shell ended, {t: "exit", code, why}; or {t: "refused", message}
-        when no shell can open now. The shell ends when the socket does: its tab closed, or the page went away."""
+        (keys and pastes), {t: "ack", n} (output its terminal has written), {t: "size", cols, rows} and {t: "close"};
+        it gets {t: "hello", kind, program, folder, note}, {t: "out", d}, {t: "note", d}, {t: "lock", on} (while Claude
+        works the screen) and, once the shell ended, {t: "exit", code, why}; or {t: "refused", message} when no shell
+        can open now. The shell ends when the socket does, whenever that is (as it opened too): its tab closed, the page
+        went away, or Kelvin quit."""
         why = socket_refused(ws.scope, settings.access_key, hosts, remote.port, signed_in_now) or (
             None if channel(ws)[0] == "portal" else "The Terminal works only on the Kelvin computer's own screen.")
         if why:
             await ws.close(code=1008, reason=why)   # before it opens: the handshake fails
             return
-        owner, turn = runtime.user, shells.turn   # who asks, and their turn: a sign-out meanwhile refuses it
+        # who asks, and their turn: a sign-out or another person's sign-in meanwhile refuses it (shells.open)
+        owner, turn = runtime.user, shells.turn
+
+        def still() -> bool:
+            return (signed_in_now is None or signed_in_now()) and runtime.user == owner
         await ws.accept(subprotocol=SHELL_PROTOCOL)
 
         def size(cols: Any, rows: Any) -> Tuple[int, int]:
@@ -3358,38 +3366,66 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             folder = await asyncio.to_thread(shell_folder)
             shell = await asyncio.to_thread(shells.open, owner, person(ws), folder,
                                             *size(ws.query_params.get("cols"), ws.query_params.get("rows")),
-                                            turn=turn)
+                                            turn=turn, still=still)
         except (ShellRefused, OSError) as e:
             said = str(e) if isinstance(e, ShellRefused) else "Kelvin couldn't start a shell: %s" % (e.strerror or e)
-            await ws.send_json({"t": "refused", "message": said})
-            await ws.close(code=1008, reason=said[:120])
-            return
-        loop = asyncio.get_running_loop()
-        woken = asyncio.Event()
-        shell.listen(lambda: loop.call_soon_threadsafe(woken.set))
-        await ws.send_json({"t": "hello", "id": shell.id, "kind": shell.kind, "program": shell.program,
-                            "folder": shell.folder, "note": shell.note,
-                            "conpty": os.name == "nt" and shell.kind == "pty"})   # xterm.js wraps lines as ConPTY does
-
-        async def output() -> None:
-            """Its output as it comes, then its end (a page gone meanwhile: nothing more to send)."""
             try:
-                while True:
-                    await woken.wait()
-                    woken.clear()
-                    done = shell.ended.is_set()
-                    text = shell.take()
-                    if text:
-                        await ws.send_json({"t": "out", "d": text})
-                    if done:
-                        await ws.send_json({"t": "exit", "code": shell.exit_code, "why": shell.why})
-                        return
-            except Exception:
-                return
-        sending = asyncio.ensure_future(output())
+                await ws.send_json({"t": "refused", "message": said})
+                await ws.close(code=1008, reason=said[:120])
+            except Exception:   # the page went meanwhile
+                pass
+            return
         ended = "its connection ended"   # why the shell closes, for the record
-        said_locked = False
-        try:
+        tasks: List[asyncio.Task] = []
+        try:   # from here on, a page gone at any moment (a reload as the shell starts) ends its shell
+            loop = asyncio.get_running_loop()
+            woken, room = asyncio.Event(), asyncio.Event()
+            unacked = [0]   # output sent that the page's terminal hasn't written yet (UTF-16 units, as it counts)
+            shell.listen(lambda: loop.call_soon_threadsafe(woken.set))
+            await ws.send_json({"t": "hello", "id": shell.id, "kind": shell.kind, "program": shell.program,
+                                "folder": shell.folder, "note": shell.note,
+                                "conpty": os.name == "nt" and shell.kind == "pty"})   # xterm.js wraps as ConPTY does
+
+            async def output() -> None:
+                """Its output as it comes, SHELL_WINDOW of it at most on its way to the page at once (a page that
+                stalls holds no more of it here; the shell keeps the latest, shells.MAX_PENDING), then its end."""
+                try:
+                    while True:
+                        await woken.wait()
+                        woken.clear()
+                        while unacked[0] >= SHELL_WINDOW and not shell.ended.is_set():
+                            room.clear()
+                            try:
+                                await asyncio.wait_for(room.wait(), 1.0)
+                            except asyncio.TimeoutError:
+                                pass
+                        done = shell.ended.is_set()
+                        text = shell.take()
+                        if shell.repaint_due():   # some was left out: its screen drawn again after the gap
+                            await asyncio.to_thread(shell.repaint)
+                        if text:
+                            unacked[0] += len(text.encode("utf-16-le")) // 2
+                            await ws.send_json({"t": "out", "d": text})
+                        if done:
+                            await ws.send_json({"t": "exit", "code": shell.exit_code, "why": shell.why})
+                            return
+                except Exception:
+                    return
+
+            async def lock() -> None:
+                """While Claude works the screen, the tab covers its shell and takes no typing or closing: Claude
+                neither sees a person's shell in its screenshots nor ends it."""
+                locked = False
+                try:
+                    while not shell.ended.is_set():
+                        if bool(runtime.operating) != locked:
+                            locked = not locked
+                            await ws.send_json({"t": "lock", "on": locked})
+                        await asyncio.sleep(LOCK_POLL_S)
+                except Exception:
+                    return
+            tasks += [asyncio.ensure_future(output()), asyncio.ensure_future(lock())]
+            said_locked = False
             while True:
                 message = await ws.receive()
                 if message["type"] == "websocket.disconnect":   # 1001: the page went; 1012: uvicorn stops (Kelvin)
@@ -3412,15 +3448,22 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                         continue
                     said_locked = False
                     shell.write(str(data.get("d") or "")[:SHELL_INPUT], raw=data.get("b") is True)
+                elif kind == "ack":
+                    try:
+                        unacked[0] = max(0, unacked[0] - int(data.get("n") or 0))
+                    except (TypeError, ValueError):
+                        pass
+                    room.set()
                 elif kind == "size":
                     await asyncio.to_thread(shell.resize, *size(data.get("cols"), data.get("rows")))
-                elif kind == "close":
+                elif kind == "close" and not runtime.operating:   # never Claude's to close
                     ended = "its tab was closed"
                     break
-        except Exception:   # the page went away mid-message
+        except Exception:   # the page went away mid-message, or as the shell started
             pass
         finally:
-            sending.cancel()
+            for task in tasks:
+                task.cancel()
             await asyncio.shield(asyncio.to_thread(shells.close, shell, ended))
 
     async def vendor(request: Request) -> Response:

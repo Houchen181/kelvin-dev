@@ -1060,6 +1060,11 @@ body.resizing-v { cursor: row-resize; user-select: none; }
 .term-tab-x { display: grid; place-items: center; width: var(--target); margin-left: -6px; border-radius: 6px; }
 .term-tab-x svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; }
 .term-tab-x:hover { background: rgba(255, 255, 255, 0.08); }
+.term-tab-x:disabled { opacity: .35; cursor: default; }
+/* the Kelvin tab while a request it asked waits behind a shell's tab: a dot in the request's colour */
+.term-tab.waiting { color: var(--term-ask); }
+.term-tab.waiting .term-tab-name::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 6px;
+  border-radius: 50%; background: var(--term-ask); vertical-align: middle; }
 .term-target { color: var(--term-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 /* a shell's tab: xterm.js draws it, and scrolls its own lines (its stylesheet, static/vendor/xterm); this never scrolls */
 .term-shells { position: relative; flex: 1; min-height: 0; }
@@ -1068,6 +1073,11 @@ body.resizing-v { cursor: row-resize; user-select: none; }
 .term-shell .xterm { height: 100%; }
 .term-shell .xterm .xterm-viewport { background-color: transparent; }   /* under the last whole row: the pane's own */
 .term-shell-said { margin: 8px 0; color: var(--term-warn); }
+/* while Claude works the screen: the shell covered (the tab undoes the page size, so the cover's text takes it back) */
+.term-shell.locked .xterm { visibility: hidden; }
+.term-shell-lock { position: absolute; inset: 0; margin: 0; display: grid; place-items: center; padding: 16px;
+  background: var(--term-bg); color: var(--term-warn); text-align: center; font-size: calc(13px * var(--zoom, 1)); }
+.term-shell-lock[hidden] { display: none; }
 .term-kelvin { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .term-head .icon-btn { color: var(--term-dim); width: var(--target); height: var(--target); }
 .term-head .icon-btn:hover { color: var(--term-text); background: rgba(255, 255, 255, 0.06); }

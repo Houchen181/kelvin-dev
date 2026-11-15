@@ -8562,7 +8562,7 @@
   const TERM = { open: false, target: null, chatId: null, history: [], hi: 0, busy: false, calling: null, ask: null, askAt: 0,
                  asked: new Set(), reply: null, progress: new Map(), tab: null };
   // the shells' tabs (shellNew), the Kelvin tab (initTerminal), how many of each program were named, xterm.js once loaded
-  const SHELLS = { tabs: [], kelvin: null, named: {}, count: 0, xterm: null, started: false, raf: 0 };
+  const SHELLS = { tabs: [], kelvin: null, named: {}, count: 0, xterm: null, started: false };
   const TERM_HELP = [
     "Type to Kelvin, or switch to an instrument and type its own commands (*IDN?, SENS?, :SOUR:VOLT 1 ...).",
     "Instrument commands go through the safety gate: limits, interlocks and blocked commands apply,",
@@ -8675,10 +8675,7 @@
       termOut().replaceChildren();
       $("term-input").focus();
     });
-    new ResizeObserver(() => {   // a shell fits its tab whenever the Terminal changes size
-      cancelAnimationFrame(SHELLS.raf);
-      SHELLS.raf = requestAnimationFrame(() => shellFit(TERM.tab));
-    }).observe($("term-shells"));
+    new ResizeObserver(() => shellFit(TERM.tab)).observe($("term-shells"));   // a shell fits the Terminal's new size
     $("term-input").addEventListener("keydown", termKey);
     termOut().addEventListener("mouseup", () => { if (!window.getSelection().toString()) $("term-input").focus(); });
     $("model").addEventListener("change", termSync);
@@ -8944,14 +8941,26 @@
     termSync();
     if (!TERM.open) toggleTerm(true);
     fullShow("termpane");
-    termTab(SHELLS.kelvin);   // asked in the Kelvin tab, whichever was on the screen
-    $("term-input").focus();
+    // asked in the Kelvin tab. A shell on the screen keeps the screen and the keys: there, y and Enter are the shell's,
+    // and they once approved a laser's 10 mW. The Kelvin tab says a request waits; the person goes there to answer
+    if (TERM.tab === SHELLS.kelvin) $("term-input").focus();
+    else termWaiting(true);
   }
   function termEndAsk(note) {
     if (!TERM.ask) return;
     if (note) termLine(note, "dim");
     TERM.ask = null;
+    termWaiting(false);
     termSync();
+  }
+  // the Kelvin tab marked while a request it asks waits behind a shell's tab: a dot, and its tip saying so
+  function termWaiting(on) {
+    const wrap = SHELLS.kelvin && SHELLS.kelvin.wrap;
+    if (!wrap) return;
+    wrap.classList.toggle("waiting", !!on);
+    SHELLS.kelvin.btn.title = on ? "A request waits here for your answer (y/n)"
+      : "Kelvin, or an instrument's own commands through the safety gate";
+    SHELLS.kelvin.btn.setAttribute("aria-label", on ? "Kelvin: a request waits for your answer" : "Kelvin");
   }
   async function termAnswer(text) {
     const p = TERM.ask;
@@ -9031,6 +9040,9 @@
       lineHeight: 1.15, cursorBlink: true, scrollback: 5000, allowProposedApi: false,
       theme: { background: v("--term-bg", "#121a23"), foreground: v("--term-text", "#d5dee8"), cursor: v("--term-prompt", "#7cc0ff"),
                selectionBackground: "rgba(124, 192, 255, 0.35)" },
+      // a link a program prints (OSC 8) opens only as a web page, in the browser, never another scheme (file:, a
+      // program's own)
+      linkHandler: { allowNonHttpProtocols: false, activate: (e, uri) => { if (/^https?:\/\//i.test(uri)) window.open(uri, "_blank", "noopener"); } },
     });
     const fit = new window.FitAddon.FitAddon();
     term.loadAddon(fit);
@@ -9063,7 +9075,10 @@
       if (m.conpty) term.options.windowsPty = { backend: "conpty" };
       if (m.note) term.write("\x1b[2m" + m.note + "\x1b[0m\r\n");
       shellSend(tab, { t: "size", cols: term.cols, rows: term.rows });   // a resize while it connected, too
-    } else if (m.t === "out") term.write(m.d);
+    } else if (m.t === "out") {   // said written once it is: Kelvin sends no more than the page keeps up with
+      const n = m.d.length;
+      term.write(m.d, () => shellSend(tab, { t: "ack", n }));
+    } else if (m.t === "lock") shellLock(tab, m.on);
     else if (m.t === "note") term.write("\r\n\x1b[33m" + m.d + "\x1b[0m\r\n");
     else if (m.t === "refused") { tab.refused = true; term.write("\x1b[33m" + m.message + "\x1b[0m\r\n"); }
     else if (m.t === "exit") {   // why it was closed (a sign-out), or how it exited
@@ -9076,6 +9091,19 @@
     tab.term.open(tab.el);
     shellFit(tab);
   }
+  // while Claude works the screen (the Claude Code bridge): the shell covered, so its screenshots never show it, and
+  // its tab neither typed in nor closed (the server takes neither meanwhile either)
+  function shellLock(tab, on) {
+    tab.locked = !!on;
+    tab.el.classList.toggle("locked", tab.locked);
+    if (tab.locked && !tab.cover) {
+      tab.cover = h("p", { class: "term-shell-lock" }, "Claude is operating this computer, so this shell is hidden " +
+        "until it finishes. Press Stop to end it.");
+      tab.el.append(tab.cover);
+    }
+    if (tab.cover) tab.cover.hidden = !tab.locked;
+    tab.wrap.querySelector(".term-tab-x").disabled = tab.locked;
+  }
   function shellEnded(tab, said) {
     tab.ended = true;
     if (tab.term) tab.term.write("\r\n\x1b[2m[" + (said ? said + " " : "") + "Press a key to close this tab.]\x1b[0m");
@@ -9084,6 +9112,7 @@
     if (tab.ws && tab.ws.readyState === WebSocket.OPEN) tab.ws.send(JSON.stringify(m));
   }
   function shellInput(tab, d) {
+    if (tab.locked) return;
     if (tab.ended) { shellClose(tab); return; }
     if (!tab.pipe) { shellSend(tab, { t: "in", d }); return; }
     const term = tab.term;   // without a terminal: the line is edited here, then sent whole
@@ -9122,6 +9151,8 @@
   // the page size, and its text is drawn at the page size instead.
   function shellFit(tab) {
     if (!tab || !tab.fit || !tab.drawn || tab.el.hidden || !TERM.open) return;
+    const box = tab.el.getBoundingClientRect();   // not laid out yet (the page still arranging itself): the next
+    if (box.width < 160 || box.height < 40) return;   // resize fits it, never a shell 2 columns wide
     const z = layoutZoom();
     if (tab.el.style.zoom !== String(1 / z)) tab.el.style.zoom = String(1 / z);
     if (tab.term.options.fontSize !== 13 * z) tab.term.options.fontSize = 13 * z;
@@ -9129,7 +9160,7 @@
   }
   function shellClose(tab) {   // its tab and its shell, with what runs in it (the server ends them as the socket ends)
     const i = SHELLS.tabs.indexOf(tab);
-    if (i < 0) return;
+    if (i < 0 || tab.locked) return;   // never while Claude works the screen
     SHELLS.tabs.splice(i, 1);
     try { shellSend(tab, { t: "close" }); if (tab.ws) tab.ws.close(1000); } catch (e) { /* closed already */ }
     if (tab.term) tab.term.dispose();
@@ -9150,6 +9181,7 @@
     }
     $("term-shells").hidden = tab === SHELLS.kelvin;
     store("lh.termTab", tab === SHELLS.kelvin ? "kelvin" : "shell");
+    if (tab === SHELLS.kelvin) termWaiting(false);   // the person came to it: its question is on the screen
     termSync();
     if (!TERM.open) return;
     if (tab === SHELLS.kelvin) { $("term-input").focus(); return; }
