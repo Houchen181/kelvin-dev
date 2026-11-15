@@ -363,6 +363,17 @@ def event_line(e: Dict[str, Any]) -> str:
                                                   str(e.get("sha256") or "")[:12])
     elif kind in ("signed_in", "signed_out"):
         text = kind.replace("_", " ")
+    elif kind in ("shell_opened", "shell_closed"):   # a person's own shell in the Terminal (web/shells.py)
+        from .approval import who_text
+        who = who_text({"account": e.get("account"), "channel": "portal"})
+        if kind == "shell_opened":
+            return "%s %s opened a shell in the Terminal (%s, in %s)%s" % (
+                t, who, e.get("program"), e.get("folder"), "" if e.get("kind") != "pipe" else ", without a terminal")
+        took = float(e.get("seconds") or 0)
+        return "%s the shell %s opened in the Terminal at %s (%s) closed after %s: %s%s" % (
+            t, who, str(e.get("opened") or "")[11:16], e.get("program"),
+            "%d min" % round(took / 60) if took >= 90 else "%d s" % took, e.get("why"),
+            " with code %s" % e["exit"] if e.get("why") == "it exited" and e.get("exit") not in (None, 0) else "")
     elif kind == "computer_task":
         text = "operating the computer: %s" % e.get("task")
     elif kind == "computer":

@@ -29,7 +29,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket, WebSocketClose
 
 from .._version import __version__
 from ..accounts import Accounts, LabRoles, OwnerPin, RoleRefused, cipher_for, has_legacy
@@ -65,6 +66,7 @@ from .remote import (API as PHONE_API, Remote, addresses, allow_through_firewall
                      remote_host_ok)
 from .providers.base import Provider, sees_images
 from .settings import ENV as OWN_KEYS, Settings, default_model
+from .shells import MAX_INPUT as SHELL_INPUT, ShellRefused, Shells
 from .store import ChatStore
 
 log = logging.getLogger("kelvin")   # the desktop app writes this to ~/Kelvin/kelvin.log
@@ -74,6 +76,16 @@ STATIC = Path(__file__).parent / "static"
 # (seq.*) and the first start (welcome.*)
 STATIC_FILES = ("app.js", "app.css", "home.js", "home.css", "seq.js", "seq.css", "welcome.js", "welcome.css",
                 "kelvin.svg")
+# the Terminal's shells draw with xterm.js 6.0.0 and @xterm/addon-fit 0.11.0, as released on the npm registry, kept here
+# with their licences: the page loads them from this computer, never a CDN, as the app works offline
+VENDOR = STATIC / "vendor" / "xterm"
+VENDOR_FILES = ("xterm.js", "xterm.css", "addon-fit.js")
+# a shell's WebSocket (/api/shell): the page offers SHELL_PROTOCOL and the access key as a second subprotocol, hex after
+# KEY_PROTOCOL (a browser's WebSocket takes no header of the page's own, and the key in the address could be logged)
+SHELL_PROTOCOL = "kelvin.shell"
+KEY_PROTOCOL = "kelvin.key."
+SHELL_WINDOW = 1 << 20   # a shell's output on its way to the page at once (UTF-16 units), until the page says it wrote it
+LOCK_POLL_S = 0.5        # how often a shell's socket looks whether Claude has started or stopped working the screen
 TRACE_POINTS = 400
 ATTACH_MAX = 40 * 2 ** 20   # a photo (the portal shrinks it first), a PDF or a data file
 TEXT_TAIL = 256 * 1024      # of a script run's own text files, the last part a person reads (X-Kelvin-Cut: the whole)
@@ -166,10 +178,46 @@ def _page(title: str, text: str) -> str:
             '</head><body><h1>%s</h1><p>%s</p></body></html>' % (escape(title), escape(text)))
 
 
+def socket_key(scope: Dict[str, Any]) -> str:
+    """The access key a WebSocket's page offered among its subprotocols (KEY_PROTOCOL, then the key in hex); ""
+    without one."""
+    for offered in scope.get("subprotocols") or []:
+        if str(offered).startswith(KEY_PROTOCOL):
+            try:
+                return bytes.fromhex(str(offered)[len(KEY_PROTOCOL):]).decode("utf-8")
+            except ValueError:
+                return ""
+    return ""
+
+
+def socket_refused(scope: Dict[str, Any], key: str, hosts: Iterable[str], network_port: Optional[int],
+                   signed_in: Optional[Callable[[], bool]]) -> Optional[str]:
+    """Why a WebSocket may not open here (None: it may). Only Kelvin's own page on this computer opens one (the
+    Terminal's shells): on 127.0.0.1 with the page's own Host, from the page's own Origin (which a browser always
+    sends, so another web site's page can't pass for it), with the access key, and someone signed in where people
+    sign in. Never on the network listener, whatever it is sent: phones use the API, and the Kelvin hub's relay only
+    ever makes HTTP requests."""
+    headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
+    hosts = set(hosts)
+    origin = headers.get("origin") or ""
+    if network_port is not None and (scope.get("server") or (None, None))[1] == network_port:
+        return "The Terminal works only on the Kelvin computer's own screen."
+    if headers.get("host") not in hosts:
+        return "bad host"
+    if not origin or origin.split("://", 1)[-1] not in hosts:
+        return "bad origin"
+    if not hmac.compare_digest(socket_key(scope).encode("utf-8"), key.encode("utf-8")):
+        return "missing or wrong access key"
+    if signed_in is not None and not signed_in():
+        return "Sign in to Kelvin first."
+    return None
+
+
 class Guard:
     """On 127.0.0.1, only this machine's browser holding the access key may use the API. On the network listener
     (phone access, see remote.py) only phones with their own token may, each within its role; the access key never
-    works there."""
+    works there. A WebSocket (the Terminal's shells) opens only for this computer's own page (socket_refused): never on
+    the network listener."""
 
     def __init__(self, app: Any, token: str, hosts: Iterable[str], remote: Optional[Remote] = None,
                  signed_in: Optional[Callable[[], bool]] = None,
@@ -232,6 +280,13 @@ class Guard:
                 body = dict(problem[2] if len(problem) > 2 else {}, error=problem[1])
                 await JSONResponse(body, status_code=problem[0])(scope, receive, send)
                 return
+        elif scope["type"] == "websocket":
+            why = socket_refused(scope, self.token, self.hosts, self.remote.port if self.remote else None,
+                                 self.signed_in)
+            if why:   # refused before it opens: the browser sees the handshake fail
+                await WebSocketClose(code=1008, reason=why)(scope, receive, send)
+                return
+            scope["kelvin"] = {"role": "owner", "device": None}
         await self.app(scope, receive, send)
 
 
@@ -374,6 +429,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     runtime.project_ids = lambda: [None] + [p["id"] for p in store.projects()]
     remote = Remote(settings)
     guard: Any = None
+    # the Terminal's shells (shells.py): the person's own, past the safety gate; each opened and closed is in the record
+    # of whoever is signed in then (a sign-out ends them first, below)
+    shells = Shells(lambda type_, **fields: runtime.gate.log.write(type_, **fields))
     runtime.cards_dir = Path(settings.path).parent / "cards"
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     home = lab_file.parent
@@ -452,6 +510,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     loop_ref: Dict[str, Any] = {}
     session: Dict[str, Any] = {"user": None}              # who is signed in (with accounts); everyone is equal
     nobody = home / "lab"                                 # the record of what happens while nobody is signed in
+    signed_in_now = None if accounts is None else (lambda: session["user"] is not None)
 
     def user_default_data() -> Path:
         if accounts is None and runtime.lab_folder is not None:   # this lab's own folder (labfolders.py)
@@ -655,6 +714,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             hub.stopping = True   # a sync in progress stops before its next request
             for t in tasks:
                 t.cancel()
+            await asyncio.to_thread(shells.close_all, "Kelvin quit")   # the Terminal's shells never outlive Kelvin
             runtime.stop_watching()
             await remote.stop()
             await agent.close()
@@ -1238,6 +1298,15 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         problem = None if same else running_for()
         if problem:
             raise RuntimeError(("Kelvin is still doing %s's work. " % runtime.user if runtime.user else "") + problem)
+        if not same:   # the last person's shells end with their turn, in their record; none opens meanwhile
+            shells.close_all("its person signed out", hold=True)
+        try:
+            switch_to(account, password, same)
+        finally:
+            shells.resume()
+
+    def switch_to(account: Dict[str, Any], password: str, same: bool) -> None:
+        """sign_in's change itself: this person's settings and keys, data folder and record, chats and sign-ins."""
         cipher = cipher_for(password, account)
         hub.use(None)   # until this person's things are all in place
         settings.use(accounts.settings_path(account), cipher)
@@ -1260,9 +1329,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     def sign_out() -> None:
         """Nobody is signed in: the portal waits for the next person. A plan or queue still running goes on and is
-        recorded as its person's; Kelvin turns to nobody's record when it ends (or at the next sign-in)."""
+        recorded as its person's; Kelvin turns to nobody's record when it ends (or at the next sign-in). Their shells
+        in the Terminal end first, so the record that says so is theirs."""
         agent.stop()   # a chat still answering ends with its person
+        shells.close_all("its person signed out", hold=True)
         session["user"] = None
+        shells.resume()   # nobody is signed in: none opens now
         relay_wake()
         hub.use(None)
         settings.use(None)
@@ -3254,6 +3326,153 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return JSONResponse(await asyncio.to_thread(runtime.terminal, instrument, op, arg, body.get("value")))
         return await soon(run())
 
+    def shell_folder() -> str:
+        """Where a new shell starts: the lab's first scripts folder, else the person's home folder."""
+        for folder in runtime.scripts_folders()[:1]:
+            path = Path(folder).expanduser()
+            if path.is_dir():
+                return str(path)
+        return str(Path.home())
+
+    async def shell_socket(ws: WebSocket) -> None:
+        """A shell in a Terminal tab (shells.py): the signed-in person's own, on this computer, past the safety gate as
+        in any terminal there. Only Kelvin's own page on this computer opens one (socket_refused, here again whatever
+        the middleware let through): never a phone, nor the AI, which no tool brings here. The page sends {t: "in", d}
+        (keys and pastes), {t: "ack", n} (output its terminal has written), {t: "size", cols, rows} and {t: "close"};
+        it gets {t: "hello", kind, program, folder, note}, {t: "out", d}, {t: "note", d}, {t: "lock", on} (while Claude
+        works the screen) and, once the shell ended, {t: "exit", code, why}; or {t: "refused", message} when no shell
+        can open now. The shell ends when the socket does, whenever that is (as it opened too): its tab closed, the page
+        went away, or Kelvin quit."""
+        why = socket_refused(ws.scope, settings.access_key, hosts, remote.port, signed_in_now) or (
+            None if channel(ws)[0] == "portal" else "The Terminal works only on the Kelvin computer's own screen.")
+        if why:
+            await ws.close(code=1008, reason=why)   # before it opens: the handshake fails
+            return
+        # who asks, and their turn: a sign-out or another person's sign-in meanwhile refuses it (shells.open)
+        owner, turn = runtime.user, shells.turn
+
+        def still() -> bool:
+            return (signed_in_now is None or signed_in_now()) and runtime.user == owner
+        await ws.accept(subprotocol=SHELL_PROTOCOL)
+
+        def size(cols: Any, rows: Any) -> Tuple[int, int]:
+            try:
+                return max(20, min(500, int(cols))), max(5, min(300, int(rows)))
+            except (TypeError, ValueError):
+                return 80, 24
+        try:
+            if runtime.operating:
+                raise ShellRefused(OPERATING)
+            folder = await asyncio.to_thread(shell_folder)
+            shell = await asyncio.to_thread(shells.open, owner, person(ws), folder,
+                                            *size(ws.query_params.get("cols"), ws.query_params.get("rows")),
+                                            turn=turn, still=still)
+        except (ShellRefused, OSError) as e:
+            said = str(e) if isinstance(e, ShellRefused) else "Kelvin couldn't start a shell: %s" % (e.strerror or e)
+            try:
+                await ws.send_json({"t": "refused", "message": said})
+                await ws.close(code=1008, reason=said[:120])
+            except Exception:   # the page went meanwhile
+                pass
+            return
+        ended = "its connection ended"   # why the shell closes, for the record
+        tasks: List[asyncio.Task] = []
+        try:   # from here on, a page gone at any moment (a reload as the shell starts) ends its shell
+            loop = asyncio.get_running_loop()
+            woken, room = asyncio.Event(), asyncio.Event()
+            unacked = [0]   # output sent that the page's terminal hasn't written yet (UTF-16 units, as it counts)
+            shell.listen(lambda: loop.call_soon_threadsafe(woken.set))
+            await ws.send_json({"t": "hello", "id": shell.id, "kind": shell.kind, "program": shell.program,
+                                "folder": shell.folder, "note": shell.note,
+                                "conpty": os.name == "nt" and shell.kind == "pty"})   # xterm.js wraps as ConPTY does
+
+            async def output() -> None:
+                """Its output as it comes, SHELL_WINDOW of it at most on its way to the page at once (a page that
+                stalls holds no more of it here; the shell keeps the latest, shells.MAX_PENDING), then its end."""
+                try:
+                    while True:
+                        await woken.wait()
+                        woken.clear()
+                        while unacked[0] >= SHELL_WINDOW and not shell.ended.is_set():
+                            room.clear()
+                            try:
+                                await asyncio.wait_for(room.wait(), 1.0)
+                            except asyncio.TimeoutError:
+                                pass
+                        done = shell.ended.is_set()
+                        text = shell.take()
+                        if shell.repaint_due():   # some was left out: its screen drawn again after the gap
+                            await asyncio.to_thread(shell.repaint)
+                        if text:
+                            unacked[0] += len(text.encode("utf-16-le")) // 2
+                            await ws.send_json({"t": "out", "d": text})
+                        if done:
+                            await ws.send_json({"t": "exit", "code": shell.exit_code, "why": shell.why})
+                            return
+                except Exception:
+                    return
+
+            async def lock() -> None:
+                """While Claude works the screen, the tab covers its shell and takes no typing or closing: Claude
+                neither sees a person's shell in its screenshots nor ends it."""
+                locked = False
+                try:
+                    while not shell.ended.is_set():
+                        if bool(runtime.operating) != locked:
+                            locked = not locked
+                            await ws.send_json({"t": "lock", "on": locked})
+                        await asyncio.sleep(LOCK_POLL_S)
+                except Exception:
+                    return
+            tasks += [asyncio.ensure_future(output()), asyncio.ensure_future(lock())]
+            said_locked = False
+            while True:
+                message = await ws.receive()
+                if message["type"] == "websocket.disconnect":   # 1001: the page went; 1012: uvicorn stops (Kelvin)
+                    code = message.get("code")
+                    ended = ("the page closed or reloaded" if code == 1001 else "Kelvin quit" if code == 1012
+                             else ended)
+                    break
+                try:
+                    data = json.loads(message.get("text") or "")
+                except ValueError:
+                    continue
+                kind = data.get("t") if isinstance(data, dict) else None
+                if kind == "in":
+                    if runtime.operating:   # Claude is working the screen: it never types here
+                        if not said_locked:
+                            await ws.send_json({"t": "note", "d": "Claude is operating this computer, so the "
+                                                "Terminal's shells take no typing until it finishes. Press Stop to end "
+                                                "it."})
+                        said_locked = True
+                        continue
+                    said_locked = False
+                    shell.write(str(data.get("d") or "")[:SHELL_INPUT], raw=data.get("b") is True)
+                elif kind == "ack":
+                    try:
+                        unacked[0] = max(0, unacked[0] - int(data.get("n") or 0))
+                    except (TypeError, ValueError):
+                        pass
+                    room.set()
+                elif kind == "size":
+                    await asyncio.to_thread(shell.resize, *size(data.get("cols"), data.get("rows")))
+                elif kind == "close" and not runtime.operating:   # never Claude's to close
+                    ended = "its tab was closed"
+                    break
+        except Exception:   # the page went away mid-message, or as the shell started
+            pass
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.shield(asyncio.to_thread(shells.close, shell, ended))
+
+    async def vendor(request: Request) -> Response:
+        """xterm.js and its fit addon, as released (VENDOR), for the Terminal's shells: from this computer."""
+        name = request.path_params["name"]
+        if name not in VENDOR_FILES or not (VENDOR / name).exists():
+            return error(404, "not found")
+        return FileResponse(VENDOR / name, headers={"Cache-Control": "no-cache"})
+
     async def instrument_switch(request: Request) -> Response:
         """POST {on}: a person switches an instrument on or off for this lab. Off, Kelvin sends it nothing at all:
         no command, no reading, no health check, no going safe, until a person switches it on again."""
@@ -4888,6 +5107,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/instruments/{name}/limits", instrument_limits, methods=["GET", "POST"]),
         Route("/api/instruments/setup", setup_view, methods=["GET", "POST"]),
         Route("/api/terminal", terminal, methods=["POST"]),
+        WebSocketRoute("/api/shell", shell_socket),   # the Terminal's shells: this computer's own page only
         Route("/api/data-folder", data_folder, methods=["GET", "POST"]),
         Route("/api/backup", backup_view, methods=["POST"]),
         Route("/api/folder", folder_view, methods=["GET", "POST"]),
@@ -4918,6 +5138,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/runs/{run_id}/files/{name}/open", run_open, methods=["POST"]),
         Route("/api/runs/{run_id}/export", run_export),
         Route("/static/{name}", static),
+        Route("/static/vendor/xterm/{name}", vendor),
         # Help and the first-run checklist, ELN records, calibration, cards in the reader's language (labops.py)
         *labops.routes(runtime, settings, home, lambda request: runtime.user or person(request),
                        lambda request: chat_viewer(request.query_params.get("chat"), person=True)),
@@ -4928,6 +5149,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.agent = agent
     app.state.remote = remote
+    app.state.shells = shells
     app.state.signin = signin
     app.state.hub = hub
     app.state.setup = setup

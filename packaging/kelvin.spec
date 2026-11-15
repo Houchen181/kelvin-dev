@@ -38,6 +38,10 @@ PACKAGES = [
 ]
 if sys.platform == "win32":   # the window's own (pywebview's WebView2 through .NET), which LightField's automation uses
     PACKAGES += [("clr_loader", "clr_loader", ()), ("pythonnet", "pythonnet", ())]
+    # the Terminal's shells on a pseudo-console (labharness/web/shells.py): pywinpty's module, and beside it in winpty/
+    # the programs and DLLs it starts the pseudo-console with (OpenConsole.exe, conpty.dll, winpty-agent.exe,
+    # winpty.dll), which the loop below carries as its files
+    PACKAGES += [("winpty", "pywinpty", ())]
 
 datas, binaries, hiddenimports = [], [], []
 for package, dist, skip in PACKAGES:

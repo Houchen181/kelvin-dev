@@ -1047,10 +1047,38 @@ body.resizing { cursor: col-resize; user-select: none; }
 .term-resize { position: absolute; left: 0; right: 0; top: -4px; height: 8px; cursor: row-resize; z-index: 5; touch-action: none; }
 .term-resize:hover, :where(html:not(.k-pointer)) .term-resize:focus-visible, body.resizing-v .term-resize { background: color-mix(in srgb, var(--term-prompt) 40%, transparent); outline: none; }
 body.resizing-v { cursor: row-resize; user-select: none; }
-.term-head { display: flex; align-items: center; gap: 10px; padding: 4px 8px 4px 14px; background: var(--term-head);
+.term-head { display: flex; align-items: center; gap: 10px; padding: 4px 8px 4px 8px; background: var(--term-head);
   border-bottom: 1px solid var(--term-line); font-size: 12.5px; }
-.term-title { font-weight: 600; letter-spacing: .02em; }
+/* its tabs: the shells, then Kelvin's console; a long row of them scrolls sideways, never up and down */
+.term-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; flex: 0 1 auto; overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none; }
+.term-tab { display: flex; align-items: center; flex: none; border-radius: 6px; color: var(--term-dim); }
+.term-tab:hover { color: var(--term-text); }
+.term-tab.on { background: rgba(255, 255, 255, 0.08); color: var(--term-text); }
+.term-tab > button { border: 0; background: none; color: inherit; font: inherit; cursor: pointer; min-height: var(--target); }
+.term-tab-name { padding: 0 10px; white-space: nowrap; font-weight: 600; letter-spacing: .02em; }
+.term-tab-x { display: grid; place-items: center; width: var(--target); margin-left: -6px; border-radius: 6px; }
+.term-tab-x svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; }
+.term-tab-x:hover { background: rgba(255, 255, 255, 0.08); }
+.term-tab-x:disabled { opacity: .35; cursor: default; }
+/* the Kelvin tab while a request it asked waits behind a shell's tab: a dot in the request's colour */
+.term-tab.waiting { color: var(--term-ask); }
+.term-tab.waiting .term-tab-name::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 6px;
+  border-radius: 50%; background: var(--term-ask); vertical-align: middle; }
 .term-target { color: var(--term-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* a shell's tab: xterm.js draws it, and scrolls its own lines (its stylesheet, static/vendor/xterm); this never scrolls */
+.term-shells { position: relative; flex: 1; min-height: 0; }
+.term-shells[hidden], .term-shell[hidden], .term-kelvin[hidden] { display: none; }
+.term-shell { position: absolute; inset: 6px 4px 4px 12px; overflow: hidden; }
+.term-shell .xterm { height: 100%; }
+.term-shell .xterm .xterm-viewport { background-color: transparent; }   /* under the last whole row: the pane's own */
+.term-shell-said { margin: 8px 0; color: var(--term-warn); }
+/* while Claude works the screen: the shell covered (the tab undoes the page size, so the cover's text takes it back) */
+.term-shell.locked .xterm { visibility: hidden; }
+.term-shell-lock { position: absolute; inset: 0; margin: 0; display: grid; place-items: center; padding: 16px;
+  background: var(--term-bg); color: var(--term-warn); text-align: center; font-size: calc(13px * var(--zoom, 1)); }
+.term-shell-lock[hidden] { display: none; }
+.term-kelvin { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .term-head .icon-btn { color: var(--term-dim); width: var(--target); height: var(--target); }
 .term-head .icon-btn:hover { color: var(--term-text); background: rgba(255, 255, 255, 0.06); }
 .term-out { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 14px 4px; font: 12.5px/1.55 ui-monospace, "Cascadia Code", Consolas, monospace;
@@ -2456,6 +2484,8 @@ body.incognito .composer { background: color-mix(in srgb, var(--text) 4%, var(--
   #anpane .pane-bar select { min-height: 40px; }
   .term-in { padding-block: 0 2px; }
   .term-in input { min-height: 40px; }
+  .term-tab > button { min-height: 40px; }   /* the Terminal's tabs and their × */
+  .term-tab-x { min-width: 40px; }
 }
 /* ===== end fit B2 ===== */
 
