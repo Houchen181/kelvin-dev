@@ -1382,10 +1382,11 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.events(n, about)
 
     @server.tool(annotations=READ, structured_output=False)
-    def calculate(expression: str) -> str:
+    def calculate(expression: Union[str, List[str]]) -> str:
         """Work a number out exactly instead of in your head: arithmetic (+ - * / ** %), sqrt exp log log10 sin cos
         tan arctan2 hypot sinh cosh tanh and the like, and the SI constants pi kB qe h hbar muB mu0 eps0 c me G0 RK
-        Phi0. E.g. 2*muB*0.35/h (a free spin's Larmor frequency at 0.35 T, in Hz) or h*c/(1.55e-6*qe) (eV)."""
+        Phi0. E.g. 2*muB*0.35/h (a free spin's Larmor frequency at 0.35 T, in Hz) or h*c/(1.55e-6*qe) (eV).
+        expression: one, or a list (or one per line), each answered on its own line."""
         return rt.calculate(expression)
 
     @server.tool(annotations=READ, structured_output=False)

@@ -24,7 +24,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
 import yaml
 
@@ -7070,8 +7070,23 @@ class LabRuntime:
                  if word in line.lower()]
         return "\n".join(lines[-n:]) or "nothing about %r in the last 5000 events" % about.strip()
 
-    def calculate(self, expression: str) -> str:
-        """A number worked out exactly: arithmetic, functions and physical constants (expr.py), no columns."""
+    def calculate(self, expression: Union[str, Sequence[str]]) -> str:
+        """Numbers worked out exactly: arithmetic, functions and physical constants (expr.py), no columns. One
+        expression, or several (a list, or one per line: the field report of 2026-11-15 sent a list, which was refused
+        whole), each answered on its own line; one that fails says why on its line, and the others are still worked
+        out."""
+        given = [expression] if isinstance(expression, str) else list(expression or [])
+        lines = [line.strip() for text in given for line in str(text).splitlines() if line.strip()]
+        if not lines:
+            return "nothing to calculate: give an expression, or a list of them"
+        if len(lines) == 1:
+            return self._calculated(lines[0])
+        return "\n".join(self._calculated(line, named=True) for line in lines)
+
+    @staticmethod
+    def _calculated(expression: str, named: bool = False) -> str:
+        """One expression worked out: "expression = value", or why not (named: after the expression, as one line of
+        several)."""
         import numpy as np
         from .. import expr
 
@@ -7081,10 +7096,10 @@ class LabRuntime:
             with np.errstate(all="ignore"):
                 value = np.asarray(expr.evaluate(expression, no_column, np), dtype=float)
         except (expr.ExprError, ArithmeticError, ValueError, TypeError) as e:
-            return "not calculated: %s" % e
+            return "%snot calculated: %s" % ("%s: " % expression if named else "", e)
         shown = ("%.10g" % value.item() if value.size == 1 else
                  "[%s%s]" % (", ".join("%.6g" % v for v in value.ravel()[:20]), ", …" if value.size > 20 else ""))
-        return "%s = %s" % (expression.strip(), shown)
+        return "%s = %s" % (expression, shown)
 
     # ------------------------------------------------------------------ provenance and measurement chains
 
