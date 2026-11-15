@@ -801,7 +801,6 @@ def test_an_approval_card_closes_only_when_the_request_did():
     rest = answer[answer.index("e.status === 409"):]
     assert "yes.disabled = no.disabled = false" in rest and "card.choice = undefined" in rest and "toast(" in rest
     assert "err.status = res.status" in portal_function("api")
-    assert "if (e.status !== 409) TERM.asked.delete(p.id)" in portal_function("termAnswer")   # the terminal's too
 
 
 def test_the_lab_button_shows_when_its_panel_is_open():

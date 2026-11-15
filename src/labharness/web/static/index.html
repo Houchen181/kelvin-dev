@@ -235,20 +235,17 @@
       </form>
     </div>
 
-    <!-- the Terminal: tabs of the person's own shells on this computer (xterm.js over /api/shell; first and by default),
-         and the Kelvin tab, its console: Kelvin, or an instrument's own commands through the safety gate -->
+    <!-- the Terminal: this computer's shell, in tabs, as Claude Code's terminal panel (xterm.js over /api/shell) -->
     <section id="termpane" class="termpane" aria-label="Terminal" hidden>
       <div id="term-resize" class="term-resize" role="separator" aria-orientation="horizontal" aria-label="Resize the terminal" tabindex="0"></div>
       <header class="term-head">
-        <div id="term-tabs" class="term-tabs" role="tablist" aria-label="Terminal tabs">
-          <div class="term-tab" data-tab="kelvin"><button id="term-tab-kelvin" class="term-tab-name" type="button" role="tab" aria-selected="false" aria-controls="term-kelvin" title="Kelvin, or an instrument's own commands through the safety gate">Kelvin</button></div>
-        </div>
+        <div id="term-tabs" class="term-tabs" role="tablist" aria-label="Terminal tabs"></div>
         <button id="term-new" class="icon-btn" type="button" aria-label="New shell" title="New shell">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         </button>
-        <span id="term-target" class="term-target"></span>
+        <span class="term-hint">this computer's shell · outside Kelvin's safety gate</span>
         <div class="spacer"></div>
-        <button id="term-clear" class="icon-btn" type="button" aria-label="Clear the terminal" title="Clear (Ctrl+L)">
+        <button id="term-clear" class="icon-btn" type="button" aria-label="Clear the screen" title="Clear the screen">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 12.5h9l1-12.5"/></svg>
         </button>
         <button class="icon-btn full-btn" type="button" data-pane="termpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
@@ -259,10 +256,6 @@
         </button>
       </header>
       <div id="term-shells" class="term-shells"></div>
-      <div id="term-kelvin" class="term-kelvin" role="tabpanel" aria-labelledby="term-tab-kelvin" hidden>
-        <div id="term-out" class="term-out" role="log" aria-live="polite" data-region="terminal"></div>
-        <label class="term-in"><span id="term-prompt" class="term-prompt">kelvin&gt;</span><input id="term-input" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Terminal input"></label>
-      </div>
     </section>
   </main>
 

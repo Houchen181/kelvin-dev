@@ -506,25 +506,42 @@ def test_a_page_gone_as_its_shell_starts_never_leaves_it_running(parts):
         assert gone(opened["pid"])
 
 
-def test_an_approval_never_takes_the_keys_from_a_shell():
-    """A request the Kelvin tab asked (a /set that drives harder) moved the screen to that tab and its input, where y
-    approves, while the person typed in a shell: their y and Enter there approved a laser's 10 mW. Now a shell on the
-    screen keeps the screen and the keys; the Kelvin tab is marked, and the person goes there to answer."""
+def test_an_approval_asked_while_a_shell_is_open_is_asked_by_the_portals_cards(tmp_path, monkeypatch):
+    """The Terminal is only the person's shell: it asks no approval (a console of Kelvin's once asked y/N beside the
+    shells, and a y and Enter meant for a shell approved a laser's 10 mW). A request asked while a shell is open waits
+    in the state the page draws the Lab panel's cards from, with their own Approve and Decline, and nothing typed in
+    the shell answers it."""
+    from simlab import build_virtual_lab
+    from labharness.agent.approval import WebApprover
+    from labharness.agent.runtime import LabRuntime
+    from labharness.clock import RealClock
+    from labharness.web import app as app_module
+    from labharness.web.settings import Settings
+    from labharness.web.store import ChatStore
     from test_fit_rules import _function
+    monkeypatch.setattr(app_module, "SOON_S", 0.5)
+    runtime = LabRuntime(build_virtual_lab(clock=RealClock(), seed=1), WebApprover(timeout=30), tmp_path / "data")
+    settings = Settings(tmp_path / "settings.json")   # no envelope: raising smu.V asks a person
+    client, headers = client_for((runtime, settings, ChatStore(tmp_path / "chats")), {"scripted": Scripted([])})
+    with client, connect(client, settings.access_key) as ws:
+        tab = Tab(ws)
+        tab.until(lambda m: m["t"] == "hello")
+        plan = "plan: ramp\nsweep: { smu.V: {from: 0, to: 1, step: 0.5} }\nmeasure: [smu.I]\n"
+        assert client.post("/api/queue", json={"op": "add", "text": plan}, headers=headers).status_code == 200
+        assert client.post("/api/queue", json={"op": "start"}, headers=headers).status_code == 202   # its card waits
+        card = runtime.approver.wait_for_pending(5)
+        assert card and [p["id"] for p in client.get("/api/state", headers=headers).json()["pending"]] == [card["id"]]
+        tab.run("y")   # typed in the shell: the shell's, never an answer
+        time.sleep(1.0)
+        assert [p["id"] for p in client.get("/api/state", headers=headers).json()["pending"]] == [card["id"]]
+        runtime.approver.answer(card["id"], False)
+        ws.send_json({"t": "close"})
     js = (Path(sh.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
-    ask = _function(js, "termAsk")
-    assert "termTab(" not in ask   # never another tab for it
-    assert 'if (TERM.tab === SHELLS.kelvin) $("term-input").focus();\n    else termWaiting(true);' in ask
-    assert "termWaiting(false);" in _function(js, "termEndAsk")   # answered (here or elsewhere): unmarked
-    assert "if (tab === SHELLS.kelvin) termWaiting(false);" in _function(js, "termTab")   # the person came to it
-    assert 'wrap.classList.toggle("waiting", !!on);' in _function(js, "termWaiting")
-    css = (Path(sh.__file__).parent / "static" / "app.css").read_text(encoding="utf-8")
-    assert ".term-tab.waiting .term-tab-name::after" in css
-    # the only ways to the Kelvin tab's input: the person's click or arrow key on its tab, and a request asked while
-    # that tab is on the screen
-    assert len(re.findall(r'\$\("term-input"\)\.focus\(\)', js)) == len(re.findall(
-        r'\$\("term-input"\)\.focus\(\)', "".join(_function(js, f) for f in ("termAsk", "termTab", "initTerminal",
-                                                                             "termUse", "termSlash", "termRun"))))
+    state = _function(js, "readState")
+    assert "PANEL.loose.set(p.id, makeApproval(p));" in state and "TERM" not in state   # every request, as cards
+    for gone in ("function termAsk(", "function termState(", "function termAnswer(", "TERM_CMDS", "approve? [y/N]",
+                 "/api/terminal", "term-input"):
+        assert gone not in js, gone
 
 
 def test_a_shell_asked_for_by_someone_no_longer_signed_in_never_opens():
@@ -825,8 +842,12 @@ def test_the_terminal_draws_with_xterm_from_this_computer(parts):
     page, js = (static / "index.html").read_text(encoding="utf-8"), (static / "app.js").read_text(encoding="utf-8")
     assert not re.search(r"https?://[^\"' ]*(cdn|unpkg|jsdelivr)", page + js)   # never a CDN: the app works offline
     assert '"/static/vendor/xterm/xterm.js"' in js and '"/static/vendor/xterm/addon-fit.js"' in js
-    assert 'role="tablist" aria-label="Terminal tabs"' in page and 'id="term-tab-kelvin"' in page
-    assert page.index('id="term-shells"') < page.index('id="term-kelvin"') and 'id="term-new"' in page
+    assert 'role="tablist" aria-label="Terminal tabs"' in page and 'id="term-new"' in page and 'id="term-shells"' in page
+    for gone in ('id="term-kelvin"', 'id="term-tab-kelvin"', 'id="term-input"', 'id="term-out"', "kelvin&gt;"):
+        assert gone not in page, gone   # no console of Kelvin's: the Terminal is this computer's shell, in tabs
+    # what the old console kept on the browser (its lines typed to Kelvin and to instruments) is let go, never read
+    assert 'localStorage.removeItem("lh.termHistory"); localStorage.removeItem("lh.termTab");' in js
+    assert 'store("lh.termHistory"' not in js and 'store("lh.termTab"' not in js
     assert '["kelvin.shell", "kelvin.key." + key]' in js   # the access key, as a subprotocol: never in the address
     root = Path(sh.__file__).parents[3]
     project = (root / "pyproject.toml").read_text(encoding="utf-8")

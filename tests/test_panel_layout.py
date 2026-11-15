@@ -154,13 +154,10 @@ def test_least_widths_are_what_the_heads_hold_at():
     assert "PANES[id][2]" not in JS.replace("const least = (id) => (COARSE.matches && PANES[id][4]) || PANES[id][2];", "")
     b2 = CSS[CSS.index("/* ===== fit B2"):CSS.index("/* ===== end fit B2")]   # the touch heads' 40 px buttons
     assert "@media (pointer: coarse) {\n  :is(.pane-head, .term-head) > .icon-btn { min-width: 40px; min-height: 40px; }" in b2
-    # the Analysis pane's dataset picker and the terminal's input are 40 px on touch, as every target
+    # the Analysis pane's dataset picker and the Terminal's tabs are 40 px on touch, as every target
     assert "#anpane .pane-bar select { min-height: 40px; }" in b2
     assert ".pane-bar .icon-btn { min-width: 40px; min-height: 40px; }" in b2   # Analyze again, the day's ‹ ›, Draft...
-    assert ".term-in { padding-block: 0 2px; }" in b2 and ".term-in input { min-height: 40px; }" in b2
-    # with a mouse the terminal's input is a target's floor (--target, 28 page px or more); its row 34 px or more
-    assert ".term-in { padding-block: 1px 5px; }\n.term-in input { min-height: var(--target); }\n" in b2
-    assert b2.index(".term-in input { min-height: var(--target); }") < b2.index("@media (pointer: coarse)")   # touch wins
+    assert ".term-tab > button { min-height: 40px; }" in b2 and ".term-tab-x { min-width: 40px; }" in b2
 
 
 def test_the_pane_being_typed_in_is_not_put_away_for_a_pane_that_came_by_itself():

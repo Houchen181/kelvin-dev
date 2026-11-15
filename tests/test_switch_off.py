@@ -158,8 +158,8 @@ def test_the_lab_panel_switch(tmp_path):
     r = client.post("/api/instruments/smu/switch", headers=h, json={"on": False})
     assert r.status_code == 200 and next(i for i in r.json()["instruments"] if i["name"] == "smu")["state"] == "off"
     assert settings.switched_off("Virtual Lab") == ["smu"] and settings.switched_off("Another lab") == []
-    r = client.post("/api/terminal", headers=h, json={"instrument": "smu", "op": "get", "arg": "V"})
-    assert "disconnected from Kelvin" in r.text
+    r = runtime.gate.get("smu", "V")   # nothing goes to it, whoever asks
+    assert not r.ok and "disconnected from Kelvin" in r.message
     assert client.post("/api/instruments/nothing/switch", headers=h, json={"on": False}).status_code == 404
     runtime.live = {"status": "running"}
     assert client.post("/api/instruments/smu/switch", headers=h, json={"on": True}).status_code == 409

@@ -284,7 +284,7 @@ def activity(events: Sequence[Dict[str, Any]], since: str = "", until: str = "",
         text = event_line(e)
         if e.get("type") == "ask":   # what was asked (its title), the answer and who asked
             text = text[:8] + " " + _ask(e)
-        elif e.get("type") == "command" and e.get("by"):   # who sent it: Kelvin's AI, a plan, a person's terminal
+        elif e.get("type") == "command" and e.get("by"):   # who sent it: Kelvin's AI, a plan, a person's Bring to safe
             text = "%s %s: %s" % (text[:8], e["by"], text[9:])
         lines.append("  %s %s%s" % (text[:8], _who(e) if e.get("type") != "answer" else "", text[9:]))
     if not picked:

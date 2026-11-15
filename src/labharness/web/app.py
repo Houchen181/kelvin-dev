@@ -3312,20 +3312,6 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(400, said)
         return JSONResponse({"said": said})
 
-    async def terminal(request: Request) -> Response:
-        """A command a person typed in the terminal pane: {instrument, op: raw|get|set|describe|manual, arg, value}.
-        Same gate as Kelvin's own commands; waits (like them) while an approval is open: answered at once with 202
-        {later} meanwhile (soon), as the terminal asks y/n through the state's pending requests."""
-        body = await request.json()
-        instrument, op = str(body.get("instrument") or ""), str(body.get("op") or "raw")
-        arg = str(body.get("arg") or "")
-        if len(arg) > 2000:
-            return error(400, "That command is too long.")
-
-        async def run() -> Response:
-            return JSONResponse(await asyncio.to_thread(runtime.terminal, instrument, op, arg, body.get("value")))
-        return await soon(run())
-
     def shell_folder() -> str:
         """Where a new shell starts: the lab's first scripts folder, else the person's home folder."""
         for folder in runtime.scripts_folders()[:1]:
@@ -4085,11 +4071,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """{chat_id}: stop that chat's answer (and the lab's work when it is that chat's call working the lab). {}: the
         Stop for everything: every chat's answer and the lab's work (its ramp or run, the queue, open approvals), also
         when no chat is answering, as a queue runs by itself. {chat_id, lab: true}: that chat's answer and the lab's
-        work (a typed STOP); {lab: true}: the lab's work (the terminal's /stop before it has a conversation).
+        work (a typed STOP); {lab: true}: the lab's work alone, every chat answering on.
 
-        Only a body that names no chat at all is the Stop for everything. A chat_id that names none (null, "": the
-        terminal's Esc before its first message) stops nothing: it once stopped every chat's answer, another chat's
-        2-hour run and the queue, when a person pressed Esc on a /get waiting for a slow instrument."""
+        Only a body that names no chat at all is the Stop for everything. A chat_id that names none (null, "") stops
+        nothing: it once stopped every chat's answer, another chat's 2-hour run and the queue, when a person pressed Esc
+        in the portal's old console on a command waiting for a slow instrument."""
         try:
             body = await request.json()
         except ValueError:
@@ -5106,7 +5092,6 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/experiments/{name}/run", experiment_run, methods=["POST"]),
         Route("/api/instruments/{name}/limits", instrument_limits, methods=["GET", "POST"]),
         Route("/api/instruments/setup", setup_view, methods=["GET", "POST"]),
-        Route("/api/terminal", terminal, methods=["POST"]),
         WebSocketRoute("/api/shell", shell_socket),   # the Terminal's shells: this computer's own page only
         Route("/api/data-folder", data_folder, methods=["GET", "POST"]),
         Route("/api/backup", backup_view, methods=["POST"]),
