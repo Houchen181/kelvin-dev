@@ -70,10 +70,12 @@ def test_a_chat_keeps_its_prompt_an_hour_and_a_one_off_request_five_minutes():
 
 
 @pytest.mark.parametrize("model, tokens", [
-    ("claude-opus-5-5", 120_000), ("claude-haiku-5-5", 120_000), ("claude-sonnet-4-5", 120_000),
-    ("gpt-6-sol", 120_000), ("gpt-5.5", 120_000), ("deepseek-v4-pro", 120_000), ("deepseek-v4.1-flash", 120_000),
-    ("deepseek-flash", 120_000), ("deepseek-chat", 76_800), ("qwen3-coder", 19_200), ("some-new-model", 76_800)])
-def test_a_conversation_is_summarised_at_120k_tokens_or_sooner_in_a_small_window(model, tokens):
+    ("claude-opus-5-5", 600_000), ("claude-haiku-5-5", 600_000), ("claude-sonnet-4-5", 120_000),
+    ("gpt-6-sol", 600_000), ("gpt-5.5", 240_000), ("deepseek-v4-pro", 600_000), ("deepseek-v4.1-flash", 600_000),
+    ("deepseek-flash", 600_000), ("deepseek-chat", 76_800), ("qwen3-coder", 19_200), ("some-new-model", 76_800)])
+def test_a_conversation_is_summarised_at_three_fifths_of_its_models_window(model, tokens):
+    """What the model can read at once decides, never what a request costs: until 0.3.53 a conversation was also
+    summarised past 120k tokens, to save cost (no limit is kept for cost alone since 2026-11-15)."""
     assert compaction.limit(SimpleNamespace(name="openrouter"), model) == tokens
 
 

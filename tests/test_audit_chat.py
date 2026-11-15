@@ -76,8 +76,9 @@ def test_c1_a_web_search_query_goes_to_claude_code_on_standard_input(tmp_path, m
     assert query in seen["stdin"]                                  # the query whole, %AUDIT_SECRET% as written
     assert "sk-audit-not-a-real-key" not in json.dumps(seen)
     for flag in ("--tools", "WebSearch", "--allowedTools", "--permission-mode", "dontAsk", "--strict-mcp-config",
-                 "--no-session-persistence", "--max-turns", "--model"):
+                 "--no-session-persistence", "--model"):
         assert flag in seen["argv"]                                # none cut off by the query
+    assert "--max-turns" not in seen["argv"]                       # no limit kept for what model use costs
     assert not any(query[:10] in a for a in seen["argv"])
 
 

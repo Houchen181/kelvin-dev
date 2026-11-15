@@ -1,7 +1,7 @@
 """Long lab conversations: near the model's context limit, the older turns become a lab handoff.
 
 A lab day can run to hundreds of steps: manuals, run data, sweeps. Before a request would fill most of the model's
-context window, or pass BUDGET tokens, the turns before the last two are summarised into a handoff (what the person
+context window, the turns before the last two are summarised into a handoff (what the person
 wants, the lab's state, the runs with their IDs and results, decisions, open questions), and the model sees that
 handoff in place of them.
 The chat itself keeps everything, for the person and for chat_history, which searches it. The handoff is kept with
@@ -24,11 +24,8 @@ WINDOWS = (("claude-opus-5", 1_000_000), ("claude-sonnet-5", 1_000_000), ("claud
            ("gpt-4o", 128_000), ("o3", 200_000), ("o4", 200_000), ("gemini", 1_000_000), ("deepseek-v4", 1_000_000),
            ("deepseek-flash", 1_000_000), ("deepseek", 128_000), ("qwen", 32_000), ("llama", 128_000),
            ("mistral", 32_000))
-SHARE = 0.6        # summarise when a request would fill this much of the window...
-# ...or pass this many tokens, however large the window. Every request sends the whole conversation again, so a longer
-# one costs more at every step and after every pause (when it is cached again), and some services charge double past
-# a size (GPT-6 past 272k tokens). A lab day's handoff keeps what matters, and chat_history finds the rest.
-BUDGET = 120_000
+SHARE = 0.6        # summarise when a request would fill this much of the window: what the model can read at once,
+# never what it costs (until 0.3.53 also past 120k tokens, to save cost: Kelvin keeps no limit for cost alone)
 KEEP_TURNS = 2     # the last turns the person started stay as they are
 PICTURE_TOKENS = 1600   # about what a picture costs a model (the chat keeps only its file's name)
 MAX_HANDOFF = 16000     # characters of a handoff kept
@@ -67,8 +64,8 @@ def window(provider: Provider, model_id: str) -> int:
 
 def limit(provider: Provider, model_id: str) -> int:
     """The size of a request (tokens) past which the turns before the last ones are summarised: SHARE of the model's
-    window, at most BUDGET."""
-    return int(min(SHARE * window(provider, model_id), BUDGET))
+    window."""
+    return int(SHARE * window(provider, model_id))
 
 
 def size(system: str, tools: List[Dict[str, Any]], messages: List[Dict[str, Any]],

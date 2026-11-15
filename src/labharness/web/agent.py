@@ -96,7 +96,6 @@ OUTSIDE_TOOLS = {"read_web_page": "a web page", "web_search": "web search result
                  "survey_labview": "the lab's LabVIEW files", "run_script": "a lab script's output",
                  "survey_specialmeasure": "the lab's Special Measure files",
                  "team_chat": "the team chat"}
-COMPARE_STEPS = 8
 MAX_LANES = 3
 PROJECT = """# Project “{name}”
 This conversation is filed under the project “{name}”. The project's instructions below come from the user and
@@ -160,11 +159,11 @@ def remember_tool(in_project: bool, everywhere: bool = True) -> Dict[str, Any]:
                             "description": "lab: the instruments it concerns (it is shown when one is used)"},
             "replaces": {"type": "string", "description": "id of an outdated note this one corrects (optional)"}}},
     }
-# Steps (a model response and its tool calls) in one answer before Kelvin pauses and asks to go on. Setting up an
-# instrument from its manual, or a staged measurement, takes dozens; what keeps an answer from going round in circles
-# is below (REPEATS, REFUSALS) and the person's Stop, not a short count.
-MAX_STEPS = 100
-REPEATS = 3               # the same call with the same arguments this often in one answer: the model is told so
+# No count of steps (a model response and its tool calls) ends or pauses an answer, as none does in Claude Code: it goes
+# on until the model is done, the person presses Stop, or the guards below end it (REPEATS, REFUSALS). Its earlier
+# turns are summarised as it goes (compaction), and every change to the lab goes through the gate whatever the step.
+# Kelvin keeps no limit for what model use costs (asked for 2026-11-15; until 0.3.53 an answer paused at 100 steps).
+REPEATS = 3              # the same call with the same arguments this often in one answer: the model is told so
 REFUSALS = 3              # calls refused, declined or stopped by a guard in one answer: the model is told to stop...
 REFUSALS_END = 5          # ...and at this many the answer ends, for the person to say how to go on
 REPEATED = ("(Kelvin: you have made this exact call, with these arguments, %d times in this answer. Read the results "
@@ -1931,11 +1930,8 @@ class ChatAgent:
                 await emit({"type": "memory", "notes": message["memory"]})
             if attachments and await self._draw_attached(chat, message, provider, model_id, emit):
                 await self._save(chat)
-            for _ in range(MAX_STEPS):
-                if not await self._step(chat, provider, model_id, context, emit):
-                    return
-            await emit({"type": "note", "text": "Paused after %d steps. Say “continue” to go on." % MAX_STEPS})
-            await emit({"type": "turn_end", "reason": "step_limit"})
+            while await self._step(chat, provider, model_id, context, emit):
+                pass   # the next step: no count of steps ends an answer
         except Exception as e:
             await emit({"type": "error", "message": describe_error(provider, e)})
             await emit({"type": "turn_end", "reason": "error"})
@@ -2412,7 +2408,7 @@ class ChatAgent:
                                                                 "args": command[1:]}}}), encoding="utf-8")
         argv = ["-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--mcp-config", str(config),
                 "--strict-mcp-config", "--allowedTools", "mcp__screen__*", "--permission-mode", "dontAsk",
-                "--no-session-persistence", "--max-turns", "100", "--model", alias,
+                "--no-session-persistence", "--model", alias,
                 "--append-system-prompt", COMPUTER_RULES]
         log = self.runtime.gate.log
         log.write("computer_task", by="Claude Code", task=task)
@@ -2577,7 +2573,7 @@ class ChatAgent:
         async def quiet(event: Dict[str, Any]) -> None:
             return None
         text = ""
-        for _ in range(review.MAX_ROUNDS):
+        while True:   # until it answers; REVIEW_S bounds its time, no count of rounds or lookups
             result = await provider.stream(model_id, system, history, tools, quiet)
             text = text_of(result.blocks) or text
             history.append({"role": "assistant", "provider": provider.name, "model": result.model or model_id,
@@ -2588,9 +2584,7 @@ class ChatAgent:
             for call in result.tool_calls:
                 lookups += 1
                 pictures: List[Dict[str, str]] = []
-                if lookups > review.MAX_LOOKUPS:
-                    content, is_error = "no more lookups: answer now with the JSON object", True
-                elif call["name"] not in allowed or not isinstance(call["input"], dict):
+                if call["name"] not in allowed or not isinstance(call["input"], dict):
                     content, is_error = "not available to the reviewer: it reads the lab's records only", True
                 elif call["name"] == "look_at" and call["input"].get("camera"):
                     content, is_error = "the reviewer looks at saved runs and frames only, not at a camera", True
@@ -2611,7 +2605,6 @@ class ChatAgent:
                     entry["images"] = pictures
                 results.append(entry)
             history.append({"role": "tool", "results": results})
-        return text, lookups
 
     def _own_requests(self, loop: asyncio.AbstractEventLoop,
                       requests: asyncio.Queue) -> Callable[[Dict[str, Any]], None]:
@@ -2776,7 +2769,7 @@ class ChatAgent:
             await emit(dict(event, lane=i))
 
         try:
-            for _ in range(COMPARE_STEPS):
+            while True:   # until the lane's model is done, or the person stops: no count of steps
                 keep = RESUMABLE.set(not incognito)   # Claude Code bridge: the chosen lane's session goes on
                 own = ANSWER.set(True)
                 try:
@@ -2818,9 +2811,6 @@ class ChatAgent:
                     results.append(dict({"id": call["id"], "name": call["name"], "content": content,
                                          "is_error": is_error}, **({"images": kept} if kept else {})))
                 out.append({"role": "tool", "results": results})
-            else:
-                out.append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
-                            "blocks": [{"type": "text", "text": "(paused after %d steps)" % COMPARE_STEPS}]})
             await lane_emit({"type": "lane_end", "reason": "end"})
             return {"model": key, "messages": out}
         except asyncio.CancelledError:

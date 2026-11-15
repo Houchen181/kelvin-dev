@@ -28,7 +28,7 @@ from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.agent.server import INSTRUCTIONS, build_server  # noqa: E402
 from labharness.gate import ScriptedApprover  # noqa: E402
 from labharness.web import agent as agent_mod, compaction  # noqa: E402
-from labharness.web.agent import (INTERRUPTED, MAX_KEPT_PICTURES, MAX_STEPS, REFUSALS,  # noqa: E402
+from labharness.web.agent import (INTERRUPTED, MAX_KEPT_PICTURES, REFUSALS,  # noqa: E402
                                   REFUSALS_END, REPEATS, SYSTEM, ChatAgent)
 from labharness.web.providers.base import EFFORT, TurnResult, sent_line, user_text  # noqa: E402
 from labharness.web.settings import Settings  # noqa: E402
@@ -205,9 +205,19 @@ def test_each_message_says_when_it_was_sent(tmp_path):
 
 # ------------------------------------------------------------------ many steps, and no circles
 
+def test_no_count_of_steps_pauses_an_answer(tmp_path):
+    """As in Claude Code, an answer goes on until the model is done (or the person's Stop, or the guards end it): no
+    count of steps pauses it, nor any other limit kept for what model use costs. Until 0.3.53 it paused at 100."""
+    steps = [call("describe_instrument", str(i), instrument="smu") for i in range(120)] + [DONE]
+    chat, events = day(tmp_path, Watching(steps), ["describe the smu, many times"])
+    assert len([m for m in chat["messages"] if m["role"] == "tool"]) == 120
+    assert not any(e.get("reason") == "step_limit" for e in events)
+    assert not any("Paused after" in str(e.get("text")) for e in events if e.get("type") == "note")
+    assert "Done." in json.dumps(chat["messages"][-1])           # the model's own last word ended it
+
+
 def test_an_answer_may_take_many_steps_and_a_repeated_call_is_pointed_out(tmp_path):
-    assert MAX_STEPS >= 100
-    steps = [call("describe_instrument", str(i), instrument="smu") for i in range(REPEATS + 1)] + \
+    steps =[call("describe_instrument", str(i), instrument="smu") for i in range(REPEATS + 1)] + \
         [call("get_value", "g%d" % i, instrument="smu", parameter="V") for i in range(REPEATS + 1)] + [DONE]
     provider = Watching(steps)
     chat, events = day(tmp_path, provider, ["describe it, again and again"])
