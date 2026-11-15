@@ -882,6 +882,48 @@ def test_its_identity_for_a_reading_through_any_connection_is_said_out_of_step_a
     assert plain.owed
 
 
+class Streams:
+    """A gauge controller that sends its readings by itself, as Pfeiffer's do from power-up, and no <ACK> yet."""
+    timeout, read_termination, write_termination = 3000, None, None
+
+    def __init__(self):
+        self.sent = []
+
+    def write(self, cmd):
+        self.sent.append(cmd)
+
+    def write_raw(self, data):
+        self.sent.append(data)
+
+    def read(self):
+        return "0,1.0000E-03"
+
+    def read_raw(self):
+        raise TimeoutError("VI_ERROR_TMO")
+
+    def close(self):
+        pass
+
+
+def test_an_acknowledge_that_may_still_come_is_never_read_as_the_next_reply():
+    """Two more ways a reply could stay queued without Kelvin knowing: an <ACK> not come after 20 lines, and a reply
+    read where the ack should be. Each puts the instrument back in step before its next command."""
+    from labharness import builtin_registry
+    from labharness.adapters import AdapterError, VisaBackend
+    from test_hardware import Bus, Device
+    reg = builtin_registry()
+    gauge = VisaBackend("gauge", reg.get("pfeiffer/tpg36x"), "ASRL5::INSTR", rm=OneLockin(Streams()))
+    with pytest.raises(AdapterError, match="did not acknowledge"):
+        gauge.query("PR1")
+    assert gauge.owed
+    obis = Device("coherent/obis", ack="OK", name="obis")
+    laser = VisaBackend("laser", reg.get("coherent/obis"), "serial://COM7", Bus({"ASRL7::INSTR": obis}))
+    obis.ack = "ERR-400"
+    with pytest.raises(AdapterError, match="instead of 'OK'"):
+        laser.write("SOURce:AM:STATe OFF")
+    assert laser.owed
+
+
 def test_a_binary_block_kelvin_couldnt_read_is_dropped_before_the_next_command():
     """A block whose header or length didn't read (ValueError) left the rest of it queued, for the next command."""
     from labharness.adapters import AdapterError

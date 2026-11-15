@@ -1097,7 +1097,8 @@ class VisaBackend:
                                    "answered %r, its card wants set_reply: \"^%s$\" instead of ack"
                                    % (self.name, answer.strip(), command, self.ack, self.ack, re.escape(self.ack))) from e
             raise
-        if reply != self.ack:
+        if reply != self.ack:   # a reply read in the ack's place may be a late one, the ack behind it: back in step
+            self.owed = True    # before the next command, never one behind from here
             raise AdapterError("%s: %r answered %r instead of %r" % (self.name, command, reply, self.ack))
 
     def _enq_ack(self, command: str) -> None:
@@ -1110,6 +1111,7 @@ class VisaBackend:
                 return
             if reply == "\x15":
                 raise AdapterError("%s refused %r (it answered NAK)" % (self.name, command))
+        self.owed = True   # its <ACK> may still come, behind the lines read: back in step before the next command
         raise AdapterError("%s did not acknowledge %r" % (self.name, command))
 
     def _bus_ok(self) -> None:
