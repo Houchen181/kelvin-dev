@@ -317,3 +317,322 @@ def test_the_qick_cards_notes_start_the_server_at_boot_as_qicks_own_files_do_not
     call = ast.parse(code).body[1].value
     assert call.func.id == "start_server" and {k.arg: k.value.value for k in call.keywords} == {
         "ns_host": "localhost", "ns_port": 8888, "proxy_name": "myqick", "iface": "usb0"}
+
+
+# ---------------------------------------------------------------------- item 9: a ZeroMQ instrument, and MACs
+
+class Rep:
+    """A ZeroMQ REP socket's side of ZMTP 3.1, written out by hand on a port of this computer, in libzmq's order: its
+    signature as a connection opens, its major version once the peer's signature is in, the rest of its greeting once
+    the peer's version is, READY with its Socket-Type, then a reply to each request. `how` makes it misbehave as a peer
+    might. It keeps every request's frames, and every connection is served on a thread of its own (a sweep's knock
+    is one too)."""
+    IDN = b"ID Quantique,ID900,SN01234,v7.0.4"
+
+    def __init__(self, how="", socket_type=b"REP", mechanism=b"NULL", major=3):
+        import socket
+        import threading
+        self.how, self.socket_type, self.mechanism, self.major = how, socket_type, mechanism, major
+        self.requests, self.readies, self.free = [], [], threading.Event()
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(16)
+        self.port = self.listener.getsockname()[1]
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def close(self):
+        self.free.set()
+        self.listener.close()
+
+    def _accept(self):
+        import threading
+        while not self.free.is_set():
+            try:
+                conn, _ = self.listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn):
+        conn.settimeout(10)
+        try:
+            if self._talk(conn) is False:   # it closes the connection there and then
+                return
+            conn.settimeout(3)
+            while conn.recv(4096):   # until the peer closes: its last reads never meet a reset
+                pass
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    @staticmethod
+    def frame(flags, body):
+        import struct
+        if flags & 0x02:
+            return bytes([flags]) + struct.pack(">Q", len(body)) + body
+        return bytes([flags, len(body)]) + body
+
+    def command(self, name, data=b""):
+        return self.frame(0x04, bytes([len(name)]) + name + data)
+
+    def _talk(self, conn):
+        import struct
+        import time
+
+        def need(n):
+            data = b""
+            while len(data) < n:
+                chunk = conn.recv(n - len(data))
+                if not chunk:
+                    raise OSError("closed")
+                data += chunk
+            return data
+
+        def read_frame():
+            flags = need(1)[0]
+            size = struct.unpack(">Q", need(8))[0] if flags & 0x02 else need(1)[0]
+            return flags, need(size)
+        ready = self.command(b"READY", bytes([11]) + b"Socket-Type" + struct.pack(">I", len(self.socket_type))
+                             + self.socket_type)
+        rest = b"\x01" + self.mechanism.ljust(20, b"\x00") + b"\x00" + bytes(31)
+        if self.how == "eager":   # its whole greeting and READY at once, as a peer may
+            conn.sendall(b"\xff" + bytes(7) + b"\x01\x7f" + bytes([self.major]) + rest + ready)
+            need(64)
+        else:
+            conn.sendall(b"\xff" + bytes(7) + b"\x01\x7f")
+            if self.how == "closes":
+                return False
+            need(10)
+            conn.sendall(bytes([self.major]))
+            need(1)
+            if self.major < 3:
+                self.free.wait(5)
+                return
+            conn.sendall(rest)
+            need(53)
+            if self.how == "error":
+                conn.sendall(self.command(b"ERROR", bytes([20]) + b"Invalid socket type!"))
+                return
+            conn.sendall(ready)
+        flags, body = read_frame()
+        self.readies.append(body)
+        if self.how == "silent":
+            self.free.wait(10)
+            return
+        parts = []
+        while True:
+            flags, body = read_frame()
+            parts.append(body)
+            if not flags & 0x01:
+                break
+        self.requests.append(parts)
+        delimiter = self.frame(0x01, b"")
+        if self.how == "long":
+            conn.sendall(delimiter + self.frame(0x02, self.IDN))
+        elif self.how == "ping":
+            conn.sendall(self.command(b"PING", b"\x00\x64ctx") + delimiter + self.frame(0x00, self.IDN))
+        elif self.how == "split":
+            for byte in delimiter + self.frame(0x00, self.IDN):
+                conn.sendall(bytes([byte]))
+                time.sleep(0.005)
+        elif self.how == "parts":
+            conn.sendall(delimiter + self.frame(0x01, self.IDN[:18]) + self.frame(0x00, self.IDN[18:]))
+        elif self.how == "huge":
+            conn.sendall(delimiter + b"\x02" + struct.pack(">Q", 1 << 40))
+            self.free.wait(10)
+        elif self.how == "flood":
+            for _ in range(100):
+                conn.sendall(self.frame(0x01, b"x"))
+            self.free.wait(10)
+        elif self.how == "bad":
+            conn.sendall(b"\xf0\x05hello")
+        else:
+            conn.sendall(delimiter + self.frame(0x00, self.IDN))
+
+
+@pytest.fixture
+def rep_server():
+    made = []
+
+    def make(*a, **k):
+        made.append(Rep(*a, **k))
+        return made[-1]
+    yield make
+    for r in made:
+        r.close()
+
+
+@pytest.mark.parametrize("how, reply", [
+    ("", "ID Quantique,ID900,SN01234,v7.0.4"),
+    ("eager", "ID Quantique,ID900,SN01234,v7.0.4"),
+    ("long", "ID Quantique,ID900,SN01234,v7.0.4"),
+    ("ping", "ID Quantique,ID900,SN01234,v7.0.4"),
+    ("split", "ID Quantique,ID900,SN01234,v7.0.4"),
+    ("parts", "ID Quantique,ID900 | ,SN01234,v7.0.4"),   # a reply of two frames: each shown
+])
+def test_kelvin_asks_a_zeromq_instrument_who_it_is_as_a_req_socket_does(rep_server, how, reply):
+    """The field report's Time Controller answered port 5555 with ZeroMQ's greeting, and *IDN? sent as SCPI's text
+    never came back. Kelvin speaks ZMTP 3.0 itself (no pyzmq): greetings, READY as a REQ socket, an empty delimiter
+    and *IDN?, its reply read however it comes: at once, in a long frame, after a PING, a byte at a time, in parts."""
+    import time
+    from labharness import probe
+    rep = rep_server(how)
+    t0 = time.monotonic()
+    found = probe.probe_port("127.0.0.1", rep.port, "idn")
+    assert time.monotonic() - t0 < 2.0
+    assert found["zmq"] == {"version": "3.1", "socket": "REP", "reply": reply}
+    assert "idn" not in found and "banner" not in found
+    assert rep.requests == [[b"", b"*IDN?"]]           # one question, as a REQ asks it; nothing else
+    assert b"\x05READY\x0bSocket-Type\x00\x00\x00\x03REQ" in rep.readies[0]
+
+
+@pytest.mark.parametrize("how, kw, said", [
+    ("silent", {}, "it sent nothing more within 1.5 s"),
+    ("closes", {}, "it closed the connection"),
+    ("huge", {}, "it sent a frame of 1099511627776 bytes, not an answer to who it is"),
+    ("flood", {}, "its reply went on past 16 frames"),
+    ("bad", {}, "it sent a frame ZMTP doesn't have (flags 0xf0)"),
+    ("error", {}, "it refused the connection: Invalid socket type!"),
+    ("", {"socket_type": b"PUB"}, "its socket is PUB, which takes no questions: Kelvin asked it nothing"),
+    ("", {"mechanism": b"CURVE"}, "it wants ZeroMQ's CURVE security, which Kelvin's look doesn't speak"),
+    ("", {"major": 1}, "it speaks an older ZeroMQ (ZMTP revision 1, before 3.0), which Kelvin's look doesn't"),
+])
+def test_a_zeromq_peer_that_misbehaves_never_holds_the_look(rep_server, how, kw, said):
+    """Short timeouts in all (the port's 0.8 s and 0.7 s more), a frame's size read before its body, and nothing asked
+    of a socket that takes no requests or a peer that wants security: the look always ends, saying why."""
+    import time
+    from labharness import probe
+    rep = rep_server(how, **kw)
+    t0 = time.monotonic()
+    found = probe.probe_port("127.0.0.1", rep.port, "idn")
+    took = time.monotonic() - t0
+    assert took < 2.5, "the look waited %.1f s" % took
+    assert found["zmq"]["error"] == said
+    if kw.get("socket_type") or kw.get("mechanism") or kw.get("major") or how in ("error", "closes"):
+        assert rep.requests == []                      # nothing asked
+    line = probe.what_answers(dict(found, hint="SCPI over a socket"))
+    assert line.startswith("port %d: a ZeroMQ instrument" % rep.port)
+    assert line.endswith("Kelvin has no card or connection for ZeroMQ instruments yet") and "SCPI" not in line
+
+
+def test_what_a_zeromq_instrument_said_and_which_macs_are_macs():
+    from labharness import probe
+    said = probe.what_answers({"port": 5555, "hint": "SCPI over a socket: TCPIP0::10.0.0.7::5555::SOCKET", "zmq": {
+        "version": "3.1", "socket": "REP", "reply": "ID Quantique,ID900,SN01234,v7.0.4"}})
+    assert said == ("port 5555: a ZeroMQ (REQ) instrument; it says: ID Quantique,ID900,SN01234,v7.0.4. Kelvin has no "
+                    "card or connection for ZeroMQ instruments yet")
+    for written in ("70-B3-D5-65-78-CF", "70:b3:d5:65:78:cf", "70b3.d565.78cf", "70B3D56578CF", " 70-b3-d5-65-78-cf "):
+        assert probe.mac_of(written) == "70:b3:d5:65:78:cf"
+    for other in ("192.168.1.0/24", "192.168.1.*", "70-B3-D5-65-78", "70-B3-D5-65-78-CG", ""):
+        assert probe.mac_of(other) is None
+    assert not probe.zmtp_signature(b"\xff\xfd\x18\xff\xfd\x20\xff\xfd\x23\xff")   # a Telnet server's IAC DO ...
+
+
+FIELD_ARP = """
+Interface: 192.168.1.10 --- 0x9
+  Internet Address      Physical Address      Type
+  192.168.1.1           00-1a-2b-3c-4d-5e     dynamic
+  192.168.1.78          70-b3-d5-65-78-cf     dynamic
+  192.168.1.255         ff-ff-ff-ff-ff-ff     static
+  224.0.0.22            01-00-5e-00-00-16     static
+"""
+
+
+class Page:
+    """The Time Controller's web page on port 8080, as a connection to it answers."""
+
+    def __init__(self):
+        self.pending = b""
+
+    def settimeout(self, seconds):
+        pass
+
+    def sendall(self, data):
+        if data.startswith(b"GET "):
+            self.pending = (b"HTTP/1.0 200 OK\r\nServer: lighttpd\r\nContent-Type: text/html\r\n\r\n"
+                            b"<html><head><title>Time Controller</title></head></html>")
+
+    def recv(self, n):
+        import socket
+        if not self.pending:
+            raise socket.timeout()
+        out, self.pending = self.pending[:n], self.pending[n:]
+        return out
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def lab_network(monkeypatch, rep_server):
+    """The field report's lab network, 192.168.1.0/24, this computer at .10: the IDQ Time Controller at .78 (ZeroMQ
+    on 5555, its web page on 8080; MAC 70-B3-D5-65-78-CF), a router at .1 that answers no port instruments use. This
+    computer's neighbour table (arp -a) has both once the sweep has knocked."""
+    import socket
+    pytest.importorskip("mcp")
+    from labharness import probe, survey
+    rep = rep_server()
+    asked = []
+
+    def connect(ip, port, seconds):
+        if (ip, port) == ("192.168.1.78", 5555):
+            return socket.create_connection(("127.0.0.1", rep.port), timeout=seconds)
+        if (ip, port) == ("192.168.1.78", 8080):
+            return Page()
+        raise ConnectionRefusedError()
+    monkeypatch.setattr(probe, "_connect", connect)
+    monkeypatch.setattr(probe, "WIN", True)
+    monkeypatch.setattr(probe, "network_adapters", lambda: [
+        {"name": "Ethernet", "address": "192.168.1.10", "network": "192.168.1.0/24", "link_local": False}])
+    monkeypatch.setattr(probe, "_run_text", lambda command: asked.append(command) or FIELD_ARP)
+    monkeypatch.setattr(probe, "_udp", lambda: pytest.fail("a GigE Vision broadcast with no link-local network"))
+    monkeypatch.setattr(survey, "network_adverts", lambda *a, **k: ([], []))
+    return rep, asked
+
+
+def test_find_on_network_says_what_the_time_controller_is_and_each_hosts_mac(lab_network, tmp_path):
+    from labharness.agent.runtime import LabRuntime
+    from labharness.gate import ScriptedApprover
+    from simlab import build_virtual_lab
+    rep, asked = lab_network
+    rt = LabRuntime(build_virtual_lab(), ScriptedApprover([]), tmp_path / "data")
+    said = rt.find_on_network()
+    lines = said.splitlines()
+    assert lines[0].endswith("and for instruments that announce themselves: 1 address answered")
+    assert ("- 192.168.1.78: port 5555: a ZeroMQ (REQ) instrument; it says: ID Quantique,ID900,SN01234,v7.0.4. Kelvin "
+            "has no card or connection for ZeroMQ instruments yet; MAC 70:b3:d5:65:78:cf") in lines
+    assert rep.requests == [[b"", b"*IDN?"]]           # the sweep's knock asked nothing; the look asked once
+    assert asked == [["arp", "-a", "-N", "192.168.1.10"]]   # read once, after the sweep
+    assert not any("192.168.1.78" in a for a in rt.last_found)   # no address Kelvin could connect to it through
+
+    inspected = rt.inspect_address("192.168.1.78")
+    assert inspected.splitlines()[0] == ("192.168.1.78 (MAC 70:b3:d5:65:78:cf): 2 of the ports instruments use "
+                                         "answer")
+    assert "- port 5555: a ZeroMQ (REQ) instrument; it says: ID Quantique,ID900" in inspected
+    assert "- port 8080: web page 'Time Controller' (lighttpd)" in inspected
+
+
+def test_find_on_network_finds_a_device_by_its_mac(lab_network, tmp_path):
+    """The field report: the Time Controller's configured address, 169.254.220.105, answered nothing, and its MAC
+    couldn't be used to find it. Given its MAC (as network or as mac), the sweep fills this computer's neighbour table,
+    which says where it is; that address is looked at on every port."""
+    from labharness.agent.runtime import LabRuntime
+    from labharness.gate import ScriptedApprover
+    from simlab import build_virtual_lab
+    rep, asked = lab_network
+    rt = LabRuntime(build_virtual_lab(), ScriptedApprover([]), tmp_path / "data")
+    said = rt.find_on_network("70-B3-D5-65-78-CF")
+    lines = said.splitlines()
+    assert lines[1] == ("MAC 70:b3:d5:65:78:cf is 192.168.1.78 (on Ethernet), in this computer's neighbour table after "
+                        "the sweep: looked at on every port below")
+    idq = next(ln for ln in lines if ln.startswith("- 192.168.1.78:"))
+    assert "port 5555: a ZeroMQ (REQ) instrument; it says: ID Quantique,ID900" in idq
+    assert "port 8080: web page 'Time Controller'" in idq and idq.endswith("MAC 70:b3:d5:65:78:cf")
+    assert "looked for MAC 70:b3:d5:65:78:cf on the network (192.168.1.0/24)" in rt.events(5, "network")
+
+    said = rt.find_on_network(mac="70:b3:d5:00:00:01")
+    assert said.splitlines()[1].startswith("No address on 192.168.1.0/24 has MAC 70:b3:d5:00:00:01 in this computer's "
+                                           "neighbour table after the sweep: the device is off, on a network this "
+                                           "computer has no address on")
+    assert rt.find_on_network(mac="70-B3-D5").startswith("'70-B3-D5' is not a MAC address")

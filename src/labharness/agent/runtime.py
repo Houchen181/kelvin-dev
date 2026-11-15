@@ -371,8 +371,9 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "approvals: " + ("auto mode on (low-risk changes run without asking)" if e.get("mode") == "auto"
                                 else "ask before every drive increase")
     elif kind == "network_search":
-        text = "looked for instruments on the network%s: %s" % (
-            " (%s)" % ", ".join(e["networks"]) if e.get("networks") else "",
+        text = "looked for %s on the network%s: %s" % (
+            "MAC %s" % e["mac"] if e.get("mac") else "instruments", " (%s)" % ", ".join(e["networks"])
+            if e.get("networks") else "",
             "found " + ", ".join(e["found"]) if e.get("found") else
             "%d address(es) answered" % len(e["answered"]) if e.get("answered") else "nothing answered")
     else:
@@ -9981,7 +9982,13 @@ class LabRuntime:
                   if probe.host_of(ic.address)[0] in (host, ip)}
         ports = [p for p in probe.PORTS if p[1] in ("http", "https")] if in_lab else None
         res = probe.inspect(address, ports)
-        lines = ["%s%s: %s" % (host, " (%s)" % ip if ip != host else "",
+        try:   # its MAC, from this computer's neighbour table, which the look just filled (an address on its networks)
+            import ipaddress
+            mac = probe.macs_on(probe.network_adapters(), [ipaddress.ip_network(ip)])[0].get(ip, ("", ""))[0]
+        except Exception:
+            mac = ""
+        shown = ([ip] if ip != host else []) + (["MAC %s" % mac] if mac else [])
+        lines = ["%s%s: %s" % (host, " (%s)" % ", ".join(shown) if shown else "",
                                "%d of the ports instruments use answer" % len(res["found"]) if res["found"] else
                                "nothing answers on the ports instruments use")]
         if in_lab:
@@ -10036,20 +10043,29 @@ class LabRuntime:
                 self.last_found.append(resource)   # found here: try_card and add_instrument may use it
         return "\n".join(lines)
 
-    def find_on_network(self, network: str = "") -> str:
+    def find_on_network(self, network: str = "", mac: str = "") -> str:
         """Instruments on the local network: those that announce themselves (mDNS, as LXI instruments do, and a
         VXI-11 broadcast), and every address of this computer's networks (or the local range named) with a port open
         that instruments or their gateways use. A link-local network (169.254.x.x) is too wide to sweep: there the
         addresses in this computer's neighbour table and the cameras that answer GigE Vision's discovery are looked
         at instead, each on every port inspect_address knows. Each is asked who it is and matched to a card, and what
         answered is kept for try_card and add_instrument. Only looks: one connection per port, *IDN? only where
-        instruments speak SCPI; an instrument already in the lab is left alone."""
+        instruments speak SCPI (as a ZeroMQ request where a port greets as ZeroMQ does); an instrument already in the
+        lab is left alone. Each address is listed with its MAC address from this computer's neighbour table, which the
+        sweep fills. mac (or a MAC given as network): the device with that MAC address, found in the table after the
+        sweep, whatever address it took, and looked at on every port (a field report's IDQ Time Controller was
+        configured as 169.254.220.105 and had taken 192.168.1.78, 2026-11-15)."""
         import concurrent.futures
         import ipaddress
         from .. import probe, prologix
         from ..adapters import AdapterError, resource_name
         from ..discovery import Found, identify, look_up, match_card, scan_prologix
         from ..survey import network_adverts
+        wanted = probe.mac_of(mac) if str(mac or "").strip() else None
+        if str(mac or "").strip() and wanted is None:
+            return "%r is not a MAC address: give it as 70-B3-D5-65-78-CF or 70:b3:d5:65:78:cf" % mac
+        if wanted is None and probe.mac_of(network):   # a MAC given as the network: this computer's networks, swept
+            wanted, network = probe.mac_of(network), ""
         adapters = probe.network_adapters()
         try:
             nets, notes = probe.sweep_networks(network, adapters)
@@ -10080,6 +10096,16 @@ class LabRuntime:
             problems = problems + near["problems"]
             ports: Dict[str, List[int]] = {ip: [] for ip in near["hosts"]}   # first: few, and each looked at fully
             ports.update(probe.sweep(nets, skip=skip))
+            # this computer's neighbour table, which the sweep's connections filled: each address's MAC
+            macs, unread = probe.macs_on(adapters, nets) if nets else ({}, [])
+            problems += unread
+            for ip, got in near["macs"].items():
+                macs.setdefault(ip, got)
+            at = sorted((ip for ip, (m, _) in macs.items() if m == wanted), key=ipaddress.ip_address) \
+                if wanted else []
+            if at:   # the device asked for by its MAC: first, and looked at on every port
+                ports = dict([(ip, []) for ip in at if ip not in skip] + [(ip, p) for ip, p in ports.items()
+                                                                           if ip not in at])
             hosts = list(ports)[:probe.MAX_IDENTIFIED]
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
                 said = dict(zip(hosts, pool.map(lambda ip: probe.identify_host(ip, ports[ip]) if ports[ip] else
@@ -10141,6 +10167,16 @@ class LabRuntime:
             "" if network else " and for instruments that announce themselves",
             "%d address%s answered" % (len(everyone), "" if len(everyone) == 1 else "es") if everyone else
             "nothing answered")]
+        if wanted:
+            lab_at = ["%s, in this lab already as %s: left alone" % (ip, in_lab[ip]) for ip in at if ip in in_lab]
+            lines.append(("MAC %s is %s, in this computer's neighbour table after the sweep%s" % (
+                wanted, ", ".join(lab_at + ["%s (on %s)" % (ip, macs[ip][1]) for ip in at if ip not in in_lab]),
+                ": looked at on every port below" if any(ip not in in_lab for ip in at) else "")) if at else
+                ("No address on %s has MAC %s in this computer's neighbour table after the sweep: the device is off, on "
+                 "a network this computer has no address on (a cable straight to it needs one on its network: the "
+                 "address it was set to says which, 169.254.x.x a link-local one), or behind a router, whose own MAC "
+                 "stands for what is behind it" % (", ".join(map(str, nets)) + "".join(
+                     ", the link-local %s" % a["network"] for a in near["looked"]) or "no network", wanted)))
         for host in everyone:
             seen = said.get(host) or {"found": [], "lxi": {}}
             bits = [probe.gige_line(c) for c in near["cameras"] if c["ip"] == host]
@@ -10157,9 +10193,12 @@ class LabRuntime:
                         10001: "TCPIP0::%s::10001::SOCKET"}.get(f["port"])
                 if gate and gate % host not in self.last_found:
                     self.last_found.append(gate % host)
-            lines.append("- %s: %s" % (host, "; ".join(bits) or (
+            line = "- %s: %s" % (host, "; ".join(bits) or (
                 "ports %s open" % ", ".join(map(str, ports[host])) if ports.get(host) else
-                "%s; answers none of the ports instruments use" % near["hosts"].get(host, "found"))))
+                "%s; answers none of the ports instruments use" % near["hosts"].get(host, "found")))
+            if host in macs and "MAC " not in line:   # who it is when its address changes (DHCP, a reset)
+                line += "; MAC %s" % macs[host][0]
+            lines.append(line)
         lines += ["- " + probe.gige_line(c) for c in near["cameras"] if c["ip"] not in everyone]   # off its network
         if len(ports) > len(hosts):
             lines.append("Also answered, not asked who they are: " + ", ".join(list(ports)[len(hosts):]))
@@ -10170,7 +10209,7 @@ class LabRuntime:
             lines.append("Check that the instrument is switched on, on one of this computer's networks "
                          "(connected_devices lists them), with its network interface on (often a front-panel "
                          "setting); or give its address, from its front panel, to inspect_address.")
-        self.gate.log.write("network_search", by="agent",
+        self.gate.log.write("network_search", by="agent", mac=wanted or None,
                             networks=[str(n) for n in nets] + [a["network"] for a in near["looked"]] or None,
                             answered=everyone or None, found=[g.address for h in everyone for g in found.get(h, [])]
                             or None, cameras=[" ".join(x for x in (c["maker"], c["model"], c["serial"]) if x)

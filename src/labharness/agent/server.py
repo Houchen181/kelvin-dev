@@ -856,17 +856,20 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     @cancellable   # it may hold the lab a while: the chat's Stop or a cancel ends it
-    def find_on_network(network: str = "") -> str:
+    def find_on_network(network: str = "", mac: str = "") -> str:
         """Find instruments on the local network whose address nobody knows: those that announce themselves (mDNS,
         as LXI instruments do, and a VXI-11 broadcast), and every address of this computer's networks with a port
         open that instruments or their gateways use (VXI-11, HiSLIP, SCPI sockets, Modbus, Prologix GPIB-ETHERNET,
         serial device servers). A link-local network (169.254.x.x, a cable straight to an instrument) is too wide to
         sweep: there it looks at the addresses in this computer's neighbour table and sends GigE Vision's discovery,
-        which cameras answer with maker, model and serial. Each is asked who it is (*IDN?, its LXI page; behind a
-        Prologix, every GPIB address) and matched to a card; what answered can then go to try_card and add_instrument.
-        network: a local range to sweep instead (192.168.1.0/24 or 192.168.1.*, at most a /22); empty: this
-        computer's own networks. Takes up to half a minute, and about 12 s more for each Prologix; only looks."""
-        return outside(rt, "what addresses on the network answered", rt.find_on_network(network))
+        which cameras answer with maker, model and serial. Each is asked who it is (*IDN?, as a ZeroMQ request where
+        the port speaks ZeroMQ; its LXI page; behind a Prologix, every GPIB address) and matched to a card, and listed
+        with its MAC address; what answered can then go to try_card and add_instrument. network: a local range to
+        sweep instead (192.168.1.0/24 or 192.168.1.*, at most a /22); empty: this computer's own networks. mac: a
+        device's MAC address (70-B3-D5-65-78-CF, from its label or maker's program; also taken as network): which
+        address it has after the sweep, looked at on every port. Takes up to half a minute, and about 12 s more for
+        each Prologix; only looks."""
+        return outside(rt, "what addresses on the network answered", rt.find_on_network(network, mac))
 
     @server.tool(annotations=ACT, structured_output=False)   # it sends a query to an instrument nobody set up
     @cancellable   # it may hold the lab a while: the chat's Stop or a cancel ends it
