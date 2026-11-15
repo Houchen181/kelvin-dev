@@ -26,7 +26,7 @@ import types
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
 import yaml
 
@@ -7273,8 +7273,23 @@ class LabRuntime:
                  if word in line.lower()]
         return "\n".join(lines[-n:]) or "nothing about %r in the last 5000 events" % about.strip()
 
-    def calculate(self, expression: str) -> str:
-        """A number worked out exactly: arithmetic, functions and physical constants (expr.py), no columns."""
+    def calculate(self, expression: Union[str, Sequence[str]]) -> str:
+        """Numbers worked out exactly: arithmetic, functions and physical constants (expr.py), no columns. One
+        expression, or several (a list, or one per line: the field report of 2026-11-15 sent a list, which was refused
+        whole), each answered on its own line; one that fails says why on its line, and the others are still worked
+        out."""
+        given = [expression] if isinstance(expression, str) else list(expression or [])
+        lines = [line.strip() for text in given for line in str(text).splitlines() if line.strip()]
+        if not lines:
+            return "nothing to calculate: give an expression, or a list of them"
+        if len(lines) == 1:
+            return self._calculated(lines[0])
+        return "\n".join(self._calculated(line, named=True) for line in lines)
+
+    @staticmethod
+    def _calculated(expression: str, named: bool = False) -> str:
+        """One expression worked out: "expression = value", or why not (named: after the expression, as one line of
+        several)."""
         import numpy as np
         from .. import expr
 
@@ -7284,10 +7299,10 @@ class LabRuntime:
             with np.errstate(all="ignore"):
                 value = np.asarray(expr.evaluate(expression, no_column, np), dtype=float)
         except (expr.ExprError, ArithmeticError, ValueError, TypeError) as e:
-            return "not calculated: %s" % e
+            return "%snot calculated: %s" % ("%s: " % expression if named else "", e)
         shown = ("%.10g" % value.item() if value.size == 1 else
                  "[%s%s]" % (", ".join("%.6g" % v for v in value.ravel()[:20]), ", …" if value.size > 20 else ""))
-        return "%s = %s" % (expression.strip(), shown)
+        return "%s = %s" % (expression, shown)
 
     # ------------------------------------------------------------------ provenance and measurement chains
 
@@ -10471,8 +10486,12 @@ class LabRuntime:
             return "%s: %s" % (name, str(e).splitlines()[0][:300] if str(e) else type(e).__name__)
         finally:
             self.lock.release()
-        if res.get("error"):
-            return "could not open %s: %s (another program may have it open)" % (name, res["error"])
+        if res.get("error"):   # with the program that has it open, where Kelvin can see it (field report 2026-11-15)
+            from .. import portholders
+            held = portholders.who_has(name, res["error"])[2:]   # "COM11 is open in ...", or where to look
+            if "is open in" in held:
+                held += ": close it there first"
+            return "could not open %s: %s (%s)" % (name, res["error"], held or "another program may have it open")
         lines = []
         for speed, text in res["streams"]:
             lines.append("%s sends by itself at %d baud, 8N1: %r (an instrument that streams its readings)"
@@ -10502,19 +10521,51 @@ class LabRuntime:
 
     def connected_devices(self) -> str:
         """Everything plugged into this computer: USB devices (with what each calls itself and its driver, also
-        those no driver claims), serial ports, and the networks this computer is on."""
-        from .. import probe
+        those no driver claims), serial ports, and the networks this computer is on. Each serial port says whose in
+        the lab it is and which program has it open (portholders; the field report of 2026-11-15 had a port that
+        CoboltMonitor.exe held, and only the port was shown); a light source the lab doesn't have says so, with how to
+        bring it in (Kelvin sees nothing of one outside the lab); and the programs with VISA loaded, one of which may
+        hold an instrument's VISA session."""
+        from .. import portholders, probe
+        from ..scriptrun import bring_in, lab_name, port_device
         ports, devices = probe.serial_ports(), probe.usb_devices()
+        held = portholders.holders_of([p["port"] for p in ports]) if ports else {}
+        notes = {}   # each port: whose in the lab, and who has it open
+        for p in ports:
+            ours = lab_name(self.lab, p["port"])
+            notes[p["port"]] = "; ".join(([("the lab's %s" % ours)] if ours else []) + (
+                ["open in " + ", ".join("%s, process %d" % ("Kelvin itself" if h["kelvin"] else h["name"] or "a program",
+                                                            h["pid"]) for h in held.get(p["port"]) or [])]
+                if held.get(p["port"]) else []))
+
+        def light(p: Dict[str, Any], more: List[Any]) -> List[str]:
+            device = port_device(self.lab, p["port"], listed=p, more=more)
+            if device is None or not device["light"] or lab_name(self.lab, p["port"]):
+                return []
+            return ["  %s: a light source not in this lab (%s): Kelvin doesn't see whether it emits, nor at what "
+                    "power. Add it first: %s. Kelvin then reads it, and every change to its output asks a person until "
+                    "they have reviewed its limits" % (p["port"], device["light"], bring_in(device))]
         lines = ["USB devices:" if devices else "No USB devices (or this computer doesn't say)."]
         plain = [d for d in devices if probe.ordinary(d)]
-        lines += ["- " + probe.usb_line(d, ports) for d in devices if d not in plain]
+        for d in devices:
+            if d not in plain:
+                lines.append("- " + probe.usb_line(d, ports, notes))
+                for p in probe.usb_ports(d, ports):
+                    lines += light(p, list(d["names"]) + [d["maker"]])
         if plain:
             lines.append("- also: " + ", ".join((d["names"] or ["?"])[0] for d in plain))
         usb_ports = {p["port"] for p in ports if p.get("vid") is not None}
         other = [p for p in ports if p["port"] not in usb_ports]
         if other:
-            lines.append("Serial ports (not USB): " + ", ".join("%s (%s)" % (p["port"], p["description"])
-                                                                if p["description"] else p["port"] for p in other))
+            lines.append("Serial ports (not USB): " + ", ".join(
+                "%s (%s)" % (p["port"], "; ".join(x for x in (p["description"], notes.get(p["port"])) if x))
+                if p["description"] or notes.get(p["port"]) else p["port"] for p in other))
+            for p in other:
+                lines += light(p, [])
+        users = portholders.visa_users()
+        if users:
+            lines.append("Programs with VISA loaded (one may hold an instrument's VISA session): "
+                         + portholders.named(users))
         nets = probe.network_adapters()
         if nets:
             lines.append("Networks this computer is on: " + "; ".join(

@@ -1023,8 +1023,10 @@ class VisaBackend:
                 raise AdapterError("%s: this computer's VISA cannot reach %s: its interface driver is missing (for GPIB, "
                                    "install NI-488.2 or your GPIB adapter's driver)." % (self.name, self.resource)) from e
             from .others import holders_text   # who may hold it: another Kelvin still closing, MATLAB, NI MAX...
+            from .portholders import who_has   # who has it open: a serial port's program (field report 2026-11-15)
             raise AdapterError("%s: cannot open %s (%s). Check the cable, the address and that no other program "
-                               "holds the instrument%s." % (self.name, self.resource, e, holders_text())) from e
+                               "holds the instrument%s%s." % (self.name, self.resource, e, holders_text(),
+                                                             who_has(self.resource, e))) from e
         try:
             self.res.timeout = int(self._conn.get("timeout_ms", 3000))
             self.res.read_termination = self._conn.get("read_termination", "\n")

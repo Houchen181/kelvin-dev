@@ -1338,7 +1338,10 @@ def behind(lab: Any, address: str) -> List[str]:
 
 
 def outside(lab: Any, address: str) -> str:
-    """An address the script opens that is no lab instrument's, and why Kelvin can't check what goes there."""
+    """An address the script opens that is no lab instrument's, and why Kelvin can't check what goes there; a serial
+    port, with the device behind it, and when that is a light source, that Kelvin won't see it emit while the script
+    runs and how to bring it into the lab first (field report 2026-11-15: cobolt_probe.py opened the laser's COM11,
+    which the card called only "not in this lab", and it emitted about 40 mW while Kelvin saw none of it)."""
     under = behind(lab, address)
     if under:
         return ("%s, the Prologix adapter this lab's %s %s behind: commands sent through it skip the safety gate"
@@ -1347,7 +1350,79 @@ def outside(lab: Any, address: str) -> str:
     if other:
         return ("%s, which reaches this lab's %s another way than its address in the lab (%s): commands sent there skip "
                 "the safety gate" % (address, other, lab.config.instruments[other].address))
-    return "%s, which is not in this lab: Kelvin can't check what it sends there" % address
+    said = "%s, which is not in this lab: Kelvin can't check what it sends there" % address
+    device = port_device(lab, address)
+    if device is None:
+        return said
+    said += ". %s is %s" % (device["port"], device["words"])
+    if device["light"]:
+        return said + (", a light source (%s): Kelvin won't see whether it emits, nor at what power, while the script "
+                       "runs. Add it to the lab first: %s. Kelvin then reads it, and every change to its output asks a "
+                       "person until they have reviewed its limits" % (device["light"], bring_in(device)))
+    if device["card"] is not None:
+        return said + "; Kelvin has a card for it, %s: %s puts it in the lab, behind the gate" % (
+            device["card"].id, bring_in(device))
+    return said
+
+
+LIGHT_KINDS = ("laser", "laser-driver")   # the kinds of card whose instrument is a light source
+
+
+def port_device(lab: Any, address: str, listed: Optional[Dict[str, Any]] = None,
+                more: Sequence[Any] = ()) -> Optional[Dict[str, Any]]:
+    """The device behind a serial port, as this computer lists it (probe.serial_device: pyserial's description, maker,
+    product, the name it reports, USB ids; listed: that entry, when the caller has it), and what Kelvin makes of it:
+    {port, words: what it is, in words; card: the lab's card for its USB ID (identify: usb), or None; light: why it is
+    a light source (that card is a laser's, or what it calls itself, with more: other names it has, says so), or ""}.
+    None for an address that is no serial port, or a port this computer doesn't list."""
+    from . import portholders, probe
+    port = portholders.port_name(address)
+    if not port:
+        return None
+    d = listed if listed is not None else probe.serial_device(port)
+    if d is None:
+        return None
+    ids = "%04x:%04x" % (d["vid"], d.get("pid") or 0) if d.get("vid") is not None else ""
+    cards = [c for c in (getattr(lab, "registry", None) or ()) if ids and ids in c.usb_ids]
+    card = next((c for c in cards if c.kind in LIGHT_KINDS), cards[0] if cards else None)
+    if card is not None and card.kind in LIGHT_KINDS:
+        light = "Kelvin's card for its USB ID is %s, a %s" % (card.id, card.kind.replace("-", " "))
+    else:
+        word = probe.light_word([d.get(k) for k in ("description", "product", "interface", "maker")] + list(more))
+        light = "its name says %s" % word if word else ""
+    return {"port": port, "words": probe.serial_words(d), "card": card, "light": light}
+
+
+def bring_in(device: Dict[str, Any]) -> str:
+    """How the device behind a port comes into the lab (port_device), as the agent does it."""
+    if device["card"] is not None:
+        return "add_instrument %s with card %s" % (device["port"], device["card"].id)
+    return "add_instrument %s with its card (find_card, or draft_card from its manual)" % device["port"]
+
+
+def held_ports(text: str, opens: Sequence[str] = ()) -> str:
+    """Who has the serial ports a failed script couldn't open, in words for its failure: the ports named in the lines
+    of its error and output that say a port was held (could not open port 'COM11': PermissionError(13, 'Access is
+    denied.'), Errno 16, busy: portholders.busy), else the ports outside the lab it opens (opens). "" when no line says
+    so. A port Kelvin itself holds is a lab instrument's, which a script reaches through Kelvin, never on its own."""
+    from . import portholders
+    lines = [line for line in (text or "").splitlines() if portholders.busy(line)]
+    if not lines:
+        return ""
+    ports = list(dict.fromkeys(p for line in lines for p in portholders.ports_in(line)))
+    ports = ports or [p for p in dict.fromkeys(portholders.port_name(a) for a in opens) if p]
+    said = []
+    for port in ports[:4]:
+        found = portholders.holders(port)
+        if any(h.get("kelvin") for h in found):
+            said.append("%s is open in Kelvin itself, for the lab's instrument there: a script reaches it through "
+                        "Kelvin (pyvisa or pyserial with its address), never with a port of its own" % port)
+        elif found:
+            said.append("%s is open in %s: close it there, then run the script again"
+                        % (port, portholders.named(found)))
+        else:
+            said.append(portholders.nobody(port))
+    return "; ".join(said)
 
 
 @dataclass
@@ -3094,12 +3169,18 @@ class ScriptRun:
                          in reason):
                 reason += " (it is the module %s of a package: run_script with module: %s runs it as python -m does)" \
                           % (name, name)
+        output = self._tail(output_path)
+        # a serial port another program has open, by its error or its last lines: who has it (the field report of
+        # 2026-11-15: nvpulse's could not open port 'COM11': PermissionError(13, ...), which CoboltMonitor.exe held)
+        if status == "aborted" and reason and not stopped_by_person:
+            held = held_ports("\n".join([reason] + output), list(prep.found.unknown) + list(self.passed))
+            if held:
+                reason += " (%s)" % held
         left = self._left_on() if status == "done" else []
         try:
             self.rec.snapshot("end", lab.snapshot(needed=list(prep.found.instruments) if status == "done" else ()))
         except Exception:
             pass
-        output = self._tail(output_path)
         after = self._files_now()
         files = sorted(f for f, m in after.items() if files_before.get(f) != m)[:40]
         report = ScriptReport(status, "", self.rec.run_id, str(self.rec.path) if self.rec.path else str(run_dir),

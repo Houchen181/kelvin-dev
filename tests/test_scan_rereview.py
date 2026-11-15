@@ -36,8 +36,10 @@ def test_the_code_beside_an_imported_script_is_the_persons(tmp_path, scripts):
     rt.library_import(str(measure))
     assert "done" in rt.run_script(str(measure))
     kw = dict(ai_saves(rt), kept=kept_by_person(rt))
+    # (a new package is code too; since 2026-11-15 a note in a new subfolder of Kelvin's own is fine there:
+    # test_field_report_2026_11_15_scripts.py)
     for path in ("proj/measure.py", "proj/helpers.py", "proj/numpy.py", "proj/helpers.PYW", "proj/fast.pyd",
-                 "proj/__pycache__/helpers.cpython-313.pyc", "proj/data/__init__.py", "proj/newpkg/notes.txt",
+                 "proj/__pycache__/helpers.cpython-313.pyc", "proj/data/__init__.py", "proj/newpkg/__init__.py",
                  "proj/data/../helpers.py",
                  "proj/data/results.csv"):   # since re-review 2, its whole folder: what it reads there too
         with pytest.raises(folderfiles.FolderError, match="only a person changes|Only a person changes"):

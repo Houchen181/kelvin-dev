@@ -842,13 +842,68 @@ def usb_devices() -> List[Dict[str, Any]]:
 
 
 def serial_ports() -> List[Dict[str, Any]]:
+    """This computer's serial ports (pyserial's list), each with what it says of the device behind it: its description,
+    maker and product, the name it reports itself (interface: on Windows, its own USB product name, where the
+    description is often only its driver's, "USB Serial Device"), its USB ids and serial number."""
     try:
         from serial.tools import list_ports
     except ImportError:
         return []
     return [{"port": p.device, "description": p.description if p.description != "n/a" else "", "vid": p.vid,
-             "pid": p.pid, "serial": p.serial_number or "", "maker": p.manufacturer or "", "product": p.product or ""}
+             "pid": p.pid, "serial": p.serial_number or "", "maker": p.manufacturer or "", "product": p.product or "",
+             "interface": getattr(p, "interface", None) or ""}
             for p in sorted(list_ports.comports(), key=lambda p: p.device)]
+
+
+def serial_device(port: str) -> Optional[Dict[str, Any]]:
+    """The device behind one serial port, as serial_ports lists it (a link to a port, /dev/serial/by-id/..., is the
+    port it leads to); None when this computer doesn't list it, or can't say (no pyserial)."""
+    try:
+        listed = serial_ports()
+    except Exception:   # a list of ports is a help: never a failure of its own
+        return None
+    want = os.path.normcase(port)
+    for p in listed:
+        if os.path.normcase(str(p["port"])) == want:
+            return p
+    if port.startswith("/"):
+        real = os.path.realpath(port)
+        return next((p for p in listed if os.path.realpath(str(p["port"])) == real), None)
+    return None
+
+
+# what says a device is a light source, in what it calls itself: a laser by name, or the maker of lasers and light
+# engines that labs drive over a serial port (field report 2026-11-15: a Cobolt 06-MLD on COM11)
+LIGHT_WORDS = ("laser", "cobolt", "obis", "toptica", "oxxius", "omicron", "lumencor", "coherent", "nkt photonics",
+               "superk", "lasos", "vortran", "qioptiq", "cnilaser", "hubner", "hübner", "luxx")
+
+
+def serial_words(d: Dict[str, Any]) -> str:
+    """A serial port's device in words: "Cobolt 06-01 Series (COM11) (USB 25dc:0006, Cobolt AB)", with the name it
+    reports itself when its description doesn't have it."""
+    name = d.get("description") or d.get("product") or d.get("interface") or "a device"
+    bits = []
+    if d.get("vid") is not None:
+        bits.append("USB %04x:%04x" % (d["vid"], d.get("pid") or 0))
+    maker = d.get("maker") or USB_VENDORS.get(d.get("vid") or -1, "")
+    if maker:
+        bits.append(maker)
+    own = [x for x in dict.fromkeys((d.get("product"), d.get("interface"))) if x and x.lower() not in name.lower()]
+    if own:
+        bits.append("it calls itself " + " / ".join(own))
+    return name + (" (%s)" % ", ".join(bits) if bits else "")
+
+
+def light_word(texts: Iterable[Any]) -> str:
+    """The word in what a device calls itself that says it is a light source (LIGHT_WORDS), as it is written there;
+    "" when none does."""
+    for text in texts:
+        low = str(text or "").lower()
+        for word in LIGHT_WORDS:
+            at = low.find(word)
+            if at >= 0:
+                return str(text)[at:at + len(word)]
+    return ""
 
 
 def network_adapters() -> List[Dict[str, str]]:
@@ -882,17 +937,27 @@ def ordinary(d: Dict[str, Any]) -> bool:
     return bool(drivers) and drivers <= ORDINARY and any(w in named for w in ORDINARY_NAMES)
 
 
-def usb_line(d: Dict[str, Any], ports: List[Dict[str, Any]]) -> str:
+def usb_ports(d: Dict[str, Any], ports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The serial ports (serial_ports) a USB device (usb_devices) makes: same USB ids, and its serial number where both
+    say one."""
+    vid, pid = d.get("vid"), d.get("pid")
+    return [p for p in ports if p.get("vid") == vid and p.get("pid") == pid
+            and (not d["serial"] or not p.get("serial") or p["serial"] == d["serial"])]
+
+
+def usb_line(d: Dict[str, Any], ports: List[Dict[str, Any]], notes: Optional[Dict[str, str]] = None) -> str:
+    """A USB device in a line: what it calls itself, its ids, maker and serial number, its serial ports (with a note
+    on each, notes: who holds it), its driver or what is wrong with it, and what Kelvin knows it as."""
     vid, pid = d.get("vid"), d.get("pid")
     ids = "%04x:%04x" % (vid, pid) if vid is not None and pid is not None else "?"
     names = " / ".join(d["names"][:2]) or "(no name)"
     maker = d["maker"] or USB_VENDORS.get(vid or -1, "")
     bits = ["%s (USB %s%s%s)" % (names, ids, ", " + maker if maker else "", ", serial " + d["serial"] if d["serial"]
                                   else "")]
-    com = [p["port"] for p in ports if p.get("vid") == vid and p.get("pid") == pid
-           and (not d["serial"] or not p.get("serial") or p["serial"] == d["serial"])]
+    com = [p["port"] for p in usb_ports(d, ports)]
     if com:
-        bits.append("serial port " + ", ".join(com))
+        bits.append("serial port " + ", ".join(c + (" (%s)" % notes[c] if notes and notes.get(c) else "")
+                                               for c in com))
     if d["problem"] == 28 or (WIN and not d["drivers"]):
         bits.append("no driver installed: the maker's software or driver brings it")
     elif d["problem"]:
