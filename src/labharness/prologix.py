@@ -369,8 +369,9 @@ class Adapter:
 
     def _unreachable(self, e: BaseException) -> str:
         if on_serial(self.key):
-            return ("the Prologix %s could not be opened (%s): is it plugged in, and not open in another program?"
-                    % (place(self.key), first_line(e)))
+            from .portholders import who_has   # the program that has its port open, where Kelvin can see it
+            return ("the Prologix %s could not be opened (%s): is it plugged in, and not open in another program?%s"
+                    % (place(self.key), first_line(e), who_has(self.key, e).replace(";", "", 1)))
         return ("the Prologix %s does not take a connection (%s): is it on, at that address? It takes one connection "
                 "at a time, so another program (or another Kelvin) may have it" % (place(self.key), first_line(e)))
 

@@ -359,11 +359,13 @@ def _discard_input(res: Any) -> None:
 
 
 def _unopened(address: str, e: BaseException) -> str:
-    """A port the scan couldn't open, in words: most often another program has it (LabVIEW holding a GPIB-USB)."""
+    """A port the scan couldn't open, in words: most often another program has it (LabVIEW holding a GPIB-USB), and
+    for a serial port Kelvin names the one that has it open, where it can see it (portholders)."""
     from .others import holders_text
+    from .portholders import who_has
     why = str(e).splitlines()[0][:160] if str(e).strip() else type(e).__name__
-    return ("Kelvin could not open it (%s): another program may have it open%s; close that program, or unplug it "
-            "and plug it in again, then scan again" % (why, holders_text()))
+    return ("Kelvin could not open it (%s): another program may have it open%s%s; close that program, or unplug it "
+            "and plug it in again, then scan again" % (why, holders_text(), who_has(address, e)))
 
 
 BLUETOOTH = ("a Bluetooth serial port: not asked, as opening one can wait a long while for a paired device (an "
