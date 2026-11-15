@@ -32,9 +32,15 @@ def test_sc2_a_cards_try_sends_a_reading_only_when_every_part_is_a_query():
 
 def test_sc3_a_scripts_asyncio_connection_or_another_name_never_passes_the_gate():
     out = repro("socket_paths")
-    for part in out.split("--- ")[1:]:
+    parts = {part.split(" ---", 1)[0]: part for part in out.split("--- ")[1:]}
+    assert {"through_kelvin.py", "with_asyncio.py", "other_name.py"} <= set(parts), out[-3000:]
+    for part in parts.values():
         assert "lines that reached the instrument's own port, past Kelvin: []" in part, part[:3000]
-    assert "asyncio's own connection would go past it" in out
+    asyncio_part = parts["with_asyncio.py"]
+    if os.name == "nt":   # the proactor connects below the socket's own connect (ConnectEx): refused outright
+        assert "asyncio's own connection would go past it" in asyncio_part, asyncio_part
+    else:                 # the selector loop (Linux, macOS) connects and sends with the socket's methods: gated
+        assert "commands the gate saw: ['SLVL 5.0']" in asyncio_part, asyncio_part
     assert "It opens lockin2 (TCPIP0::localhost" in out   # another name of the lab's own address
 
 
