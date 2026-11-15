@@ -15,9 +15,11 @@ from .model import Report, RunPart
 
 EMU = 12700                     # per point
 SLIDE_W, SLIDE_H = 960.0, 540.0  # 16:9, points
-FONT = "Calibri"
+FONT = "Arial"                  # one plain sans-serif, as the academic slide skill has it (user, 2026-11-15)
 MONO = "Consolas"
 ACCENT = "2a78d6"
+NAVY = "1B365D"                 # titles, and the opening slide
+RULE = "C8CED6"                 # the line under a slide's title
 
 NS = ('xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
       'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
@@ -38,9 +40,9 @@ def emu(v: float) -> int:
 
 
 def measure(text: str, size: float) -> float:
-    """Calibri is narrow: about half an em per character on average."""
+    """Arial: a little over half an em per character on average."""
     wide = sum(1 for c in text if c in "MWmw@%")
-    return (len(text) * 0.5 + wide * 0.3) * size
+    return (len(text) * 0.55 + wide * 0.3) * size
 
 
 def _xfrm(x: float, y: float, w: float, h: float, tag: str = "a:xfrm") -> str:
@@ -239,8 +241,8 @@ _THEME = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><a:theme xmlns
           '<a:accent3><a:srgbClr val="1BAF7A"/></a:accent3><a:accent4><a:srgbClr val="EDA100"/></a:accent4>'
           '<a:accent5><a:srgbClr val="6250D6"/></a:accent5><a:accent6><a:srgbClr val="E34948"/></a:accent6>'
           '<a:hlink><a:srgbClr val="2A78D6"/></a:hlink><a:folHlink><a:srgbClr val="6250D6"/></a:folHlink>'
-          '</a:clrScheme><a:fontScheme name="Kelvin"><a:majorFont><a:latin typeface="Calibri"/><a:ea typeface=""/>'
-          '<a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/>'
+          '</a:clrScheme><a:fontScheme name="Kelvin"><a:majorFont><a:latin typeface="Arial"/><a:ea typeface=""/>'
+          '<a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Arial"/><a:ea typeface=""/>'
           '<a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Kelvin"><a:fillStyleLst>'
           + '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>' * 3 + '</a:fillStyleLst><a:lnStyleLst>'
           + '<a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>' * 3
@@ -343,19 +345,92 @@ def save_slides(slides: List[Slide], path: Path, title: str) -> None:
 M = 40.0   # slide margin
 
 
-def _frame(s: Slide, title: str, sub: str = "", number: int = 0, footer: str = "") -> float:
-    """Title bar; returns where the content starts."""
-    s.rect(0, 0, 6, SLIDE_H, ACCENT)
-    s.text(M, 26, SLIDE_W - 2 * M, 34, [[(title, {"bold": True})]], 26, anchor="b", shrink=True, name="Title")
-    y = 64
+def _frame(s: Slide, title: str, sub: str = "", number: int = 0, footer: str = "", kicker: str = "") -> float:
+    """A slide's head, in the academic slide skill's look with a short title (user, 2026-11-15): a small kicker (what
+    the slide belongs to), the title in navy with a rule under it, a muted line (when the data was taken); the
+    footer says where it comes from. Returns where the content starts."""
+    y = 22.0
+    if kicker:
+        s.text(M, y, SLIDE_W - 2 * M, 14, [[(kicker.upper(), {"bold": True, "color": ACCENT})]], 10, name="Kicker")
+        y += 16
+    s.text(M, y, SLIDE_W - 2 * M, 32, [[(title, {"bold": True, "color": NAVY})]], 24, anchor="b", shrink=True,
+           name="Title")
+    y += 38
+    s.line(M, y, SLIDE_W - M, y, RULE, 1.0)
+    y += 8
     if sub:
-        s.text(M, y, SLIDE_W - 2 * M, 18, [sub], 12, MUTED, name="Subtitle")
-        y += 22
+        s.text(M, y, SLIDE_W - 2 * M, 16, [sub], 11, MUTED, name="Subtitle")
+        y += 20
     if footer:
         s.text(M, SLIDE_H - 24, SLIDE_W - 2 * M - 40, 14, [footer], 9, MUTED, name="Footer")
     if number:
         s.text(SLIDE_W - M - 40, SLIDE_H - 24, 40, 14, [str(number)], 9, MUTED, align="r", name="Slide number")
-    return y + 8
+    return y + 6
+
+
+def title_slide(kicker: str, title: str, lines: Sequence[Para], words: Sequence[Para] = (),
+                foot: Sequence[Para] = ()) -> Slide:
+    """The opening slide: navy, the title in white, what it covers under it, then the result in words."""
+    s = Slide()
+    s.rect(0, 0, SLIDE_W, SLIDE_H, NAVY)
+    s.text(70, 64, SLIDE_W - 140, 20, [[(kicker.upper(), {"bold": True, "color": "9CC3F0"})]], 12, name="Kind")
+    s.text(70, 90, SLIDE_W - 140, 96, [[(title, {"bold": True, "color": "FFFFFF"})]], 36, anchor="b", shrink=True,
+           name="Title")
+    s.line(70, 200, 190, 200, "5B9BE0", 2.5)
+    y = 214.0
+    if lines:
+        s.text(70, y, SLIDE_W - 140, 24 * len(lines), list(lines), 15, "D7E3F2", space=2, shrink=True, name="Subtitle")
+        y += 24 * len(lines) + 18
+    if words:
+        s.text(70, y, SLIDE_W - 140, SLIDE_H - y - 84, list(words), 17, "FFFFFF", space=8, shrink=True, name="Result")
+    if foot:
+        s.text(70, SLIDE_H - 64, SLIDE_W - 140, 40, list(foot), 11, "AFC3DA", space=2, shrink=True, name="Lab")
+    return s
+
+
+def plot_title(chart: Chart) -> str:
+    """A short title for a plot's slide: what was measured against what (the result goes beside the plot)."""
+    return chart.title if chart.x_key in ("", "x") else "%s vs %s" % (chart.title, chart.x_key)
+
+
+def _height(paras: Sequence[Para], width: float, size: float, space: float) -> float:
+    """About how tall these paragraphs are in a box this wide."""
+    total = 0.0
+    for p in paras:
+        text = p if isinstance(p, str) else "".join(t for t, _ in p)
+        lines = max(1, -(-int(measure(text, size)) // max(1, int(width))))
+        total += lines * size * 1.2 + space
+    return total
+
+
+def plot_slide(chart: Chart, title: str, kicker: str, sub: str, footer: str, number: int, summary: str,
+               table: Optional[Table], alert: str = "", more: Sequence[Para] = ()) -> Slide:
+    """One plot, large, with its result beside it: "Result", the plot's own result in words, its fitted numbers as
+    label and value (a table when there are several groups), then the rest (the next step, how the fit is drawn)."""
+    s = Slide()
+    y = _frame(s, title, sub, number, footer, kicker)
+    split = 600.0
+    s.chart(chart, M, y + 2, split - M - 28, SLIDE_H - y - 44, 11)
+    x, w = split, SLIDE_W - M - split
+    paras: List[Para] = [[("Result", {"bold": True, "color": ACCENT, "size": 16})]]
+    if alert:
+        paras.append([(_clip(alert, 200), {"bold": True, "color": "B42318"})])
+    if summary:
+        paras.append(_clip(summary, 320))
+    pairs = table is not None and len(table.header) == 2
+    if pairs:
+        paras += [[(str(r[0]) + ": ", {"bold": True}), (str(r[1]), {})] for r in table.rows[:8]]
+    if table is None or pairs:
+        s.text(x, y + 2, w, SLIDE_H - y - 46, paras + list(more), 14, space=7, shrink=True, name="Result")
+        return s
+    high = min(_height(paras, w, 14, 7), (SLIDE_H - y) / 2)
+    s.text(x, y + 2, w, high, paras, 14, space=7, shrink=True, name="Result")
+    t = Table(table.header[:3], [r[:3] for r in table.rows[:6]], table.title)
+    ty = y + 2 + high + 8
+    ty += s.table(x, ty, _table_widths(t, w, 11), t, 11, 20) + 10
+    if more:
+        s.text(x, ty, w, SLIDE_H - ty - 44, list(more), 12, space=5, shrink=True, name="More")
+    return s
 
 
 def _table_widths(t: Table, total: float, size: float) -> List[float]:
@@ -368,38 +443,54 @@ def _clip(text: str, n: int) -> str:
     return text if len(text) <= n else text[:n - 1].rstrip() + "…"
 
 
-def _run_slides(run: RunPart, footer: str, start: int) -> List[Slide]:
-    slides = []
-    s = Slide()
-    sub = "%s  ·  %s points  ·  %s  ·  %s" % (run.when, run.points, run.duration, run.status)
-    y = _frame(s, run.plan, sub, start, footer)
-    right_x = 600.0
-    if run.charts:
-        s.chart(run.charts[0], M, y + 4, right_x - M - 24, SLIDE_H - y - 48, 10)
-    else:
-        s.text(M, y + 4, right_x - M - 24, 40, ["No plot: this run recorded %s points." % run.points], 14, MUTED)
-    paras: List[Para] = []
-    if run.reason and run.status != "done":
-        paras.append([("Stopped: " + run.reason, {"bold": True, "color": "B42318"})])
-    if run.assessment:
-        paras.append(_clip(run.assessment, 420))
-    if run.next:
-        paras.append([("Next: ", {"bold": True}), (_clip(run.next, 200), {"color": MUTED})])
-    ty = y + 4
-    if run.results:
-        t = run.results[0]
-        if len(t.header) > 3:
-            t = Table(t.header[:3], [r[:3] for r in t.rows], t.title)
-        t = Table(t.header, t.rows[:8], t.title)
-        size = 11
-        ty += s.table(right_x, ty, _table_widths(t, SLIDE_W - M - right_x, size), t, size, 21) + 14
-    s.text(right_x, ty, SLIDE_W - M - right_x, SLIDE_H - ty - 40, paras, 13, space=6, shrink=True, name="Assessment")
-    slides.append(s)
+def measured(when: str, duration: str = "") -> str:
+    """When the data was taken, as a slide says it: Measured Nov 15 2026, 08:06 (18 s)."""
+    return ("Measured %s%s" % (when, " (%s)" % duration if duration else "")) if when else ""
 
-    if len(run.charts) > 1:
+
+def matching(chart: Chart, tables: List[Table]) -> Optional[Table]:
+    """The fit table of this plot's quantity ("lockin.X vs smu.V (peak)" for lockin.X), taken out of tables."""
+    subject = chart.title.split(" (")[0]
+    t = next((t for t in tables if t.title.split(" vs ")[0] == subject), None)
+    if t is not None:
+        tables.remove(t)
+    return t
+
+
+SINGLE = 3   # plots a run shows one to a slide, each with its result beside it; any more share a slide
+
+
+def _run_slides(run: RunPart, footer: str, start: int) -> List[Slide]:
+    """A run's slides: each plot with its result beside it (the run's first plot also says what to do next), more
+    plots together, then its conditions."""
+    slides: List[Slide] = []
+    kicker = run.plan + ("  ·  " + run.device if run.device else "")
+    sub = "  ·  ".join(b for b in (measured(run.when, run.duration), "%s points" % run.points,
+                                   run.status if run.status != "done" else "") if b)
+    src = "Run %s%s" % (run.run_id, "  ·  " + footer if footer else "")
+    alert = "Stopped: " + run.reason if run.reason and run.status != "done" else ""
+    next_step: List[Para] = [[("Next: ", {"bold": True}), (_clip(run.next, 200), {"color": MUTED})]] if run.next else []
+    tables = list(run.results)
+    if not run.charts:
         s = Slide()
-        y = _frame(s, run.plan + ": more plots", sub, start + 1, footer)
-        rest = run.charts[1:5]
+        y = _frame(s, run.plan, sub, start, src, kicker)
+        paras: List[Para] = [[(alert, {"bold": True, "color": "B42318"})]] if alert else []
+        paras.append(_clip(run.assessment, 420) if run.assessment else
+                     "No plot: this run recorded %s points." % run.points)
+        s.text(M, y + 4, SLIDE_W - 2 * M, SLIDE_H - y - 48, paras + next_step, 15, space=8, shrink=True, name="Result")
+        slides.append(s)
+    for k, chart in enumerate(run.charts[:SINGLE]):
+        more = list(next_step if k == 0 else [])
+        if chart.caption:
+            more.append([(chart.caption, {"color": MUTED, "size": 11})])
+        slides.append(plot_slide(chart, plot_title(chart), kicker, sub, src, start + len(slides),
+                                 chart.summary or (run.assessment if k == 0 else ""), matching(chart, tables),
+                                 alert if k == 0 else "", more))
+
+    if len(run.charts) > SINGLE:
+        s = Slide()
+        y = _frame(s, "More plots", sub, start + len(slides), src, kicker)
+        rest = run.charts[SINGLE:SINGLE + 4]
         cols = 1 if len(rest) == 1 else 2
         rows = (len(rest) + 1) // 2
         w = (SLIDE_W - 2 * M - 30) / cols
@@ -409,8 +500,9 @@ def _run_slides(run: RunPart, footer: str, start: int) -> List[Slide]:
         slides.append(s)
 
     s = Slide()
-    y = _frame(s, run.plan + ": conditions", "run %s, started by %s" % (run.run_id, run.operator),
-               start + len(slides), footer)
+    y = _frame(s, "Conditions", "  ·  ".join(b for b in (measured(run.when, run.duration),
+                                                         "started by %s" % run.operator) if b),
+               start + len(slides), src, kicker)
     left: List[Para] = []
     for label, items in (("Swept", run.sweep), ("Measured", [", ".join(run.measured)] if run.measured else []),
                          ("Set up", run.setup), ("Left changed", run.changes), ("Not read at the end", run.unread)):
@@ -447,16 +539,10 @@ def _deck(report: Report, brief: int = 0) -> List[Slide]:
         s = Slide()
         _summary(s, report, 1, report.title)
         return [s]
-    s = Slide()
-    s.rect(0, 0, SLIDE_W, SLIDE_H, "F3F5F8")
-    s.rect(0, 0, 10, SLIDE_H, ACCENT)
-    s.text(70, 170, SLIDE_W - 140, 90, [[(report.title, {"bold": True})]], 40, anchor="b", shrink=True, name="Title")
-    s.text(70, 272, SLIDE_W - 140, 30, [report.subtitle], 18, MUTED, name="Subtitle")
-    s.text(70, 310, SLIDE_W - 140, 24, ["%s%s" % (report.lab, " (simulated instruments)" if report.simulated else "")],
-           14, MUTED, name="Lab")
-    s.text(70, SLIDE_H - 60, SLIDE_W - 140, 20, ["Made with Kelvin, %s" % report.created], 11, MUTED, name="Made with")
-    slides.append(s)
-    footer = report.title
+    lab = "%s%s" % (report.lab, " (simulated instruments)" if report.simulated else "")
+    slides.append(title_slide("Report", report.title, [report.subtitle, lab], (),
+                              ["Made with Kelvin, %s" % report.created]))
+    footer = "%s  ·  %s" % (report.title, lab) if lab else report.title
 
     s = Slide()
     _summary(s, report, 2, footer)

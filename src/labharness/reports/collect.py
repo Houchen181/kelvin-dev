@@ -174,6 +174,7 @@ class Collector:
                        plan_text=plan_text)
         part.assessment = numbers.prose(str(analysis.get("assessment") or ""))   # rounded as reports show
         part.next = str(analysis.get("next") or "")
+        part.device = str(meta.get("device_name") or "")
         part.issues = [str(i) for i in analysis.get("issues") or []]
         part.setup = ["%s %s" % (k, self._show(k, v)) for k, v in (plan.get("setup") or {}).items()]
         part.sweep = self._sweep_lines(plan)
@@ -289,7 +290,9 @@ class Collector:
                            if model else "")
                 if how:   # a derived quantity says how it was worked out
                     caption = ("%s From the measurement chain: %s." % (caption, how)).strip()
-                charts.append(Chart(title, xa["key"], xa.get("unit", ""), y_unit, series, caption))
+                own = [s for s in analysis.get("series") or [] if s.get("y") == m["key"] and not s.get("group")]
+                summary = numbers.prose(str(own[0].get("summary") or "")) if len(own) == 1 and not how else ""
+                charts.append(Chart(title, xa["key"], xa.get("unit", ""), y_unit, series, caption, summary))
         for m in [m for m in measures if m.get("kind") == "trace"]:
             last = next((r for r in reversed(rows) if isinstance(r.get(m["key"]), list)), None)
             if not last:

@@ -41,6 +41,15 @@ def _day(iso: str) -> str:
         return "?"
 
 
+def _stamp(iso: str) -> str:
+    """The day and time data was taken: Nov 15 2026 08:06."""
+    try:
+        t = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return "?"
+    return "%s %d %d %s" % (t.strftime("%b"), t.day, t.year, t.strftime("%H:%M"))
+
+
 def _first_sentence(text: str) -> str:
     text = (text or "").strip()
     return (text.split(". ")[0].rstrip(".") + ".") if text else ""
@@ -271,9 +280,12 @@ def scan_document(part: RunPart, d: Digest, files: Iterable[str], lab: str, simu
     files = set(files)
     names = [n for n in FILE_NOTES if n in files]
     note = ("In the run's folder: " + "; ".join("%s (%s)" % (n, FILE_NOTES[n]) for n in names) + ".") if names else ""
+    source = "  ·  ".join(b for b in ("Run " + part.run_id, d.device_name,
+                                     lab + (" (simulated instruments)" if simulated else "")) if b)
     return Document("scan", "%s on %s" % (part.plan, d.device_name) if d.device_name else part.plan,
                     "  ·  ".join(bits), _now(), lab, simulated, [], [result, conditions, events], compact=True,
-                    note=note)
+                    note=note, measured=part.when + (" (%s)" % part.duration if part.duration else ""),
+                    source=source)
 
 
 # ------------------------------------------------------------------ the device report
@@ -299,7 +311,7 @@ def device_document(device: Dict[str, Any], project_name: str, ds: Sequence[Dige
         rows.append([plan, str(n), _day(last.started), last.key_result()[:60]])
         part = latest.get(plan)
         if part and part.charts:
-            charts.append(_named(part.charts[0], "%s, %s" % (plan, _day(last.started))))
+            charts.append(_named(part.charts[0], "%s, %s" % (plan, _stamp(last.started))))
     by_type = Section("Results by measurement", "each measurement's latest finished scan",
                       tables=[Table(["Measurement", "Scans", "Latest", "Key result"], rows)] if rows else [],
                       charts=charts[:6], empty="No scans on this device yet.")
@@ -375,7 +387,7 @@ def project_document(project: Dict[str, Any], ds: Sequence[Digest], latest: Dict
         if plan in latest and latest[plan][0].charts:
             part, dg = latest[plan]
             figures.append(_named(part.charts[0], "%s%s, %s" % (plan, " on " + dg.device_name if dg.device_name else "",
-                                                               _day(dg.started))))
+                                                               _stamp(dg.started))))
     main = Section("Main results and figures", "each measurement's latest finished scan, and what it found",
                    tables=[Table(["Measurement", "Scans", "Devices", "Latest result"], rows)] if rows else [],
                    charts=figures[:6], empty="No finished scans yet.")

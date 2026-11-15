@@ -23,11 +23,10 @@ def prefixed(x: float, unit: str) -> Tuple[float, str]:
     """(divisor, shown unit) for a value in unit: as cards.si_parts, and for a compound unit such as A/V or V/mm the
     prefix goes on its numerator (1.01e-12 A/V -> pA/V)."""
     top, slash, rest = unit.partition("/")
-    if slash and top:
-        _, factor, shown = si_parts(x, top)
-        return factor, shown + slash + rest
-    _, factor, shown = si_parts(x, unit)
-    return factor, shown
+    _, factor, shown = si_parts(x, top if slash and top else unit)
+    if factor == 1e9 and shown.startswith("G") and abs(x) >= 1e12 * 0.99995:   # cards stop at G: 1.00 TΩ, not 1004 GΩ
+        factor, shown = 1e12, "T" + shown[1:]
+    return factor, shown + (slash + rest if slash and top else "")
 
 
 def _round(x: float, place: int) -> str:
@@ -47,15 +46,17 @@ def _place(err: float) -> int:
     return int(exp1) - (1 if one == "1" else 0)
 
 
-def _lead(x: float) -> int:
-    """The decimal place of x's first significant digit."""
+def _lead(x: float, figures: int = 0) -> int:
+    """The decimal place of x's first significant digit; with figures, of x rounded to that many (0.99996 -> 0)."""
+    if figures:
+        x = float("%.*e" % (figures - 1, x))
     return int(math.floor(math.log10(abs(x)))) if x else 0
 
 
 def _bare(v: float) -> str:
     if not v:
         return "0"
-    lead = _lead(v)
+    lead = _lead(v, BARE)
     if lead <= -4 or lead >= 6:
         return "%.*e" % (BARE - 1, v)
     return _round(v, min(0, lead - BARE + 1))   # whole numbers stay whole: 1234.5 -> 1235, not 1230
@@ -76,11 +77,19 @@ def shown(value: Optional[float], err: Optional[float] = None, unit: str = "",
         inner = shown(v / 10 ** exp, e / 10 ** exp if e else None, "")
         return ("(%s)e%d" % (inner, exp) if " ± " in inner else "%se%d" % (inner, exp)) + tail
     if e is None:
-        return _bare(v) + tail
-    place = _place(e)
-    if v and _lead(v) - place + 1 > FIGURES:   # the uncertainty is below the last digit shown
-        return _round(v, _lead(v) - FIGURES + 1) + tail
-    return "%s ± %s%s" % (_round(v, place), _round(e, place), tail)
+        text, top = _bare(v), _bare(v)
+    else:
+        place = _place(e)
+        if v and _lead(v, FIGURES) - place + 1 > FIGURES:   # the uncertainty is below the last digit shown
+            text = top = _round(v, _lead(v, FIGURES) - FIGURES + 1)
+        else:
+            top = _round(v, place)
+            text = "%s ± %s" % (top, _round(e, place))
+    if scale is None and "e" not in top and abs(float(top)) >= 1000:   # rounded up into the next prefix: 996 fA/V
+        bigger = prefixed(float(top) * factor, unit)                     # to 1000 fA/V reads 1.00 pA/V
+        if bigger[0] != factor:
+            return shown(value, err, unit, bigger)
+    return text + tail
 
 
 def result(r: Dict[str, Any]) -> str:

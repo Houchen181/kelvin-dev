@@ -39,6 +39,7 @@ class Chart:
     y_unit: str
     series: List[Series]
     caption: str = ""          # e.g. "lorentzian fits dashed"
+    summary: str = ""          # the plot's own result in words, rounded (a slide shows it beside the plot)
 
 
 @dataclass

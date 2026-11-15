@@ -151,7 +151,10 @@ def test_runs_written_up_as_pdf_and_slides(runtime):
     slides = check_pptx(pdf.with_suffix(".pptx"))
     assert "Stage scans" in slides[0] and "Summary" in slides[1] and "We scanned the stage." in slides[1]
     assert "Project notes" in slides[2]
-    assert any(s.startswith("stage_scan") for s in slides) and any("tc_map: conditions" in s for s in slides)
+    # each plot: the run as a kicker, a short title, when the data was taken, its result beside it (2026-11-15)
+    plot = next(s for s in slides if s.startswith("STAGE_SCAN"))
+    assert "lockin.X vs stage.position" in plot and "Measured " in plot and "Result" in plot
+    assert any(s.startswith("TC_MAP") and "Conditions" in s for s in slides)
     assert "Lab log" in slides[-1]
     assert "report custom/%s (2 runs)" % pdf.name in runtime.events(5)
     assert [r["name"] for r in runtime.reports_index()] == ["custom/" + n for n in sorted([pdf.name, pdf.with_suffix(".pptx").name], reverse=True)]

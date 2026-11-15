@@ -21,6 +21,9 @@ from test_reports import pdf_strings
     (12345.6, None, "", "12346"),                         # whole numbers stay whole
     (1.2e-7, 3e-9, "", "(1.20 ± 0.03)e-7"),               # no prefix for this unit: a power of ten
     (None, None, "V", "-"),
+    (0.996e-12, 0.027e-12, "A/V", "1.00 ± 0.03 pA/V"),    # rounding up into the next prefix: not 1000 ± 30 fA/V
+    (1004e9, 27e9, "Ω", "1.00 ± 0.03 TΩ"),
+    (999.96e-6, None, "V", "1.00 mV"),
 ])
 def test_values_are_shown_rounded(value, err, unit, want):
     assert shown(value, err, unit) == want
