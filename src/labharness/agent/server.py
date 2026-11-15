@@ -43,7 +43,8 @@ You are connected to a physics lab through Kelvin.
 - Cancelling a call (or disconnecting) ends it: what it asked a person for is declined, the ramp or run it started
   stops, and a call still waiting for the lab is not run. A person's Stop also ends the calls waiting for the lab.
 - A person may switch on auto mode. Then drive changes and runs that stay well inside the lab's limits (and pass
-  a clean dry run) go ahead without asking; lab_status says when it is on. Only a person can switch it.
+  a clean dry run) go ahead without asking, and so does a script's run whose drives stay there and that reaches
+  nothing past the gate; lab_status says when it is on. Only a person can switch it.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. A refusal covers
   the outcome, not only the command: never reach the same level, field, temperature or output another way (another
   command, a raw command, a script, another instrument, a plan). Tell the person what was refused and why.
@@ -165,6 +166,11 @@ You are connected to a physics lab through Kelvin.
   approval, and its readings become a run like a plan's. params changes its settings for that run (check_script
   lists them); never edit the person's script to change a value. Code run as python -m <package>: module, with
   args; a Python the person names for the run (a conda environment): python. Never write a launcher for it.
+- Code of your own to run on the instruments, for what a plan can't do (a vendor's protocol, a loop that decides as
+  it goes): save it with save_script (or, in a chat whose folder is a scripts folder, write_file into kelvin_scripts/),
+  then run_script. Its card tells the person you wrote it and shows the code, or what changed since a run they
+  approved; every command it sends to a lab instrument goes through the gate, as any script's. Analysis of runs
+  stays with run_python, and a measurement a plan can make stays a plan.
 - A lab that runs its instruments from LabVIEW: survey_labview on its LabVIEW folder reads NI MAX and its projects
   and VIs the same way (never running a VI) and translates each VI it could read into a scan, saying what didn't
   translate; a scan is a plan, run with run_plan once the person agrees. Never guess what a VI not read does.
@@ -614,17 +620,30 @@ def build_server(rt: LabRuntime) -> MCPServer:
         what wasn't translated."""
         return outside(rt, "the lab's experiments", rt.experiments_view(name))
 
+    @server.tool(annotations=ACT, structured_output=False)
+    def save_script(name: str, code: str) -> str:
+        """Save a Python script of your own where run_script runs it: kelvin_scripts/<name>.py in the lab's first
+        scripts folder (the folder is made and marked as Kelvin's as needed; a script you saved there before is
+        replaced, the version before kept in .kelvin-old). For work on the instruments that a plan can't do: then
+        run_script runs it with every command to a lab instrument through the safety gate, after a card that tells a
+        person you wrote it and shows its code (or what changed since a run they approved), or, in auto mode, without
+        the card when every drive it sets stays within auto's ranges and nothing in it reaches past the gate. Analysis
+        of runs is run_python's, and what a plan can do stays a plan. Never over a file a person put there, nor named
+        as a module a script means (kelvin, pyvisa, serial, one of Python's own). Saving drives nothing."""
+        return rt.save_script(name, code)
+
     @server.tool(annotations=READ, structured_output=False)
     @cancellable   # it may hold the lab while it reads the script: the chat's Stop or a cancel ends it
     def check_script(script: str = "", params: Optional[Dict[str, Any]] = None, action: str = "", module: str = "",
                      python: str = "") -> str:
-        """What run_script would do with one of the lab's own scripts, without running it: the Python that runs it
-        (and the others a run may name), the settings it takes (its module constants such as VMAX = 5, and main()'s
-        defaults: params changes them for a run), an experiment's actions, and the one approval a person would be
-        asked (the lab instruments it opens, the drive ranges it uses, what Kelvin can't check) for that action
-        (action; "": its main one). module and python as run_script takes them. Only to see a script's settings, or
-        when the person asks: run_script checks by itself. It never waits for a run or the queue: beside one, it uses
-        the latest values Kelvin has seen."""
+        """What run_script would do with one of the lab's own scripts (or one you saved with save_script), without
+        running it: the Python that runs it (and the others a run may name), the settings it takes (its module
+        constants such as VMAX = 5, and main()'s defaults: params changes them for a run), an experiment's actions,
+        the card a person would be asked (the lab instruments it opens, the drive ranges it uses, what Kelvin can't
+        check; a script you wrote, with its code) for that action (action; "": its main one), and whether auto mode
+        runs it without the card, or why not. module and python as run_script takes them. Only to see a script's
+        settings, or when the person asks: run_script checks by itself. It never waits for a run or the queue: beside
+        one, it uses the latest values Kelvin has seen."""
         return outside(rt, "the lab's scripts", rt.check_script(script, params or {}, action, module=module,
                                                                 python=python))
 
@@ -636,8 +655,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Run one of the lab's own measurement scripts (Python or a notebook) as it is, in the lab's own Python:
         script is its path in one of the lab's scripts folders (those the person named in Settings or Set up: a file
         name is the file at the top of a folder, else the only one in their sub-folders; when two folders have it at
-        the top, or two sub-folders, give its full path), or one the person imported in the Runs panel; Kelvin runs
-        nothing from elsewhere. Code the lab runs as python -m <package> <args>: module is the package or module
+        the top, or two sub-folders, give its full path), or one the person imported in the Runs panel, or one you
+        saved with save_script (kelvin_scripts/<name>.py); Kelvin runs nothing from elsewhere. Code the lab runs as
+        python -m <package> <args>: module is the package or module
         ({"module": "nvpulse", "args": ["check", "soc"]}), in place of script; a package's own modules, its
         __main__.py too, run as python -m runs them by themselves, so their relative imports work. python: the Python
         for this run, when the person says which: one of this computer's conda environments (its name, folder or
@@ -645,8 +665,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         finds one with everything it imports. Every
         command it sends to a lab instrument (pyvisa, pyserial, a socket)
         goes through the safety gate on Kelvin's own connection: readings and settings run, drives are checked against
-        the limits, ramped and watched. A person approves the run once; Kelvin reads the script first for the drive
-        ranges it uses. params: values for its settings for this run, without editing the file ({"VMAX": 2});
+        the limits, ramped and watched. A person approves the run once on a card (one you wrote says so, with its
+        code); in auto mode it runs without the card, as a plan does, when every drive it sets stays within auto's
+        ranges on instruments Kelvin is sure of and nothing in it reaches past the gate (an address outside the lab, a
+        maker's library, ctypes, COM, a program, the network, a device file, code it puts together as it runs, an
+        action that drives the sample): the card says why not when it asks. Kelvin reads the script first for the
+        drive ranges it uses. params: values for its settings for this
+        run, without editing the file ({"VMAX": 2});
         args: its command-line arguments; drives: the range of a drive the script works out as it runs, when you
         know it ({"smu.V": [0, 5]}), else such a drive is approved within its limits. A refusal, a person's no or
         Stop ends the script (its own finally: still runs), and Kelvin brings what it drove back to safe. Returns

@@ -90,7 +90,7 @@ def test_a_scripts_outside_port_names_the_laser_behind_it(lab, folder, ports):
     assert "a light source" in line and "Kelvin won't see whether it emits" in line, line
     assert "add_instrument COM11" in line and "find_card" in line and "draft_card" in line, line
     assert "every change to its output asks a person until they have reviewed its limits" in line, line
-    assert "A script can't be rehearsed on the simulated lab, so a person approves each run" in str(request)
+    assert scriptrun.SCRIPT_ASKS in str(request)   # a person approves it, as before (or auto mode, as a plan)
 
     # found only as it runs: the person asked then is told the same
     said = scriptrun.outside(lab, "COM11")
@@ -588,18 +588,21 @@ def test_kelvin_saves_a_report_in_a_new_subfolder_of_the_scripts_folder(tmp_path
     assert folderfiles.MADE not in listed and "nv_bringup.md" in listed
 
 
-def test_in_the_scripts_folder_kelvin_never_saves_code_nor_in_the_persons_folders(tmp_path):
+def test_in_the_scripts_folder_kelvin_never_saves_programs_nor_in_the_persons_folders(tmp_path):
+    """(Since 2026-11-15 Kelvin's own folder there takes its scripts and their settings too, which run_script runs:
+    test_kelvins_own_scripts.py.)"""
     lab, kw = _scripts_lab(tmp_path)
     folderfiles.save(lab, "kelvin_reports/notes.md", "ok\n", **kw)
+    for rel in ("kelvin_reports/helper.py", "kelvin_reports/odmr.ipynb", "kelvin_reports/settings.json",
+                "kelvin_reports/config.yaml", "kelvin_reports/rig.ini", "kelvin_reports/pyproject.toml"):
+        folderfiles.save(lab, rel, "x\n", **kw)
     refused = {
-        # code and settings, even in its own subfolder
-        "kelvin_reports/helper.py": "notes, tables and pictures", "kelvin_reports/odmr.ipynb": "notes, tables",
+        # programs, shortcuts and what no Python, LabVIEW or Windows takes from Kelvin, even in its own folder
         "kelvin_reports/run.bat": "notes, tables", "kelvin_reports/setup.ps1": "notes, tables",
-        "kelvin_reports/settings.json": "notes, tables", "kelvin_reports/config.yaml": "notes, tables",
-        "kelvin_reports/rig.ini": "notes, tables", "kelvin_reports/pyproject.toml": "notes, tables",
         "kelvin_reports/sweep.vi": "notes, tables", "kelvin_reports/Makefile": "notes, tables",
-        "newpkg/__init__.py": "notes, tables", "kelvin_reports/x.pth": "notes, tables",
-        # the person's own folders, and the scripts folder itself
+        "kelvin_reports/x.pth": "notes, tables",
+        # the person's own folders, a new folder of another name, and the scripts folder itself
+        "newpkg/__init__.py": "no name of Kelvin's",
         "report.md": "named kelvin_", "data/odmr.csv": "named kelvin_", "nvpulse/notes.md": "named kelvin_",
         "tools/README.md": "named kelvin_",
     }
@@ -729,8 +732,9 @@ def test_an_imported_scripts_folder_alike(tmp_path):
     with pytest.raises(folderfiles.FolderError, match="no name of Kelvin's"):
         folderfiles.save(chat, "results/notes.md", "x\n", **kw)
     folderfiles.save(chat, "kelvin_reports/notes.md", "x\n", **kw)
+    folderfiles.save(chat, "kelvin_reports/helpers.py", "x = 1\n", **kw)   # its own code too, since 2026-11-15
     with pytest.raises(folderfiles.FolderError, match="only a person changes it"):
-        folderfiles.save(chat, "kelvin_reports/helpers.py", "x = 1\n", **kw)
+        folderfiles.save(chat, "kelvin_reports/run.bat", "echo\n", **kw)
 
 
 def test_a_chat_whose_folder_is_the_scripts_folder_saves_its_report(lab, folder, tmp_path):

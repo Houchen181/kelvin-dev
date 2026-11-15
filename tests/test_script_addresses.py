@@ -80,14 +80,15 @@ def test_another_way_into_a_lab_instrument_is_known(lab, address, name):
     assert scriptrun.same_device(lab, address) == name
 
 
-def opener(lab, answers):
+def opener(lab, answers, auto=False):
+    """A run's own end of opening an address (ScriptRun._open), in a run a person approved, or auto mode (auto)."""
     asked = []
 
     def ask(request):
         asked.append(request)
         return answers.pop(0)
     return types.SimpleNamespace(lab=lab, rehearsal=False, allowed=set(), prep=types.SimpleNamespace(name="sweep.py"),
-                                 opened={}, passed=[], _ask=ask), asked
+                                 opened={}, passed=[], _ask=ask, auto=auto), asked
 
 
 def test_a_raw_socket_to_a_lab_instrument_asks_a_person_saying_it_skips_the_gate(lab):
@@ -102,6 +103,13 @@ def test_a_socket_to_no_lab_instrument_needs_no_one(lab):
     me, asked = opener(lab, [])
     assert scriptrun.ScriptRun._open(me, "TCPIP0::10.0.0.77::5025::SOCKET", "socket") == {} and asked == []
     assert scriptrun.ScriptRun._open(me, "TCPIP0::10.0.0.9::4002::SOCKET", "socket") == {} and asked == []
+
+
+def test_in_a_run_auto_mode_approved_a_socket_to_no_lab_instrument_asks(lab):
+    """Nobody's yes covers it: auto mode covers only what the gate checks (2026-11-15)."""
+    me, asked = opener(lab, [True], auto=True)
+    assert scriptrun.ScriptRun._open(me, "TCPIP0::10.0.0.77::5025::SOCKET", "socket") == {}
+    assert asked[0].items[-1] == scriptrun.AUTO_ASKS and me.passed == ["TCPIP0::10.0.0.77::5025::SOCKET"]
 
 
 def test_a_lab_instrument_spelled_another_way_goes_through_kelvin(lab):

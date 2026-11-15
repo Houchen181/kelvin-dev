@@ -13,23 +13,28 @@ files that hold sign-ins, keys or tokens, wherever they are (secret): SSH and cl
 sign-ins.
 
 The lab's scripts folders, and the folder of a script a person imported, are the person's: Kelvin runs what is there as
-they chose it. Kelvin saves only notes, tables and pictures there (BESIDE_SCRIPTS), and only in a folder it made itself
-whose name says it is Kelvin's (kelvin_reports: OWN_NAMES), or one it made inside such a folder, each marked MADE so it
-is still its own after a restart; never the person's own folders, nor a file it didn't save. The field report of
-2026-11-15 had a chat whose folder was the scripts folder, and its report, in a new subfolder, was refused; and a folder
-of any other name could be one a script reads when it is there (cal/offsets.csv set a laser's power)."""
+they chose it. Kelvin saves there only in a folder it made itself whose name says it is Kelvin's (kelvin_reports,
+kelvin_scripts: OWN_NAMES), or one it made inside such a folder, each marked MADE so it is still its own after a
+restart: notes, tables and pictures, and its own scripts and their settings (BESIDE_SCRIPTS), which run_script runs as
+it runs the lab's, each run through the gate; never the person's own folders, nor a file it didn't save, nor one named
+as Kelvin's stand-in or Python's start-up hooks are. The field report of 2026-11-15 had a chat whose folder was the
+scripts folder, and its report, in a new subfolder, was refused; a folder of any other name could be one a script reads
+when it is there (cal/offsets.csv set a laser's power); and Kelvin's own code, once a person asked for it to run, is as
+safe there as any script the gate checks (asked for 2026-11-15)."""
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 MAX_CHARS = 12000              # of text in one read; start= reads on
 MAX_PDF_PAGES = 20             # pages a model sees whole at once: each costs about as much as a picture
@@ -46,9 +51,14 @@ NOT_SAVED = {".exe", ".com", ".scr", ".pif", ".msi", ".msp", ".dll", ".sys", ".c
 STARTUP = {"sitecustomize.py", "usercustomize.py"}
 LOADED = {".py", ".pyw"}   # what a maker's Python library could import from its folder
 KEPT = ".kelvin-old"   # beside a file Kelvin replaced: each version before, by date
-# what Kelvin saves among the lab's scripts (in a folder of its own there): notes, tables, logs and pictures, which no
-# Python, LabVIEW or Windows runs or loads as code or settings
-BESIDE_SCRIPTS = (".md", ".txt", ".csv", ".tsv", ".log", ".png", ".jpg", ".jpeg", ".svg", ".pdf")
+# what Kelvin saves among the lab's scripts (in a folder of its own there): notes, tables, logs and pictures, and its own
+# scripts and their settings, which only a script in that folder reads by its name (asked for 2026-11-15)
+BESIDE_SCRIPTS = (".md", ".txt", ".csv", ".tsv", ".log", ".png", ".jpg", ".jpeg", ".svg", ".pdf",
+                  ".py", ".ipynb", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg")
+# what no file of Kelvin's among the lab's scripts is called: the modules Kelvin's stand-in gives a script (kelvin) or
+# patches as they load (pyvisa, serial: the gate's way in), which one so named beside a script would take the place of,
+# and Python's start-up hooks; nor is a folder there named as those modules are
+NOT_OWN_MODULES = ("kelvin", "kelvin_shim", "kelvin_api", "pyvisa", "serial", "sitecustomize", "usercustomize")
 # how the name of a folder Kelvin makes among the lab's scripts starts: no script of the person's reads from a folder so
 # named by chance, as one may from cal/ or output/ when it is there (a review of the 2026-11-15 fixes: a new
 # cal/offsets.csv set the laser power an approved script used), nor imports it as a missing module's name (nidaqmx/).
@@ -170,10 +180,11 @@ def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: 
     (RUN_RECORDS) are Kelvin's in any folder named as a run is. unseen: whether a Kelvin run (its folder) is unshared
     work the chat may not see, which it never reaches wherever it is kept. kept: what Kelvin runs as a person chose
     it: the lab's scripts folders, and the folder of each script a person imported (their library), each whole (what
-    a script imports and reads there, its code, settings and data, is the person's). Kelvin saves there only notes,
-    tables and pictures in a subfolder it made itself (beside_scripts). Nothing is saved inside a Python environment,
-    wherever it is (a venv, a conda environment, a Python installation, installed packages: environment), whose code
-    runs with the lab's scripts; nor a folder's mark of being Kelvin's own (MADE), which only Kelvin writes."""
+    a script imports and reads there, its code, settings and data, is the person's). Kelvin saves there only in a
+    folder of its own it made itself, its notes, tables, pictures and scripts (beside_scripts). Nothing is saved inside
+    a Python environment, wherever it is (a venv, a conda environment, a Python installation, installed packages:
+    environment), whose code runs with the lab's scripts; nor a folder's mark of being Kelvin's own (MADE), which only
+    Kelvin writes."""
     verb = "saves" if saving else "reads"
     folder = mine(target, own)
     if folder is not None:
@@ -202,8 +213,8 @@ def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: 
         return ("%s is in the data folder's runs, which only Kelvin itself writes (every run there is one it "
                 "recorded)" % target)
     if saving and name.startswith(MADE):
-        return ("%s is Kelvin's own mark of a folder it made for its notes beside the lab's scripts: only Kelvin "
-                "itself writes it, as it makes such a folder" % target)
+        return ("%s is Kelvin's own mark of a folder it made beside the lab's scripts: only Kelvin itself writes it, "
+                "as it makes such a folder and saves in it" % target)
     if saving:
         for k in kept:
             if not k:
@@ -247,9 +258,9 @@ def environment(path: Path) -> Optional[str]:
     return None
 
 
-AMONG_SCRIPTS = ("notes, tables and pictures (%s) go in a folder of Kelvin's own there, named kelvin_... "
-                 "(kelvin_reports/report.md, say), and the rest in the answer, for the person to save if they want it"
-                 % ", ".join(BESIDE_SCRIPTS))
+AMONG_SCRIPTS = ("notes, tables, pictures, and Kelvin's own scripts and their settings (%s) go in a folder of Kelvin's "
+                 "own there, named kelvin_... (kelvin_scripts/odmr_check.py, kelvin_reports/report.md), and the rest "
+                 "in the answer, for the person to save if they want it" % ", ".join(BESIDE_SCRIPTS))
 
 
 def own_name(name: str) -> bool:
@@ -258,16 +269,27 @@ def own_name(name: str) -> bool:
     return low.startswith(OWN_NAMES) and len(low) > len(OWN_NAMES[0]) and low not in NOT_OWN
 
 
+def module_named(name: str) -> bool:
+    """Whether a file or folder of this name, beside a script, would be imported in place of a module it means: one
+    Kelvin's stand-in gives it or patches (NOT_OWN_MODULES), or one of Python's own (os, json, csv: Python 3.10 and
+    later know their names)."""
+    low = name.lower()
+    return low in NOT_OWN_MODULES or low in getattr(sys, "stdlib_module_names", ())
+
+
 def beside_scripts(target: Path, root: Any) -> Optional[str]:
     """Why Kelvin's AI may not save target among the person's scripts (root: a scripts folder, or an imported script's
-    folder; target in it, resolved), or None when it may: a note, table or picture (BESIDE_SCRIPTS) in a folder of
-    Kelvin's own there, one whose name says so (own_name: kelvin_reports) right in the root, or any folder inside such
-    a folder; each one that is there already marked as made by Kelvin (MADE), the others made now; and not a file the
-    person put there. Never code or settings, nor in the person's own folders, nor in a new folder of another name,
-    which a script may read when it is there (cal/offsets.csv): what a script imports and reads there stays theirs."""
+    folder; target in it, resolved), or None when it may: a note, table, picture, or a script of Kelvin's own and its
+    settings (BESIDE_SCRIPTS) in a folder of Kelvin's own there, one whose name says so (own_name: kelvin_scripts)
+    right in the root, or any folder inside such a folder; each one that is there already marked as made by Kelvin
+    (MADE), the others made now; and not a file the person put there. Never in the person's own folders, nor in a new
+    folder of another name, which a script may read when it is there (cal/offsets.csv): what a script imports and
+    reads there stays theirs. Nor a module or package named as one a script beside it means (module_named: kelvin.py,
+    pyvisa.py, json/), which it would import instead."""
     root = Path(root).expanduser().resolve()
-    if target.suffix.lower() not in BESIDE_SCRIPTS:
-        return "Kelvin saves no code or settings there: " + AMONG_SCRIPTS
+    suffix = target.suffix.lower()
+    if suffix not in BESIDE_SCRIPTS:
+        return "Kelvin saves no %s there: %s" % ("%s file" % suffix if suffix else "file of that kind", AMONG_SCRIPTS)
     persons = "Kelvin saves nothing in the person's own folders there: " + AMONG_SCRIPTS
     try:
         parts = target.parent.relative_to(root).parts
@@ -280,6 +302,12 @@ def beside_scripts(target: Path, root: Any) -> Optional[str]:
             return persons
         return ("%s is no name of Kelvin's: a folder it makes there is named kelvin_..., so no script reads it by "
                 "chance, as one may read cal/ or output/ when it is there; %s" % (parts[0], AMONG_SCRIPTS))
+    named = [p for p in parts[1:] if module_named(p)] + \
+        ([target.name] if suffix == ".py" and module_named(target.stem) else [])
+    if named:
+        return ("%s is named as a module a script means (Kelvin's stand-in's, pyvisa or pyserial the gate goes "
+                "through, or one of Python's own): a script beside it would import it in that module's place, so "
+                "Kelvin names it otherwise (odmr_check.py, say)" % named[0])
     level = root
     for part in parts:   # each folder down to the file's: Kelvin's own while it is there, the rest made now
         level = level / part
@@ -297,31 +325,51 @@ def beside_scripts(target: Path, root: Any) -> Optional[str]:
 def made(folder: Path) -> Optional[List[str]]:
     """The files Kelvin saved in a folder it made among the lab's scripts (its mark, MADE, says so), as the file system
     compares names; None for a folder Kelvin didn't make (no mark, or one it can't read)."""
+    mark = _mark_of(folder)
+    return None if mark is None else [os.path.normcase(str(f)) for f in mark["files"]]
+
+
+def _mark_of(folder: Path) -> Optional[Dict[str, Any]]:
+    """A folder's mark of being Kelvin's (MADE), read: {files, saved, made}; None for none, or one it can't read."""
     try:
         mark = json.loads((Path(folder) / MADE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    files = mark.get("files") if isinstance(mark, dict) else None
-    if not isinstance(files, list):
+    if not isinstance(mark, dict) or not isinstance(mark.get("files"), list):
         return None
-    return [os.path.normcase(str(f)) for f in files]
+    return mark
 
 
-def _mark(folder: Path, add: str = "") -> None:
+def written(path: Any) -> Optional[Dict[str, str]]:
+    """What a folder's mark says of a file Kelvin saved there among the lab's scripts: {at: when it saved it last
+    (2026-11-15 14:02), sha256: of what it saved}, each "" where a mark from before kept none; None for a file Kelvin
+    didn't save (a person's, though it be in a folder of Kelvin's). For a script's card: Kelvin wrote it."""
+    p = Path(path)
+    mark = _mark_of(p.parent)
+    name = os.path.normcase(p.name)
+    if mark is None or name not in [os.path.normcase(str(f)) for f in mark["files"]]:
+        return None
+    saved = mark.get("saved") if isinstance(mark.get("saved"), dict) else {}
+    info = saved.get(name) if isinstance(saved.get(name), dict) else {}
+    return {"at": str(info.get("at") or ""), "sha256": str(info.get("sha256") or "")}
+
+
+def _mark(folder: Path, add: str = "", sha256: str = "") -> None:
     """A folder Kelvin made among the lab's scripts marked as its own (MADE), with the file add listed as one it saved
-    there; written whole, then put in place. OSError: it couldn't be."""
+    there, when, and the sha256 of what it saved (written); written whole, then put in place. OSError: it couldn't
+    be."""
     with _MARKING:
-        files = made(folder) or []
-        if add and os.path.normcase(add) not in files:
-            files.append(os.path.normcase(add))
-        mark = {"kelvin": "a folder Kelvin made among the lab's scripts for its notes, tables and pictures: it saves "
-                          "nothing else here, and replaces only the files it saved, listed below",
-                "made": time.strftime("%Y-%m-%d %H:%M:%S"), "files": files}
-        try:
-            before = json.loads((folder / MADE).read_text(encoding="utf-8"))
-            mark["made"] = before.get("made") or mark["made"]
-        except (OSError, ValueError, AttributeError):
-            pass
+        before = _mark_of(folder) or {}
+        files = [os.path.normcase(str(f)) for f in before.get("files") or []]
+        saved = dict(before.get("saved")) if isinstance(before.get("saved"), dict) else {}
+        if add:
+            name = os.path.normcase(add)
+            if name not in files:
+                files.append(name)
+            saved[name] = {"at": time.strftime("%Y-%m-%d %H:%M"), "sha256": sha256}
+        mark = {"kelvin": "a folder Kelvin made among the lab's scripts for its notes, tables, pictures and scripts: "
+                          "it saves nothing else here, and replaces only the files it saved, listed below",
+                "made": before.get("made") or time.strftime("%Y-%m-%d %H:%M:%S"), "files": files, "saved": saved}
         part = folder / (MADE + ".new")
         part.write_text(json.dumps(mark, indent=1), encoding="utf-8")
         os.replace(part, folder / MADE)
@@ -425,7 +473,7 @@ def save(folder: Any, path: Any, text: str, own: Iterable[Any] = (), data: Any =
         raise FolderError("could not save %s: %s" % (target, e.strerror or e))
     if among:   # listed as Kelvin's once it is there (one that couldn't be saved is never listed): it may replace it
         try:    # later, and nothing else. Unlisted, it is saved all the same: Kelvin only can't replace it
-            _mark(target.parent, target.name)
+            _mark(target.parent, target.name, hashlib.sha256(data).hexdigest())
         except OSError:
             pass
     return target, kept_old

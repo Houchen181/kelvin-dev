@@ -5844,7 +5844,9 @@ class LabRuntime:
                     scripts.append(self._item_line(n, i, (
                         "the lab's experiment %s, version %d, approved: this approval covers it, as it covers a "
                         "scan%s" % (c[1].name, c[1].number, ", rehearsed with the queue" if self.gate.auto else ""))
-                        if c else "a script: it asks you itself when it starts, as it can't be rehearsed"))
+                        if c else "a script: it asks you itself when it starts, as it can't be rehearsed%s" % (
+                            ", unless auto mode covers it then, as it covers run_script's" if self.gate.auto
+                            else "")))
             pause = ["The queue pauses after %s" % self._item_line(len(items), items[-1])] \
                 if items[-1].then_pause else []
             first = ["These were added to the queue, or changed, after it was approved: it waits for your answer "
@@ -6289,7 +6291,8 @@ class LabRuntime:
     @_lookups_kept
     def _queue_script(self, item: Item, position: int, gen: int) -> Tuple[bool, str]:
         """A script item, run as run_script runs one: it can't be rehearsed, so it asks a person as it starts (the
-        queue's approval doesn't cover it), and its run records its place in the queue. gen: the stop generation when
+        queue's approval doesn't cover it), unless auto mode covers it as it covers run_script's run
+        (scriptrun.auto_cover), and its run records its place in the queue. gen: the stop generation when
         the queue picked it (a stop since then, or while its card waited, is a stop, not a failure)."""
         from .. import scriptrun
         q = self.queue
@@ -8853,9 +8856,10 @@ class LabRuntime:
     def _kept_card(self, kept: Any, prep: Any, request: Any) -> None:
         """A kept version's run card: its title, which version (and what changed in a new one), and the closing line
         an experiment's card has for its own (scriptrun.approval)."""
+        from .. import scriptrun
         request.title = "Run %s, version %d%s?" % (kept.name, kept.number, " (%s)" % prep.action if prep.action else "")
         request.items[1:1] = self._kept_lines(kept)
-        plain = [i for i, item in enumerate(request.items) if item.startswith("A person approves each run of a script")]
+        plain = [i for i, item in enumerate(request.items) if item in (scriptrun.EXPERIMENT_ASKS, scriptrun.SCRIPT_ASKS)]
         if plain:
             request.items[plain[-1]] = self.KEPT_CLOSING
         else:
@@ -9471,9 +9475,34 @@ class LabRuntime:
         source = sha = None
         if version:   # that run's copy runs in the file's folder, under its name, though the file may be gone
             source, sha = self._script_as_run(version, scriptrun.locate(path, folders, chosen, missing=True))
-        return scriptrun.prepare(self.lab, path, folders, params=params, args=args, drives=drives,
+        prep = scriptrun.prepare(self.lab, path, folders, params=params, args=args, drives=drives,
                                  python=self.scripts_python() or "", chosen=chosen, source=source, sha256=sha,
                                  version=version, named=python, action=action)
+        from .. import folderfiles
+        if folderfiles.written(prep.path) is not None:   # Kelvin's own: its card shows what changed since a yes
+            prep.before = self._approved_before(prep.path)
+        return prep
+
+    def _approved_before(self, path: Path) -> Optional[Tuple[str, str]]:
+        """The latest run of a script that a person approved (not auto mode, nor the queue's yes; a run from before
+        Kelvin kept who approved was a person's: every script's run asked one), and the text it ran, as its record
+        fingerprinted it (_script_as_run): for a card of a script Kelvin wrote to show what changed since a person's yes
+        rather than the whole script again. None: none (its card shows the whole script)."""
+        from .. import scriptrun
+        from ..scanlibrary import script_id
+        try:
+            runs = list(self.library.get(script_id(path)).get("runs") or [])
+        except (KeyError, OSError):
+            return None
+        for run_id in runs:   # the latest first
+            try:
+                meta = rundata.load(self._run_dir(run_id), with_rows=False).meta or {}
+                if meta.get("approved", "person") != "person":
+                    continue
+                return run_id, self._script_as_run(run_id, path)[0]
+            except (KeyError, OSError, ValueError, scriptrun.ScriptError):
+                continue
+        return None
 
     def _script_as_run(self, run_id: str, path: Path) -> Tuple[str, Optional[str]]:
         """A run's script.py, the script as that run ran it, and the sha256 of the file as it read it then. Only from
@@ -9555,12 +9584,57 @@ class LabRuntime:
             raise scriptrun.ScriptError("give the script's path, or the module to run as python -m runs it")
         return path
 
+    SCRIPTS = "kelvin_scripts"   # the folder of Kelvin's own scripts, in the lab's first scripts folder (save_script)
+
+    def save_script(self, name: str, code: str) -> str:
+        """A script of Kelvin's own, saved where run_script runs it (asked for 2026-11-15: "for the script it should be
+        pretty safe once the user has asked to run"): kelvin_scripts/<name>.py in the lab's first scripts folder, that
+        folder made and marked as Kelvin's as needed, as write_file saves among the lab's scripts (folderfiles.save:
+        never over a file a person put there, nor named as a module a script means); a script Kelvin saved there
+        before is replaced, the version before kept in .kelvin-old. Saving drives nothing: running it is run_script's,
+        through the gate, after its card (or auto mode, as for a plan)."""
+        from .. import folderfiles
+        folders = [f for f in self.scripts_folders() if f]
+        if not folders:
+            return ("not saved: this lab has no scripts folder, where run_script runs scripts: a person adds one in "
+                    "Settings (Instruments → Your lab's scripts → Add folder…) or Lab → Set up…")
+        stem = str(name or "").strip()
+        stem = stem[:-3] if stem.lower().endswith(".py") else stem
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", stem):
+            return ("not saved: name it with letters, digits, _ and - (odmr_check, say): it is saved as %s/<name>.py"
+                    % self.SCRIPTS)
+        if not isinstance(code, str) or not code.strip():
+            return "not saved: give the script's whole code"
+        try:
+            compile(code, stem + ".py", "exec")
+        except SyntaxError as e:
+            return "not saved: it doesn't parse as Python 3 (line %s: %s)" % (e.lineno, e.msg)
+        try:
+            chosen = list(self.library.chosen())
+        except Exception:   # the library can't be read now: the scripts folders still keep what is theirs
+            chosen = []
+        try:
+            target, before = folderfiles.save(folders[0], "%s/%s.py" % (self.SCRIPTS, stem), code,
+                                              own=[self.home] if self.home is not None else [], data=self.data_dir,
+                                              kept=folders + chosen)
+        except folderfiles.FolderError as e:
+            return "not saved: %s" % e
+        self.gate.log.write("file_saved", by="agent", path=str(target), chars=len(code),
+                            kept=str(before) if before else None, tool="save_script")
+        count = code.count("\n") + (0 if code.endswith("\n") else 1)
+        return ("saved %s (%d line%s)%s. Run it with run_script (script: %s): every command it sends to a lab "
+                "instrument goes through the gate, and its card shows a person this code, or in auto mode it runs "
+                "without one when it stays within auto's ranges (check_script says which)"
+                % (target, count, "" if count == 1 else "s",
+                   "; the version it replaced is kept as %s" % before if before else "", target))
+
     def check_script(self, path: str, params: Optional[Dict[str, Any]] = None, action: str = "", module: str = "",
                      python: str = "") -> str:
         """What running one of the lab's scripts would do, without running it: the Python that runs it, the settings
-        it takes, an experiment's actions, and the one approval a person would be asked (instruments, drive ranges,
-        what Kelvin can't check) for the action asked for (action; "": the main one). module: a module of the lab's own
-        to run as python -m runs it, instead of a path; python: the Python for this run (scriptrun.python_named)."""
+        it takes, an experiment's actions, the card a person would be asked (instruments, drive ranges, what Kelvin
+        can't check; a script Kelvin wrote, with its code) for the action asked for (action; "": the main one), and
+        whether auto mode runs it without the card. module: a module of the lab's own to run as python -m runs it,
+        instead of a path; python: the Python for this run (scriptrun.python_named)."""
         return self.script_check(path, params, action, module=module, python=python)["text"]
 
     def script_check(self, path: str, params: Optional[Dict[str, Any]] = None, action: str = "", module: str = "",
@@ -9577,7 +9651,8 @@ class LabRuntime:
         others = [n for n, _ in scriptrun.conda_envs()]
 
         def run(gate: Any = None) -> str:
-            request, _, problems = scriptrun.approval(self.gate if gate is None else gate, prep)
+            gate = self.gate if gate is None else gate
+            request, grants, problems = scriptrun.approval(gate, prep)
             refused.extend(problems)
             settings = scriptrun.parameters(prep.original)
             lines = ["%s in %s" % (prep.name, prep.path.parent)]
@@ -9597,11 +9672,21 @@ class LabRuntime:
                 if exp.actions:
                     lines.append("Actions: " + ", ".join(a + (" (main)" if a == exp.main else "") for a in exp.actions))
             lines += ["will be refused now: " + p for p in problems]
-            lines.append("run_script asks a person once:")
+            lines.append("run_script asks a person once: (in auto mode it may run without asking: the last line says)")
             kept = self._kept_version(prep.path)
             if kept is not None:   # one of the lab's experiments: its version, as its run's card says it
                 self._kept_card(kept, prep, request)
             lines += ["  " + i for i in request.items]
+            if kept is None:   # what auto mode makes of it, on now or not, as _script_run judges it (auto_cover)
+                ok, why = scriptrun.auto_cover(gate, prep, grants, now=False)
+                if gate.auto:
+                    lines.append(("Auto mode is on: run_script runs it without the card (%s)" if ok else
+                                  "Auto mode is on, but doesn't cover it: the card asks a person (%s)")
+                                 % "; ".join(why))
+                else:
+                    lines.append(("Auto mode is off, so the card asks a person; with it on, it would run without the "
+                                  "card (%s)" if ok else "Auto mode is off, so the card asks a person; with it on, "
+                                  "the card would ask all the same (%s)") % "; ".join(why))
             return "\n".join(lines)
 
         def seen() -> str:   # beside the work that has the lab: never waits for it, sends nothing (_CheckGate)
@@ -9739,7 +9824,9 @@ class LabRuntime:
         refused, declined, stopped, or an instrument it opens not ready). extra: more for its run's record (its place
         in the queue). told: a notice when it ends (a queue's account says it at the end instead). queued: an approved
         version of one of the lab's experiments the queue's approval covered, which runs without asking again. In
-        auto mode an approved version is rehearsed first and covered as a plan is (_auto_experiment). since: the
+        auto mode an approved version is rehearsed first and covered as a plan is (_auto_experiment), and any other
+        script, the lab's or Kelvin's own, is covered as a plan is by what reading it ahead found (scriptrun.auto_cover:
+        its drives low-risk, nothing past the gate); a new version of an experiment asks a person once. since: the
         gate's stops when the run was asked for (the tool's call, the queue picking it; else now): a person's Stop
         since then, while it was rehearsed, approved or starting, means it doesn't run, never that it runs anyway.
         ready: called once its preflight passed (the queue's item reads running from then). Its preflight stops it for
@@ -9797,12 +9884,15 @@ class LabRuntime:
                 covered = why
             else:
                 request.items.append("Auto mode does not cover this run: " + "; ".join(why))
-        elif gate.auto:
-            request.items.append(
-                "Auto mode does not cover this run: version %d is new, and a person approves a new version once"
-                % kept.number if kept is not None else
-                "Auto mode does not cover this run: a person approves each run of a script, experiments too"
-                if prep.found.experiment else "Auto mode does not cover this run: a script can't be dry-run first")
+        elif gate.auto and kept is not None:   # a new version of one of the lab's experiments: a person's, once
+            request.items.append("Auto mode does not cover this run: version %d is new, and a person approves a new "
+                                 "version once" % kept.number)
+        elif gate.auto:   # a script, the lab's or Kelvin's own, judged as a plan is (asked for 2026-11-15)
+            ok, why = scriptrun.auto_cover(gate, prep, grants)
+            if ok:
+                covered = why
+            else:
+                request.items.append("Auto mode does not cover this run: " + "; ".join(why))
         said = stopped("while it was read and checked")   # its card is never shown after a Stop
         if said:
             return said, None
@@ -9829,6 +9919,9 @@ class LabRuntime:
         meta.update(extra or {})
         if kept is not None:
             meta["experiment"] = {"name": kept.name, "version": kept.number}
+        # who said yes to it: a person, auto mode, or the queue's approval (a script Kelvin wrote shows, at its next
+        # run, what changed since one a person approved: _approved_before)
+        meta["approved"] = ("queue" if queued else "auto mode") if covered else "person"
 
         def busy(text: str) -> None:
             self.busy = text
