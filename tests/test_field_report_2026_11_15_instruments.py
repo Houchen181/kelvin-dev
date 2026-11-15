@@ -757,6 +757,34 @@ def test_find_on_network_finds_a_device_by_its_mac(lab_network, tmp_path):
     assert rt.find_on_network(mac="70-B3-D5").startswith("'70-B3-D5' is not a MAC address")
 
 
+IP_NEIGH = """192.168.1.78 lladdr 70:b3:d5:65:78:cf REACHABLE
+192.168.1.1 lladdr 00:1a:2b:3c:4d:5e STALE
+192.168.1.99  FAILED
+"""
+
+
+def test_the_neighbour_table_after_a_sweep_is_read_as_linux_prints_it(lab_network, tmp_path, monkeypatch):
+    """The review's gap: the pretend networks take Windows' arp -a. On Linux the table after the sweep is ip neigh's,
+    asked for the swept network's adapter by its name, and an address it couldn't resolve has no MAC."""
+    import ipaddress
+    from labharness import probe
+    from labharness.agent.runtime import LabRuntime
+    from labharness.gate import ScriptedApprover
+    from simlab import build_virtual_lab
+    asked = []
+    monkeypatch.setattr(probe, "WIN", False)
+    monkeypatch.setattr(probe, "_run_text", lambda command: asked.append(command) or IP_NEIGH)
+    eth0 = {"name": "eth0", "address": "192.168.1.10", "network": "192.168.1.0/24", "link_local": False}
+    macs, problems = probe.macs_on([eth0], [ipaddress.ip_network("192.168.1.0/24")])
+    assert asked == [["ip", "-4", "neigh", "show", "dev", "eth0"]] and not problems
+    assert macs == {"192.168.1.78": ("70:b3:d5:65:78:cf", "eth0"), "192.168.1.1": ("00:1a:2b:3c:4d:5e", "eth0")}
+    asked.clear()
+    rt = LabRuntime(build_virtual_lab(), ScriptedApprover([]), tmp_path / "data")
+    said = rt.find_on_network("70:b3:d5:65:78:cf")
+    assert asked == [["ip", "-4", "neigh", "show", "dev", "Ethernet"]]
+    assert said.splitlines()[1].startswith("MAC 70:b3:d5:65:78:cf is 192.168.1.78 (on Ethernet)")
+
+
 # ---------------------------------------------------------------------- item 11: a late reply read as another's
 
 class LateLockin:
