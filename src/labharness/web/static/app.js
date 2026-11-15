@@ -5402,7 +5402,6 @@
     part("the lab's tabs", () => { labTabSeen(); });   // seen if its part is on the screen now, else a dot on its tab
     part("the hub's terms", () => hubTerms(HUB.on ? s.hub_terms : null));   // Kelvin shares once they are agreed to
     part("the answering chats", () => wakeState(s));
-    part("the terminal", () => { termState(s); });   // the terminal first: an approval its own command needs is asked there
     part("the approval cards", () => {
       // requests not already shown in a conversation (e.g. after a page reload)
       // requests no conversation shows (a queue started here, another agent's run): asked in the Lab panel, and kept
@@ -5419,7 +5418,7 @@
       }
       let fresh = 0;
       for (const p of s.pending) {
-        if (PANEL.loose.has(p.id) || S.approvals.has(p.id) || TERM.asked.has(p.id)) continue;
+        if (PANEL.loose.has(p.id) || S.approvals.has(p.id)) continue;
         PANEL.loose.set(p.id, makeApproval(p));
         fresh += 1;
       }
@@ -8552,67 +8551,19 @@
     if (S.labOpen) pollState();
   }
 
-  // ------------------------------------------------------------------ terminal pane: a person's own commands
-  // Its tabs: the person's own shells on this computer (below: the first tab, and the one it opens on) and the Kelvin
-  // tab, this console. There, type to Kelvin in text, or switch to an instrument and send it its own commands (SCPI...).
-  // They go through the same safety gate as Kelvin's: limits, interlocks and blocked commands apply, and a drive change
-  // waits for an approval, answered here with y/n. The server logs them as the person's, never as Kelvin's.
-  // busy: what the terminal is doing ("chat": Kelvin's answer; "call": a command to calling, an instrument); tab: the
-  // tab on the screen
-  const TERM = { open: false, target: null, chatId: null, history: [], hi: 0, busy: false, calling: null, ask: null, askAt: 0,
-                 asked: new Set(), reply: null, progress: new Map(), tab: null };
-  // the shells' tabs (shellNew), the Kelvin tab (initTerminal), how many of each program were named, xterm.js once loaded
-  const SHELLS = { tabs: [], kelvin: null, named: {}, count: 0, xterm: null, started: false };
-  const TERM_HELP = [
-    "Type to Kelvin, or switch to an instrument and type its own commands (*IDN?, SENS?, :SOUR:VOLT 1 ...).",
-    "Instrument commands go through the safety gate: limits, interlocks and blocked commands apply,",
-    "and a change that drives the sample harder asks you first (y/n).",
-    "Your own shell on this computer is in the tabs before this one (+ opens another). What runs there",
-    "goes past the safety gate, as in any terminal on this computer.",
-    "",
-    "  /use <instrument>    send what you type to that instrument (or just /<instrument>)",
-    "  /kelvin              talk to Kelvin again",
-    "  /ls                  the instruments",
-    "  /status [name]       readings, outputs and settings",
-    "  /get <param>         read one, e.g. /get X or /get lockin.X",
-    "  /set <param> <val>   set one, e.g. /set time_constant 300 ms or /set smu.V 0.5",
-    "  /describe [name]     parameters, units, limits and safe values",
-    "  /manual <words>      search the instrument's manual",
-    "  /new                 start a new conversation with Kelvin",
-    "  /stop                stop Kelvin's answer, any ramp or run, and the queue",
-    "  /clear               clear the screen (Ctrl+L)",
-    "",
-    "Up/Down: history  ·  Tab: complete  ·  Esc: stop Kelvin's answer  ·  Ctrl+`: show or hide the terminal",
-  ];
-  const TERM_CMDS = ["/use", "/kelvin", "/ls", "/status", "/get", "/set", "/describe", "/manual", "/new", "/stop",
-                     "/clear", "/help"];
-  const termOut = () => $("term-out");
-  const instNames = () => (PANEL.instruments || []).map((i) => i.name);
-  const paramsOf = (name) => {
-    const i = (PANEL.instruments || []).find((x) => x.name === name);
-    return i ? [...i.readings, ...i.drives, ...i.settings] : [];
-  };
-  const plain = (html) => { const t = document.createElement("span"); t.innerHTML = html; return t.textContent; };
+  // ------------------------------------------------------------------ the Terminal: this computer's shell, in tabs
+  // As Claude Code's terminal panel: a terminal in the page (xterm.js, from this computer, loaded the first time the
+  // Terminal opens) on a shell of this computer (web/shells.py: PowerShell on Windows, the person's own shell
+  // elsewhere), one in each tab, over a WebSocket only this page opens: it offers the access key as a subprotocol. What
+  // runs there goes past Kelvin's safety gate, as in any terminal on this computer, and the lab's record notes each
+  // shell opened and closed, never what is typed or shown. A shell ends with its tab, and with the page; the last tab
+  // closed closes the Terminal, which opens on a new shell. Without a terminal on the server (pipes: no pywinpty), the
+  // line is edited here and sent whole. Approvals are never asked here: the chat's and the Lab panel's cards ask them.
+  // open: the Terminal on the screen; tab: the shell's tab on it
+  const TERM = { open: false, tab: null };
+  // the shells' tabs, how many were opened (their ids), xterm.js once loaded
+  const SHELLS = { tabs: [], count: 0, xterm: null };
 
-  function termLine(text, cls) {
-    const out = termOut();
-    const stick = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
-    const el = h("div", { class: "term-line" + (cls ? " " + cls.split(" ").map((c) => "t-" + c).join(" ") : "") }, text);
-    out.append(el);
-    while (out.childElementCount > 3000) out.firstElementChild.remove();
-    if (stick) out.scrollTop = out.scrollHeight;
-    return el;
-  }
-  function termPrompt() { return TERM.ask ? "approve? [y/N]" : (TERM.target || "kelvin") + ">"; }
-  function termSync() {
-    $("term-prompt").textContent = termPrompt();
-    $("term-prompt").classList.toggle("asking", !!TERM.ask);
-    $("term-input").placeholder = TERM.ask ? "y approves; anything else declines"
-      : TERM.target ? "a command for " + TERM.target + ", or /help" : "ask Kelvin, or /help";
-    const model = $("model").selectedOptions[0];
-    $("term-target").textContent = TERM.tab && TERM.tab !== SHELLS.kelvin ? "this computer · outside the safety gate"
-      : TERM.target ? TERM.target + " · through the safety gate" : "Kelvin" + (model ? " · " + model.textContent : "");
-  }
   function toggleTerm(open) {
     TERM.open = open === undefined ? !TERM.open : open;
     $("termpane").hidden = !TERM.open;
@@ -8621,14 +8572,8 @@
     store("lh.term", TERM.open ? "1" : "0");
     fitLayout();   // full screen, and the top-bar buttons, follow
     if (!TERM.open) return;
-    if (!termOut().childElementCount) termLine("Kelvin terminal. Type to Kelvin, or /help for instrument commands.", "dim");
-    if (!SHELLS.started) {   // the first opening: a shell, the first tab, on the screen unless Kelvin's was last
-      SHELLS.started = true;
-      const kelvin = store("lh.termTab") === "kelvin";
-      shellNew(!kelvin);
-      if (kelvin) termTab(SHELLS.kelvin);
-    } else termTab(TERM.tab || SHELLS.tabs[0] || SHELLS.kelvin);
-    termSync();
+    if (!SHELLS.tabs.length) shellNew();   // its first tab: a shell
+    else termTab(TERM.tab || SHELLS.tabs[0]);
   }
   function setTermHeight(px) {   // in the page's own pixels (the window's divided by the page size)
     const max = Math.max(160, layoutH() - 220);
@@ -8637,8 +8582,9 @@
     return hgt;
   }
   function initTerminal() {
-    try { TERM.history = JSON.parse(store("lh.termHistory") || "[]").filter((x) => typeof x === "string"); } catch (e) { TERM.history = []; }
-    TERM.hi = TERM.history.length;
+    // what Kelvin's old console kept on this browser (the lines typed there, to Kelvin and to instruments, and its tab):
+    // let go, as nothing reads it
+    try { localStorage.removeItem("lh.termHistory"); localStorage.removeItem("lh.termTab"); } catch (e) { /* no storage */ }
     const saved = Number(store("lh.termHeight"));
     setTermHeight(saved > 0 ? saved : Math.round(Math.min(240, layoutH() * 0.3)));   // at first, 30 % up to 240 px
     const handle = $("term-resize");
@@ -8664,336 +8610,18 @@
     });
     $("toggle-term").addEventListener("click", () => pillClick("termpane", toggleTerm));
     $("close-term").addEventListener("click", () => toggleTerm(false));
-    const kelvin = $("term-tab-kelvin");
-    SHELLS.kelvin = { kind: "kelvin", btn: kelvin, wrap: kelvin.parentElement, el: $("term-kelvin") };
-    kelvin.addEventListener("click", () => termTab(SHELLS.kelvin));
     $("term-tabs").addEventListener("keydown", termTabKey);
-    $("term-new").addEventListener("click", () => shellNew(true));
-    $("term-clear").addEventListener("click", () => {   // the tab on the screen: Kelvin's lines, or a shell's screen
+    $("term-new").addEventListener("click", () => shellNew());
+    $("term-clear").addEventListener("click", () => {   // the screen of the shell on the screen (its scrollback too)
       const tab = TERM.tab;
-      if (tab && tab.term) { tab.term.clear(); tab.term.focus(); return; }
-      termOut().replaceChildren();
-      $("term-input").focus();
+      if (tab && tab.term) { tab.term.clear(); tab.term.focus(); }
     });
     new ResizeObserver(() => shellFit(TERM.tab)).observe($("term-shells"));   // a shell fits the Terminal's new size
-    $("term-input").addEventListener("keydown", termKey);
-    termOut().addEventListener("mouseup", () => { if (!window.getSelection().toString()) $("term-input").focus(); });
-    $("model").addEventListener("change", termSync);
     document.addEventListener("keydown", (e) => {
       if (e.ctrlKey && (e.key === "`" || e.code === "Backquote")) { e.preventDefault(); pillClick("termpane", toggleTerm); }
     });
     if (store("lh.term") === "1") toggleTerm(true);
   }
-
-  function termKey(e) {
-    const input = $("term-input");
-    if (e.key === "Enter" && !e.isComposing) {
-      e.preventDefault();
-      const v = input.value;
-      input.value = "";
-      termRun(v);
-    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-      if (!TERM.history.length || TERM.ask) return;
-      e.preventDefault();
-      TERM.hi = Math.max(0, Math.min(TERM.history.length, TERM.hi + (e.key === "ArrowUp" ? -1 : 1)));
-      input.value = TERM.history[TERM.hi] || "";
-    } else if (e.key === "Tab") {
-      e.preventDefault();
-      termComplete();
-    } else if (e.ctrlKey && (e.key === "l" || e.key === "L")) {
-      e.preventDefault();
-      termOut().replaceChildren();
-    } else if (e.key === "Escape" || (e.ctrlKey && (e.key === "c" || e.key === "C") &&
-               input.selectionStart === input.selectionEnd && !window.getSelection().toString())) {
-      if (e.key !== "Escape") e.preventDefault();
-      if (TERM.busy && !TERM.ask) termInterrupt();
-      else if (e.key !== "Escape") { termLine(termPrompt() + " " + input.value + "^C", "cmd"); input.value = ""; }
-    }
-  }
-  // Esc or Ctrl+C while the terminal works: its own answer stops. An instrument's command can't be cut off here (it
-  // waits for the instrument, or for the lab): said, with /stop for the lab's work. Never anything else: with no
-  // conversation yet it sent a chat_id of null, which stopped every chat, another chat's run and the queue
-  function termInterrupt() {
-    if (TERM.busy === "chat" && TERM.chatId) {
-      termLine("^C stopping Kelvin's answer", "dim");
-      api("/api/stop", { body: { chat_id: TERM.chatId }, timeout: 8000 })
-        .catch((e) => termLine("the stop didn't reach Kelvin (" + e.message + "): press Esc again, or /stop", "err"));
-    } else if (TERM.busy === "chat") termLine("^C Kelvin's answer hasn't started yet: press Esc again in a moment", "dim");
-    else termLine("^C still waiting for " + (TERM.calling || "the instrument") + ": a command to an instrument can't be " +
-      "cut off here. /stop stops the lab's work (any ramp or run, and the queue)", "dim");
-  }
-  function termComplete() {
-    const input = $("term-input");
-    const words = input.value.split(" ");
-    const last = words[words.length - 1];
-    let options = [];
-    if (words.length === 1 && last.startsWith("/")) options = [...TERM_CMDS, ...instNames().map((n) => "/" + n)];
-    else if (words.length === 2 && ["/use", "/status", "/describe"].includes(words[0])) options = instNames();
-    else if (words.length === 2 && ["/get", "/set"].includes(words[0])) {
-      options = TERM.target ? paramsOf(TERM.target).map((p) => p.name) : [];
-      for (const n of instNames()) options.push(...paramsOf(n).map((p) => n + "." + p.name));
-    }
-    const hits = [...new Set(options)].filter((o) => o.startsWith(last));
-    if (!hits.length) return;
-    let common = hits[0];
-    for (const o of hits) while (!o.startsWith(common)) common = common.slice(0, -1);
-    if (common.length > last.length || hits.length === 1) {
-      words[words.length - 1] = common + (hits.length === 1 ? " " : "");
-      input.value = words.join(" ");
-    } else termLine(hits.join("   "), "dim");
-  }
-
-  async function termRun(raw) {
-    const line = raw.trim();
-    if (TERM.ask) { await termAnswer(line); return; }
-    if (!line) { termLine(termPrompt(), "cmd"); return; }
-    if (TERM.history[TERM.history.length - 1] !== line) TERM.history.push(line);
-    TERM.history = TERM.history.slice(-200);
-    TERM.hi = TERM.history.length;
-    store("lh.termHistory", JSON.stringify(TERM.history.slice(-100)));
-    termLine(termPrompt() + " " + line, "cmd");
-    const cmd = line.split(/\s+/)[0];
-    if (TERM.busy && !["/stop", "/clear", "/help", "/ls", "/status"].includes(cmd)) {
-      termLine("still working on the last one; wait, or press Esc (or /stop) to stop it", "warn");
-      return;
-    }
-    if (line.startsWith("/")) return termSlash(line);
-    if (TERM.target) return termCall({ instrument: TERM.target, op: "raw", arg: line });
-    return termChat(line);
-  }
-  function termUse(name) {
-    if (!name) { termLine("instruments: " + (instNames().join(", ") || "none"), "dim"); return; }
-    if (!instNames().includes(name)) { termLine("no instrument " + name + " (have: " + instNames().join(", ") + ")", "warn"); return; }
-    TERM.target = name;
-    termSync();
-    termLine("typing to " + name + " now, through the safety gate; /kelvin to talk to Kelvin", "dim");
-  }
-  function splitKey(word) {   // "lockin.X", or "X" on the instrument in use
-    const dot = word.indexOf(".");
-    if (dot > 0 && instNames().includes(word.slice(0, dot))) return [word.slice(0, dot), word.slice(dot + 1)];
-    return [TERM.target, word];
-  }
-  async function termSlash(line) {
-    const [cmd, ...rest] = line.split(/\s+/);
-    const arg = rest.join(" ");
-    let inst = null;
-    switch (cmd) {
-      case "/help": case "/?": TERM_HELP.forEach((l) => termLine(l, "dim")); return;
-      case "/clear": termOut().replaceChildren(); return;
-      case "/kelvin": case "/chat": TERM.target = null; termSync(); termLine("talking to Kelvin", "dim"); return;
-      case "/use": return termUse(arg);
-      case "/ls": {
-        const list = PANEL.instruments || [];
-        if (!list.length) termLine("no instruments", "dim");
-        for (const i of list) termLine(i.name.padEnd(10) + " " + i.model + "   [" + i.state + "]");
-        return;
-      }
-      case "/status": {
-        for (const n of arg ? [arg] : TERM.target ? [TERM.target] : instNames()) {
-          const i = (PANEL.instruments || []).find((x) => x.name === n);
-          if (!i) { termLine("no instrument " + n, "warn"); continue; }
-          termLine(i.name + " · " + i.model, "step");
-          for (const p of paramsOf(n)) {
-            termLine("  " + p.name.padEnd(18) + " " + p.value + (p.away ? "   (away from safe " + p.safe + ")" : ""),
-              p.error ? "err" : p.away ? "warn" : "");
-          }
-        }
-        return;
-      }
-      case "/describe":
-        inst = arg || TERM.target;
-        if (inst) return termCall({ instrument: inst, op: "describe" });
-        break;
-      case "/manual":
-        if (!arg) { termLine("say what to look for, e.g. /manual trigger buffer", "warn"); return; }
-        if (TERM.target) return termCall({ instrument: TERM.target, op: "manual", arg });
-        break;
-      case "/get": case "/set": {
-        if (!rest.length || (cmd === "/set" && rest.length < 2)) {
-          termLine(cmd === "/get" ? "which parameter? e.g. /get X or /get lockin.X"
-            : "e.g. /set time_constant 300 ms, or /set smu.V 0.5", "warn");
-          return;
-        }
-        const [n, p] = splitKey(rest[0]);
-        if (!n) break;
-        if (cmd === "/get") return termCall({ instrument: n, op: "get", arg: p });
-        const v = rest.slice(1).join(" ");
-        return termCall({ instrument: n, op: "set", arg: p, value: /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(v) ? Number(v) : v });
-      }
-      case "/new": TERM.chatId = null; termLine("your next message starts a new conversation with Kelvin", "dim"); return;
-      case "/stop":   // the lab's work, and the terminal's own answer: never a chat_id that names none
-        try {
-          const r = await api("/api/stop", { body: TERM.chatId ? { chat_id: TERM.chatId, lab: true } : { lab: true }, timeout: 10000 });
-          termLine(r.message || "stopped", "dim");
-        } catch (e) { termLine("the stop didn't reach Kelvin (" + e.message + "): /stop again", "err"); }
-        return;
-      default:
-        if (instNames().includes(cmd.slice(1))) return termUse(cmd.slice(1));
-        termLine("unknown command " + cmd + "; /help lists them", "warn");
-        return;
-    }
-    termLine("which instrument? /use <name> first, or e.g. " + cmd + " lockin", "warn");
-  }
-
-  async function termCall(body) {
-    TERM.busy = "call";   // what Esc meets (termInterrupt): a command to an instrument
-    TERM.calling = body.instrument;
-    const wait = termLine("…", "dim");
-    const fast = setInterval(pollState, 700);   // an approval this command needs is asked here at once
-    try {
-      const r = await api("/api/terminal", { body });
-      wait.remove();
-      for (const l of String(r.message || "").split("\n")) termLine(l, r.ok ? "" : r.action === "error" ? "err" : "warn");
-    } catch (e) {
-      wait.remove();
-      termLine(e.message, "err");
-    } finally {
-      clearInterval(fast);
-      TERM.busy = false;
-      TERM.calling = null;
-      termEndAsk();
-      pollState();
-    }
-  }
-  async function termChat(text) {
-    const model = $("model").value;
-    if (!model) { termLine("choose a model first (add a key in Settings)", "warn"); return; }
-    TERM.busy = "chat";   // what Esc meets (termInterrupt): Kelvin's answer
-    try {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        if (!TERM.chatId) TERM.chatId = (await api("/api/chats", { body: { model } })).id;
-        const res = await fetch("/api/chats/" + TERM.chatId + "/turn", {
-          method: "POST", headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
-          body: JSON.stringify({ text, model }),
-        });
-        if (res.status === 404) { TERM.chatId = null; continue; }   // the conversation was deleted: a new one
-        if (!res.ok) {
-          let msg = "HTTP " + res.status;
-          try { msg = (await res.json()).error || msg; } catch (e) { /* not JSON */ }
-          termLine(msg, "warn");
-          return;
-        }
-        await readEvents(res, termEvent);
-        return;
-      }
-    } catch (e) {
-      termLine("lost the connection to Kelvin (" + e.message + ")", "err");
-    } finally {
-      termCloseReply();
-      TERM.busy = false;
-      TERM.progress.clear();
-      termEndAsk();
-      refreshChats();
-      pollState();
-    }
-  }
-  function termCloseReply() {   // a finished answer: Markdown bold read as plain text
-    if (TERM.reply) TERM.reply.textContent = TERM.reply.textContent.replace(/\*\*([^*\n]+)\*\*/g, "$1");
-    TERM.reply = null;
-  }
-  function termText(delta) {
-    if (!TERM.reply) TERM.reply = termLine("", "reply");
-    const out = termOut();
-    const stick = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
-    TERM.reply.textContent += delta;
-    if (stick) out.scrollTop = out.scrollHeight;
-  }
-  function termEvent(ev) {
-    const cls = { ok: "ok", warn: "warn", err: "err" };
-    switch (ev.type) {
-      case "text": termText(ev.delta); break;
-      case "reset": if (TERM.reply) TERM.reply.textContent = ""; break;
-      case "tool_start": termCloseReply(); termLine("● " + plain(stepLabel(ev.name, ev.input, false)), "step"); break;
-      case "tool_end":
-        termCloseReply();
-        termLine("  ⎿ " + (summaryOf(ev.content) || "done"), "step " + cls[outcome(ev.content, ev.is_error)]);
-        break;
-      case "run_progress": {
-        let el = TERM.progress.get(ev.call_id);
-        if (!el) { termCloseReply(); el = termLine("", "step"); TERM.progress.set(ev.call_id, el); }
-        el.textContent = "  ⎿ " + (ev.plan || "run") + ": " + ev.done + (ev.total ? " / " + ev.total : "") + " points" +
-          (ev.status && ev.status !== "running" ? " (" + ev.status + ")" : "");
-        if (ev.status === "running") noticeRun(ev.run_id, ev.plan);   // its data show live in the Runs pane
-        break;
-      }
-      case "approval":
-        termCloseReply();
-        if (ev.auto) termLine("  auto mode approved: " + ev.title, "dim");
-        else termAsk(ev);
-        break;
-      case "approval_closed": if (TERM.ask && TERM.ask.id === ev.id) termEndAsk(); break;
-      case "note": termCloseReply(); termLine(ev.text, "dim"); break;
-      case "memory":
-        if (ev.notes && ev.notes.length) termLine("recalled " + ev.notes.length + " note" + (ev.notes.length === 1 ? "" : "s") + " from earlier work", "dim");
-        break;
-      case "error": termCloseReply(); termLine(ev.message, "err"); break;
-      default: break;
-    }
-  }
-  function termAsk(p) {
-    if (TERM.asked.has(p.id)) return;
-    TERM.asked.add(p.id);
-    TERM.ask = p;
-    TERM.askAt = Date.now();
-    termLine(p.title, "ask");
-    for (const i of p.items || []) termLine("  - " + i, "ask");
-    for (const l of p.lessons || []) termLine("  from the lab's memory: " + l, "dim");
-    termSync();
-    if (!TERM.open) toggleTerm(true);
-    fullShow("termpane");
-    // asked in the Kelvin tab. A shell on the screen keeps the screen and the keys: there, y and Enter are the shell's,
-    // and they once approved a laser's 10 mW. The Kelvin tab says a request waits; the person goes there to answer
-    if (TERM.tab === SHELLS.kelvin) $("term-input").focus();
-    else termWaiting(true);
-  }
-  function termEndAsk(note) {
-    if (!TERM.ask) return;
-    if (note) termLine(note, "dim");
-    TERM.ask = null;
-    termWaiting(false);
-    termSync();
-  }
-  // the Kelvin tab marked while a request it asks waits behind a shell's tab: a dot, and its tip saying so
-  function termWaiting(on) {
-    const wrap = SHELLS.kelvin && SHELLS.kelvin.wrap;
-    if (!wrap) return;
-    wrap.classList.toggle("waiting", !!on);
-    SHELLS.kelvin.btn.title = on ? "A request waits here for your answer (y/n)"
-      : "Kelvin, or an instrument's own commands through the safety gate";
-    SHELLS.kelvin.btn.setAttribute("aria-label", on ? "Kelvin: a request waits for your answer" : "Kelvin");
-  }
-  async function termAnswer(text) {
-    const p = TERM.ask;
-    const approve = /^y(es)?$/i.test(text);
-    termLine(termPrompt() + " " + text, "cmd");
-    TERM.ask = null;
-    termSync();
-    try {
-      await api("/api/approvals/" + encodeURIComponent(p.id), { body: { approve } });
-      termLine(approve ? "approved" : "declined", approve ? "ok" : "warn");
-    } catch (e) {
-      termLine(e.message, "err");
-      if (e.status !== 409) TERM.asked.delete(p.id);   // still open (only a 409 says it closed): asked again
-    }
-  }
-  function termState(s) {   // each poll: ask here for what the terminal is waiting on; notice answers given elsewhere
-    if (TERM.ask && Date.now() - TERM.askAt > 2500 && !s.pending.some((p) => p.id === TERM.ask.id)) {
-      termEndAsk("(answered elsewhere)");
-    }
-    if (TERM.busy && !TERM.ask) {
-      const p = s.pending.find((x) => !TERM.asked.has(x.id) && !S.approvals.has(x.id));
-      if (p) termAsk(p);
-    }
-    if (TERM.open) termSync();
-  }
-
-  // ------------------------------------------------------------------ the Terminal's shells: the person's own
-  // A terminal in the page (xterm.js, from this computer, loaded the first time the Terminal opens) on a shell of this
-  // computer (web/shells.py: PowerShell on Windows, the person's own shell elsewhere), over a WebSocket only this page
-  // opens: it offers the access key as a subprotocol. What runs there goes past Kelvin's safety gate, as in any
-  // terminal on this computer, and the lab's record notes each shell opened and closed, never what is typed or shown.
-  // A shell ends with its tab, and with the page. Without a terminal on the server (pipes: no pywinpty), the line is
-  // edited here and sent whole.
   function xtermLoad() {
     if (!SHELLS.xterm) {
       const add = (tag, attrs) => new Promise((done, failed) => {
@@ -9009,9 +8637,9 @@
     }
     return SHELLS.xterm;
   }
-  // a new shell's tab, before Kelvin's; select: it comes on the screen
-  async function shellNew(select) {
-    const tab = { id: "shell-" + (++SHELLS.count), kind: "shell", term: null, fit: null, ws: null, ended: false, pipe: false,
+  // a new shell, in a tab of its own after the others, on the screen
+  async function shellNew() {
+    const tab = { id: "shell-" + (++SHELLS.count), term: null, fit: null, ws: null, ended: false, pipe: false,
                   line: "", hist: [], hi: 0 };
     tab.el = h("div", { class: "term-shell", id: "term-" + tab.id, role: "tabpanel", "aria-label": "Shell", hidden: true });
     tab.btn = h("button", { class: "term-tab-name", type: "button", role: "tab", "aria-selected": "false",
@@ -9019,15 +8647,15 @@
     const x = h("button", { class: "term-tab-x", type: "button", "aria-label": "Close this shell",
                             title: "Close: the shell ends with what runs in it" }, icon("x"));
     tab.wrap = h("div", { class: "term-tab", "data-tab": tab.id }, tab.btn, x);
-    $("term-tabs").insertBefore(tab.wrap, SHELLS.kelvin.wrap);
+    $("term-tabs").append(tab.wrap);
     $("term-shells").append(tab.el);
     SHELLS.tabs.push(tab);
     tab.btn.addEventListener("click", () => termTab(tab));
     x.addEventListener("click", () => shellClose(tab));
-    if (select) termTab(tab);
+    termTab(tab);
     try { await xtermLoad(); }
     catch (e) {
-      tab.el.append(h("p", { class: "term-shell-said" }, "The terminal couldn't load here (" + e.message + "). The Kelvin tab still works."));
+      tab.el.append(h("p", { class: "term-shell-said" }, "The terminal couldn't load here (" + e.message + ")."));
       return tab;
     }
     if (SHELLS.tabs.includes(tab)) shellStart(tab);   // unless its tab was closed meanwhile
@@ -9069,8 +8697,10 @@
     if (m.t === "hello") {
       tab.hello = true;
       tab.pipe = m.kind === "pipe";
-      SHELLS.named[m.program] = (SHELLS.named[m.program] || 0) + 1;
-      tab.btn.textContent = m.program + (SHELLS.named[m.program] > 1 ? " " + SHELLS.named[m.program] : "");
+      const taken = new Set(SHELLS.tabs.filter((t) => t !== tab && t.program === m.program).map((t) => t.n));
+      Object.assign(tab, { program: m.program, n: 1 });   // named by its program, numbered from the first free
+      while (taken.has(tab.n)) tab.n += 1;
+      tab.btn.textContent = m.program + (tab.n > 1 ? " " + tab.n : "");
       tab.el.setAttribute("aria-label", tab.btn.textContent);
       if (m.conpty) term.options.windowsPty = { backend: "conpty" };
       if (m.note) term.write("\x1b[2m" + m.note + "\x1b[0m\r\n");
@@ -9158,7 +8788,9 @@
     if (tab.term.options.fontSize !== 13 * z) tab.term.options.fontSize = 13 * z;
     try { tab.fit.fit(); } catch (e) { /* not laid out yet: the next resize fits it */ }
   }
-  function shellClose(tab) {   // its tab and its shell, with what runs in it (the server ends them as the socket ends)
+  // its tab and its shell, with what runs in it (the server ends them as the socket ends); the last one closes the
+  // Terminal, as Claude Code's does, and the Terminal opens again on a new shell
+  function shellClose(tab) {
     const i = SHELLS.tabs.indexOf(tab);
     if (i < 0 || tab.locked) return;   // never while Claude works the screen
     SHELLS.tabs.splice(i, 1);
@@ -9166,32 +8798,31 @@
     if (tab.term) tab.term.dispose();
     tab.wrap.remove();
     tab.el.remove();
-    if (TERM.tab === tab) termTab(SHELLS.tabs[Math.min(i, SHELLS.tabs.length - 1)] || SHELLS.kelvin);
+    if (TERM.tab !== tab) return;
+    TERM.tab = null;
+    if (SHELLS.tabs.length) termTab(SHELLS.tabs[Math.min(i, SHELLS.tabs.length - 1)]);
+    else toggleTerm(false);
   }
-  // a tab on the screen: a shell (fitted to the Terminal and focused) or Kelvin's console
+  // a shell's tab on the screen: fitted to the Terminal and focused
   function termTab(tab) {
     if (!tab) return;
     TERM.tab = tab;
-    for (const t of [...SHELLS.tabs, SHELLS.kelvin]) {
+    for (const t of SHELLS.tabs) {
       const on = t === tab;
       t.wrap.classList.toggle("on", on);
       t.btn.setAttribute("aria-selected", String(on));
       t.btn.tabIndex = on ? 0 : -1;
       t.el.hidden = !on;
     }
-    $("term-shells").hidden = tab === SHELLS.kelvin;
-    store("lh.termTab", tab === SHELLS.kelvin ? "kelvin" : "shell");
-    if (tab === SHELLS.kelvin) termWaiting(false);   // the person came to it: its question is on the screen
-    termSync();
     if (!TERM.open) return;
-    if (tab === SHELLS.kelvin) { $("term-input").focus(); return; }
     shellShow(tab);   // laid out now that its tab shows: measured at once
     shellFit(tab);
     if (tab.term) tab.term.focus();
   }
   function termTabKey(e) {   // ← → among the tabs, as a tablist goes
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" || !e.target.matches('[role="tab"]')) return;
-    const all = [...SHELLS.tabs, SHELLS.kelvin], i = all.findIndex((t) => t.btn === e.target);
+    const all = SHELLS.tabs, i = all.findIndex((t) => t.btn === e.target);
+    if (i < 0) return;
     const next = all[(i + (e.key === "ArrowRight" ? 1 : all.length - 1)) % all.length];
     e.preventDefault();
     termTab(next);

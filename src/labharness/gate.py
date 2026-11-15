@@ -381,7 +381,7 @@ class SafetyGate:
         self.stop_reason = ""   # why the latest stop came, when not from a person (an interlock): said with its result
         self.trip_count = 0     # guard trips so far: an item that trips one pauses the queue, whatever on_error says
         self._prefixes: Dict[int, Template] = {}
-        self._acting = threading.local()   # a person's own command (the portal's terminal), on this thread only
+        self._acting = threading.local()   # a person's own (Bring to safe, Hands on, a queue), on this thread only
         self._work = threading.local()     # the stop count as this thread's work began (work_since)
 
     @contextmanager

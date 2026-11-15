@@ -23,7 +23,7 @@ def test_help_finds_the_passages_people_read_and_whole_sections():
     assert not any(p["where"].startswith("the portal's map") for p in found)   # that one is written for models
     topics = guide.topics()
     assert {"doc": "Using Kelvin", "title": "Terminal", "where": "portal.md › Terminal"} in topics
-    assert "/use lockin" in guide.section("portal.md › Terminal")
+    assert "Windows PowerShell" in guide.section("portal.md › Terminal")
     assert guide.section("nowhere.md › Terminal") == "" and guide.section("portal.md › No such heading") == ""
     assert guide.search("review a draft card").startswith("[the portal's map")   # kelvin_help, as before
 
@@ -45,8 +45,8 @@ def test_help_in_the_portal(portal):
         assert any("Limits" in p["text"] for p in r["passages"])
         topics = client.get("/api/help", headers=headers).json()["topics"]
         assert any(t["where"] == "safety.md › The rules" for t in topics)
-        assert "/use lockin" in client.get("/api/help", params={"section": "portal.md › Terminal"},
-                                           headers=headers).json()["text"]
+        assert "Windows PowerShell" in client.get("/api/help", params={"section": "portal.md › Terminal"},
+                                                  headers=headers).json()["text"]
         assert client.get("/api/help", params={"section": "x.md › y"}, headers=headers).status_code == 404
 
 

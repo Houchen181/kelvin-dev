@@ -2505,56 +2505,6 @@ class LabRuntime:
         """The instrument setup is at work (autosetup.py: connecting, scanning, writing cards, reading settings)."""
         return self.setup_status.get("state") in SETUP_STEPS
 
-    # ------------------------------------------------------------------ a person's terminal (people only)
-
-    def terminal(self, instrument: str, op: str, arg: str = "", value: Any = None,
-                 by: str = "human (terminal)") -> Dict[str, Any]:
-        """A command a person typed in the portal's terminal. It goes through the same gate as everything Kelvin
-        does (limits, interlocks, blocked commands, approvals) and is logged as theirs. op: raw (a command for the
-        instrument, e.g. SCPI), get, set, describe or manual (search its manual). raw and set are refused, not queued,
-        while Kelvin is busy, so a typed command never lands in the middle of a run; get reads as get_value does,
-        beside it (the latest value of an instrument the run uses)."""
-        if instrument not in self.lab.instruments:
-            return {"ok": False, "action": "refused", "message": "no instrument %r (have: %s)"
-                    % (instrument, ", ".join(self.lab.instruments))}
-        if op == "manual":
-            return {"ok": True, "action": "read", "message": self.search_manual(instrument, arg)}
-        if op == "describe":
-            return {"ok": True, "action": "read", "message": self.gate.describe(instrument)}
-        if op not in ("raw", "get", "set"):
-            return {"ok": False, "action": "refused", "message": "unknown terminal operation %r" % op}
-        if not arg.strip():
-            return {"ok": False, "action": "refused", "message": "nothing to send"}
-        if op == "get":   # a reading, as get_value: beside whatever else Kelvin does, never inside a run's work
-            self.last_active = time.monotonic()
-            with self._reading(instrument) as why:
-                if why is None:
-                    with self.gate.acting_as(by), self._asked(instrument, arg.strip()):
-                        r = self.gate.get(instrument, arg.strip())
-            if why is not None:
-                if self._spec("%s.%s" % (instrument, arg.strip())) is None:
-                    return {"ok": False, "action": "refused", "message": "%s has no parameter %r" % (instrument, arg)}
-                return {"ok": False, "action": "busy", "message": self._not_read(instrument, arg.strip(), why)}
-            shown = r.value if r.value is None or isinstance(r.value, (str, int, float, bool)) else str(r.value)[:200]
-            return {"ok": r.ok, "action": r.action, "message": r.message, "value": shown}
-        if not self.lock.acquire(blocking=False, names=self._involved([instrument])):   # waits for its readings only
-            return {"ok": False, "action": "busy",
-                    "message": "Kelvin is busy (%s); wait for it, or stop it first" % self.held_by()}
-        started = time.time()
-        try:
-            self.busy, self._acted, self.last_active = "terminal: %s %s" % (instrument, arg), True, time.monotonic()
-            with self.gate.acting_as(by):
-                if op == "raw":
-                    r = self.gate.raw(instrument, arg.strip())
-                else:
-                    r = self.gate.set(instrument, arg.strip(), value)
-            shown = r.value if r.value is None or isinstance(r.value, (str, int, float, bool)) else str(r.value)[:200]
-            return {"ok": r.ok, "action": r.action, "message": r.message, "value": shown}
-        finally:
-            self.busy = None
-            self._look_after(started)
-            self.lock.release()
-
     def where(self, request: ApprovalRequest) -> Optional[str]:
         """Where a request acts, for its card: SIMULATOR when every instrument it names is a simulated one, else
         REAL HARDWARE (a request asked on simulated instruments once looked just like one on real ones). None for a

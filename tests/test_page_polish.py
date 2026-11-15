@@ -57,7 +57,7 @@ def test_one_part_of_the_state_that_fails_to_draw_never_skips_the_rest():
     loose = [line for line in top if not line.startswith(("part(", "await part(", "});", "})"))]
     assert loose == ["PROT.busy = s.busy;", "S.last = s;"], loose
     for drawn in ("renderAlerts(s.alarms, s.incident)", "renderWatches(", "makeApproval(p)", "renderInstruments()",
-                  "wakeState(s)", "termState(s)", "queueFromState(s.queue)", 'emit("state", s)'):
+                  "wakeState(s)", "queueFromState(s.queue)", 'emit("state", s)'):
         before = body[:body.index(drawn)]
         assert before.rfind("part(") > before.rfind("\n    })"), drawn   # inside the part opened last
 

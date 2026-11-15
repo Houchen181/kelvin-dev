@@ -174,13 +174,13 @@ def test_chat_or_home_ends_full_screen_from_either_side_even_the_one_chosen():
 
 def test_nothing_a_person_must_answer_is_out_of_sight_in_full_screen():
     """An approval in the chat on the screen declines itself unless someone answers: full screen ends for it. One the
-    Lab panel or the terminal asks brings that panel to the screen. Another chat and a new one need the chat (the
-    Analysis pane's Ask Kelvin went with its fields, 2026-11-03)."""
+    Lab panel asks brings that panel to the screen (the Terminal asks none: it is the person's shell). Another chat
+    and a new one need the chat (the Analysis pane's Ask Kelvin went with its fields, 2026-11-03)."""
     handle = _js("handle")
     case = handle[handle.index('case "approval":'):]
     assert "if (here && !ev.auto) exitFull();" in case[:case.index("break;")]
     assert re.search(r'(fullShow|paneShow)\("labpanel"\);', _js("readState"))
-    assert 'if (!TERM.open) toggleTerm(true);\n    fullShow("termpane");' in _js("termAsk")
+    assert "function termAsk(" not in JS
     for name in ("openChat", "newChat", "toggleIncognito"):
         assert "exitFull();" in _js(name), name
     assert "function askAboutAnalysis(" not in JS

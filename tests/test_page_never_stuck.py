@@ -1,8 +1,8 @@
 """The page always shows a way forward, and a chat's Stop is that chat's (review of 0.3.45, wave 2: 1.6-1.8, 3.9,
 7.1-7.3).
 
-- The terminal's Esc before it had a conversation sent a chat_id of null, which the server took as the Stop for
-  everything: another chat's run and the queue stopped (1.7).
+- The portal's old console's Esc before it had a conversation sent a chat_id of null, which the server took as the
+  Stop for everything: another chat's run and the queue stopped (1.7).
 - A chat's Stop left its cards for tools that never hold the lab open, and a Stop in a chat whose call only waited
   for the lab aborted whoever had it (1.8).
 - Saving a chat blocked the server's loop (3.9).
@@ -85,9 +85,9 @@ def real(tmp_path, timeout=20):
 # ------------------------------------------------------------------ 1.7 a chat_id that names none stops nothing
 
 def test_a_stop_naming_no_chat_stops_nothing_and_the_lab_stop_leaves_other_chats_answering(tmp_path):
-    """The terminal's Esc before its first message sent {chat_id: null}: the server took it as the Stop for
-    everything, and another chat's 2-hour run and the queue stopped. Only {} is that Stop now; {lab: true} stops the
-    lab's work (the terminal's /stop with no conversation) and not another chat's answer."""
+    """The portal's old console sent {chat_id: null} for an Esc before its first message: the server took it as the
+    Stop for everything, and another chat's 2-hour run and the queue stopped. Only {} is that Stop now; {lab: true}
+    stops the lab's work alone and not another chat's answer."""
     rt = real(tmp_path)
     release = threading.Event()
 
@@ -107,13 +107,13 @@ def test_a_stop_naming_no_chat_stops_nothing_and_the_lab_stop_leaves_other_chats
         assert wait_until(answering)
         queue_running(rt)
 
-        r = client.post("/api/stop", json={"chat_id": None}, headers=headers)   # the terminal's Esc, as it was
+        r = client.post("/api/stop", json={"chat_id": None}, headers=headers)   # the old console's Esc, as it was
         assert r.status_code == 200 and r.json()["ok"] is False and "Nothing stopped" in r.json()["message"]
         assert client.post("/api/stop", json={"chat_id": ""}, headers=headers).json()["ok"] is False
         time.sleep(0.3)
         assert answering() and rt.queue.state == "running"   # nothing stopped
 
-        r = client.post("/api/stop", json={"lab": True}, headers=headers)   # the terminal's /stop, no conversation
+        r = client.post("/api/stop", json={"lab": True}, headers=headers)   # the lab's work, no conversation named
         assert r.json()["ok"] is True
         assert stopped(rt)                                                  # the lab's work: the queue stopped
         assert answering()                                                  # and the chat goes on answering
@@ -126,21 +126,13 @@ def test_a_stop_naming_no_chat_stops_nothing_and_the_lab_stop_leaves_other_chats
     assert ends == [{"type": "turn_end", "reason": "stopped"}]
 
 
-def test_the_terminal_never_sends_a_chat_id_that_names_no_chat():
-    key = js_function("termKey")
-    assert 'api("/api/stop"' not in key and "termInterrupt();" in key
-    interrupt = js_function("termInterrupt")
-    assert interrupt.index('TERM.busy === "chat" && TERM.chatId') < interrupt.index('api("/api/stop"')
-    assert "can't be \" +\n      \"cut off here. /stop stops the lab's work" in interrupt   # an instrument's command: said
-    slash = js_function("termSlash")
-    assert "body: TERM.chatId ? { chat_id: TERM.chatId, lab: true } : { lab: true }" in slash
-    assert 'TERM.busy = "call"' in js_function("termCall") and 'TERM.busy = "chat"' in js_function("termChat")
+def test_the_page_never_sends_a_chat_id_that_names_no_chat():
     # the message box's typed STOP with no chat open is the Stop for everything ({}), never a null chat
     assert "body: S.chatId ? { chat_id: S.chatId, lab: true } : {}" in js_function("hardStop")
     senders = set()   # every Stop the page sends, by the function that sends it: each guards its chat_id
     for at in [i for i in range(len(JS)) if JS.startswith('api("/api/stop"', i)]:
         senders.add(JS[JS.rindex("function ", 0, at) + len("function "):].split("(")[0])
-    assert senders == {"stopAnswer", "hardStop", "termInterrupt", "termSlash"}
+    assert senders == {"stopAnswer", "hardStop"}   # the Terminal is the person's shell: it sends no Stop of Kelvin's
     assert "if (!chatId || S.stopping.has(chatId)) return;" in js_function("stopAnswer")
 
 
@@ -447,22 +439,6 @@ def test_a_start_refused_after_its_card_says_why_when_fetched(tmp_path, soon):
         done = client.get("/api/later/%s" % job, headers=headers).json()
         assert done["status"] == 400 and "did not start" in done["body"]["error"]
     assert rt.queue.state != "running"
-
-
-def test_a_terminal_command_waiting_for_its_approval_is_answered_at_once(tmp_path, soon):
-    """The terminal's /set that drives the sample harder asks y/n through the state: its request waited meanwhile."""
-    rt = real(tmp_path)
-    client, headers, _ = portal(tmp_path, rt)
-    with client:
-        r = client.post("/api/terminal", json={"instrument": "smu", "op": "set", "arg": "V", "value": 0.5},
-                        headers=headers)
-        assert r.status_code == 202
-        card = rt.approver.wait_for_pending(5)
-        assert card and rt.approver.answer(card["id"], True)
-        assert wait_until(lambda: client.get("/api/later/%s" % r.json()["later"], headers=headers).json()["done"])
-        done = client.get("/api/later/%s" % r.json()["later"], headers=headers).json()
-        assert done["status"] == 200 and done["body"]["ok"] and "approved" in done["body"]["message"]
-    assert rt.lab.read("smu", "V") == 0.5
 
 
 def test_the_page_waits_for_a_later_answer_without_holding_a_request():

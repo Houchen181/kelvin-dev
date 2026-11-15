@@ -181,7 +181,6 @@ def test_a_run_with_no_total_counts_its_points():
     assert '(m.planned_points ? " of " + m.planned_points : "")' in view   # "Stopped after 21 points", not "of 21"
     card = _js("runCard")
     assert 'count.textContent = ev.total ? ev.done + " / " + ev.total : ev.done + " points";' in card
-    assert '(ev.total ? " / " + ev.total : "") + " points"' in _js("termEvent")
     css = (STATIC / "app.css").read_text(encoding="utf-8")
     assert ".bar.open i { animation: pulse" in css and ".chat-dot, .bar.open i { animation: none !important; }" in css
 
