@@ -5,6 +5,7 @@ wall (PEP 578), but closed as tightly as is practical, with run_python's own ref
 _overlapped, O_TEMPORARY, gc...), state of their own that no module name switches off, and on Windows the operating
 system's own protection besides: a run auto mode approved runs at low integrity, so Windows itself refuses its writes
 outside its two folders, C code's too. P-numbers are the review's probes (test_zz_rv_*)."""
+import json
 import os
 import socket
 import subprocess
@@ -374,3 +375,170 @@ def test_p14_ordinary_traffic_in_a_persons_run_is_left_alone(lab, folder, tmp_pa
     results = json.loads(line[len("RESULTS "):])
     assert all(v == "ok" for v in results.values()), results
     assert len(gate.approver.requests) == 1
+
+
+# ------------------------------------------------------------------ a final review of 1a7c2fc (2026-11-15)
+
+def _unc(path):
+    path = str(path)
+    return "\\\\localhost\\" + path[0] + "$" + path[2:]
+
+
+@pytest.mark.skipif(not WINDOWS, reason="Windows' low integrity")
+def test_fr1_low_integrity_isnt_used_where_windows_would_refuse_every_write(monkeypatch, tmp_path):
+    """Over SMB Windows refuses a low-integrity process every write, its labelled folder's too; FAT takes no label."""
+    from labharness import sandbox
+    assert sandbox.low_problem(tmp_path) is None   # a local NTFS drive
+    assert sandbox.low_problem(_unc(tmp_path)).endswith("is on a network share")
+    assert sandbox.low_problem(r"\\?\UNC\server\lab\scripts").endswith("is on a network share")
+    assert sandbox.low_problem("\\\\?\\" + str(tmp_path)) is None
+    real = os.path.realpath   # a local folder that is a link to a share is on the share
+    monkeypatch.setattr(sandbox.os.path, "realpath",
+                        lambda p: r"\\server\lab\scripts" if p == r"C:\lab\link" else real(p))
+    assert sandbox.low_problem(r"C:\lab\link") == r"C:\lab\link is on a network share"
+    monkeypatch.setattr(sandbox.os.path, "realpath", real)
+    monkeypatch.setattr(sandbox, "_volume", lambda folder: (sandbox.DRIVE_REMOTE, 0x8))   # a mapped drive
+    assert sandbox.low_problem(r"Z:\lab\scripts") == r"Z:\lab\scripts is on a network drive"
+    monkeypatch.setattr(sandbox, "_volume", lambda folder: (2, 0x2))   # a USB stick, FAT: no access lists
+    assert sandbox.low_problem(r"E:\scripts") == r"E:\scripts is on a drive that keeps no access lists (FAT, exFAT)"
+
+
+@pytest.mark.skipif(not WINDOWS, reason="Windows' low integrity")
+def test_fr1_an_auto_run_whose_scripts_folder_is_on_a_share_runs_and_says_why_not_low(lab, folder, tmp_path):
+    """A final review of 1a7c2fc: with the scripts folder on a share, the run lowered itself, and its first write
+    there failed with a bare PermissionError. It runs fenced, not lowered, and its record says why."""
+    share = _unc(folder)
+    if not os.path.isdir(share):
+        pytest.skip("this computer has no administrative share at %s" % share)
+    rt = kelvin(lab, folder, tmp_path, answers=[])
+    rt.scripts_folders = lambda: [share]
+    rt.gate.auto = True
+    code = SWEEP + ("import os\nhere = os.path.dirname(os.path.abspath(__file__))\n"
+                    "open(os.path.join(here, 'results.csv'), 'w').write('v,i')\nprint('WROTE OK')\n")
+    assert rt.save_script("share_probe", code).startswith("saved")
+    said = rt.run_script("kelvin_scripts/share_probe.py")
+    assert "script share_probe.py done" in ran(said) and "WROTE OK" in said, said
+    assert "low integrity can't be used here" in said and "is on a network share" in said, said
+    assert (folder / "kelvin_scripts" / "results.csv").read_text() == "v,i"
+
+
+@pytest.mark.skipif(WINDOWS, reason="links to a serial port: Linux")
+@pytest.mark.parametrize("inline", [False, True])
+def test_fr2_a_port_by_its_link_is_asked_once(lab, folder, tmp_path, inline):
+    """A final review of 1a7c2fc: a port outside the lab, opened by a link to it (as /dev/serial/by-id/... is), was
+    read as an address the script works out as it runs, then asked about mid-run as the link, and again as the device
+    file pyserial opens through it. The card names it, and the yes to the run covers the port by either name."""
+    link = tmp_path / "by-id" / "usb-FTDI_FT232R_A1B2-if00-port0"
+    link.parent.mkdir()
+    os.symlink("/dev/ttyS1", str(link))
+    port = repr(str(link)) if inline else "PORT"
+    script = write(folder, "laser_port.py", "import os, serial\n" + ("" if inline else "PORT = %r\n" % str(link)) + (
+        "try:\n    s = serial.Serial(%s, 9600)\nexcept RuntimeError as e:\n    print('FAKE', e)\n"
+        "try:\n    fd = os.open(%s, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)   # what pyserial's open does\n"
+        "    os.close(fd)\n    print('OPENED')\nexcept OSError as e:\n    print('OPEN', type(e).__name__, e)\n"
+        "print('DONE')\n") % (port, port))
+    gate, request, report = run(lab, folder, tmp_path, script, answers=(True, True, True))
+    asked = [r.title for r in gate.approver.requests]
+    assert "It also opens serial://%s, which is not in this lab" % link in str(request), str(request)
+    assert asked == ["Run script laser_port.py?"] and "DONE" in output(report), (asked, output(report)[-800:])
+    assert "past Kelvin's stand-in" not in output(report)
+    # a by-path link's name has colons in it
+    by_path = tmp_path / "by-path" / "pci-0000:00:14.0-usb-0:2:1.0-port0"
+    by_path.parent.mkdir()
+    os.symlink("/dev/ttyS1", str(by_path))
+    assert scriptrun._real_port("serial://%s" % by_path) == scriptrun._real_port(str(link)) == \
+        os.path.realpath("/dev/ttyS1")
+
+
+@pytest.mark.skipif(WINDOWS, reason="links to a serial port: Linux")
+def test_fr2_a_lab_instruments_port_by_its_link_is_the_lab_instrument(folder, tmp_path):
+    """And a lab instrument opened by a link to its port is the lab instrument, on the card and as it opens: through
+    its stand-in, not taken for a port outside the lab, then refused as the lab's own device."""
+    link = tmp_path / "by-id" / "usb-Cobolt-if00-port0"
+    link.parent.mkdir()
+    os.symlink("/dev/ttyUSB7", str(link))
+    cfg = load_lab_config(LAB.replace("serial://COM7", "serial:///dev/ttyUSB7"), builtin_registry())
+    clock = SimClock()
+    world = World(clock, 0)
+    lab = Lab(cfg, builtin_registry(), sim_backend_factory(world), clock, world)
+    assert scriptrun.lab_name(lab, str(link)) == "laser" and scriptrun.lab_name(lab, "/dev/ttyUSB7") == "laser"
+    script = write(folder, "by_link.py", "import serial\ns = serial.Serial(%r, 9600)\nprint('OPENED', s.is_open)\n"
+                   % str(link))
+    gate, request, report = run(lab, folder, tmp_path, script, answers=(True,))
+    assert "It opens laser (serial://%s)" % link in str(request), str(request)   # the lab's own, through Kelvin
+    assert len(gate.approver.requests) == 1 and "OPENED True" in output(report), output(report)[-800:]
+
+
+MIX = '''
+import asyncio, json, os, subprocess, sys, threading, multiprocessing as mp
+import numpy as np
+here = os.path.dirname(os.path.abspath(__file__))
+def sq(x):
+    return x * x
+async def echo():
+    async def handle(r, w):
+        w.write(await r.readline()); await w.drain(); w.close()
+    srv = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = srv.sockets[0].getsockname()[1]
+    r, w = await asyncio.open_connection("127.0.0.1", port)
+    w.write(b"hi\\n"); await w.drain()
+    got = await r.readline(); w.close(); srv.close()
+    return got
+if __name__ == "__main__":
+    res = {}
+    res["asyncio"] = asyncio.run(echo()).decode().strip()
+    out = []
+    t = threading.Thread(target=lambda: out.append(np.arange(5).sum())); t.start(); t.join()
+    res["thread"] = int(out[0])
+    res["sub"] = subprocess.run([sys.executable, "-c", "print(6*7)"], capture_output=True, text=True).stdout.strip()
+    np.savetxt(os.path.join(here, "data_beside.csv"), np.arange(6).reshape(2, 3), delimiter=",")
+    res["file"] = os.path.exists(os.path.join(here, "data_beside.csv"))
+    try:
+        import h5py
+        with h5py.File(os.path.join(here, "d.h5"), "w") as f:
+            f["x"] = np.arange(3)
+        res["h5py"] = True
+    except ImportError:
+        res["h5py"] = "none"
+    for how in (["spawn", "fork"] if sys.platform != "win32" else ["spawn"]):
+        with mp.get_context(how).Pool(2) as pool:
+            res["pool-" + how] = pool.map(sq, range(4))
+    print("RES " + json.dumps(res))
+'''
+
+
+def test_fr_ordinary_work_in_a_persons_run_asks_once(lab, folder, tmp_path):
+    """The final review's check that a run a person approved still does what scripts do (asyncio, threads, a
+    subprocess, numpy's and h5py's writes beside it, a Pool spawned or forked), asked once, on its card."""
+    pytest.importorskip("numpy")
+    script = folder / "mix.py"
+    script.write_text(MIX.lstrip(), encoding="utf-8")
+    gate, request, report = run(lab, folder, tmp_path, script, answers=(True,))
+    out = output(report)
+    line = next((x for x in out.splitlines() if x.startswith("RES ")), None)
+    assert line is not None and len(gate.approver.requests) == 1, out[-1500:]
+    res = json.loads(line[len("RES "):])
+    assert res["asyncio"] == "hi" and res["thread"] == 10 and res["sub"] == "42" and res["file"], res
+    assert all(res["pool-" + how] == [0, 1, 4, 9] for how in (["spawn", "fork"] if not WINDOWS else ["spawn"])), res
+
+
+@pytest.mark.skipif(not WINDOWS, reason="Windows' low integrity")
+def test_fr4_the_scripts_folder_keeps_its_low_label(lab, folder, tmp_path):
+    """As safety.md says: after an auto run the kelvin_scripts folder keeps its low label (the folder above it doesn't
+    get one), so a file a person puts there later has it too, and any low-integrity process may change it; Kelvin's
+    check of its own scripts against what it saved still catches one of them that changed."""
+    rt = kelvin(lab, folder, tmp_path, answers=[False])
+    rt.gate.auto = True
+    assert rt.save_script("label_probe", SWEEP + "print('OK')\n").startswith("saved")
+    said = rt.run_script("kelvin_scripts/label_probe.py")
+    assert "script label_probe.py done" in ran(said), said
+
+    def low(path):
+        return "Low Mandatory" in subprocess.run(["icacls", str(path)], capture_output=True, text=True).stdout
+    assert low(folder / "kelvin_scripts") and not low(folder)
+    (folder / "kelvin_scripts" / "notes_by_person.txt").write_text("x")
+    assert low(folder / "kelvin_scripts" / "notes_by_person.txt")
+    (folder / "kelvin_scripts" / "label_probe.py").write_text(SWEEP + "print('OK')\n# changed\n")
+    said = rt.run_script("kelvin_scripts/label_probe.py")
+    assert said.startswith("declined: script label_probe.py not run"), said
+    assert "label_probe.py changed after Kelvin saved it" in cards(rt)[-1].items[-1]

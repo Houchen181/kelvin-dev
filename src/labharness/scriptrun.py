@@ -1294,7 +1294,30 @@ def lab_name(lab: Any, address: str) -> Optional[str]:
             h = _lan(canonical(ic.address))
             if h is not None and h[1] == w[1] and _same_host(h[0], w[0]):
                 return name
+    real = _real_port(address)   # a serial port by a link to it (Linux: /dev/serial/by-id/...), as this computer has it
+    if real is not None:
+        for name, ic in lab.config.instruments.items():
+            if _real_port(str(ic.address or "")) == real:
+                return name
     return None
+
+
+def _real_port(address: str) -> Optional[str]:
+    """A serial port's device file as this computer resolves it, through any link (/dev/serial/by-id/...,
+    /dev/serial/by-path/...:1.0-port0, a link of the lab's own, /proc/self/root/dev/...): for an address that names one
+    by its path (/dev/ttyUSB0, serial:///dev/ttyUSB0, ASRL/dev/ttyUSB0::INSTR) outside Windows; None for any other, and
+    for a path that leads anywhere but /dev (a final review of 2026-11-15: a lab instrument opened by its by-id link was
+    taken for a port outside the lab, then refused as its own device)."""
+    if os.name == "nt":
+        return None
+    m = re.match(r"^(?:serial://|ASRL)?(/.*?)(?:::INSTR)?$", str(address or "").strip(), re.I)
+    if m is None:
+        return None
+    try:
+        real = os.path.realpath(m.group(1))
+    except (OSError, ValueError):
+        return None
+    return real if real.startswith("/dev/") else None
 
 
 def _lan(address: str) -> Optional[Tuple[str, str]]:
@@ -1313,22 +1336,8 @@ def _plain_host(address: str) -> bool:
 
 def _lab_device(lab: Any, path: str) -> Optional[str]:
     """The lab instrument whose serial port a device file is: COM7 however Windows spells it (canonical); elsewhere
-    through any link to it as this computer resolves both (/dev/serial/by-id/..., /proc/self/root/dev/...)."""
-    name = lab_name(lab, path)
-    if name is not None or os.name == "nt":
-        return name
-    try:
-        real = os.path.realpath(path)
-    except (OSError, ValueError):
-        return None
-    for other, ic in lab.config.instruments.items():
-        m = re.match(r"^(?:serial://|ASRL)(/dev/[^:]+?)(?:::INSTR)?$", str(ic.address or "").strip(), re.I)
-        try:
-            if m and os.path.realpath(m.group(1)) == real:
-                return other
-        except (OSError, ValueError):
-            continue
-    return None
+    through any link to it as this computer resolves both (/dev/serial/by-id/..., /proc/self/root/dev/...: lab_name)."""
+    return lab_name(lab, path)
 
 
 _HOSTS: Dict[str, frozenset] = {}
@@ -2511,6 +2520,8 @@ class ScriptRun:
         # unknown addresses a person allowed, as VISA resources however they are spelled (the approval's serial://COM5
         # is the script's COM5 or ASRL5::INSTR), and makers' libraries, by name
         self.allowed = {a if a in OPAQUE else canonical(a) for a in allowed}
+        # and the serial ports among them as this computer resolves them (a link and its port are one port)
+        self.allowed_ports = {r for r in (_real_port(a) for a in allowed) if r}
         self.busy = busy or (lambda text: None)
         self.progress = progress   # told of the run as it goes, as RunEngine.progress is: the live views follow it
         self.token = secrets.token_hex(16)
@@ -2590,12 +2601,21 @@ class ScriptRun:
         integrity, as run_python's scratch folder is, so the process, which lowers itself there before its fence goes
         up, may write in them and Windows itself refuses its writes anywhere else, h5py's or SQLite's own C code's too
         (a review of 2026-11-15). The kelvin_ folder keeps its label. Not done (another system, or the call failed): said
-        in the run's record, and the fence alone guards what it writes."""
+        in the run's record, and the fence alone guards what it writes. Nor on a network share or a drive with no
+        access lists (sandbox.low_problem): over SMB Windows refuses every low-integrity write, the labelled folder's
+        too, and FAT takes no label, so the run would fail at its first write (a final review of 2026-11-15)."""
         self.low = False
         if self.prep.fenced != "auto" or self.rehearsal or os.name != "nt":
             return
-        from .sandbox import _label_low
+        from .sandbox import _label_low, low_problem
         own = self.prep.own
+        folders = [run_dir] + ([own.folder] if own is not None and own.folder else [])
+        where = [w for w in (low_problem(f) for f in folders) if w]
+        if where:
+            self.told.append("low integrity can't be used here (%s: on a network share, or a FAT drive, Windows "
+                             "refuses a low-integrity process's writes there): the fence alone guards what it writes"
+                             % "; ".join(where))
+            return
         whys = [w for w in (_label_low(run_dir), _label_low(own.folder) if own is not None and own.folder else
                             "no folder of Kelvin's") if w]
         if whys:
@@ -3271,8 +3291,9 @@ class ScriptRun:
             raise _Refuse("refused: a rehearsal reaches only the simulated lab, not %s" % address)
         if same_device(self.lab, address) or behind(self.lab, address):   # another way into a lab instrument:
             raise _Refuse("refused: %s opens %s" % (self.prep.name, outside(self.lab, address)))   # never asked
-        if canonical(address) in self.allowed:
-            return {}   # a person allowed it
+        real = _real_port(address)
+        if canonical(address) in self.allowed or (real is not None and real in self.allowed_ports):
+            return {}   # a person allowed it (a port by its link, the link by its port: one port, asked once)
         if self.auto:
             raise _Refuse(FENCE_REFUSED % ("opening %s, outside the lab" % address))
         if kind == "socket" and _plain_host(address):
@@ -3283,6 +3304,8 @@ class ScriptRun:
             raise _Refuse("declined: %s may not open %s%s" % (self.prep.name, address,
                                                                " (%s)" % request.note if request.note else ""))
         self.allowed.add(canonical(address))
+        if real is not None:
+            self.allowed_ports.add(real)
         self.passed.append(address)
         return {}
 

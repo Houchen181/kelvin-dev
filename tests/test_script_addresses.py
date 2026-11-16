@@ -88,7 +88,7 @@ def opener(lab, answers, auto=False):
         asked.append(request)
         return answers.pop(0)
     return types.SimpleNamespace(lab=lab, rehearsal=False, allowed=set(), prep=types.SimpleNamespace(name="sweep.py"),
-                                 opened={}, passed=[], _ask=ask, auto=auto), asked
+                                 opened={}, passed=[], _ask=ask, auto=auto, allowed_ports=set()), asked
 
 
 @pytest.mark.parametrize("answers", [[True], [False]])

@@ -581,6 +581,10 @@ class _Python(ast.NodeVisitor):
     def _new(self, target: Optional[ast.AST], library: str, node: ast.AST) -> Instrument:
         text, ok = self.values.text(target)
         addr = normalize(text) if ok and is_address(text) else ""
+        if not addr and ok and library == "pyserial" and re.match(r"^\s*/\S+\s*$", text or ""):
+            # pyserial's port by its path, whatever it is called: /dev/serial/by-id/..., /dev/cu.usbserial-..., a
+            # link of the lab's own (a final review of 2026-11-15: a by-id port was read as worked out as it runs)
+            addr = "serial://" + text.strip()
         inst = self._made(addr, "" if addr else (_unparse(target) if target is not None else "?"), library, node)
         if target is not None and _key(target) in self.addr_hints:
             inst.hints += self.addr_hints[_key(target)]
