@@ -344,7 +344,7 @@ class SafetyGate:
         self.auto = False  # auto mode: set by a person through the portal, never by the agent
         # text from outside the lab the model has read (a web page, a manual, a board's output): it could try to
         # steer the model, so auto mode asks a person instead. outside_chat: the portal's chat has read some.
-        self.outside: Optional[Tuple[float, str]] = None
+        self.outside: Optional[Tuple[float, str, bool]] = None   # (when, what, whether from the web)
         self.outside_chat: Optional[str] = None
         self.in_chat = False   # a portal chat's turn: the chat's own account of web text counts, not the clock's
         self._grants: Dict[str, Allowed] = {}
@@ -701,10 +701,11 @@ class SafetyGate:
         return False, "%s goes %.0f%% of the way from safe to %s (auto mode covers %.0f%%)" % (
             key, 100 * worst, whose, 100 * fraction)
 
-    def note_outside(self, source: str) -> None:
-        """The model has read text from the web: until it has been a while, auto mode asks a person (a portal chat
-        keeps its own account instead, in_chat and outside_chat)."""
-        self.outside = (time.monotonic(), source)
+    def note_outside(self, source: str, web: bool = True) -> None:
+        """The model has read text from the web (web), or from the lab's own files or a script's printed output:
+        until it has been a while, auto mode asks a person (a portal chat keeps its own account instead, in_chat and
+        outside_chat)."""
+        self.outside = (time.monotonic(), source, web)
 
     def outside_reason(self, chat: Optional[str] = None) -> Optional[str]:
         """Why auto mode asks a person now, because the model read text from outside the lab (the web; in a portal
@@ -717,8 +718,9 @@ class SafetyGate:
                     "to steer a model, so a person approves" % read)
         if chat is None and not self.in_chat and self.outside is not None and \
                 time.monotonic() - self.outside[0] < OUTSIDE_S:
-            return ("Kelvin read text from the web (%s) in the last %d minutes, which could try to steer a model, "
-                    "so a person approves" % (self.outside[1], OUTSIDE_S // 60))
+            return ("Kelvin read text from %s (%s) in the last %d minutes, which could try to steer a model, so a "
+                    "person approves" % ("the web" if self.outside[2:3] != (False,) else "outside the lab",
+                                         self.outside[1], OUTSIDE_S // 60))
         return None
 
     def _draft(self, inst: Instrument) -> bool:

@@ -87,12 +87,14 @@ This project's rules: {rules}. Keep its details inside this conversation: never 
 services."""
 WEB_TOOLS = {"search_papers", "read_paper", "web_search", "read_web_page", "save_manual",   # reach the internet
              "install_for_instrument"}
-# tools whose results carry text from outside the lab (the open web, the chat's files, the lab's scripts): once a chat
-# has read some, auto mode asks a person there until the person writes again (manuals, makers' files and
-# instruments' replies are marked for the model, nothing more)
+# tools whose results carry text from outside the lab (the open web, the chat's files, the lab's scripts, what a
+# script printed): once a chat has read some, auto mode asks a person there until the person writes again (manuals,
+# makers' files and instruments' replies are marked for the model, nothing more); over MCP the same tools make it ask
+# for a while (server.STEERING). Kelvin's own reading of a script (check_script) isn't among them: its last line says
+# whether the next run is auto mode's, which it would make wrong (a review of 2026-11-15)
 OUTSIDE_TOOLS = {"read_web_page": "a web page", "web_search": "web search results", "search_papers": "paper search "
                  "results", "read_paper": "a paper", "read_file": "a file in the chat's folder",
-                 "survey_scripts": "the lab's scripts", "check_script": "the lab's scripts",
+                 "survey_scripts": "the lab's scripts",
                  "survey_labview": "the lab's LabVIEW files", "run_script": "a lab script's output",
                  "survey_specialmeasure": "the lab's Special Measure files",
                  "team_chat": "the team chat"}
@@ -608,7 +610,8 @@ WRITE_FILE = {
                    "tables and pictures (kelvin_reports/report.md), and scripts of your own with their settings (.py, "
                    ".ipynb, .json, .yaml, .toml, .ini, .cfg in kelvin_scripts/, which run_script runs; save_script "
                    "saves one there from any chat); never in the person's own folders or a new folder of another "
-                   "name, nor a file named as a module a script means (kelvin.py, pyvisa.py). Python code in a "
+                   "name, nor a file named as a module a script means (kelvin.py, pyvisa.py) or as a test a test "
+                   "runner collects (test_*.py, *_test.py, conftest.py). Python code in a "
                    "folder an instrument's maker's library loads from (the folder in the instrument's lib:// address) "
                    "shows in the chat whole, since it runs on the instrument when it connects.",
     "schema": {"type": "object", "required": ["path", "content"], "properties": {

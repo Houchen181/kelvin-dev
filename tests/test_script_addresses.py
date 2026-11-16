@@ -105,11 +105,14 @@ def test_a_socket_to_no_lab_instrument_needs_no_one(lab):
     assert scriptrun.ScriptRun._open(me, "TCPIP0::10.0.0.9::4002::SOCKET", "socket") == {} and asked == []
 
 
-def test_in_a_run_auto_mode_approved_a_socket_to_no_lab_instrument_asks(lab):
-    """Nobody's yes covers it: auto mode covers only what the gate checks (2026-11-15)."""
-    me, asked = opener(lab, [True], auto=True)
-    assert scriptrun.ScriptRun._open(me, "TCPIP0::10.0.0.77::5025::SOCKET", "socket") == {}
-    assert asked[0].items[-1] == scriptrun.AUTO_ASKS and me.passed == ["TCPIP0::10.0.0.77::5025::SOCKET"]
+def test_in_a_run_auto_mode_approved_an_address_outside_the_lab_ends_the_run(lab):
+    """Nobody's yes covers it: auto mode covers only what the gate checks, so the run ends there, as at its fence
+    (2026-11-15), and nobody is asked mid-run."""
+    me, asked = opener(lab, [], auto=True)
+    for address, kind in (("TCPIP0::10.0.0.77::5025::SOCKET", "socket"), ("COM11", "serial")):
+        with pytest.raises(scriptrun._Refuse, match="auto mode's fence refused opening %s, outside the lab" % address):
+            scriptrun.ScriptRun._open(me, address, kind)
+    assert asked == [] and me.passed == []
 
 
 def test_a_lab_instrument_spelled_another_way_goes_through_kelvin(lab):

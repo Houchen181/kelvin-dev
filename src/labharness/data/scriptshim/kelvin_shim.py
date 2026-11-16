@@ -26,6 +26,13 @@ A command the gate refuses ends the script with KelvinRefused; a person's stop w
 script's own `finally:` runs. Its commands go through Kelvin too, and Kelvin brings what the script drove back to safe
 after it. Without Kelvin (the connection lost) the script stops as well: it never runs on unwatched.
 
+What goes around the stand-ins is watched in the script's own process (audit hooks, PEP 578). In a run a person
+approved (_guard): a socket's own connection or datagram (_socket, sendto) and a device file opened as a file are put
+to Kelvin first, and a lab instrument's is refused, as pyvisa's open_bare_resource and visalib.open of one are. A
+rehearsal, a kept experiment's real run and a run auto mode approved are fenced (_fence: no programs, native code, COM,
+registry changes, USB, network or device files; writing only in the run's folder, and for auto mode its kelvin_
+folder); what the fence refuses in a run auto mode approved ends the run (KELVIN_FENCE=auto).
+
 KELVIN_IPC (host:port) and KELVIN_IPC_TOKEN say where Kelvin listens. A Python the script starts loads this file too,
 through sitecustomize.py next to it on PYTHONPATH. Standard library only, Python 3.6 or later.
 """
@@ -50,6 +57,7 @@ _REAL = {name: getattr(socket.socket, name) for name in
 _REAL_CREATE_CONNECTION = socket.create_connection
 _REAL_SLEEP = time.sleep
 _LINK = None
+_FENCED = False   # a fenced run (a rehearsal, a kept experiment, a run auto mode approved): no VISA library is loaded
 CONNECT_S = 30   # how long the stand-in waits to reach Kelvin as the script starts
 
 
@@ -212,6 +220,11 @@ class _Link(object):
     def lookup(self, address):
         """A lab instrument's name for this address, or None; nothing is opened and nobody is asked."""
         return self.request("lookup", address=address).get("instrument")
+
+    def past(self, address, how):
+        """A way to an address past the stand-ins (how: socket.connect, socket.sendto, socket.sendmsg, device, visa):
+        Kelvin says, KelvinRefused when it may not (a lab instrument's, which also ends the run)."""
+        return self.request("past", address=address, how=how)
 
     def library(self, module):
         """May the script import this maker's library? Kelvin says once: yes with the run, unless it stops."""
@@ -452,6 +465,7 @@ def _patch_pyvisa(module):
     real_open = rm_class.open_resource
     real_new = rm_class.__new__
     real_info = getattr(rm_class, "resource_info", None)
+    real_bare = getattr(rm_class, "open_bare_resource", None)
 
     def open_resource(self, resource_name, *args, **kwargs):
         name = _LINK.open(str(resource_name), "visa")
@@ -459,23 +473,55 @@ def _patch_pyvisa(module):
             return real_open(self, resource_name, *args, **kwargs)
         return _Resource(_LINK, name, str(resource_name), kwargs)
 
+    def open_bare_resource(self, resource_name, *args, **kwargs):
+        """A bare VISA session (the session number only): a lab instrument's would be one past the stand-in, so Kelvin
+        refuses it (and ends the run); any other address as open_resource's (a person allowed it)."""
+        _LINK.past(str(resource_name), "visa")
+        return real_bare(self, resource_name, *args, **kwargs)
+
     def resource_info(self, resource_name, extended=True):   # PyMeasure asks it before it opens
         if real_info is not None and _LINK.lookup(str(resource_name)) is None:
             return real_info(self, resource_name, extended)
         return _resource_info(str(resource_name))
 
     def __new__(cls, *args, **kwargs):
+        if _FENCED:   # its VISA library (a DLL, through ctypes) is past the fence: the lab's instruments open all the same
+            return _Manager("a fenced run reaches instruments only through Kelvin's stand-in, never the VISA library")
         try:
-            return real_new(cls) if real_new is object.__new__ else real_new(cls, *args, **kwargs)
+            rm = real_new(cls) if real_new is object.__new__ else real_new(cls, *args, **kwargs)
         except Exception as e:
             return _Manager("%s: %s" % (type(e).__name__, e))
+        _guard_visalib(rm)
+        return rm
 
     open_resource.kelvin = True
     rm_class.open_resource = open_resource
     if getattr(rm_class, "get_instrument", None) is not None:   # an older pyvisa's alias, bound to the original
         rm_class.get_instrument = open_resource
+    if real_bare is not None:
+        open_bare_resource.kelvin = True
+        rm_class.open_bare_resource = open_bare_resource
     rm_class.resource_info = resource_info
     rm_class.__new__ = staticmethod(__new__)
+
+
+def _guard_visalib(rm):
+    """The VISA library's own open (rm.visalib.open), below open_resource: a session it opens at a lab instrument's
+    address goes past the stand-in (a review of 2026-11-15: rm.visalib.write on one), so Kelvin is asked first, as for
+    open_bare_resource; the library is shared by every manager, so it is put in place once."""
+    lib = getattr(rm, "visalib", None)
+    real = getattr(lib, "open", None)
+    if real is None or getattr(real, "kelvin", False):
+        return
+
+    def open(session, resource_name, *args, **kwargs):
+        _LINK.past(str(resource_name), "visa")
+        return real(session, resource_name, *args, **kwargs)
+    open.kelvin = True
+    try:
+        lib.open = open
+    except Exception:   # a library that takes no attributes: its open_bare_resource still asks
+        pass
 
 
 # ------------------------------------------------------------------ a line at a time (pyserial, sockets)
@@ -767,9 +813,17 @@ def install():
     global _LINK
     if _LINK is not None:
         return _LINK
+    global _FENCED
     address = os.environ.get("KELVIN_IPC")
     if not address:
         raise RuntimeError("KELVIN_IPC is not set: Kelvin starts this, to run one of the lab's scripts")
+    fence = os.environ.get("KELVIN_FENCE")
+    run_dir = os.environ.get("KELVIN_RUN_DIR") or os.getcwd()
+    _FENCED = bool(fence or os.environ.get("KELVIN_REHEARSAL"))
+    try:   # the run's record as Kelvin made it, before anything the script loads writes there
+        record = os.listdir(run_dir)
+    except OSError:
+        record = []
     _LINK = _Link(address, os.environ.get("KELVIN_IPC_TOKEN", ""))
     for name, patch in _PATCHES.items():
         try:
@@ -787,9 +841,14 @@ def install():
     time.sleep = _LINK.sleep
     if os.environ.get("KELVIN_REHEARSAL"):
         _rehearsing()
-    elif os.environ.get("KELVIN_FENCE"):   # one of the lab's kept experiments, in its real run: kelvin.lab only
-        _fence(os.environ.get("KELVIN_RUN_DIR") or os.getcwd(),
-               "one of the lab's experiments reaches the lab only through kelvin.lab")
+    elif fence == "auto":   # a run auto mode approved, which nobody looked at: the lab through Kelvin only
+        _preload(os.environ.get("KELVIN_PRELOAD", ""))
+        _fence(run_dir, AUTO_WORDS, auto=True, record=record,
+               writable=[w for w in os.environ.get("KELVIN_FENCE_WRITES", "").split(os.pathsep) if w])
+    elif fence:   # one of the lab's kept experiments, in its real run: kelvin.lab only
+        _fence(run_dir, "one of the lab's experiments reaches the lab only through kelvin.lab", record=record)
+    else:         # a run a person approved: a lab instrument only through the stand-ins (a raw socket, a device file)
+        _guard()
     _install_api()
     return _LINK
 
@@ -832,29 +891,78 @@ def _rehearsing():
     _fence(os.environ.get("KELVIN_RUN_DIR") or os.getcwd())
 
 
-# what a rehearsal's process refuses: nobody approved it, so it reaches the simulated lab through Kelvin and nothing
-# else (labharness/scriptrun.py says the same of the script's text before it runs: PAST_THE_LAB)
+# what a fence refuses (a rehearsal's: nobody approved it, so it reaches the simulated lab through Kelvin and nothing
+# else; a kept experiment's real run; a run auto mode approved, which reaches the lab only through Kelvin's stand-ins):
+# labharness/scriptrun.py says the same of the script's text before it runs (PAST_THE_LAB)
 _FENCED_IMPORTS = ("cffi", "_cffi_backend", "win32com", "win32api", "win32process", "win32file", "win32event",
                    "win32service", "pythoncom", "pywintypes", "comtypes", "clr", "pythonnet", "usb", "libusb_package",
                    "libusb1", "hid", "ftd2xx", "pyftdi", "pylibftdi")
 _FENCED_EVENTS = ("subprocess.", "_posixsubprocess.", "_winapi.CreateProcess", "os.system", "os.exec", "os.spawn",
-                  "os.posix_spawn", "os.fork", "os.forkpty", "os.startfile", "os.kill", "os.killpg", "os.chdir",
-                  "os.fchdir", "os.add_dll_directory", "ctypes.", "winreg.", "pty.", "webbrowser.", "socket.connect",
-                  "socket.bind", "socket.sendto", "socket.sendmsg")
-# events that change the file system, and the positions of their paths (each must be in the rehearsal's folder)
+                  "os.posix_spawn", "os.fork", "os.forkpty", "os.startfile", "os.kill", "os.killpg", "os.fchdir",
+                  "ctypes.", "winreg.", "pty.", "webbrowser.", "socket.connect", "socket.bind", "socket.sendto",
+                  "socket.sendmsg")
+# the registry read (fonts, time zones, a file's type: matplotlib and the standard library look there as they load),
+# which changes nothing; every other registry event is refused
+_REGISTRY_READS = ("winreg.OpenKey", "winreg.OpenKey/result", "winreg.EnumKey", "winreg.EnumValue",
+                   "winreg.QueryInfoKey", "winreg.QueryValue", "winreg.QueryReflectionKey",
+                   "winreg.ExpandEnvironmentStrings", "winreg.PyHKEY.Detach")
+# events that change the file system, and the positions of their paths (each must be in a folder the fence lets it write)
 _FENCED_WRITES = {"os.remove": (0,), "os.rmdir": (0,), "os.mkdir": (0,), "os.rename": (0, 1), "os.link": (0, 1),
                   "os.symlink": (0, 1), "os.chmod": (0,), "os.chown": (0,), "os.utime": (0,), "os.truncate": (0,),
                   "shutil.rmtree": (0,), "shutil.copyfile": (1,), "shutil.copytree": (1,), "shutil.move": (0, 1),
                   "tempfile.mkstemp": (0,), "tempfile.mkdtemp": (0,), "sqlite3.connect": (0,)}
+# in the folder of Kelvin's own a run auto mode approved may write in (its kelvin_ folder): never code, nor Kelvin's
+# marks and kept versions, nor bytecode, so what runs next is still what Kelvin wrote and was checked
+_CODE = (".py", ".pyw", ".pyc", ".pyo", ".pyd", ".pth", ".ipynb", ".so", ".dll", ".dylib", ".exe", ".com", ".bat",
+         ".cmd", ".ps1", ".vbs", ".js", ".lnk", ".scr", ".msi")
 _REFUSED = []   # what the fence refused, said to Kelvin as the script ends (also when the script carried on)
+AUTO_WORDS = "auto mode's fence (a run auto mode approved reaches the lab only through Kelvin's stand-ins)"
 
 
-def _fence(folder, words="a rehearsal reaches only the simulated lab"):
-    """A rehearsal's fence, inside the script's process (an audit hook, PEP 578): no programs, native libraries, COM,
-    registry, USB or network (the connection to Kelvin is made already), no device files, and no writing outside the
-    rehearsal's own folder. What the experiment uses (NumPy) is loaded first. Like run_python's sandbox, it keeps
-    honest code and code an AI was talked into away from the instruments; it is not a wall against code written to get
-    around it. Python before 3.8 has no audit hooks, so it can't be rehearsed (Kelvin says so before it starts)."""
+class KelvinFenced(ImportError):
+    """An import a fence refused: as a module that isn't there, so code that does without it goes on (Pillow 8.4's
+    try: import cffi, which matplotlib loads; a PermissionError there broke every plot under the fence)."""
+
+
+def _python_dirs():
+    """The script's Python's own folders (its installation, its environment, its site-packages): a DLL folder a
+    package adds as it loads (delvewheel's os.add_dll_directory: SciPy, pyzmq) is one of its own there."""
+    import site
+    dirs = [sys.prefix, sys.base_prefix, sys.exec_prefix, getattr(sys, "base_exec_prefix", "")]
+    try:
+        dirs += list(site.getsitepackages())
+    except Exception:
+        pass
+    try:
+        dirs.append(site.getusersitepackages())
+    except Exception:
+        pass
+    return [d for d in dirs if d]
+
+
+def _preload(names):
+    """What the script imports from its Python's own packages, loaded before the fence goes up (KELVIN_PRELOAD, read
+    ahead by Kelvin): a package's own start (matplotlib's font list, made with fc-list or read from the registry; a
+    DLL found as it loads) is the package's, not the script's, and is never taken for the script reaching past."""
+    for name in [n.strip() for n in (names or "").split(",") if n.strip()]:
+        try:
+            __import__(name)
+        except BaseException:   # the script meets the same error at its own import, in its own words
+            pass
+
+
+def _fence(folder, words="a rehearsal reaches only the simulated lab", writable=(), auto=False, record=None):
+    """A fence inside the script's process (an audit hook, PEP 578): no programs, native libraries, COM, registry
+    changes, USB or network (the connection to Kelvin is made already), no device files, and writing only in the
+    run's own folder (folder: a rehearsal's, a kept experiment's run folder; its record's files there, record: their
+    names as Kelvin made them, else as they are now, stay Kelvin's) and in writable (a run auto mode approved: its
+    kelvin_ folder, but no code there). It may change
+    into those folders; a package of its Python's may add a DLL folder of its own; a refused import fails as a missing
+    module (KelvinFenced). What the experiment uses (NumPy) is loaded first. auto: a run auto mode approved, which
+    nobody looked at: what the fence refuses ends the run (Kelvin is told at once: op fenced), and its drives go back
+    to safe. Like run_python's sandbox, it keeps honest code and code an AI was talked into away from the instruments;
+    it is not a wall against code written to get around it. Python before 3.8 has no audit hooks, so it can't be
+    fenced (Kelvin says so before it starts)."""
     if not hasattr(sys, "addaudithook"):
         raise RuntimeError("Python %s can't keep a rehearsal to the simulated lab: 3.8 or later" % sys.version.split()[0])
     try:
@@ -866,25 +974,62 @@ def _fence(folder, words="a rehearsal reaches only the simulated lab"):
         full, fold, sep = nt._getfullpathname, str.lower, "\\"
     else:
         full, fold, sep = os.path.abspath, str, "/"
-    root = fold(full(folder)).rstrip("\\/")
+
+    def folded(p):
+        p = fold(full(p))
+        if p.startswith("\\\\?\\") and (p[4:6].endswith(":") or p[4:8] == "unc\\"):   # a long path: as any other
+            p = p[4:] if p[5:6] == ":" else "\\\\" + p[8:]
+        return p.rstrip("\\/") if len(p) > 3 else p
+    root = folded(folder)
+    roots = [root] + [folded(w) for w in writable if w]
+    own = roots[1:]
+    try:   # the record's own files, as Kelvin made them before the script started: never written by the script
+        kept = tuple(folded(os.path.join(folder, n)) for n in (os.listdir(folder) if record is None else record))
+    except OSError:
+        kept = ()
+    python = tuple(folded(d) for d in _python_dirs())
     null = fold(full(os.devnull))
     write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC | getattr(os, "O_EXCL", 0)
     imports = _FENCED_IMPORTS + tuple(_LINK.opaque if _LINK is not None else ())
+    telling = threading.local()
+
+    def inside(p, dirs):
+        for d in dirs:
+            if p == d or p.startswith(d + sep):
+                return True
+        return False
 
     def hook(event, args, _sw=str.startswith, _isinstance=isinstance, _str=str, _bytes=bytes, _int=int,
-             _fspath=os.fspath, _full=full, _fold=fold, _sep=sep, _root=root, _null=null, _flags=write_flags,
-             _imports=imports, _events=_FENCED_EVENTS, _writes=_FENCED_WRITES, _refused=_REFUSED,
-             _PE=PermissionError, _len=len, _words=words):
-        def refuse(what):
+             _fspath=os.fspath, _fold=folded, _null=null, _flags=write_flags, _imports=imports,
+             _events=_FENCED_EVENTS, _writes=_FENCED_WRITES, _refused=_REFUSED, _PE=PermissionError, _len=len,
+             _words=words, _inside=inside, _roots=roots, _own=own, _kept=kept, _python=python, _code=_CODE,
+             _reads=_REGISTRY_READS, _auto=auto, _telling=telling, _sep=sep):
+        def refuse(what, imported=""):
             if _len(_refused) < 20:
                 _refused.append(what)
+            if imported:   # as a module that isn't there: the script goes on without it, or fails as it would
+                raise KelvinFenced("%s: %s" % (_words, what), name=imported)
+            if _auto and _LINK is not None and not getattr(_telling, "on", False):
+                _telling.on = True   # Kelvin ends the run at once, its drives back to safe (a stop follows)
+                try:
+                    _LINK.request("fenced", what=what)
+                except KelvinRefused:
+                    pass
+                finally:
+                    _telling.on = False
             raise _PE("%s: %s" % (_words, what))
+
+        def path_of(path):
+            p = _fspath(path)
+            if _isinstance(p, _bytes):
+                p = p.decode("utf-8", "surrogateescape")
+            return _fold(p)
         if event == "import":
             name = args[0] if args else ""
             if _isinstance(name, _str):
                 for d in _imports:
                     if name == d or _sw(name, d + "."):
-                        refuse("import %s" % name)
+                        refuse("import %s" % name, imported=name)
             return
         if event == "open" or event in _writes:
             if event == "open":
@@ -898,22 +1043,154 @@ def _fence(folder, words="a rehearsal reaches only the simulated lab"):
                 if path is None or _isinstance(path, _int):
                     continue   # no file, or one opened already (so already checked)
                 try:
-                    p = _fspath(path)
-                    if _isinstance(p, _bytes):
-                        p = p.decode("utf-8", "surrogateescape")
-                    p = _fold(_full(p))
+                    p = path_of(path)
                 except (OSError, ValueError, TypeError):
-                    refuse("%r is not a path a rehearsal may use" % (path,))
+                    refuse("%r, which is not a path a fenced run may use" % (path,))
                 if p == _null:
                     continue
                 if _sw(p, "\\\\.\\") or _sw(p, "\\\\?\\") or _sw(p, "//./") or _sw(p, "/dev/"):
                     refuse("the device %s" % path)
-                if writing and not (p == _root or _sw(p, _root + _sep)):
+                if not writing:
+                    continue
+                if not _inside(p, _roots):
                     refuse("writing %s, outside its own folder" % path)
+                if _inside(p, _kept):
+                    refuse("writing %s, Kelvin's own record of the run" % path)
+                if _inside(p, _own):
+                    low = p.rsplit(_sep, 1)[-1]
+                    parts = p.split(_sep)
+                    if low.startswith(".kelvin-made") or ".kelvin-old" in parts or "__pycache__" in parts or \
+                            any(low.endswith(c) for c in _code):
+                        refuse("writing %s: code, and Kelvin's own marks, aren't written by a run there" % path)
+            return
+        if event == "os.chdir":   # into the folders it may write in, as a script that saves its data where it is
+            try:
+                p = path_of(args[0]) if args else ""
+            except (OSError, ValueError, TypeError):
+                p = ""
+            if not p or not _inside(p, _roots):
+                refuse("os.chdir to %s, outside its own folder" % (args[0] if args else "?"))
+            return
+        if event == "os.add_dll_directory":   # a package of its Python's adds its own DLL folder (delvewheel)
+            try:
+                p = path_of(args[0]) if args else ""
+            except (OSError, ValueError, TypeError):
+                p = ""
+            if not p or not _inside(p, _python):
+                refuse("os.add_dll_directory of %s, outside its Python" % (args[0] if args else "?"))
+            return
+        if event in _reads:
             return
         for d in _events:
             if _sw(event, d):
                 refuse(event)
+
+    sys.addaudithook(hook)
+    # importlib.import_module raises no "import" event: the same refusal as a finder, first on sys.meta_path; and a
+    # refused module a package loaded before the fence (Pillow's cffi) is no longer handed out by its name
+    for name in list(sys.modules):
+        if any(name == d or name.startswith(d + ".") for d in imports):
+            sys.modules.pop(name, None)
+    sys.meta_path.insert(0, _FencedFinder(imports, words))
+
+
+class _FencedFinder(importlib.abc.MetaPathFinder):
+    """A fenced run's refused imports, however they are asked for (an import statement, importlib.import_module):
+    each fails as a module that isn't there (KelvinFenced)."""
+
+    def __init__(self, names, words):
+        self.names, self.words = tuple(names), words
+
+    def find_spec(self, fullname, path=None, target=None):
+        for d in self.names:
+            if fullname == d or fullname.startswith(d + "."):
+                if len(_REFUSED) < 20:
+                    _REFUSED.append("import %s" % fullname)
+                raise KelvinFenced("%s: import %s" % (self.words, fullname), name=fullname)
+        return None
+
+
+_GUARD = threading.local()   # this thread asks Kelvin of a way past: what its own request does is never asked again
+# a device file Kelvin never asks of: what isn't an instrument (the console, the null device, a terminal, shared memory)
+_PSEUDO = ("null", "zero", "random", "urandom", "full", "stdin", "stdout", "stderr", "tty", "ptmx", "console")
+
+
+def _device(path, writing=False):
+    """A device file this path opens, as the system names it (COM5 is \\\\.\\COM5; /dev/ttyUSB0), or None for a file:
+    however its path was spelled or put together (bytes, joined from parts, relative)."""
+    try:
+        p = os.fspath(path)
+        if isinstance(p, bytes):
+            p = p.decode("utf-8", "surrogateescape")
+    except TypeError:
+        return None
+    if os.name == "nt":
+        import nt
+        try:
+            f = nt._getfullpathname(p)
+        except (OSError, ValueError):
+            return None
+        low = f.lower()
+        if low.startswith("\\\\.\\") or low.startswith("//./"):
+            rest = low[4:]
+            if rest in ("nul", "con", "conin$", "conout$") or rest.startswith("pipe\\") or rest.startswith("pipe/"):
+                return None
+            return f
+        if low.startswith("\\\\?\\") and not (low[5:6] == ":" or low[4:8] == "unc\\"):
+            return f
+        return None
+    f = os.path.normpath(p if p.startswith("/") else os.path.join(os.getcwd(), p))
+    if f.startswith("/dev/"):
+        rest = f[5:]
+        if rest in _PSEUDO or rest.startswith(("fd/", "pts/", "shm/", "mqueue/")):
+            return None
+        return f
+    if f.startswith("/sys/") and writing:   # a GPIO pin, a USB device's switch
+        return f
+    return None
+
+
+def _guard():
+    """Every run Kelvin doesn't fence (a person approved it): a way to a lab instrument past the stand-ins, which the
+    script's own process takes, is put to Kelvin first (an audit hook, PEP 578; op past): a socket's own connection or
+    datagram (the stand-in patches socket.socket's methods; _socket's own, sendto and sendmsg went past them: a review
+    of 2026-11-15 had a raw _socket send SLVL 4.5 to the lab's lock-in, and the gate never saw it), and a device file
+    opened as a file (COM5, /dev/ttyUSB0). A lab instrument's address, or another way into one, is refused and ends
+    the run; any other goes as the stand-ins' own would (a socket that reaches no lab instrument; a device outside the
+    lab once a person allows it)."""
+    if not hasattr(sys, "addaudithook") or _LINK is None:
+        return
+    said = {}
+    write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+
+    def check(where, how):
+        key = (where, how)
+        if key not in said:
+            _GUARD.on = True
+            try:
+                _LINK.past(where, how)
+                said[key] = ""
+            except KelvinRefused as e:
+                said[key] = str(e)
+            finally:
+                _GUARD.on = False
+        if said[key]:
+            raise PermissionError("Kelvin: %s" % said[key])
+
+    def hook(event, args):
+        if getattr(_GUARD, "on", False):
+            return
+        if event in ("socket.connect", "socket.sendto", "socket.sendmsg"):
+            where = _socket_address(args[1] if len(args) > 1 else None)
+            if where:
+                check(where, event)
+        elif event == "open" and args and args[0] is not None and not isinstance(args[0], int):
+            mode, flags = (args[1] if len(args) > 1 else None), (args[2] if len(args) > 2 else 0)
+            writing = (isinstance(mode, str) and any(c in mode for c in "wax+")) or \
+                (isinstance(flags, int) and bool(flags & write_flags))
+            device = _device(args[0], writing)
+            if device:
+                check(device, "device")
 
     sys.addaudithook(hook)
 

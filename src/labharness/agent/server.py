@@ -43,8 +43,10 @@ You are connected to a physics lab through Kelvin.
 - Cancelling a call (or disconnecting) ends it: what it asked a person for is declined, the ramp or run it started
   stops, and a call still waiting for the lab is not run. A person's Stop also ends the calls waiting for the lab.
 - A person may switch on auto mode. Then drive changes and runs that stay well inside the lab's limits (and pass
-  a clean dry run) go ahead without asking, and so does a script's run whose drives stay there and that reaches
-  nothing past the gate; lab_status says when it is on. Only a person can switch it.
+  a clean dry run) go ahead without asking, and so does a run of a script of your own (save_script) whose drives
+  stay there, fenced (writing only in its kelvin_ folder and its run's; no programs, network or native code: what
+  the fence refuses ends the run); the lab's own scripts always ask a person. lab_status says when it is on. Only a
+  person can switch it.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. A refusal covers
   the outcome, not only the command: never reach the same level, field, temperature or output another way (another
   command, a raw command, a script, another instrument, a plan). Tell the person what was refused and why.
@@ -168,9 +170,10 @@ You are connected to a physics lab through Kelvin.
   args; a Python the person names for the run (a conda environment): python. Never write a launcher for it.
 - Code of your own to run on the instruments, for what a plan can't do (a vendor's protocol, a loop that decides as
   it goes): save it with save_script (or, in a chat whose folder is a scripts folder, write_file into kelvin_scripts/),
-  then run_script. Its card tells the person you wrote it and shows the code, or what changed since a run they
-  approved; every command it sends to a lab instrument goes through the gate, as any script's. Analysis of runs
-  stays with run_python, and a measurement a plan can make stays a plan.
+  then run_script. Its card tells the person you wrote it and shows all its code, and that of your modules it
+  imports, or what changed since a run they approved; every command it sends to a lab instrument goes through the
+  gate, as any script's. Give it no test_ names (a person's pytest would run it). Analysis of runs stays with
+  run_python, and a measurement a plan can make stays a plan.
 - A lab that runs its instruments from LabVIEW: survey_labview on its LabVIEW folder reads NI MAX and its projects
   and VIs the same way (never running a VI) and translates each VI it could read into a scan, saying what didn't
   translate; a scan is a plan, run with run_plan once the person agrees. Never guess what a VI not read does.
@@ -244,15 +247,26 @@ OUTSIDE = '<outside_text from="%s">\n%s\n</outside_text>'
 VIEWER_META = "kelvin.viewer"   # a portal chat's tool call names its viewer here (LabRuntime.register_viewer)
 
 
-def outside(rt: LabRuntime, source: str, text: str, web: bool = False) -> str:
+def outside(rt: LabRuntime, source: str, text: str, web: bool = False, steers: bool = False) -> str:
     """A tool's text from outside the lab, marked as data for the model. web: text from the open web, which also
     makes auto mode ask a person for a while (an instrument's manual, a maker's files or an instrument's reply
-    don't); while searching outside the lab is switched off, such a tool says so itself, unmarked."""
+    don't); while searching outside the lab is switched off, such a tool says so itself, unmarked. steers: text from
+    the lab's own files or a script's printed output, which makes auto mode ask a person for a while too, as the
+    portal's chat does after the same tools (web/agent.py OUTSIDE_TOOLS: STEERING here); Kelvin's own reading of a
+    script (check_script) doesn't (a review of 2026-11-15: over MCP nothing a script printed ever stopped auto mode)."""
     if web:
         if not rt.literature.enabled:
             return text
         rt.gate.note_outside(source)
+    elif steers:
+        rt.gate.note_outside(source, web=False)
     return OUTSIDE % (source, text)
+
+
+# the tools whose text makes auto mode ask a person for a while, over MCP as in the portal's chat (OUTSIDE_TOOLS): the
+# web's, the lab's own files, and what a script printed; never Kelvin's own reading of a script (check_script)
+STEERING = ("read_web_page", "search_papers", "read_paper", "survey_scripts", "survey_labview",
+            "survey_specialmeasure", "run_script")
 WEB = ToolAnnotations(readOnlyHint=True, openWorldHint=True)   # reads the public literature, never the lab
 ACT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
 FETCH = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
@@ -548,7 +562,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         and the values the lab uses, the Kelvin card that fits, limits from those values, and an outline of each
         script (sweeps, waits, readings, files saved) to keep as recipes. Only reads them: nothing is run, and
         nothing is sent to an instrument."""
-        return outside(rt, "the lab's scripts", rt.survey_scripts(path))
+        return outside(rt, "the lab's scripts", rt.survey_scripts(path), steers=True)
 
     @server.tool(annotations=READ, structured_output=False)
     def survey_labview(path: str) -> str:
@@ -559,7 +573,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         each part of the VI became, and what didn't translate). Only reads: no VI is run (LabVIEW isn't needed), and
         nothing is sent to an instrument."""
         try:
-            return outside(rt, "the lab's LabVIEW files", rt.survey_labview(path))
+            return outside(rt, "the lab's LabVIEW files", rt.survey_labview(path), steers=True)
         except Underway as e:   # Set up reads one now: Kelvin's own words, nothing from the files
             return "not read now: %s" % e
 
@@ -573,7 +587,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         nothing is sent to an instrument. add_instrument then names the rack's instruments as the rack does and
         proposes their limits and ramp rates to the person."""
         try:
-            return outside(rt, "the lab's Special Measure files", rt.survey_specialmeasure(path))
+            return outside(rt, "the lab's Special Measure files", rt.survey_specialmeasure(path), steers=True)
         except Underway as e:   # Set up reads one now: Kelvin's own words, nothing from the files
             return "not read now: %s" % e
 
@@ -626,10 +640,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         scripts folder (the folder is made and marked as Kelvin's as needed; a script you saved there before is
         replaced, the version before kept in .kelvin-old). For work on the instruments that a plan can't do: then
         run_script runs it with every command to a lab instrument through the safety gate, after a card that tells a
-        person you wrote it and shows its code (or what changed since a run they approved), or, in auto mode, without
-        the card when every drive it sets stays within auto's ranges and nothing in it reaches past the gate. Analysis
-        of runs is run_python's, and what a plan can do stays a plan. Never over a file a person put there, nor named
-        as a module a script means (kelvin, pyvisa, serial, one of Python's own). Saving drives nothing."""
+        person you wrote it and shows all its code and that of your own modules it imports (or what changed since a
+        run they approved), or, in auto mode, without the card when every drive it sets stays within auto's ranges and
+        nothing in it reaches past the gate: fenced then, it writes only in kelvin_scripts/ and its run's folder, and
+        starts no program, opens no network connection or device, loads no native code (what the fence refuses ends
+        the run). Analysis of runs is run_python's, and what a plan can do stays a plan. Never over a file a person
+        put there, nor named as a module a script means (kelvin, pyvisa, serial, one of Python's own) or as a test a
+        test runner collects (test_*.py, *_test.py, conftest.py). Saving drives nothing."""
         return rt.save_script(name, code)
 
     @server.tool(annotations=READ, structured_output=False)
@@ -640,8 +657,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
         running it: the Python that runs it (and the others a run may name), the settings it takes (its module
         constants such as VMAX = 5, and main()'s defaults: params changes them for a run), an experiment's actions,
         the card a person would be asked (the lab instruments it opens, the drive ranges it uses, what Kelvin can't
-        check; a script you wrote, with its code) for that action (action; "": its main one), and whether auto mode
-        runs it without the card, or why not. module and python as run_script takes them. Only to see a script's
+        check; a script you wrote, with all its code) for that action (action; "": its main one), and, for a script
+        you wrote, whether auto mode runs it without the card now, or why not. module and python as run_script takes
+        them. Only to see a script's
         settings, or when the person asks: run_script checks by itself. It never waits for a run or the queue: beside
         one, it uses the latest values Kelvin has seen."""
         return outside(rt, "the lab's scripts", rt.check_script(script, params or {}, action, module=module,
@@ -665,11 +683,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         finds one with everything it imports. Every
         command it sends to a lab instrument (pyvisa, pyserial, a socket)
         goes through the safety gate on Kelvin's own connection: readings and settings run, drives are checked against
-        the limits, ramped and watched. A person approves the run once on a card (one you wrote says so, with its
-        code); in auto mode it runs without the card, as a plan does, when every drive it sets stays within auto's
-        ranges on instruments Kelvin is sure of and nothing in it reaches past the gate (an address outside the lab, a
-        maker's library, ctypes, COM, a program, the network, a device file, code it puts together as it runs, an
-        action that drives the sample): the card says why not when it asks. Kelvin reads the script first for the
+        the limits, ramped and watched; a raw socket, a device file or a bare VISA session to a lab instrument is
+        refused. A person approves the run once on a card (one you wrote says so, with all its code). In auto mode a
+        script you wrote, as you saved it, runs without the card, fenced, as a plan does, when every drive it sets
+        stays within auto's ranges on instruments Kelvin is sure of and reading it finds nothing that reaches past the
+        gate (an address outside the lab, a maker's library, ctypes, COM, a program, the network, a device file, code
+        it puts together as it runs, an action that drives the sample, a module beside it you didn't write); the card
+        says why not when it asks. The lab's own scripts ask a person each run. Kelvin reads the script first for the
         drive ranges it uses. params: values for its settings for this
         run, without editing the file ({"VMAX": 2});
         args: its command-line arguments; drives: the range of a drive the script works out as it runs, when you
@@ -683,8 +703,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
         library, is not rehearsed); background: true runs it through the queue and returns at once, so set_live
         can change its live inputs from this chat while it runs."""
         return rt.run_script(script, params or {}, args or [], drives or {},
-                             mark=lambda text: outside(rt, "the lab's script output", text), action=action,
-                             dry_run=dry_run, background=background, module=module, python=python)
+                             mark=lambda text: outside(rt, "the lab's script output", text, steers=True),
+                             action=action, dry_run=dry_run, background=background, module=module, python=python)
 
     @server.tool(annotations=ACT, structured_output=False)
     def set_live(name: str, value: Any, run: str = "") -> str:

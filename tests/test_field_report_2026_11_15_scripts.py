@@ -90,7 +90,7 @@ def test_a_scripts_outside_port_names_the_laser_behind_it(lab, folder, ports):
     assert "a light source" in line and "Kelvin won't see whether it emits" in line, line
     assert "add_instrument COM11" in line and "find_card" in line and "draft_card" in line, line
     assert "every change to its output asks a person until they have reviewed its limits" in line, line
-    assert scriptrun.SCRIPT_ASKS in str(request)   # a person approves it, as before (or auto mode, as a plan)
+    assert "A script can't be rehearsed on the simulated lab, so a person approves each run" in str(request)
 
     # found only as it runs: the person asked then is told the same
     said = scriptrun.outside(lab, "COM11")

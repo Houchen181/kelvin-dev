@@ -1725,16 +1725,21 @@ class Prepared:
     near: Dict[str, str] = field(default_factory=dict)   # the Python files beside it as it starts, hashed (beside)
     action: str = ""          # an experiment's action this run runs ("": it has none; experiment.choose)
     live: Dict[str, Any] = field(default_factory=dict)   # an experiment's live inputs and their defaults
-    # one of the lab's kept experiments (expstore): its process is fenced in its real run too (kelvin_shim._fence)
-    fenced: bool = False
+    # one of the lab's kept experiments (expstore): its process is fenced in its real run too (kelvin_shim._fence);
+    # "auto": a run auto mode approved of one of Kelvin's own scripts, fenced too (own: the folder it may write in)
+    fenced: Any = False
     title: str = ""   # what its run is called instead of its file's name (one of the lab's experiments: its name)
     # a package's module, run as python -m runs it (module_of: nvpulse.__main__ for python -m nvpulse), from home, the
     # folder above its top package; "" and None: a script, run as a file from its own folder
     module: str = ""
     home: Optional[Path] = None
-    # of a script Kelvin wrote: the latest run of it a person approved, and the text that run ran (its script.py),
-    # which its card shows what changed since (the runtime finds it: LabRuntime._approved_before); None: none
-    before: Optional[Tuple[str, str]] = None
+    # of a script Kelvin wrote: the latest run of it a person approved, the text that run ran (its script.py) and of
+    # Kelvin's own modules it imported ({path from the script's folder: text}), which its card shows what changed
+    # since (the runtime finds it: LabRuntime._approved_before); None: none
+    before: Optional[Tuple[str, str, Dict[str, str]]] = None
+    # of a script Kelvin wrote (folderfiles.written): what reading it and its own modules found (own_script); None for
+    # any other script, which auto mode never runs
+    own: Optional["Own"] = None
 
     @property
     def name(self) -> str:
@@ -1850,23 +1855,286 @@ def prepare(lab: Any, path: str, folders: Sequence[Any], params: Optional[Dict[s
                     beside(script, package=_package_of(module, home)), action, live, module=module, home=home)
 
 
-CODE_LINES = 80   # of a script Kelvin wrote, shown on its card; and of the change since a run a person approved
-# the card's last line: who approves a run (auto mode covers one as it covers a plan, auto_cover)
-SCRIPT_ASKS = ("A script can't be rehearsed on the simulated lab: a person approves each run, unless auto mode is on "
-               "and covers it (every drive it sets low-risk, and nothing in it past the gate); a maker's library it "
+CARD_CODE_CHARS = 200_000   # of code a card shows whole (Kelvin saves no file over a million characters)
+# the card's last line: who approves a run. The lab's own scripts: a person, each run, in auto mode too; Kelvin's own:
+# auto mode may cover one, fenced (auto_cover)
+SCRIPT_ASKS = ("A script can't be rehearsed on the simulated lab, so a person approves each run; a maker's library it "
                "loads on the way comes with it, and anything else beyond this asks again, or is refused")
-EXPERIMENT_ASKS = ("A person approves each run of this experiment, unless auto mode is on and covers it as it covers a "
-                   "script; run_script with dry_run rehearses it on the simulated lab first")
-# a card a run auto mode approved asks as it goes, for what the gate can't check that reading it ahead missed
-AUTO_ASKS = "Auto mode approved this run, and covers only what the gate checks: a person says whether it may"
+EXPERIMENT_ASKS = ("A person approves each run of a script, this experiment too, in auto mode as well; run_script with "
+                   "dry_run rehearses it on the simulated lab first")
+OWN_ASKS = ("A script can't be rehearsed on the simulated lab, so a person approves each run, unless auto mode is on "
+            "and covers it: one of Kelvin's own as it saved it, every drive it sets low-risk, run fenced (nothing past "
+            "the gate); anything else beyond this asks again, or is refused")
+# why auto mode doesn't cover a run of one of the lab's own scripts (asked for 2026-11-15, after a review: the lab's
+# scripts write beside themselves, which a fence would break mid-measurement, so a person approves each run, as ever)
+LAB_SCRIPT = "a script can't be dry-run first, and auto mode runs only Kelvin's own scripts, fenced"
+LAB_EXPERIMENT = ("a person approves each run of a script, experiments too; auto mode runs only Kelvin's own scripts, "
+                  "fenced")
+# a run auto mode approved, which the fence (or Kelvin, for its stand-ins) stopped: the run ends there
+FENCE_REFUSED = ("auto mode's fence refused %s; to run it unfenced, a person approves it (turn auto mode off for this "
+                 "run, or ask)")
+# how a script's own process went past the stand-ins (kelvin_shim._guard), for the run's refusal
+PAST_HOW = {"socket.connect": "connects a socket of its own to %s", "socket.sendto": "sends a datagram to %s",
+            "socket.sendmsg": "sends a datagram to %s", "device": "opens %s as a file",
+            "visa": "opens a bare VISA session to %s"}
+
+
+@dataclass
+class Own:
+    """What reading one of Kelvin's own scripts, and the modules it imports beside it, found (own_script)."""
+    why_not: List[str] = field(default_factory=list)   # why auto mode may not run it ([]: it may, as Kelvin saved it)
+    folder: Optional[Path] = None   # its kelvin_ folder among the lab's scripts: a fenced run of it may write there
+    # Kelvin's own modules it imports beside it, followed all the way: (path, text, sha256 of its bytes now), which its
+    # card shows and its run pins (each still those bytes as it starts)
+    modules: List[Tuple[Path, str, str]] = field(default_factory=list)
+    others: List[Path] = field(default_factory=list)   # modules beside it that Kelvin didn't write
+    preload: List[str] = field(default_factory=list)   # what it imports from its Python's own packages
+
+
+OWN_ENCODINGS = ("utf-8", "utf-8-sig")
+# what a script imports that isn't loaded ahead of a fence: the stand-in's own, and what does something as it loads (a
+# browser, a window)
+NOT_PRELOADED = ("kelvin", "kelvin_api", "kelvin_shim", "antigravity", "this", "webbrowser", "turtle", "turtledemo",
+                 "tkinter", "idlelib", "pydoc", "__main__", "__future__")
+_SYS_PATHS = ("path", "meta_path", "path_hooks", "path_importer_cache")   # where Python finds modules
+_LOADERS = ("spec_from_file_location", "module_from_spec", "SourceFileLoader", "SourcelessFileLoader",
+            "ExtensionFileLoader", "load_dynamic", "load_source", "load_compiled", "load_module", "addsitedir",
+            "run_path", "run_module")
+_COMPILED = (".pyc", ".pyo", ".pyd", ".so", ".pyw")
+
+
+def python_text(raw: bytes, name: str, own: bool = True) -> Tuple[Optional[str], Optional[str]]:
+    """A Python file's text as Python reads its bytes (its coding line, PEP 263): (text, None), or (None, why Kelvin
+    can't read it ahead). own: one of Kelvin's own, which it reads only as UTF-8 (a review of 2026-11-15 hid import
+    ctypes in a module whose coding line said utf-7, which the reading took as UTF-8)."""
+    import io
+    import tokenize
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(raw).readline)
+    except SyntaxError as e:
+        return None, "Kelvin can't read %s ahead (%s)" % (name, e)
+    if own and encoding.lower() not in OWN_ENCODINGS:
+        return None, "%s names an encoding of its own (%s), which Kelvin doesn't read ahead" % (name, encoding)
+    try:
+        return raw.decode(encoding), None
+    except (UnicodeDecodeError, LookupError) as e:
+        return None, "Kelvin can't read %s ahead (%s)" % (name, e)
+
+
+def _imported(tree: ast.AST) -> List[Tuple[str, int]]:
+    """What a module imports, as (the dotted name, its level: 0, or the dots of a relative import), each name it
+    imports from a module as a submodule it may be."""
+    out: List[Tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out += [(a.name, 0) for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if base:
+                out.append((base, node.level))
+            out += [("%s.%s" % (base, a.name) if base else a.name, node.level) for a in node.names if a.name != "*"]
+        elif isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant) and \
+                isinstance(node.args[0].value, str):   # __import__("x"), import_module("x"): read as imports too
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+            if name in ("__import__", "import_module"):
+                out.append((node.args[0].value, 0))
+    return out
+
+
+def _moves_imports(tree: ast.AST) -> Optional[str]:
+    """What in a module changes where Python finds modules, or loads one from a file of its choosing, in words; None
+    when nothing does."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            if node.attr in _SYS_PATHS and isinstance(node.value, ast.Name) and node.value.id == "sys":
+                return "uses sys.%s, where Python finds modules" % node.attr
+            if node.attr in _LOADERS:
+                return "loads code from a file of its choosing (%s)" % node.attr
+        elif isinstance(node, ast.Name) and node.id in _LOADERS:
+            return "loads code from a file of its choosing (%s)" % node.id
+        elif isinstance(node, ast.ImportFrom) and node.module == "sys" and \
+                any(a.name in _SYS_PATHS for a in node.names):
+            return "imports sys's %s, where Python finds modules" % next(a.name for a in node.names
+                                                                        if a.name in _SYS_PATHS)
+    return None
+
+
+def _local_files(base: Path, importer: Path, dotted: str, level: int) -> Optional[List[Path]]:
+    """The files beside a script that an import loads (base: the script's folder, first on sys.path; importer: the
+    file that imports, for a relative import), along its dotted name: a module, a package's __init__.py, a compiled
+    module; None when nothing there is it (it comes from its Python's own packages)."""
+    if level:
+        here = importer.parent
+        for _ in range(level - 1):
+            here = here.parent
+    else:
+        here = base
+    parts = [p for p in dotted.split(".") if p]
+    if not parts:
+        init = here / "__init__.py"
+        return [init] if init.is_file() else []
+    out: List[Path] = []
+    for i, part in enumerate(parts):
+        module, package = here / (part + ".py"), here / part
+        compiled = []
+        try:
+            compiled = [here / e.name for e in os.scandir(here)
+                        if e.name.split(".")[0] == part and e.name != part + ".py" and
+                        Path(e.name).suffix.lower() in _COMPILED]
+        except OSError:
+            pass
+        found = False
+        if package.is_dir():
+            init = package / "__init__.py"
+            if init.is_file():
+                out.append(init)
+            found = True
+        if module.is_file():
+            out.append(module)
+            found = True
+        if compiled:
+            out += compiled
+            found = True
+        if not found:
+            return out if (i or level) else None
+        if not package.is_dir():
+            break
+        here = package
+    return out
+
+
+def _own_folder(path: Path) -> Optional[Path]:
+    """The kelvin_ folder among the lab's scripts that a script of Kelvin's is in: the topmost folder named so of
+    those Kelvin made around it (kelvin_scripts, for kelvin_scripts/odmr/x.py); None when it is in none."""
+    from . import folderfiles
+    best, here = None, path.parent
+    while here.parent != here and folderfiles.made(here) is not None:
+        if folderfiles.own_name(here.name):
+            best = here
+        here = here.parent
+    return best
+
+
+def own_script(prep: Prepared) -> Own:
+    """What auto mode needs of one of Kelvin's own scripts (asked for 2026-11-15, after a review): Kelvin's own as it
+    saved it (its folder's mark lists it, and its bytes are those Kelvin saved), and every module it imports beside it
+    too, followed all the way, each read as Python reads it; nothing in them that changes where Python finds modules or
+    loads one from a file of its choosing. It fails closed: a file Kelvin can't read, or one Kelvin didn't write, is a
+    reason to ask, never a sign it is safe. With it: its kelvin_ folder (where a fenced run may write), Kelvin's own
+    modules it imports (pinned with the run, shown on its card), and what it imports from its Python's own packages
+    (loaded before the fence)."""
+    from . import folderfiles
+    own = Own()
+    info = folderfiles.written(prep.path)
+    if info is None:
+        own.why_not.append(LAB_EXPERIMENT if prep.found.experiment else LAB_SCRIPT)
+        return own
+    own.folder = _own_folder(prep.path)
+    if own.folder is None:
+        own.why_not.append("%s isn't in a folder of Kelvin's own" % prep.path.name)
+    if prep.version:
+        own.why_not.append("it runs run %s's copy, not the file Kelvin saved" % prep.version)
+    if prep.module:
+        own.why_not.append("it runs as python -m runs a package")
+    try:
+        raw = prep.path.read_bytes()
+    except OSError as e:
+        raw = None
+        own.why_not.append("Kelvin can't read %s: %s" % (prep.path.name, e.strerror or e))
+    if raw is not None:
+        if not info["sha256"] or hashlib.sha256(raw).hexdigest() != info["sha256"]:
+            own.why_not.append("%s changed after Kelvin saved it" % prep.path.name)
+        why = python_text(raw, prep.path.name)[1]
+        if why:
+            own.why_not.append(why)
+    base = prep.path.parent
+    seen = {os.path.normcase(str(prep.path))}
+    preload: Dict[str, None] = {}
+    past = set(PAST_THE_LAB) | set(OPAQUE) | {m.split(".")[0] for m in NETWORK} | set(NOT_PRELOADED)
+    todo: List[Tuple[Path, str]] = [(prep.path, prep.source)]
+    while todo:
+        path, text = todo.pop(0)
+        try:
+            tree = ast.parse(text)
+        except SyntaxError as e:
+            own.why_not.append("Kelvin can't read %s ahead (line %s: %s)" % (path.name, e.lineno, e.msg))
+            continue
+        moved = _moves_imports(tree)
+        if moved:
+            own.why_not.append("%s %s, so Kelvin can't tell what it imports" % (path.name, moved))
+        for dotted, level in _imported(tree):
+            files = _local_files(base, path, dotted, level)
+            if files is None:   # from its Python's own packages: loaded before the fence goes up
+                if dotted.split(".")[0] not in past:
+                    preload[dotted] = None
+                continue
+            for f in files:
+                key = os.path.normcase(str(f))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rel = _rel(f, base)
+                if f.suffix.lower() != ".py":
+                    own.others.append(f)
+                    own.why_not.append("it imports %s beside it, which isn't Python Kelvin can read ahead" % rel)
+                    continue
+                w = folderfiles.written(f)
+                if w is None:
+                    own.others.append(f)
+                    own.why_not.append("it imports %s beside it, which Kelvin didn't write" % rel)
+                    continue
+                try:
+                    fraw = f.read_bytes()
+                except OSError as e:
+                    own.why_not.append("Kelvin can't read %s: %s" % (rel, e.strerror or e))
+                    continue
+                sha = hashlib.sha256(fraw).hexdigest()
+                if not w["sha256"] or sha != w["sha256"]:
+                    own.why_not.append("%s beside it changed after Kelvin saved it" % rel)
+                ftext, why = python_text(fraw, rel)
+                if why:
+                    own.why_not.append(why)
+                    continue
+                own.modules.append((f, ftext, sha))
+                todo.append((f, ftext))
+    own.preload = list(preload)[:60]
+    return own
+
+
+def _block(text: str, path: Path) -> str:
+    """Code as one item of a card, which the portal shows as it is written (a <pre>, its indentation kept): whole, up
+    to CARD_CODE_CHARS."""
+    body = text.rstrip("\n")
+    if len(body) > CARD_CODE_CHARS:
+        body = body[:CARD_CODE_CHARS].rsplit("\n", 1)[0] + "\n… (the rest: the whole file at %s)" % path
+    return body + "\n"
+
+
+def _diff(then: str, now: str, name: str, run_id: str) -> str:
+    """What changed in a file since a run, as a unified diff (its own lines only), "" for none."""
+    change = list(difflib.unified_diff(then.splitlines(), now.splitlines(), "%s (run %s)" % (name, run_id),
+                                       "%s (now)" % name, n=2, lineterm=""))
+    return "\n".join(change[2:])
+
+
+def _rel(path: Path, base: Path) -> str:
+    """A module's path from the script's folder, as a run keeps its copy (modules/) and its card names it: never above
+    that folder."""
+    try:
+        rel = path.relative_to(base).as_posix()
+    except ValueError:
+        rel = path.name
+    return "/".join(p for p in rel.split("/") if p not in ("", ".", "..")) or path.name
 
 
 def kelvin_wrote(prep: Prepared) -> List[str]:
     """A card's lines for a script Kelvin wrote (folderfiles.written: its folder's mark lists it; one a person put in
-    a folder of Kelvin's is theirs, and gets none): that Kelvin wrote it, plainly, and what runs, its code up to
-    CODE_LINES; or, when a person approved a run of it before (prep.before), what changed since that run, as a unified
-    diff, as long at most. And the Python files beside it that it imports which Kelvin wrote too. [] for any other
-    script. Asked for 2026-11-15: Kelvin may write a script and run it with run_script, its card the person's say."""
+    a folder of Kelvin's is theirs, and gets none): that Kelvin wrote it, plainly, and the code that runs, as one item
+    the portal shows as written (_block), whole; or, when a person approved a run of it before (prep.before), what
+    changed since that run, as a unified diff. The same for each module of Kelvin's it imports beside it (prep.own),
+    and the name of any it imports that Kelvin didn't write. [] for any other script. Asked for 2026-11-15: Kelvin may
+    write a script and run it with run_script, its card the person's say over all the code it approves."""
     from . import folderfiles
     info = folderfiles.written(prep.path)
     if info is None:
@@ -1880,39 +2148,44 @@ def kelvin_wrote(prep: Prepared) -> List[str]:
             edited = False
     head = "Kelvin wrote this script (%s%s)%s" % (where, ", saved %s" % info["at"] if info["at"] else "",
                                                   ", changed since outside Kelvin" if edited else "")
-    if prep.before is not None:
-        run_id, then = prep.before
-        change = [d for d in difflib.unified_diff(then.splitlines(), prep.source.splitlines(), "run " + run_id, "now",
-                                                  n=2, lineterm="")][2:]
+    run_id, then, then_modules = prep.before if prep.before is not None else (None, None, {})
+    lines: List[str] = []
+    if run_id is not None and then is not None:
+        change = _diff(then, prep.source, prep.path.name, run_id)
         if not change:
-            lines = [head + "; the same code as run %s, which a person approved" % run_id]
+            lines.append(head + "; the same code as run %s, which a person approved" % run_id)
         else:
-            lines = [head + "; what changed since run %s, which a person approved:" % run_id]
-            lines += ["  " + d for d in change[:CODE_LINES]]
-            if len(change) > CODE_LINES:
-                lines.append("  … %d more lines of the change (the whole script: %s)" % (len(change) - CODE_LINES,
-                                                                                        prep.path))
+            lines += [head + "; what changed since run %s, which a person approved:" % run_id, _block(change,
+                                                                                                    prep.path)]
     else:
-        code = prep.source.splitlines()
-        lines = [head + ":"] + ["  " + c for c in code[:CODE_LINES]]
-        if len(code) > CODE_LINES:
-            lines.append("  … %d more lines (the whole script: %s)" % (len(code) - CODE_LINES, prep.path))
-    for m in _local_modules(prep.path, prep.source, prep.home):
-        also = folderfiles.written(m) if m.is_file() else None
-        if also is not None:
-            try:
-                count = len(m.read_text(encoding="utf-8", errors="replace").splitlines())
-            except OSError:
-                count = 0
-            lines.append("It imports %s beside it, which Kelvin wrote too (%d lines%s): the whole file at %s"
-                         % (m.name, count, ", saved %s" % also["at"] if also["at"] else "", m))
+        lines += [head + ":", _block(prep.source, prep.path)]
+    own = prep.own
+    base = prep.path.parent
+    for path, text, sha in (own.modules if own is not None else []):
+        rel = _rel(path, base)
+        w = folderfiles.written(path) or {"at": "", "sha256": ""}
+        mhead = "It imports %s beside it, which Kelvin wrote too%s%s" % (
+            rel, " (saved %s)" % w["at"] if w["at"] else "",
+            ", changed since outside Kelvin" if w["sha256"] and sha != w["sha256"] else "")
+        if run_id is not None and rel in then_modules:
+            change = _diff(then_modules[rel], text, rel, run_id)
+            if not change:
+                lines.append(mhead + "; the same as in run %s" % run_id)
+            else:
+                lines += [mhead + "; what changed since run %s:" % run_id, _block(change, path)]
+        else:
+            lines += [mhead + ":", _block(text, path)]
+    for path in (own.others if own is not None else []):
+        rel = _rel(path, base)
+        lines.append("It imports %s beside it, which Kelvin didn't write: the whole file at %s" % (rel, path))
     return lines
 
 
 def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[str, Allowed], List[str]]:
     """The one request a person answers before the script runs, the drive ranges it grants, and refusals (a drive
-    nothing may move now: hands on the sample, an interlock). A script Kelvin wrote says so, with its code or what
-    changed since a run a person approved (kelvin_wrote). In auto mode the run may go without it (auto_cover)."""
+    nothing may move now: hands on the sample, an interlock). A script Kelvin wrote says so, with its code and its
+    own modules' code, or what changed since a run a person approved (kelvin_wrote); in auto mode its run may go
+    without the card, fenced (auto_cover). The lab's own scripts: a person approves each run, in auto mode too."""
     lab = gate.lab
     values, whole, open_lines = prep.drive_values(lab)
     items, grants, problems = gate.plan_approval(values, noun="the script")
@@ -1952,7 +2225,7 @@ def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[st
     if prep.live:
         lines.append("While it runs, these may change (set_live): %s; a change that moves a drive still passes the "
                      "safety gate" % ", ".join(k if v is None else "%s (now %s)" % (k, v) for k, v in prep.live.items()))
-    lines.append(EXPERIMENT_ASKS if found.experiment else SCRIPT_ASKS)
+    lines.append(OWN_ASKS if prep.own is not None else EXPERIMENT_ASKS if found.experiment else SCRIPT_ASKS)
     return ApprovalRequest("Run script %s?" % prep.name, lines), grants, problems
 
 
@@ -2261,6 +2534,31 @@ class ScriptRun:
         if self.rec is not None:
             self._emit(event="point", run_id=self.rec_id, done=len(self.rows), total=None, row=row, eta_s=None,
                        columns=self._columns())   # its axes and readings so far: they grow as it runs
+
+    def _pin(self, run_dir: Path) -> Optional[str]:
+        """Kelvin's own modules the script imports (prep.own), as its card showed them or auto mode read them: a copy
+        of each kept with the run (modules/, which the card of a later run shows what changed since), and each file
+        still those bytes as the run starts; why not, else None (a review of 2026-11-15: only script.py was pinned, so
+        a module changed after its card ran as it was then)."""
+        own = self.prep.own
+        if own is None or not own.modules or self.rehearsal:
+            return None
+        for path, text, sha in own.modules:
+            rel = _rel(path, self.prep.path.parent)
+            try:
+                target = run_dir / "modules" / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            except OSError as e:
+                self._unwritten(e, "a copy of %s" % rel)
+            try:
+                now = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError as e:
+                return "script not run: %s, which it imports, can't be read now (%s)" % (rel, e.strerror or e)
+            if now != sha:
+                return ("script not run: %s, which it imports, changed after Kelvin read it, so it isn't what was "
+                        "approved: run it again for a card of it as it is now" % rel)
+        return None
 
     def _unwritten(self, e: BaseException, what: str = "its data") -> None:
         """The run's record couldn't be written (its folder's drive or network share went away, a full disk): the run
@@ -2800,6 +3098,8 @@ class ScriptRun:
             return self._open(str(msg.get("address") or ""), str(msg.get("kind") or "visa"))
         if op == "lookup":   # is this address a lab instrument? (pyvisa's resource_info); nothing opens
             return {"instrument": lab_name(self.lab, str(msg.get("address") or ""))}
+        if op == "past":     # a way past the stand-ins its own process took (a raw socket, a device file)
+            return self._past(str(msg.get("address") or ""), str(msg.get("how") or ""))
         if op == "command":
             return self._command(msg)
         if op in ("read", "read_raw", "read_bytes"):
@@ -2887,8 +3187,12 @@ class ScriptRun:
         return self.gate.ask(request)
 
     def _open(self, address: str, kind: str) -> Dict[str, Any]:
+        """An address the script opens (kind: visa, serial, socket; device: a device file it opens as a file): a lab
+        instrument's goes through its stand-in; any other once a person allows it (a socket that reaches no lab
+        instrument needs nobody, in a run a person approved). In a run auto mode approved (self.auto) nobody's yes
+        covers one outside the lab: the run ends there, as at its fence."""
         name = lab_name(self.lab, address) if address else None
-        if name is not None:
+        if name is not None and kind != "device":
             away = self.lab.away(name)
             if away:
                 raise _Refuse("refused: %s is %s" % (name, away))
@@ -2896,12 +3200,14 @@ class ScriptRun:
             return {"instrument": name}
         if self.rehearsal:
             raise _Refuse("refused: a rehearsal reaches only the simulated lab, not %s" % address)
-        if canonical(address) in self.allowed or kind == "socket" and not self.auto \
-                and not behind(self.lab, address) and not same_device(self.lab, address):
-            return {}   # a person allowed it, or a socket that reaches no lab instrument in a run a person approved
+        if canonical(address) in self.allowed:
+            return {}   # a person allowed it
+        if self.auto:
+            raise _Refuse(FENCE_REFUSED % ("opening %s, outside the lab" % address))
+        if kind == "socket" and not behind(self.lab, address) and not same_device(self.lab, address):
+            return {}   # a socket that reaches no lab instrument, in a run a person approved
         request = ApprovalRequest("Let %s open %s?" % (self.prep.name, address), [
-            "%s opens %s, so it runs as the script wrote it" % (self.prep.name, outside(self.lab, address))]
-            + [AUTO_ASKS] * self.auto)
+            "%s opens %s, so it runs as the script wrote it" % (self.prep.name, outside(self.lab, address))])
         if not self._ask(request):
             raise _Refuse("declined: %s may not open %s%s" % (self.prep.name, address,
                                                                " (%s)" % request.note if request.note else ""))
@@ -2909,29 +3215,45 @@ class ScriptRun:
         self.passed.append(address)
         return {}
 
+    def _past(self, address: str, how: str) -> Dict[str, Any]:
+        """A way to an address past the stand-ins that the script's own process took (kelvin_shim._guard, in a run a
+        person approved; how: socket.connect, socket.sendto, socket.sendmsg, device, visa): to a lab instrument, or
+        another way into one (same_device, the Prologix adapter one is behind), it is refused and the run ends, as the
+        gate never sees what goes there (a review of 2026-11-15: a raw _socket sent SLVL 4.5 to the lab's lock-in,
+        and commands.jsonl had no record of it); any other goes as the stand-in's own way would (_open: a socket that
+        reaches no lab instrument, a device or address outside the lab once a person allows it)."""
+        if self.rehearsal:
+            raise _Refuse("refused: a rehearsal reaches only the simulated lab, not %s" % address)
+        way = lab_name(self.lab, address) or same_device(self.lab, address) or ", ".join(behind(self.lab, address))
+        if way:
+            raise _Refuse("refused: %s %s, which is the lab's %s, past Kelvin's stand-in, so the safety gate would "
+                          "never see what goes there: a script reaches a lab instrument through pyvisa's "
+                          "open_resource, pyserial, or a plain socket's connect" % (self.prep.name, PAST_HOW.get(
+                              how, "reaches %s") % address, way))
+        if how.startswith("socket."):
+            return self._open(address, "socket")
+        return self._open(address, "device" if how == "device" else "visa")
+
     def _library(self, module: str) -> Dict[str, Any]:
         """A maker's library the reading missed (one another loads, as pylablib loads pyusb and nidaqmx, or an import
         the script builds): it drives nothing itself, and the run a person approved is what uses it, so Kelvin lets it
         through with the run, in the chat and the record, never waiting for anyone. Not while the run stops, and never
-        in a rehearsal (nobody approved one); in a run auto mode approved (self.auto), a person says whether it may, as
-        no person's yes covers it."""
+        in a rehearsal (nobody approved one); in a run auto mode approved (self.auto), whose fence refuses it too, no
+        person's yes covers it, so the run ends there."""
         if self.rehearsal:
             raise _Refuse("refused: a rehearsal reaches only the simulated lab, so it may not use %s" % module)
         if module in self.allowed:
             return {}
         if self.stopping:
             raise _Refuse("declined: %s may not use %s as it stops" % (self.prep.name, module))
+        if self.auto:
+            raise _Refuse(FENCE_REFUSED % ("%s, a maker's library that reaches instruments past the gate" % module))
         request = ApprovalRequest("Let %s use %s?" % (self.prep.name, module), [
             "%s imports %s, which reaches instruments without Kelvin seeing the commands: the safety gate can't "
-            "check what it does through it" % (self.prep.name, module)] + [AUTO_ASKS] * self.auto)
-        if self.auto:   # no person's yes to the run: one says whether it may
-            if not self._ask(request):
-                raise _Refuse("declined: %s may not use %s%s" % (self.prep.name, module,
-                                                                 " (%s)" % request.note if request.note else ""))
-        else:
-            self.gate.auto_approve(request, ["a maker's library the script loads on the way drives nothing itself; "
-                                             "the person's yes to the run covers what the script does with it"],
-                                   "approved with the script's run")
+            "check what it does through it" % (self.prep.name, module)])
+        self.gate.auto_approve(request, ["a maker's library the script loads on the way drives nothing itself; the "
+                                         "person's yes to the run covers what the script does with it"],
+                               "approved with the script's run")
         self.allowed.add(module)
         self.through.append(module)
         return {}
@@ -3007,6 +3329,16 @@ class ScriptRun:
             if self.stopping:
                 self._send(conn, {"op": "stop", "why": self.stopping})
             return True
+        if msg.get("op") == "fenced":   # auto mode's fence refused something in its process: the run ends there, its
+            if self.auto:               # drives back to safe as on any abort (the script hears the stop next)
+                why = FENCE_REFUSED % str(msg.get("what") or "something")[:300]
+                if not self.failed:
+                    self.failed = why
+                self._send(conn, {"id": rid, "ok": True})
+                self._begin_stop(why, conns)
+            else:
+                self._send(conn, {"id": rid, "ok": True})
+            return True
         try:   # every wait on an instrument in it ends at the script's own Stop (from the moment it lands, and the
             # clean-up's past MAX_GRACE_S), not only at the lab's taken as each exchange begins
             from .instrument import ended_by
@@ -3049,6 +3381,11 @@ class ScriptRun:
                    PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         if self.rehearsal:   # its own folder for what Matplotlib keeps, and no bytecode written beside the lab's code
             env.update(KELVIN_REHEARSAL="1", PYTHONDONTWRITEBYTECODE="1", MPLCONFIGDIR=str(run_dir / ".matplotlib"))
+        elif self.prep.fenced == "auto":   # a run auto mode approved of one of Kelvin's own scripts: fenced, writing in
+            own = self.prep.own              # its kelvin_ folder and the run's; its Python's packages loaded first
+            env.update(KELVIN_FENCE="auto", PYTHONDONTWRITEBYTECODE="1", MPLCONFIGDIR=str(run_dir / ".matplotlib"),
+                       KELVIN_FENCE_WRITES=str(own.folder) if own is not None and own.folder is not None else "",
+                       KELVIN_PRELOAD=",".join(own.preload) if own is not None else "")
         elif self.prep.fenced:   # one of the lab's kept experiments: kelvin.lab and nothing past it, in the real run too
             env.update(KELVIN_FENCE="1", PYTHONDONTWRITEBYTECODE="1", MPLCONFIGDIR=str(run_dir / ".matplotlib"))
         env["PYTHONPATH"] = os.pathsep.join([str(SHIM_DIR)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
@@ -3093,6 +3430,8 @@ class ScriptRun:
         meta = dict({"lab": lab.config.name, "simulated": all(i.simulated for i in lab.instruments.values())},
                     **self.meta)
         meta.update(script=str(prep.path), script_sha256=fingerprint(prep.source), beside=prep.near)
+        if prep.own is not None and prep.own.modules:   # Kelvin's own modules it imports, as read: kept with it (_pin)
+            meta["modules"] = {_rel(f, prep.path.parent): sha for f, _, sha in prep.own.modules}
         self.rec = self.store.create(prep.name, {k: v for k, v in plan.items() if v is not None}, gate.operator,
                                      self.folder, meta=meta)
         self.rec_id = self.rec.run_id
@@ -3128,8 +3467,12 @@ class ScriptRun:
         approved.__enter__()
         try:
             proc = None
+            changed = self._pin(run_dir)
             if self._stop_pressed():   # stopped while it was approved or starting: its Python never starts
                 self._begin_stop("stop requested", conns)
+            elif changed:   # a module of Kelvin's it imports isn't what was approved, or read for auto mode: not run
+                self.failed = changed
+                self._begin_stop(changed, conns)
             else:
                 try:
                     proc = subprocess.Popen(self._command_line(run_dir, source_file),
@@ -3477,24 +3820,31 @@ def _unread_reach(source: str, placed: Sequence[str] = ()) -> Optional[str]:
 def rehearsal_problem(prep: Prepared) -> Optional[str]:
     """Why Kelvin won't rehearse this experiment, in words; None when it may. A rehearsal is approved by nobody, so
     it runs only an experiment whose code, and the lab's own modules it imports, reach no further than kelvin.lab and
-    the lab's instruments through Kelvin, in a Python that can fence it (3.8 or later: audit hooks)."""
+    the lab's instruments through Kelvin, in a Python that can fence it (3.8 or later: audit hooks); a module Kelvin
+    can't read as Python reads it is never taken for one that reaches nothing."""
     if tuple(prep.python.version[:2]) < (3, 8):
         return ("its Python is %d.%d, and a rehearsal needs Python 3.8 or later to keep it to the simulated lab"
                 % tuple(prep.python.version[:2]))
     if prep.found.libraries:
         return "it uses %s, which reaches instruments past the gate" % ", ".join(prep.found.libraries)
-    for text in _texts(prep):
+    texts, unread = _texts(prep)
+    if unread:
+        return unread[0]
+    for text in texts:
         why = _reaches_past(text)
         if why:
             return why
     return None
 
 
-def _texts(prep: Prepared) -> List[str]:
-    """The Python a run of this script runs: its own text as it runs, and the lab's own modules it imports beside it
-    (a package's module: every module of its package), as package_files reads them (Python environments left out, a
-    few hundred files at most)."""
-    texts = [prep.source]
+def _texts(prep: Prepared) -> Tuple[List[str], List[str]]:
+    """The Python a run of this script runs, read as Python reads it (each file's coding line, PEP 263): its own text
+    as it runs, and the lab's own modules it imports beside it (a package's module: every module of its package), as
+    package_files reads them (Python environments left out, a few hundred files at most); one of Kelvin's own: its
+    own modules, followed all the way (own_script). And what Kelvin couldn't read so, in words."""
+    if prep.own is not None:
+        return [prep.source] + [t for _, t, _ in prep.own.modules], []
+    texts, unread = [prep.source], []
     package = _package_of(prep.module, prep.home)
     modules = ([package] if package is not None else []) + _local_modules(prep.path, prep.source, prep.home)
     for m in modules:
@@ -3502,35 +3852,49 @@ def _texts(prep: Prepared) -> List[str]:
             if _same_path(f, prep.path):
                 continue
             try:
-                texts.append(f.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                continue
-    return texts
+                text, why = python_text(f.read_bytes(), f.name, own=False)
+            except OSError as e:
+                text, why = None, "Kelvin can't read %s: %s" % (f.name, e.strerror or e)
+            if text is None:
+                unread.append(why)
+            else:
+                texts.append(text)
+    return texts, unread
 
 
-def auto_cover(gate: Any, prep: Prepared, grants: Dict[str, Allowed],
-               now: bool = True) -> Tuple[bool, List[str]]:
-    """Whether auto mode runs this script without asking a person, as it runs a plan (gate.auto_plan), what reading it
-    ahead found standing in for the dry run a script can't have: the model hasn't read text from outside the lab
-    (gate.outside_reason), every drive it sets is low-risk on an instrument Kelvin is sure of (gate.auto_drives: the
-    plan's own judgement), it does no card action that drives the sample, and nothing in it reaches an instrument past
-    the gate (no address outside the lab, no maker's library, no ctypes, COM or program, no network client, no device
-    file, in it or the lab's modules it imports), and Kelvin could read it ahead (no code it puts together as it runs).
-    As it runs, what the gate can't check that the reading missed (an address it works out then, a maker's library
-    another loads) asks a person (ScriptRun.auto). Asked for 2026-11-15: a script run, Kelvin's own and the lab's alike,
-    is judged by auto mode as a plan is. (covered, why: its reasons for the record, or what keeps auto mode from
-    covering it.) now: only while auto mode is on; check_script asks as if it were."""
+def auto_cover(gate: Any, prep: Prepared, grants: Dict[str, Allowed], now: bool = True,
+               outside: Optional[str] = None) -> Tuple[bool, List[str]]:
+    """Whether auto mode runs this script without asking a person, fenced, as it runs a plan (gate.auto_plan) with
+    what reading it ahead found standing in for the dry run a script can't have. Only one of Kelvin's own, as it saved
+    it, with every module it imports (own_script): the lab's own scripts write beside themselves, which a fence would
+    break mid-measurement, so a person approves each run of one, in auto mode too. Then: the model hasn't read text
+    from outside the lab (gate.outside_reason; outside: a queue item's own mark, queued by a chat that had), every drive
+    it sets is low-risk on an instrument Kelvin is sure of (gate.auto_drives: a plan's own judgement), it does no card
+    action that drives the sample, and nothing in it is read as reaching past the gate (an address outside the lab, a
+    maker's library, ctypes, COM, a program, the network, a device file, code it puts together as it runs). The
+    reading is only a reason to ask: the run itself is fenced (kelvin_shim._fence, KELVIN_FENCE=auto), and what the
+    fence refuses ends it. Asked for 2026-11-15. (covered, why: its reasons for the record, or what keeps auto mode
+    from covering it.) now: only while auto mode is on; check_script asks as if it were."""
     if now and not gate.auto:
         return False, []
-    outside = gate.outside_reason()
+    own = prep.own
+    if own is None:   # the lab's own script: a person approves each run, as ever
+        return False, [LAB_EXPERIMENT if prep.found.experiment else LAB_SCRIPT]
+    if own.why_not:
+        return False, list(own.why_not)
+    read = gate.outside_reason()
+    if read:
+        return False, [read]
     if outside:
-        return False, [outside]
+        return False, ["a chat queued it after it read text from outside the lab (%s), which could steer a model, so "
+                       "a person approves" % outside]
     from .portholders import port_name
     found, blockers = prep.found, []
     blockers += ["it opens %s, outside the lab: auto mode covers only what the gate checks" % (port_name(a) or a)
                  for a in found.unknown]
     blockers += ["it uses %s, which reaches instruments past the gate" % m for m in found.libraries]
-    texts = _texts(prep)
+    texts, unread = _texts(prep)
+    blockers += unread
     past = next((w for w in (_reaches_past(t, "the gate", found.libraries) for t in texts) if w), None)
     if past:
         blockers.append(past + ": auto mode covers only what the gate checks")
@@ -3540,9 +3904,9 @@ def auto_cover(gate: Any, prep: Prepared, grants: Dict[str, Allowed],
             placed.add(canonical(a))
         except Exception:
             continue
-    unread = next((w for w in (_unread_reach(t, placed) for t in texts) if w), None)
-    if unread:
-        blockers.append(unread + ": auto mode covers only what the gate checks")
+    unread_reach = next((w for w in (_unread_reach(t, placed) for t in texts) if w), None)
+    if unread_reach:
+        blockers.append(unread_reach + ": auto mode covers only what the gate checks")
     blockers += ["it does %s, which drives the sample: a person starts that" % a for a in found.actions]
     if any(n.startswith("Kelvin could not read the script ahead") for n in found.notes):
         blockers.append("Kelvin could not read it ahead, so it can't say what it drives")
@@ -3551,7 +3915,8 @@ def auto_cover(gate: Any, prep: Prepared, grants: Dict[str, Allowed],
         blockers += why
     if blockers:
         return False, blockers
-    return True, (why or ["it sets no drive away from safe"]) + ["nothing in it reaches an instrument past the gate"]
+    return True, (why or ["it sets no drive away from safe"]) + [
+        "it is Kelvin's own, as it saved it, and runs fenced: nothing in it reaches past the gate"]
 
 
 def rehearse(lab: Any, prep: Prepared, seconds: float = REHEARSE_S, envelope: Any = None,
