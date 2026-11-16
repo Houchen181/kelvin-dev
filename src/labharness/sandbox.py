@@ -173,6 +173,56 @@ def _limits(memory_mb: int) -> Optional[Callable[[], None]]:
     return apply
 
 
+DRIVE_REMOTE = 4              # GetDriveTypeW: a network drive (a mapped one too)
+FILE_PERSISTENT_ACLS = 0x8    # GetVolumeInformationW: the volume keeps access lists (NTFS, ReFS; not FAT, exFAT)
+
+
+def _volume(folder: Any) -> Tuple[Optional[int], Optional[int]]:
+    """Windows: the drive type of the volume a folder is on and its file system's flags; (None, None) where Windows
+    doesn't say."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        root = ctypes.create_unicode_buffer(1024)
+        if not k32.GetVolumePathNameW(str(folder), root, 1024):
+            return None, None
+        kind = k32.GetDriveTypeW(root.value)
+        flags = wintypes.DWORD()
+        if not k32.GetVolumeInformationW(root.value, None, 0, None, None, ctypes.byref(flags), None, 0):
+            return kind, None
+        return kind, flags.value
+    except Exception:
+        return None, None
+
+
+def low_problem(folder: Any) -> Optional[str]:
+    """Why Windows' low integrity can't keep a folder writable for a lowered process, in words; None when it can. Over
+    SMB Windows refuses every low-integrity write, the labelled folder's too, though the label is set and the process
+    lowers itself (a review of 2026-11-15: a run whose scripts folder was on a share failed at its first write, with a
+    bare PermissionError): a network share (a UNC path, a mapped drive, a link to one). And a drive that keeps no access
+    lists (FAT, exFAT) takes no label at all."""
+    if os.name != "nt":
+        return "not Windows"
+    text = str(folder)
+    try:
+        real = os.path.realpath(text)   # a link or a junction is where it leads: a folder linked to a share is on it
+    except (OSError, ValueError):
+        real = text
+    for path in dict.fromkeys((text, real)):
+        low = path.replace("/", "\\").lower()
+        if low.startswith("\\\\?\\") and low[5:6] == ":":   # a long path on a drive: as the drive is
+            low = low[4:]
+        if low.startswith("\\\\"):                           # \\server\share, \\?\UNC\server\share
+            return "%s is on a network share" % text
+        kind, flags = _volume(path)
+        if kind == DRIVE_REMOTE:
+            return "%s is on a network drive" % text
+        if flags is not None and not flags & FILE_PERSISTENT_ACLS:
+            return "%s is on a drive that keeps no access lists (FAT, exFAT)" % text
+    return None
+
+
 def _label_low(folder: Path) -> Optional[str]:
     """The folder labelled Windows' low integrity level, its files and folders after it too: the one place a child at
     that level may write. None when done; else why not (not Windows, or the call failed), in words."""
@@ -239,8 +289,10 @@ def run(code: str, runs: Dict[str, Path], base: Path, timeout_s: float = TIME_LI
             out.notes.append("%s is still being measured: the code read a snapshot of its points so far" % run_id)
         given[run_id] = item
     # the operating system's own restriction (Windows): the folder labelled low integrity, and the child lowered to
-    # it, so nothing it runs, natively either, writes or deletes anywhere else
-    low = _label_low(folder)
+    # it, so nothing it runs, natively either, writes or deletes anywhere else; never on a share or a FAT drive, where
+    # Windows refuses a low-integrity process every write, its own folder's too (low_problem)
+    low = low_problem(folder) if os.name == "nt" else None
+    low = low or _label_low(folder)
     job = {"code": str(folder / "code.py"), "scratch": str(folder), "runs": given, "path": list(sys.path),
            "result": str(folder / "result.json"), "low_integrity": low is None}
     if low is not None and os.name == "nt":

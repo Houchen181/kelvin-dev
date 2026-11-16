@@ -643,12 +643,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         person you wrote it and shows all its code and that of your own modules it imports (or what changed since a
         run they approved), or, in auto mode, without the card when every drive it sets stays within auto's ranges and
         nothing in it reaches past the gate: fenced then, as run_python is, it writes only in kelvin_scripts/ and its
-        run's folder (on Windows at low integrity, so Windows itself refuses other writes), imports only your modules
-        and its Python's own packages, and starts no program, opens no network connection or device, loads no native
-        code (what the fence refuses ends the run). It guards against mistakes, not against code written to get around
-        it. Analysis of runs is run_python's, and what a plan can do stays a plan. Never over a file a person
-        put there, nor named as a module a script means (kelvin, pyvisa, serial, one of Python's own) or as a test a
-        test runner collects (test_*.py, *_test.py, conftest.py). Saving drives nothing."""
+        run's folder (on Windows, on a local NTFS drive, at low integrity, so Windows itself refuses other writes; on
+        a network share or a FAT drive the fence alone guards them), imports only your modules and its Python's own
+        packages, and starts no program, opens no network connection or device, loads no native code (what the fence
+        refuses ends the run). It guards against mistakes, not against code written to get around it. Analysis of runs
+        is run_python's, and what a plan can do stays a plan. Never over a file a person put there, nor named as a
+        module a script means (kelvin, pyvisa, serial, one of Python's own) or as a test a test runner collects
+        (test_*.py, *_test.py, conftest.py). Saving drives nothing."""
         return rt.save_script(name, code)
 
     @server.tool(annotations=READ, structured_output=False)
