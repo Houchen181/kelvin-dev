@@ -38,7 +38,9 @@ through sitecustomize.py next to it on PYTHONPATH. Standard library only, Python
 """
 import base64
 import builtins
+import hashlib
 import importlib.abc
+import ipaddress
 import json
 import os
 import socket
@@ -74,18 +76,28 @@ class _Link(object):
     """The connection to Kelvin: requests from any thread, and one reader for Kelvin's answers and its stop."""
 
     def __init__(self, address, token):
-        host, _, port = address.rpartition(":")
-        self.sock = _REAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM)
+        self.address, self.token = address, token
+        self.asked = {}                     # a maker's library -> Kelvin's answer
+        self.opaque = ()
+        self.sock = self._connect()
+        self._start()
+
+    def _connect(self):
+        host, _, port = self.address.rpartition(":")
+        sock = _REAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM)
         # a Kelvin that doesn't answer (endpoint security that drops this computer's own connections) is said, not
         # waited for: the script hung before it ran anything, with nothing to say why
-        self.sock.settimeout(CONNECT_S)
+        sock.settimeout(CONNECT_S)
         try:
-            _REAL["connect"](self.sock, (host, int(port)))
+            _REAL["connect"](sock, (host, int(port)))
         except Exception as e:
             raise RuntimeError("Kelvin's stand-in could not reach Kelvin at %s within %d s (%s): a firewall or "
                                "security program may be blocking this computer's own connections" % (
-                                   address, CONNECT_S, e))
-        self.sock.settimeout(None)
+                                   self.address, CONNECT_S, e))
+        sock.settimeout(None)
+        return sock
+
+    def _start(self):
         self.lock = threading.Lock()        # one request written at a time
         self.state = threading.Lock()       # the stop's bookkeeping, between the reader and the main thread
         self.waiting = {}                   # request id -> [answered, answer]
@@ -95,13 +107,31 @@ class _Link(object):
         self.lost = False
         self.interrupted = False            # the main thread has had its one KeyboardInterrupt or KelvinRefused
         self.main_waiting = False           # the main thread is in a request or in time.sleep: it raises itself
-        self.asked = {}                     # a maker's library -> Kelvin's answer
-        self.opaque = ()
         reader = threading.Thread(target=self._read, name="kelvin-link")
         reader.daemon = True
         reader.start()
-        hello = self.request("hello", token=token, pid=os.getpid(), python=sys.version.split()[0])
+        hello = self.request("hello", token=self.token, pid=os.getpid(), python=sys.version.split()[0])
         self.opaque = tuple(hello.get("opaque") or ())
+
+    def reborn(self):
+        """A forked child of the script (multiprocessing's fork, os.fork): its own connection to Kelvin, never its
+        parent's, whose answers only the parent's reader takes (a review of 2026-11-15: a forked Pool worker that sent
+        a datagram waited for ever); the locks a thread of the parent held at the fork are made anew. When Kelvin
+        can't be reached from it, each request fails at once, saying why: it never waits."""
+        old = getattr(self, "sock", None)
+        try:
+            self.sock = self._connect()
+            self._start()
+        except BaseException as e:
+            self.lost = True
+            self.gone = ("a forked process of the script couldn't reach Kelvin (%s), so nothing it asks of the lab "
+                         "goes ahead" % e)
+            self.waiting, self.lock, self.state = {}, threading.Lock(), threading.Lock()
+        if old is not None:
+            try:
+                _REAL["close"](old)   # the child's copy only: the parent's connection goes on
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ the reader
 
@@ -176,7 +206,8 @@ class _Link(object):
     def request(self, op, **fields):
         if self.lost:
             self._leave(refused=True)
-            raise KelvinRefused("Kelvin is gone, so the script stops: nothing watches the instruments")
+            raise KelvinRefused(getattr(self, "gone", "") or
+                                "Kelvin is gone, so the script stops: nothing watches the instruments")
         self._enter()
         slot = [threading.Event(), None]
         with self.lock:
@@ -428,17 +459,17 @@ class _Manager(object):
     """pyvisa's ResourceManager where no VISA library can be loaded (no NI-VISA on this computer, say): the lab's
     instruments are Kelvin's anyway, so they open; any other address fails as it would have."""
 
-    def __init__(self, why):
-        self.why, self.visalib, self.session = why, None, 0
+    def __init__(self, why, link):
+        self.why, self.visalib, self.session, self._link = why, None, 0, link
 
     def open_resource(self, resource_name, *args, **kwargs):
-        name = _LINK.open(str(resource_name), "visa")
+        name = self._link.open(str(resource_name), "visa")
         if name is None:
             raise KelvinInstrumentError("%s can't be opened here: %s" % (resource_name, self.why))
-        return _Resource(_LINK, name, str(resource_name), kwargs)
+        return _Resource(self._link, name, str(resource_name), kwargs)
 
     def resource_info(self, resource_name, extended=True):
-        if _LINK.lookup(str(resource_name)) is None:
+        if self._link.lookup(str(resource_name)) is None:
             raise KelvinInstrumentError("%s can't be looked up here: %s" % (resource_name, self.why))
         return _resource_info(str(resource_name))
 
@@ -466,32 +497,34 @@ def _patch_pyvisa(module):
     real_new = rm_class.__new__
     real_info = getattr(rm_class, "resource_info", None)
     real_bare = getattr(rm_class, "open_bare_resource", None)
+    link, fenced = _LINK, _FENCED   # bound now: a script that rebinds kelvin_shim's names changes nothing here
 
     def open_resource(self, resource_name, *args, **kwargs):
-        name = _LINK.open(str(resource_name), "visa")
+        name = link.open(str(resource_name), "visa")
         if name is None:
             return real_open(self, resource_name, *args, **kwargs)
-        return _Resource(_LINK, name, str(resource_name), kwargs)
+        return _Resource(link, name, str(resource_name), kwargs)
 
     def open_bare_resource(self, resource_name, *args, **kwargs):
         """A bare VISA session (the session number only): a lab instrument's would be one past the stand-in, so Kelvin
         refuses it (and ends the run); any other address as open_resource's (a person allowed it)."""
-        _LINK.past(str(resource_name), "visa")
+        link.past(str(resource_name), "visa")
         return real_bare(self, resource_name, *args, **kwargs)
 
     def resource_info(self, resource_name, extended=True):   # PyMeasure asks it before it opens
-        if real_info is not None and _LINK.lookup(str(resource_name)) is None:
+        if real_info is not None and link.lookup(str(resource_name)) is None:
             return real_info(self, resource_name, extended)
         return _resource_info(str(resource_name))
 
     def __new__(cls, *args, **kwargs):
-        if _FENCED:   # its VISA library (a DLL, through ctypes) is past the fence: the lab's instruments open all the same
-            return _Manager("a fenced run reaches instruments only through Kelvin's stand-in, never the VISA library")
+        if fenced:   # its VISA library (a DLL, through ctypes) is past the fence: the lab's instruments open all the same
+            return _Manager("a fenced run reaches instruments only through Kelvin's stand-in, never the VISA library",
+                            link)
         try:
             rm = real_new(cls) if real_new is object.__new__ else real_new(cls, *args, **kwargs)
         except Exception as e:
-            return _Manager("%s: %s" % (type(e).__name__, e))
-        _guard_visalib(rm)
+            return _Manager("%s: %s" % (type(e).__name__, e), link)
+        _guard_visalib(rm, link)
         return rm
 
     open_resource.kelvin = True
@@ -505,7 +538,7 @@ def _patch_pyvisa(module):
     rm_class.__new__ = staticmethod(__new__)
 
 
-def _guard_visalib(rm):
+def _guard_visalib(rm, link):
     """The VISA library's own open (rm.visalib.open), below open_resource: a session it opens at a lab instrument's
     address goes past the stand-in (a review of 2026-11-15: rm.visalib.write on one), so Kelvin is asked first, as for
     open_bare_resource; the library is shared by every manager, so it is put in place once."""
@@ -515,7 +548,7 @@ def _guard_visalib(rm):
         return
 
     def open(session, resource_name, *args, **kwargs):
-        _LINK.past(str(resource_name), "visa")
+        link.past(str(resource_name), "visa")
         return real(session, resource_name, *args, **kwargs)
     open.kelvin = True
     try:
@@ -568,16 +601,18 @@ def _patch_serial(module):
     if real is None or getattr(real, "kelvin", False):
         return
 
+    link = _LINK   # bound now: a script that rebinds kelvin_shim's names changes nothing here
+
     class Serial(real):
         """pyserial's Serial; on a lab instrument's port, each line goes to Kelvin instead."""
         kelvin = True
         _kelvin_lines = None
 
         def open(self):
-            name = _LINK.open(str(self.port), "serial") if self.port is not None else None
+            name = link.open(str(self.port), "serial") if self.port is not None else None
             if name is None:
                 return real.open(self)
-            self._kelvin_lines = _Lines(_LINK, name)
+            self._kelvin_lines = _Lines(link, name)
             self.is_open = True
 
         def close(self):
@@ -642,12 +677,24 @@ _SOCKETS = weakref.WeakKeyDictionary()   # a socket to a lab instrument's addres
 
 
 def _socket_address(address):
+    """A socket's address as Kelvin names one (TCPIP0::host::port::SOCKET), None for one that isn't a host and a port:
+    an IPv4 address an IPv6 socket writes as ::ffff:127.0.0.1 is that address (a review of 2026-11-15: a dual-stack
+    socket reached the lab's lock-in so), any other IPv6 address in brackets, which Kelvin never takes for one that
+    reaches no lab instrument."""
     if isinstance(address, tuple) and len(address) >= 2 and isinstance(address[0], str):
-        return "TCPIP0::%s::%s::SOCKET" % (address[0], address[1])
+        host = address[0]
+        if ":" in host:
+            try:
+                ip = ipaddress.ip_address(host.split("%")[0])
+                mapped = getattr(ip, "ipv4_mapped", None)
+                host = str(mapped) if mapped is not None else "[%s]" % ip.compressed
+            except ValueError:
+                host = "[%s]" % host
+        return "TCPIP0::%s::%s::SOCKET" % (host, address[1])
     return None
 
 
-def _patch_socket():
+def _patch_socket(link):
     if getattr(socket.socket.connect, "kelvin", False):
         return
 
@@ -656,10 +703,10 @@ def _patch_socket():
 
     def connect(self, address):
         where = _socket_address(address)
-        name = _LINK.open(where, "socket") if where and _LINK is not None else None
+        name = link.open(where, "socket") if where else None
         if name is None:
             return _REAL["connect"](self, address)
-        _SOCKETS[self] = _Lines(_LINK, name, address)
+        _SOCKETS[self] = _Lines(link, name, address)
 
     def connect_ex(self, address):
         try:
@@ -709,11 +756,11 @@ def _patch_socket():
 
     def create_connection(address, *args, **kwargs):
         where = _socket_address(address)
-        name = _LINK.open(where, "socket") if where and _LINK is not None else None
+        name = link.open(where, "socket") if where else None
         if name is None:
             return _REAL_CREATE_CONNECTION(address, *args, **kwargs)
         sock = _REAL_SOCKET(socket.AF_INET, socket.SOCK_STREAM)
-        _SOCKETS[sock] = _Lines(_LINK, name, address)
+        _SOCKETS[sock] = _Lines(link, name, address)
         return sock
 
     def refuse_loop_connect(real):
@@ -722,7 +769,7 @@ def _patch_socket():
         instrument's own port, past the gate."""
         def loop_connect(self, conn, address, *args, **kwargs):
             where = _socket_address(address)
-            name = _LINK.open(where, "socket") if where and _LINK is not None else None
+            name = link.open(where, "socket") if where else None
             if name is not None:
                 raise ConnectionRefusedError(
                     "Kelvin: %s is %s, an instrument of the lab: open it with pyvisa or a plain socket, whose commands "
@@ -749,13 +796,16 @@ class _Libraries(importlib.abc.MetaPathFinder):
     """Tells Kelvin before the script first imports a maker's library that reaches instruments past the gate (one that
     is installed: a missing one fails as it always would)."""
 
+    def __init__(self, link):
+        self._link = link
+
     def find_spec(self, fullname, path=None, target=None):
-        if _LINK is None or fullname not in _LINK.opaque:
+        if fullname not in self._link.opaque:
             return None
         for finder in sys.meta_path:
             find = getattr(finder, "find_spec", None) if finder is not self else None
             if find is not None and find(fullname, path, target) is not None:
-                _LINK.library(fullname)
+                self._link.library(fullname)
                 break
         return None
 
@@ -809,22 +859,28 @@ class _Late(importlib.abc.MetaPathFinder):
 
 
 def install():
-    """Connect to Kelvin and put the stand-ins in place (once per process)."""
-    global _LINK
+    """Connect to Kelvin and put the stand-ins in place (once per process); then what watches the ways around them. A
+    run a person approved: the guard (_guard). A run auto mode approved: the guard first, the finder of its imports,
+    what it imports from its Python's own packages loaded (_preload), Windows' low integrity, then the fence (_fence).
+    A kept experiment's real run and a rehearsal: the fence. A person's Stop at any moment of this ends the run."""
+    global _LINK, _FENCED
     if _LINK is not None:
         return _LINK
-    global _FENCED
     address = os.environ.get("KELVIN_IPC")
     if not address:
         raise RuntimeError("KELVIN_IPC is not set: Kelvin starts this, to run one of the lab's scripts")
     fence = os.environ.get("KELVIN_FENCE")
+    rehearsal = bool(os.environ.get("KELVIN_REHEARSAL"))
     run_dir = os.environ.get("KELVIN_RUN_DIR") or os.getcwd()
-    _FENCED = bool(fence or os.environ.get("KELVIN_REHEARSAL"))
+    _FENCED = bool(fence or rehearsal)
     try:   # the run's record as Kelvin made it, before anything the script loads writes there
         record = os.listdir(run_dir)
     except OSError:
         record = []
-    _LINK = _Link(address, os.environ.get("KELVIN_IPC_TOKEN", ""))
+    sandbox = _sandbox_module(os.environ.get("KELVIN_SANDBOX", "")) if _FENCED else None
+    _LINK = link = _Link(address, os.environ.get("KELVIN_IPC_TOKEN", ""))
+    if hasattr(os, "register_at_fork"):   # a forked child's own connection, never its parent's (_Link.reborn)
+        os.register_at_fork(after_in_child=link.reborn)
     for name, patch in _PATCHES.items():
         try:
             module = __import__(name)
@@ -834,23 +890,52 @@ def install():
             patch(module)
         except Exception as e:   # never let a script reach the instruments unwatched
             raise RuntimeError("Kelvin could not put its stand-in into %s (%s: %s)" % (name, type(e).__name__, e))
-    _patch_socket()
+    _patch_socket(link)
     _no_input()
-    sys.meta_path.insert(0, _Libraries())
+    sys.meta_path.insert(0, _Libraries(link))
     sys.meta_path.insert(0, _Late())
-    time.sleep = _LINK.sleep
-    if os.environ.get("KELVIN_REHEARSAL"):
-        _rehearsing()
+    time.sleep = link.sleep
+    pairing = _Pairing()
+    if rehearsal:
+        sys.meta_path.insert(0, _Finder(_refused_imports(sandbox, link), "a rehearsal reaches only the simulated lab"))
+        _no_overlapped(pairing)
+        _rehearsing(link, sandbox, pairing, record)
     elif fence == "auto":   # a run auto mode approved, which nobody looked at: the lab through Kelvin only
-        _preload(os.environ.get("KELVIN_PRELOAD", ""))
-        _fence(run_dir, AUTO_WORDS, auto=True, record=record,
-               writable=[w for w in os.environ.get("KELVIN_FENCE_WRITES", "").split(os.pathsep) if w])
+        guard = _guard(link, pairing, address)
+        here = os.path.dirname(os.path.abspath(__file__))
+        dirs = _python_dirs() + [here]
+        for name in ("pyvisa", "serial"):   # the stand-ins' own modules, wherever their Python has them
+            module = sys.modules.get(name)
+            dirs += list(getattr(module, "__path__", None) or [])
+        own = {}
+        for path, sha in (json.loads(os.environ.get("KELVIN_OWN_MODULES") or "{}") or {}).items():
+            own[os.path.normcase(os.path.realpath(path))] = sha
+        sys.meta_path.insert(0, _Finder(_refused_imports(sandbox, link), AUTO_WORDS, own=own, dirs=dirs))
+        _no_overlapped(pairing)
+        _preload(os.environ.get("KELVIN_PRELOAD", ""), dirs)
+        if os.environ.get("KELVIN_LOW_INTEGRITY"):   # Windows itself refuses its writes past its two folders
+            why = sandbox._low_integrity()
+            if why:
+                _RESTRICTED.append(why)
+        _fence(run_dir, sandbox, link, pairing, words=AUTO_WORDS, auto=True, record=record, ipc=address,
+               writable=[w for w in os.environ.get("KELVIN_FENCE_WRITES", "").split(os.pathsep) if w],
+               ours=[guard] if guard is not None else [])
     elif fence:   # one of the lab's kept experiments, in its real run: kelvin.lab only
-        _fence(run_dir, "one of the lab's experiments reaches the lab only through kelvin.lab", record=record)
+        sys.meta_path.insert(0, _Finder(_refused_imports(sandbox, link), KEPT_WORDS))
+        _no_overlapped(pairing)
+        _fence(run_dir, sandbox, link, pairing, record=record, ipc=address)
     else:         # a run a person approved: a lab instrument only through the stand-ins (a raw socket, a device file)
-        _guard()
+        _guard(link, pairing, address)
     _install_api()
-    return _LINK
+    return link
+
+
+def _refused_imports(sandbox, link):
+    """What a fenced run never imports: run_python's (DENIED_IMPORTS: instruments' packages, COM, the network's
+    proactor, Kelvin's own insides) but the stand-ins' pyvisa and pyserial, COM, USB and FTDI by other names, and the
+    makers' libraries Kelvin knows (opaque)."""
+    return tuple(d for d in sandbox.DENIED_IMPORTS if d not in _FENCE_IMPORTS_OK) + _FENCED_IMPORTS + \
+        tuple(link.opaque)
 
 
 class NoInput(EOFError):
@@ -872,7 +957,7 @@ def _no_input():
     builtins.input = no_input
 
 
-def _rehearsing():
+def _rehearsing(link, sandbox, pairing, record):
     """A rehearsal on the simulated lab (KELVIN_REHEARSAL): a wait takes no time. Kelvin's simulated clock moves on by
     it, and so do the script's clocks (time.time, monotonic, perf_counter), so a loop timed by them ends too."""
     skipped = [0.0]
@@ -881,42 +966,52 @@ def _rehearsing():
     def sleep(seconds):
         if seconds < 0:
             raise ValueError("sleep length must be non-negative")
-        _LINK.request("sleep", seconds=float(seconds))
+        link.request("sleep", seconds=float(seconds))
         skipped[0] += seconds
 
     time.sleep = sleep
     time.time = lambda: real_time() + skipped[0]
     time.monotonic = lambda: real_monotonic() + skipped[0]
     time.perf_counter = lambda: real_perf() + skipped[0]
-    _fence(os.environ.get("KELVIN_RUN_DIR") or os.getcwd())
+    _fence(os.environ.get("KELVIN_RUN_DIR") or os.getcwd(), sandbox, link, pairing, record=record,
+           words="a rehearsal reaches only the simulated lab")
 
 
-# what a fence refuses (a rehearsal's: nobody approved it, so it reaches the simulated lab through Kelvin and nothing
-# else; a kept experiment's real run; a run auto mode approved, which reaches the lab only through Kelvin's stand-ins):
-# labharness/scriptrun.py says the same of the script's text before it runs (PAST_THE_LAB)
+# ------------------------------------------------------------------ what goes around the stand-ins: guard and fence
+#
+# Both are audit hooks (PEP 578) in the script's own process. Python's own documentation says such hooks are no sandbox:
+# code written on purpose to get around them can. They keep honest code, and code an AI was talked into, from reaching
+# an instrument past the gate, as run_python's sandbox does (labharness/data/sandbox/kelvin_sandbox.py, whose lists a
+# fence shares); on Windows a run auto mode approved runs at low integrity besides, so Windows itself refuses its writes
+# anywhere but its two folders. Everything a hook decides by is bound in it as it is made (default arguments, a
+# closure): a script that rebinds this module's names changes nothing it decides (a review of 2026-11-15).
+
+# what a fence refuses to import besides run_python's (DENIED_IMPORTS): COM, USB and FTDI by other names
 _FENCED_IMPORTS = ("cffi", "_cffi_backend", "win32com", "win32api", "win32process", "win32file", "win32event",
                    "win32service", "pythoncom", "pywintypes", "comtypes", "clr", "pythonnet", "usb", "libusb_package",
-                   "libusb1", "hid", "ftd2xx", "pyftdi", "pylibftdi")
-_FENCED_EVENTS = ("subprocess.", "_posixsubprocess.", "_winapi.CreateProcess", "os.system", "os.exec", "os.spawn",
-                  "os.posix_spawn", "os.fork", "os.forkpty", "os.startfile", "os.kill", "os.killpg", "os.fchdir",
-                  "ctypes.", "winreg.", "pty.", "webbrowser.", "socket.connect", "socket.bind", "socket.sendto",
-                  "socket.sendmsg")
-# the registry read (fonts, time zones, a file's type: matplotlib and the standard library look there as they load),
-# which changes nothing; every other registry event is refused
+                   "libusb1", "hid", "ftd2xx", "pyftdi", "pylibftdi", "_overlapped")
+# what run_python refuses that a fenced run imports all the same: pyvisa and pyserial, whose lab instruments go through
+# Kelvin's stand-ins (and whose other addresses Kelvin refuses in a fenced run); asyncio's Windows half, loaded
+# already, whose proactor is taken out of reach instead (_no_overlapped)
+_FENCE_IMPORTS_OK = ("pyvisa", "serial", "asyncio.windows_events", "asyncio.windows_utils")
+# what run_python refuses that a fenced run may do, each looked at on its own: a socket of its own (made, and its name
+# looked up: only connecting and sending are refused), changing into its own folders, a DLL folder of its Python's,
+# reading the registry
+_FENCE_EVENTS_OK = ("socket.", "os.chdir", "os.add_dll_directory")
+_FENCE_SOCKETS = ("socket.connect", "socket.bind", "socket.sendto", "socket.sendmsg", "socket.sethostname")
+# the registry read (fonts, time zones, a file's type: matplotlib and the standard library look there), which changes
+# nothing; every other registry event is refused
 _REGISTRY_READS = ("winreg.OpenKey", "winreg.OpenKey/result", "winreg.EnumKey", "winreg.EnumValue",
                    "winreg.QueryInfoKey", "winreg.QueryValue", "winreg.QueryReflectionKey",
                    "winreg.ExpandEnvironmentStrings", "winreg.PyHKEY.Detach")
-# events that change the file system, and the positions of their paths (each must be in a folder the fence lets it write)
-_FENCED_WRITES = {"os.remove": (0,), "os.rmdir": (0,), "os.mkdir": (0,), "os.rename": (0, 1), "os.link": (0, 1),
-                  "os.symlink": (0, 1), "os.chmod": (0,), "os.chown": (0,), "os.utime": (0,), "os.truncate": (0,),
-                  "shutil.rmtree": (0,), "shutil.copyfile": (1,), "shutil.copytree": (1,), "shutil.move": (0, 1),
-                  "tempfile.mkstemp": (0,), "tempfile.mkdtemp": (0,), "sqlite3.connect": (0,)}
 # in the folder of Kelvin's own a run auto mode approved may write in (its kelvin_ folder): never code, nor Kelvin's
 # marks and kept versions, nor bytecode, so what runs next is still what Kelvin wrote and was checked
 _CODE = (".py", ".pyw", ".pyc", ".pyo", ".pyd", ".pth", ".ipynb", ".so", ".dll", ".dylib", ".exe", ".com", ".bat",
          ".cmd", ".ps1", ".vbs", ".js", ".lnk", ".scr", ".msi")
 _REFUSED = []   # what the fence refused, said to Kelvin as the script ends (also when the script carried on)
+_RESTRICTED = []   # Windows' low integrity for a run auto mode approved: why it couldn't be, said as the script ends
 AUTO_WORDS = "auto mode's fence (a run auto mode approved reaches the lab only through Kelvin's stand-ins)"
+KEPT_WORDS = "one of the lab's experiments reaches the lab only through kelvin.lab"
 
 
 class KelvinFenced(ImportError):
@@ -924,9 +1019,27 @@ class KelvinFenced(ImportError):
     try: import cffi, which matplotlib loads; a PermissionError there broke every plot under the fence)."""
 
 
+def _sandbox_module(path):
+    """run_python's sandbox (labharness/data/sandbox/kelvin_sandbox.py), loaded from where Kelvin says (KELVIN_SANDBOX):
+    what it refuses (DENIED_IMPORTS, DENIED_EVENTS, WRITES, WRITE_FLAGS: O_TEMPORARY too), how it compares paths and
+    how it lowers a process to Windows' low integrity, which a fenced run shares rather than keeping a copy of its own.
+    RuntimeError when it can't be loaded: the run doesn't start, never fenced less."""
+    import importlib.util
+    try:
+        spec = importlib.util.spec_from_file_location("kelvin_sandbox", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.DENIED_IMPORTS, module.DENIED_EVENTS, module.WRITES, module.WRITE_FLAGS   # all there
+        return module
+    except Exception as e:
+        raise RuntimeError("Kelvin couldn't set up the fence of a run nobody looked at (its sandbox at %s: %s: %s), so "
+                           "it doesn't start" % (path, type(e).__name__, e))
+
+
 def _python_dirs():
-    """The script's Python's own folders (its installation, its environment, its site-packages): a DLL folder a
-    package adds as it loads (delvewheel's os.add_dll_directory: SciPy, pyzmq) is one of its own there."""
+    """The script's Python's own folders (its installation, its environment, its site-packages): what a run auto mode
+    approved imports comes from there (or is Kelvin's own), and a DLL folder a package adds as it loads (delvewheel's
+    os.add_dll_directory: SciPy, pyzmq) is one of its own there."""
     import site
     dirs = [sys.prefix, sys.base_prefix, sys.exec_prefix, getattr(sys, "base_exec_prefix", "")]
     try:
@@ -940,58 +1053,238 @@ def _python_dirs():
     return [d for d in dirs if d]
 
 
-def _preload(names):
+def _origins(spec):
+    """Where a module found by a finder comes from: its file, a package's folders; () for one built in."""
+    out = []
+    origin = getattr(spec, "origin", None)
+    if origin and origin not in ("built-in", "frozen", "namespace"):
+        out.append(origin)
+    out += [p for p in (getattr(spec, "submodule_search_locations", None) or []) if p]
+    return out
+
+
+def _inside(path, dirs, _norm=os.path.normcase, _abs=os.path.abspath, _sep=os.sep):
+    p = _norm(_abs(path))
+    for d in dirs:
+        d = _norm(_abs(d)).rstrip("\\/")
+        if p == d or p.startswith(d + _sep):
+            return True
+    return False
+
+
+def _preload(names, dirs):
     """What the script imports from its Python's own packages, loaded before the fence goes up (KELVIN_PRELOAD, read
     ahead by Kelvin): a package's own start (matplotlib's font list, made with fc-list or read from the registry; a
-    DLL found as it loads) is the package's, not the script's, and is never taken for the script reaching past."""
+    DLL found as it loads) is the package's, not the script's, and is never taken for the script reaching past. Only a
+    module that comes from its Python's own folders (dirs): one anywhere else (PYTHONPATH, an editable install, a
+    .pth's folder, a kelvin_ folder) is no package of its Python's, and loads only as the script imports it, fenced
+    (a review of 2026-11-15: a lab library on PYTHONPATH ran a program and a raw socket here, before the fence). A
+    person's Stop meanwhile ends the run (KeyboardInterrupt is never caught here)."""
+    import importlib.util
     for name in [n.strip() for n in (names or "").split(",") if n.strip()]:
+        top = name.split(".")[0]
         try:
+            spec = importlib.util.find_spec(top)
+            if spec is None or not all(_inside(o, dirs) for o in _origins(spec)):
+                continue
             __import__(name)
-        except BaseException:   # the script meets the same error at its own import, in its own words
+        except Exception:   # the script meets the same error at its own import, in its own words
             pass
 
 
-def _fence(folder, words="a rehearsal reaches only the simulated lab", writable=(), auto=False, record=None):
-    """A fence inside the script's process (an audit hook, PEP 578): no programs, native libraries, COM, registry
-    changes, USB or network (the connection to Kelvin is made already), no device files, and writing only in the
-    run's own folder (folder: a rehearsal's, a kept experiment's run folder; its record's files there, record: their
-    names as Kelvin made them, else as they are now, stay Kelvin's) and in writable (a run auto mode approved: its
-    kelvin_ folder, but no code there). It may change
-    into those folders; a package of its Python's may add a DLL folder of its own; a refused import fails as a missing
-    module (KelvinFenced). What the experiment uses (NumPy) is loaded first. auto: a run auto mode approved, which
-    nobody looked at: what the fence refuses ends the run (Kelvin is told at once: op fenced), and its drives go back
-    to safe. Like run_python's sandbox, it keeps honest code and code an AI was talked into away from the instruments;
-    it is not a wall against code written to get around it. Python before 3.8 has no audit hooks, so it can't be
-    fenced (Kelvin says so before it starts)."""
+class _Pairing(object):
+    """The one connection a fenced run makes of its own: a pair of sockets inside its own process, which asyncio's
+    selector loop needs (Windows makes one with a loopback bind and connect: _socketpair). Each bind or connect it
+    allows is made once, to its exact loopback address, by Kelvin's own socketpair, and is taken back as it is used."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.allowed = []
+
+    def allow(self, event, address):
+        with self.lock:
+            self.allowed.append((event, address))
+
+    def has(self, event, address):
+        with self.lock:
+            return (event, address) in self.allowed
+
+    def take(self, event, address):
+        with self.lock:
+            if (event, address) in self.allowed:
+                self.allowed.remove((event, address))
+                return True
+            return False
+
+
+def _socketpair(pairing, real_socket=socket.socket, real_connect=_REAL["connect"]):
+    """socket.socketpair for a fenced run on Windows, as Python's own makes one there (a loopback listener, a connect
+    to it, the connection accepted), each step allowed once, to that address only (_Pairing): asyncio's selector loop
+    works, and no other connection is opened (a review of 2026-11-15: asyncio ended every auto run on Windows)."""
+    def socketpair(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0):
+        if family == socket.AF_INET:
+            host = "127.0.0.1"
+        elif family == getattr(socket, "AF_INET6", None):
+            host = "::1"
+        else:
+            raise ValueError("Only AF_INET and AF_INET6 socket address families are supported")
+        lsock = real_socket(family, type, proto)
+        try:
+            pairing.allow("socket.bind", (host, 0))
+            lsock.bind((host, 0))
+            lsock.listen()
+            addr, port = lsock.getsockname()[:2]
+            csock = real_socket(family, type, proto)
+            try:
+                csock.setblocking(False)
+                pairing.allow("socket.connect", (addr, port))
+                try:
+                    real_connect(csock, (addr, port))
+                except (BlockingIOError, InterruptedError):
+                    pass
+                csock.setblocking(True)
+                ssock, _ = lsock.accept()
+                if ssock.getpeername()[:2] != csock.getsockname()[:2]:
+                    ssock.close()
+                    raise ConnectionError("Unexpected peer connection")
+            except BaseException:
+                csock.close()
+                raise
+        finally:
+            lsock.close()
+        return ssock, csock
+    socketpair.kelvin = True
+    return socketpair
+
+
+def _no_overlapped(pairing):
+    """Windows, a fenced run: asyncio's proactor out of reach (_overlapped's ConnectEx connects past every audit event:
+    a review of 2026-11-15 sent SLVL 4.5 to the lab's lock-in with it), its module emptied where asyncio holds it and
+    imported nowhere again; asyncio's default loop the selector one instead, its self-pipe Kelvin's socketpair."""
+    if os.name != "nt":
+        return
+    stub = types.ModuleType("_overlapped")
+
+    def missing(name):
+        raise AttributeError("a fenced run has no _overlapped (asyncio's proactor connects past the gate): %s" % name)
+    stub.__getattr__ = missing
+    events = sys.modules.get("asyncio.windows_events")
+    if events is not None:
+        events._overlapped = stub
+    sys.modules.pop("_overlapped", None)
+    socket.socketpair = _socketpair(pairing)
+    try:
+        import asyncio
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
+
+
+class _Finder(importlib.abc.MetaPathFinder):
+    """A fenced run's imports, however they are asked for (an import statement, importlib.import_module or
+    importlib.resources): a refused one fails as a module that isn't there (KelvinFenced). In a run auto mode approved
+    (own: Kelvin's own modules it may import, by path, each with the sha256 Kelvin read; dirs: its Python's own folders
+    and the stand-in's), any other module it imports must come from there: a module beside it that Kelvin didn't write
+    (a review of 2026-11-15: importlib.resources.files('helper') ran a person's kelvin_scripts/helper.py), one Kelvin
+    wrote that changed since, or one from anywhere else, is refused."""
+
+    def __init__(self, refused, words, own=None, dirs=()):
+        self.refused, self.words, self.own, self.dirs = tuple(refused), words, own, tuple(dirs)
+        self.busy = threading.local()
+
+    def _refuse(self, fullname, why):
+        if len(_REFUSED) < 20:
+            _REFUSED.append("import %s" % fullname)
+        raise KelvinFenced("%s: import %s%s" % (self.words, fullname, why), name=fullname)
+
+    def find_spec(self, fullname, path=None, target=None):
+        for d in self.refused:
+            if fullname == d or fullname.startswith(d + "."):
+                self._refuse(fullname, "")
+        if self.own is None or getattr(self.busy, "on", False):
+            return None
+        self.busy.on = True
+        try:
+            spec = None
+            for finder in sys.meta_path:
+                find = getattr(finder, "find_spec", None) if finder is not self else None
+                if find is None:
+                    continue
+                spec = find(fullname, path, target)
+                if spec is not None:
+                    break
+        finally:
+            self.busy.on = False
+        if spec is None:
+            return None
+        origin = getattr(spec, "origin", None)   # the code that runs (a namespace package's folder runs none)
+        for origin in ([origin] if origin and origin not in ("built-in", "frozen", "namespace") else []):
+            if _inside(origin, self.dirs):
+                continue
+            key = os.path.normcase(os.path.realpath(origin))
+            sha = self.own.get(key)
+            if sha is None:
+                self._refuse(fullname, " from %s, which is neither one of Kelvin's own modules it read nor of its "
+                                       "Python's packages" % origin)
+            try:
+                with open(origin, "rb") as f:
+                    now = hashlib.sha256(f.read()).hexdigest()
+            except OSError:
+                now = None
+            if now != sha:
+                self._refuse(fullname, " from %s, which changed after Kelvin read it" % origin)
+        return spec
+
+
+def _fence(folder, sandbox, link, pairing, words=KEPT_WORDS, writable=(), auto=False, record=None, ipc=None,
+           ours=()):
+    """A fence inside the script's process (an audit hook, PEP 578), run_python's refusals (sandbox: DENIED_EVENTS,
+    WRITES, WRITE_FLAGS with O_TEMPORARY) with what a run needs besides: no programs, native code, COM, registry
+    changes, USB, network or device files; writing only in the run's own folder (folder: a rehearsal's, a kept
+    experiment's run folder; its record's files there, record: their names as Kelvin made them, stay Kelvin's) and in
+    writable (a run auto mode approved: its kelvin_ folder, but no code there), alternate data streams included; a
+    folder elsewhere isn't opened (so no dir_fd reaches past it); it may change into its folders, and a package of its
+    Python's may add a DLL folder of its own; a refused import fails as a module that isn't there (KelvinFenced). The
+    function code of a hook is never replaced, nor are objects listed (gc), as run_python refuses. What the experiment
+    uses (NumPy) is loaded first. auto: a run auto mode approved, which nobody looked at: what the fence refuses ends
+    the run (Kelvin is told at once: op fenced), its drives back to safe. Like run_python's sandbox it keeps honest code
+    and code an AI was talked into away from the instruments; it is not a wall against code written to get around it.
+    Python before 3.8 has no audit hooks, so it can't be fenced (Kelvin says so before it starts)."""
     if not hasattr(sys, "addaudithook"):
         raise RuntimeError("Python %s can't keep a rehearsal to the simulated lab: 3.8 or later" % sys.version.split()[0])
     try:
         import numpy  # noqa: F401  loaded before the fence: its own loading may use what the fence refuses
     except Exception:
         pass
-    if os.name == "nt":
+    if os.name == "nt":   # each path as the system resolves it now (the folder it is in may change: os.chdir)
         import nt
         full, fold, sep = nt._getfullpathname, str.lower, "\\"
     else:
         full, fold, sep = os.path.abspath, str, "/"
+    real = os.path.realpath if os.name != "nt" else None
 
     def folded(p):
         p = fold(full(p))
-        if p.startswith("\\\\?\\") and (p[4:6].endswith(":") or p[4:8] == "unc\\"):   # a long path: as any other
-            p = p[4:] if p[5:6] == ":" else "\\\\" + p[8:]
+        if os.name == "nt":
+            if p.startswith("\\\\?\\") and (p[5:6] == ":" or p[4:8] == "unc\\"):   # a long path: as any other
+                p = p[4:] if p[5:6] == ":" else "\\\\" + p[8:]
+            head, rest = (p[:2], p[2:]) if p[1:2] == ":" else ("", p)
+            p = head + "\\".join(part.split(":")[0] for part in rest.split("\\"))   # x.py::$DATA is x.py
         return p.rstrip("\\/") if len(p) > 3 else p
-    root = folded(folder)
-    roots = [root] + [folded(w) for w in writable if w]
-    own = roots[1:]
-    try:   # the record's own files, as Kelvin made them before the script started: never written by the script
-        kept = tuple(folded(os.path.join(folder, n)) for n in (os.listdir(folder) if record is None else record))
-    except OSError:
-        kept = ()
+    roots = list(sandbox._roots([folder] + [w for w in writable if w], full, fold))
+    own = list(sandbox._roots([w for w in writable if w], full, fold))
+    kept = tuple(folded(os.path.join(folder, n)) for n in (os.listdir(folder) if record is None else record))
     python = tuple(folded(d) for d in _python_dirs())
     null = fold(full(os.devnull))
-    write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC | getattr(os, "O_EXCL", 0)
-    imports = _FENCED_IMPORTS + tuple(_LINK.opaque if _LINK is not None else ())
+    imports = tuple(d for d in sandbox.DENIED_IMPORTS if d not in _FENCE_IMPORTS_OK) + _FENCED_IMPORTS + \
+        tuple(link.opaque)
+    events = tuple(e for e in sandbox.DENIED_EVENTS if e not in _FENCE_EVENTS_OK) + _FENCE_SOCKETS
+    writes = dict(sandbox.WRITES)
+    writes["_winapi.CopyFile2"] = (1,)   # shutil.copy on Windows: its target, as any write
     telling = threading.local()
+    host, _, port = (ipc or ":").rpartition(":")
+    kelvin = (host, int(port)) if port.isdigit() else None
+    mine = list(ours)   # the guard's hook, and this one's (added below): their code is never replaced
 
     def inside(p, dirs):
         for d in dirs:
@@ -1000,19 +1293,21 @@ def _fence(folder, words="a rehearsal reaches only the simulated lab", writable=
         return False
 
     def hook(event, args, _sw=str.startswith, _isinstance=isinstance, _str=str, _bytes=bytes, _int=int,
-             _fspath=os.fspath, _fold=folded, _null=null, _flags=write_flags, _imports=imports,
-             _events=_FENCED_EVENTS, _writes=_FENCED_WRITES, _refused=_REFUSED, _PE=PermissionError, _len=len,
-             _words=words, _inside=inside, _roots=roots, _own=own, _kept=kept, _python=python, _code=_CODE,
-             _reads=_REGISTRY_READS, _auto=auto, _telling=telling, _sep=sep):
+             _fspath=os.fspath, _fold=folded, _null=null, _flags=sandbox.WRITE_FLAGS, _imports=imports,
+             _events=events, _writes=writes, _refused=_REFUSED, _PE=PermissionError, _len=len, _words=words,
+             _inside=inside, _roots=roots, _own=own, _kept=kept, _python=python, _code=_CODE, _reads=_REGISTRY_READS,
+             _auto=auto, _telling=telling, _sep=sep, _link=link, _pairing=pairing, _isdir=os.path.isdir,
+             _real=real, _sockets=_FENCE_SOCKETS, _kelvin=kelvin, _Fenced=KelvinFenced, _tuple=tuple, _mine=mine,
+             _getattr=getattr):
         def refuse(what, imported=""):
             if _len(_refused) < 20:
                 _refused.append(what)
             if imported:   # as a module that isn't there: the script goes on without it, or fails as it would
-                raise KelvinFenced("%s: %s" % (_words, what), name=imported)
-            if _auto and _LINK is not None and not getattr(_telling, "on", False):
+                raise _Fenced("%s: %s" % (_words, what), name=imported)
+            if _auto and not getattr(_telling, "on", False):
                 _telling.on = True   # Kelvin ends the run at once, its drives back to safe (a stop follows)
                 try:
-                    _LINK.request("fenced", what=what)
+                    _link.request("fenced", what=what)
                 except KelvinRefused:
                     pass
                 finally:
@@ -1038,7 +1333,8 @@ def _fence(folder, words="a rehearsal reaches only the simulated lab", writable=
                     or (_isinstance(flags, _int) and flags & _flags)
                 spots = ((args[0] if args else None, writing),)
             else:
-                spots = tuple((args[i], True) for i in _writes[event] if i < _len(args))
+                mode = None
+                spots = _tuple((args[i], True) for i in _writes[event] if i < _len(args))
             for path, writing in spots:
                 if path is None or _isinstance(path, _int):
                     continue   # no file, or one opened already (so already checked)
@@ -1046,14 +1342,18 @@ def _fence(folder, words="a rehearsal reaches only the simulated lab", writable=
                     p = path_of(path)
                 except (OSError, ValueError, TypeError):
                     refuse("%r, which is not a path a fenced run may use" % (path,))
+                if event == "sqlite3.connect" and p.endswith(":memory:"):
+                    continue
                 if p == _null:
                     continue
-                if _sw(p, "\\\\.\\") or _sw(p, "\\\\?\\") or _sw(p, "//./") or _sw(p, "/dev/"):
+                if _sw(p, "\\\\.\\") or _sw(p, "\\\\?\\") or _sw(p, "//./") or _sw(p, "/dev/") or p == "/dev":
                     refuse("the device %s" % path)
                 if not writing:
+                    if event == "open" and mode is None and not _inside(p, _roots) and _isdir(p):
+                        refuse("opening the folder %s, outside its own folders" % path)   # a dir_fd past them
                     continue
-                if not _inside(p, _roots):
-                    refuse("writing %s, outside its own folder" % path)
+                if not _inside(p, _roots) or (_real is not None and not _inside(_real(p), _roots)):
+                    refuse("writing %s, outside its own folders" % path)
                 if _inside(p, _kept):
                     refuse("writing %s, Kelvin's own record of the run" % path)
                 if _inside(p, _own):
@@ -1069,7 +1369,7 @@ def _fence(folder, words="a rehearsal reaches only the simulated lab", writable=
             except (OSError, ValueError, TypeError):
                 p = ""
             if not p or not _inside(p, _roots):
-                refuse("os.chdir to %s, outside its own folder" % (args[0] if args else "?"))
+                refuse("os.chdir to %s, outside its own folders" % (args[0] if args else "?"))
             return
         if event == "os.add_dll_directory":   # a package of its Python's adds its own DLL folder (delvewheel)
             try:
@@ -1079,45 +1379,36 @@ def _fence(folder, words="a rehearsal reaches only the simulated lab", writable=
             if not p or not _inside(p, _python):
                 refuse("os.add_dll_directory of %s, outside its Python" % (args[0] if args else "?"))
             return
+        if event in _sockets:
+            address = args[1] if _len(args) > 1 else None
+            if _isinstance(address, _tuple) and _len(address) >= 2:
+                if _pairing.take(event, (address[0], address[1])) or (_kelvin is not None and
+                                                                      (address[0], address[1]) == _kelvin):
+                    return   # the socketpair asyncio's loop needs; Kelvin's own connection
+            refuse("%s to %s" % (event, address))
+        if event == "object.__setattr__" and _len(args) > 1 and args[1] in ("__code__", "__defaults__",
+                                                                            "__kwdefaults__") and \
+                (args[0] in _mine or _getattr(args[0], "__module__", None) == "kelvin_shim"):
+            refuse("replacing the %s of Kelvin's own %s" % (args[1], _getattr(args[0], "__name__", "function")))
         if event in _reads:
             return
         for d in _events:
             if _sw(event, d):
                 refuse(event)
 
+    mine.append(hook)
     sys.addaudithook(hook)
-    # importlib.import_module raises no "import" event: the same refusal as a finder, first on sys.meta_path; and a
-    # refused module a package loaded before the fence (Pillow's cffi) is no longer handed out by its name
-    for name in list(sys.modules):
-        if any(name == d or name.startswith(d + ".") for d in imports):
-            sys.modules.pop(name, None)
-    sys.meta_path.insert(0, _FencedFinder(imports, words))
 
 
-class _FencedFinder(importlib.abc.MetaPathFinder):
-    """A fenced run's refused imports, however they are asked for (an import statement, importlib.import_module):
-    each fails as a module that isn't there (KelvinFenced)."""
-
-    def __init__(self, names, words):
-        self.names, self.words = tuple(names), words
-
-    def find_spec(self, fullname, path=None, target=None):
-        for d in self.names:
-            if fullname == d or fullname.startswith(d + "."):
-                if len(_REFUSED) < 20:
-                    _REFUSED.append("import %s" % fullname)
-                raise KelvinFenced("%s: import %s" % (self.words, fullname), name=fullname)
-        return None
-
-
-_GUARD = threading.local()   # this thread asks Kelvin of a way past: what its own request does is never asked again
-# a device file Kelvin never asks of: what isn't an instrument (the console, the null device, a terminal, shared memory)
 _PSEUDO = ("null", "zero", "random", "urandom", "full", "stdin", "stdout", "stderr", "tty", "ptmx", "console")
+_GLOBAL = ("\\\\?\\globalroot\\global??\\", "\\\\?\\globalroot\\??\\", "\\\\.\\globalroot\\global??\\",
+           "\\\\.\\globalroot\\??\\", "\\\\?\\")
 
 
 def _device(path, writing=False):
-    """A device file this path opens, as the system names it (COM5 is \\\\.\\COM5; /dev/ttyUSB0), or None for a file:
-    however its path was spelled or put together (bytes, joined from parts, relative)."""
+    """A device file this path opens, as the system names it (COM5 is \\\\.\\COM5, and so are \\\\?\\COM5 and
+    \\\\?\\GLOBALROOT\\GLOBAL??\\COM5; /dev/ttyUSB0, through any link to it: /dev/serial/by-id/..., /proc/self/root),
+    or None for a file: however its path was spelled or put together (bytes, joined from parts, relative)."""
     try:
         p = os.fspath(path)
         if isinstance(p, bytes):
@@ -1131,15 +1422,22 @@ def _device(path, writing=False):
         except (OSError, ValueError):
             return None
         low = f.lower()
+        for prefix in _GLOBAL:
+            if low.startswith(prefix) and not (prefix == "\\\\?\\" and (low[5:6] == ":" or low[4:8] == "unc\\")):
+                f, low = "\\\\.\\" + f[len(prefix):], "\\\\.\\" + low[len(prefix):]
+                break
         if low.startswith("\\\\.\\") or low.startswith("//./"):
-            rest = low[4:]
+            rest = low[4:].split(":")[0]
             if rest in ("nul", "con", "conin$", "conout$") or rest.startswith("pipe\\") or rest.startswith("pipe/"):
                 return None
             return f
-        if low.startswith("\\\\?\\") and not (low[5:6] == ":" or low[4:8] == "unc\\"):
-            return f
         return None
     f = os.path.normpath(p if p.startswith("/") else os.path.join(os.getcwd(), p))
+    if f.startswith("/dev/") or f.startswith("/proc/") or os.path.islink(f):
+        try:
+            f = os.path.realpath(f)   # a link to the port (/dev/serial/by-id), the root seen through /proc
+        except (OSError, ValueError):
+            pass
     if f.startswith("/dev/"):
         rest = f[5:]
         if rest in _PSEUDO or rest.startswith(("fd/", "pts/", "shm/", "mqueue/")):
@@ -1150,49 +1448,61 @@ def _device(path, writing=False):
     return None
 
 
-def _guard():
-    """Every run Kelvin doesn't fence (a person approved it): a way to a lab instrument past the stand-ins, which the
-    script's own process takes, is put to Kelvin first (an audit hook, PEP 578; op past): a socket's own connection or
-    datagram (the stand-in patches socket.socket's methods; _socket's own, sendto and sendmsg went past them: a review
-    of 2026-11-15 had a raw _socket send SLVL 4.5 to the lab's lock-in, and the gate never saw it), and a device file
-    opened as a file (COM5, /dev/ttyUSB0). A lab instrument's address, or another way into one, is refused and ends
-    the run; any other goes as the stand-ins' own would (a socket that reaches no lab instrument; a device outside the
-    lab once a person allows it)."""
-    if not hasattr(sys, "addaudithook") or _LINK is None:
+def _guard(link, pairing, ipc=None):
+    """Every run (a run a person approved; a fenced one too, first): a way to a lab instrument past the stand-ins that
+    the script's own process takes is put to Kelvin first (an audit hook, PEP 578; op past): a socket's own connection
+    or datagram (the stand-in patches socket.socket's methods; _socket's own, sendto and sendmsg went past them: a
+    review of 2026-11-15 had a raw _socket send SLVL 4.5 to the lab's lock-in), and a device file opened as a file
+    (COM5, /dev/ttyUSB0). A lab instrument's address, or another way into one, is refused and ends the run; any other
+    goes as the stand-ins' own would. Its state is its own (a closure): a script can't switch it off by a module's name
+    (the review: kelvin_shim._GUARD.on = True did)."""
+    if not hasattr(sys, "addaudithook"):
         return
     said = {}
-    write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+    busy = threading.local()   # this thread is asking Kelvin: what its own request does is never asked again
+    host, _, port = (ipc or ":").rpartition(":")
+    kelvin = (host, int(port)) if port.isdigit() else None
+    write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC | getattr(os, "O_TEMPORARY", 0)
 
-    def check(where, how):
+    def check(where, how, _link=link, _said=said, _busy=busy):
         key = (where, how)
-        if key not in said:
-            _GUARD.on = True
+        if key not in _said:
+            _busy.on = True
             try:
-                _LINK.past(where, how)
-                said[key] = ""
+                _link.past(where, how)
+                _said[key] = ""
             except KelvinRefused as e:
-                said[key] = str(e)
+                _said[key] = str(e)
             finally:
-                _GUARD.on = False
-        if said[key]:
-            raise PermissionError("Kelvin: %s" % said[key])
+                _busy.on = False
+        if _said[key]:
+            raise PermissionError("Kelvin: %s" % _said[key])
 
-    def hook(event, args):
-        if getattr(_GUARD, "on", False):
+    def hook(event, args, _busy=busy, _check=check, _address=_socket_address, _device=_device, _pairing=pairing,
+             _kelvin=kelvin, _flags=write_flags, _isinstance=isinstance, _len=len, _int=int, _str=str,
+             _tuple=tuple, _any=any, _getattr=getattr):
+        if _getattr(_busy, "on", False):
             return
         if event in ("socket.connect", "socket.sendto", "socket.sendmsg"):
-            where = _socket_address(args[1] if len(args) > 1 else None)
+            address = args[1] if _len(args) > 1 else None
+            if _isinstance(address, _tuple) and _len(address) >= 2 and (
+                    (address[0], address[1]) == _kelvin or _pairing.has(event, (address[0], address[1]))):
+                return   # Kelvin's own connection (a forked child's); the socketpair asyncio's loop needs
+            where = _address(address)
             if where:
-                check(where, event)
-        elif event == "open" and args and args[0] is not None and not isinstance(args[0], int):
-            mode, flags = (args[1] if len(args) > 1 else None), (args[2] if len(args) > 2 else 0)
-            writing = (isinstance(mode, str) and any(c in mode for c in "wax+")) or \
-                (isinstance(flags, int) and bool(flags & write_flags))
+                _check(where, event)
+            elif address is not None and not _isinstance(address, (_str, bytes)):   # an address it can't read
+                _check("%r" % (address,), event)
+        elif event == "open" and args and args[0] is not None and not _isinstance(args[0], _int):
+            mode, flags = (args[1] if _len(args) > 1 else None), (args[2] if _len(args) > 2 else 0)
+            writing = (_isinstance(mode, _str) and _any(c in mode for c in "wax+")) or \
+                (_isinstance(flags, _int) and bool(flags & _flags))
             device = _device(args[0], writing)
             if device:
-                check(device, "device")
+                _check(device, "device")
 
     sys.addaudithook(hook)
+    return hook
 
 
 def _install_api():
@@ -1227,14 +1537,20 @@ def _probe(names):
     for, not imported), with the script's own folder (the working folder) on the path."""
     import importlib.util
     sys.path.insert(0, os.getcwd())
-    missing = []
+    missing, foreign = [], {}
+    dirs = _python_dirs()
     for name in names:
         try:
-            if importlib.util.find_spec(name) is None:
-                missing.append(name)
+            spec = importlib.util.find_spec(name)
         except (ImportError, ValueError):
+            spec = None
+        if spec is None:
             missing.append(name)
-    sys.stdout.write(json.dumps({"version": list(sys.version_info[:2]), "missing": missing,
+            continue
+        away = [o for o in _origins(spec) if not _inside(o, dirs)]
+        if away:   # not one of its Python's own packages (PYTHONPATH, an editable install, a .pth's folder)
+            foreign[name] = away[0]
+    sys.stdout.write(json.dumps({"version": list(sys.version_info[:2]), "missing": missing, "foreign": foreign,
                                  "executable": sys.executable}) + "\n")
     return 0
 
@@ -1326,7 +1642,7 @@ def main(argv):
         figures = _save_figures(os.environ.get("KELVIN_RUN_DIR"))
         try:
             link.request("bye", status=status if isinstance(status, int) or status is None else 1, error=error,
-                         figures=figures, refused=list(_REFUSED))
+                         figures=figures, refused=list(_REFUSED), restricted=list(_RESTRICTED))
         except BaseException:
             pass
     return status

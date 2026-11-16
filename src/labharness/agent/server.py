@@ -45,8 +45,8 @@ You are connected to a physics lab through Kelvin.
 - A person may switch on auto mode. Then drive changes and runs that stay well inside the lab's limits (and pass
   a clean dry run) go ahead without asking, and so does a run of a script of your own (save_script) whose drives
   stay there, fenced (writing only in its kelvin_ folder and its run's; no programs, network or native code: what
-  the fence refuses ends the run); the lab's own scripts always ask a person. lab_status says when it is on. Only a
-  person can switch it.
+  the fence refuses ends the run); the lab's own scripts always ask a person. The fence guards against mistakes,
+  not against code written to get around it. lab_status says when it is on. Only a person can switch it.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. A refusal covers
   the outcome, not only the command: never reach the same level, field, temperature or output another way (another
   command, a raw command, a script, another instrument, a plan). Tell the person what was refused and why.
@@ -642,9 +642,11 @@ def build_server(rt: LabRuntime) -> MCPServer:
         run_script runs it with every command to a lab instrument through the safety gate, after a card that tells a
         person you wrote it and shows all its code and that of your own modules it imports (or what changed since a
         run they approved), or, in auto mode, without the card when every drive it sets stays within auto's ranges and
-        nothing in it reaches past the gate: fenced then, it writes only in kelvin_scripts/ and its run's folder, and
-        starts no program, opens no network connection or device, loads no native code (what the fence refuses ends
-        the run). Analysis of runs is run_python's, and what a plan can do stays a plan. Never over a file a person
+        nothing in it reaches past the gate: fenced then, as run_python is, it writes only in kelvin_scripts/ and its
+        run's folder (on Windows at low integrity, so Windows itself refuses other writes), imports only your modules
+        and its Python's own packages, and starts no program, opens no network connection or device, loads no native
+        code (what the fence refuses ends the run). It guards against mistakes, not against code written to get around
+        it. Analysis of runs is run_python's, and what a plan can do stays a plan. Never over a file a person
         put there, nor named as a module a script means (kelvin, pyvisa, serial, one of Python's own) or as a test a
         test runner collects (test_*.py, *_test.py, conftest.py). Saving drives nothing."""
         return rt.save_script(name, code)
@@ -684,12 +686,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
         command it sends to a lab instrument (pyvisa, pyserial, a socket)
         goes through the safety gate on Kelvin's own connection: readings and settings run, drives are checked against
         the limits, ramped and watched; a raw socket, a device file or a bare VISA session to a lab instrument is
-        refused. A person approves the run once on a card (one you wrote says so, with all its code). In auto mode a
-        script you wrote, as you saved it, runs without the card, fenced, as a plan does, when every drive it sets
+        refused, and another way into one (its raw port beside its VXI-11, the Prologix adapter it is behind) too,
+        nobody asked. A person approves the run once on a card (one you wrote says so, with all its code). In auto
+        mode a script you wrote, as you saved it, runs without the card, fenced (as run_python is: a guard against
+        mistakes, not against code written to get around it), as a plan does, when every drive it sets
         stays within auto's ranges on instruments Kelvin is sure of and reading it finds nothing that reaches past the
         gate (an address outside the lab, a maker's library, ctypes, COM, a program, the network, a device file, code
-        it puts together as it runs, an action that drives the sample, a module beside it you didn't write); the card
-        says why not when it asks. The lab's own scripts ask a person each run. Kelvin reads the script first for the
+        it puts together as it runs, an action that drives the sample, a module beside it you didn't write, a module
+        from outside its Python's own packages); the card says why not when it asks. The lab's own scripts ask a person each run. Kelvin reads the script first for the
         drive ranges it uses. params: values for its settings for this
         run, without editing the file ({"VMAX": 2});
         args: its command-line arguments; drives: the range of a drive the script works out as it runs, when you

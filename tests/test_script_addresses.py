@@ -91,18 +91,40 @@ def opener(lab, answers, auto=False):
                                  opened={}, passed=[], _ask=ask, auto=auto), asked
 
 
-def test_a_raw_socket_to_a_lab_instrument_asks_a_person_saying_it_skips_the_gate(lab):
-    me, asked = opener(lab, [False])
-    with pytest.raises(scriptrun._Refuse, match="may not open"):
-        scriptrun.ScriptRun._open(me, "TCPIP0::10.0.0.5::5025::SOCKET", "socket")
-    said = " ".join(asked[0].items)
-    assert "reaches this lab's vna another way" in said and "skip the safety gate" in said
+@pytest.mark.parametrize("answers", [[True], [False]])
+def test_another_way_into_a_lab_instrument_is_refused_without_asking(lab, answers):
+    """Decided 2026-11-15, after a review: a person's yes to another way into a lab instrument was asked for, then
+    overridden by the run's own guard. It is refused in every run, nobody asked, and its card says so up front."""
+    me, asked = opener(lab, list(answers))
+    for address, kind in (("TCPIP0::10.0.0.5::5025::SOCKET", "socket"), ("GPIB0::24::0::INSTR", "visa")):
+        with pytest.raises(scriptrun._Refuse, match="refused: sweep.py opens %s, which reaches this lab's" % address) \
+                as e:
+            scriptrun.ScriptRun._open(me, address, kind)
+        assert "skip the safety gate, so Kelvin refuses it as the script opens it" in str(e.value) and e.value.stop
+    assert asked == [] and me.passed == []
 
 
 def test_a_socket_to_no_lab_instrument_needs_no_one(lab):
     me, asked = opener(lab, [])
     assert scriptrun.ScriptRun._open(me, "TCPIP0::10.0.0.77::5025::SOCKET", "socket") == {} and asked == []
     assert scriptrun.ScriptRun._open(me, "TCPIP0::10.0.0.9::4002::SOCKET", "socket") == {} and asked == []
+
+
+@pytest.mark.parametrize("address", ["(1, 2, 3)", "TCPIP0::[::1::5025::SOCKET", "TCPIP0::host::SOCKET"])
+def test_a_socket_address_kelvin_cant_read_asks_a_person(lab, address):
+    """An address Kelvin can't read is never taken for one that reaches no lab instrument (a review of 2026-11-15:
+    ::ffff:127.0.0.1 reached the lab's lock-in, read as outside the lab); an IPv6 one, in brackets, it reads."""
+    me, asked = opener(lab, [False])
+    with pytest.raises(scriptrun._Refuse, match="declined: sweep.py may not open"):
+        scriptrun.ScriptRun._open(me, address, "socket")
+    assert len(asked) == 1
+
+
+def test_an_ipv6_address_is_read_and_its_lab_instrument_known(lab):
+    me, asked = opener(lab, [])
+    assert scriptrun.ScriptRun._open(me, "TCPIP0::[2001:db8::7]::5025::SOCKET", "socket") == {} and asked == []
+    assert scriptrun._same_host("[::1]", "::1") and scriptrun._lan("TCPIP0::[::1]::5025::SOCKET") == ("[::1]",
+                                                                                                    "5025::SOCKET")
 
 
 def test_in_a_run_auto_mode_approved_an_address_outside_the_lab_ends_the_run(lab):
@@ -125,5 +147,6 @@ def test_a_lab_instrument_spelled_another_way_goes_through_kelvin(lab):
 def test_what_a_person_is_told_of_another_way_in(lab):
     said = scriptrun.outside(lab, "GPIB0::24::0::INSTR")
     assert said == ("GPIB0::24::0::INSTR, which reaches this lab's smu another way than its address in the lab "
-                    "(GPIB0::24::INSTR): commands sent there skip the safety gate")
+                    "(GPIB0::24::INSTR): commands sent there skip the safety gate, so Kelvin refuses it as the script "
+                    "opens it, and the run ends there")
     assert "not in this lab" in scriptrun.outside(lab, "GPIB0::25::INSTR")

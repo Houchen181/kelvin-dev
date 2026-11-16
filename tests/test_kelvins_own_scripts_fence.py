@@ -104,12 +104,15 @@ attempt("os.makedirs data/ beside the script", lambda: os.makedirs(os.path.join(
 attempt("np.savetxt in data/", lambda: np.savetxt(os.path.join(here, "data", "iv.csv"), data))
 attempt("np.savetxt in KELVIN_RUN_DIR", lambda: np.savetxt(os.path.join(run_dir, "iv.csv"), data, delimiter=","))
 attempt("os.chdir into its folder", lambda: os.chdir(here))
+'''
+# packages of its Python's own (installed in its site-packages for the test: OWN_PACKAGES)
+PKGS = r'''
 def _optional():
-    import optlib   # its load() tries cffi, as Pillow 8.4 does: a module that isn't there, so it does without
-    assert optlib.load() is None
+    import OPTLIB   # its load() tries cffi, as Pillow 8.4 does: a module that isn't there, so it does without
+    assert OPTLIB.load() is None
 attempt("a package's optional import the fence refuses", _optional)
 def _dllpkg():
-    import dllpkg  # noqa: F401  a stand-in for a wheel delvewheel patched: os.add_dll_directory as it loads
+    import DLLPKG  # noqa: F401  a stand-in for a wheel delvewheel patched: os.add_dll_directory as it loads
 attempt("a package that adds its DLL folder as it loads", _dllpkg)
 '''
 H5 = r'''
@@ -146,23 +149,44 @@ def results_of(rt, folder, name):
     return json.loads(line[len("RESULTS "):]), run_dir
 
 
-def packages(tmp_path):
-    """The test's own packages, on the scripts' PYTHONPATH: one that adds its DLL folder as it loads (as a wheel
-    delvewheel patched: SciPy, pyzmq), and one that tries cffi when asked (as Pillow 8.4 does for matplotlib)."""
-    for name, text in (("dllpkg", "import os\nlibs = os.path.dirname(os.path.abspath(__file__))\n"
-                                  "getattr(os, 'add_dll_directory', lambda p: None)(libs)\n"),
-                       ("optlib", "def load():\n    try:\n        import cffi\n        return cffi\n"
-                                  "    except ImportError:\n        return None\n")):
-        pkg = tmp_path / "fakes" / name
-        pkg.mkdir(parents=True, exist_ok=True)
-        (pkg / "__init__.py").write_text(text)
+@pytest.fixture
+def own_packages():
+    """Packages of the scripts' Python's own (this one's), put in its site-packages for the test and taken out after,
+    under names of their own: one that adds its DLL folder as it loads (as a wheel delvewheel patched: SciPy, pyzmq),
+    one that tries cffi when asked (as Pillow 8.4 does for matplotlib), and one that takes a while to load (as
+    matplotlib's first font list): {DLLPKG, OPTLIB, SLOWMOD: its name}. Only what comes from there is loaded before
+    the fence (a module on PYTHONPATH is no package of its Python's: test_a_library_on_pythonpath_asks)."""
+    import shutil
+    import sysconfig
+    import uuid
+    site = Path(sysconfig.get_paths()["purelib"])
+    tag = uuid.uuid4().hex[:8]
+    names = {"DLLPKG": "kfence_dllpkg_" + tag, "OPTLIB": "kfence_optlib_" + tag, "SLOWMOD": "kfence_slow_" + tag}
+    texts = {"DLLPKG": "import os\nlibs = os.path.dirname(os.path.abspath(__file__))\n"
+                       "getattr(os, 'add_dll_directory', lambda p: None)(libs)\n",
+             "OPTLIB": "def load():\n    try:\n        import cffi\n        return cffi\n"
+                       "    except ImportError:\n        return None\n",
+             "SLOWMOD": "import time\nt0 = time.perf_counter()\nwhile time.perf_counter() - t0 < 6:\n    pass\n"}
+    for key, name in names.items():
+        (site / name).mkdir()
+        (site / name / "__init__.py").write_text(texts[key])
+    yield names
+    for name in names.values():
+        shutil.rmtree(site / name, ignore_errors=True)
+
+
+def named(code, names):
+    for key, name in names.items():
+        code = code.replace(key, name)
+    return code
 
 
 @pytest.mark.parametrize("python", ["Kelvin's own (NumPy, h5py)", "with SciPy and matplotlib"])
-def test_ordinary_lab_code_runs_fenced_in_auto_mode(lab, folder, tmp_path, python):
+def test_ordinary_lab_code_runs_fenced_in_auto_mode(lab, folder, tmp_path, own_packages, python):
+    """At low integrity too on Windows (its two folders labelled): the channel to Kelvin, the stand-in pyvisa, NumPy,
+    h5py, SciPy, matplotlib and Pillow 8.4 all work there."""
     rt = kelvin(lab, folder, tmp_path, answers=[])   # a card would fail the test
     rt.gate.auto = True
-    packages(tmp_path)
     code = LAB_CODE
     if python.startswith("with"):
         if not Path(SCIENCE).is_file():
@@ -171,14 +195,16 @@ def test_ordinary_lab_code_runs_fenced_in_auto_mode(lab, folder, tmp_path, pytho
         code += SCI
     else:
         pytest.importorskip("h5py")
-        code += H5
+        code += H5 + named(PKGS, own_packages)
     rt.save_script("iv_sweep", code + TAIL)
     said = rt.run_script("kelvin_scripts/iv_sweep.py")
     assert "script iv_sweep.py done" in ran(said), said
     assert cards(rt) == [] and len(auto_approved(rt)) == 1
+    assert "low integrity" not in said, said   # Windows' restriction set, and taken
     results, run_dir = results_of(rt, folder, "iv_sweep")
     assert all(v == "ok" for v in results.values()), results
-    assert "warning: its process refused: import cffi" in said, said   # the fence's, as a module that isn't there
+    if not python.startswith("with"):   # the fence's own refusal, as a module that isn't there
+        assert "warning: its process refused: import cffi" in said, said
     assert (folder / "kelvin_scripts" / "iv.csv").is_file() and (run_dir / "iv.csv").is_file()
     assert rundata.load(run_dir, with_rows=False).meta["approved"] == "auto mode"
     assert any(c.get("instrument") == "smu" and c["command"] == "SOUR:VOLT 1" for c in commands(run_dir))
@@ -265,9 +291,10 @@ def test_each_escape_the_review_found_asks_or_ends_at_the_fence(tcp_lab, folder,
     if cards(rt):   # read ahead: its card asks a person, saying why
         [card] = cards(rt)
         assert said.startswith("declined") and card.items[-1].startswith("Auto mode does not cover this run: "), said
-    else:           # auto mode ran it, fenced: the fence refused it, and the run ended there
-        assert FENCED in ran(said), said
-        assert len(auto_approved(rt)) == 1
+    else:           # auto mode ran it, fenced: the fence (or the guard, for the lab's own instrument) refused it, and
+        assert len(auto_approved(rt)) == 1   # the run ended there (asyncio's subprocess: the selector loop has none)
+        assert ran(said).startswith("script escape.py stopped") and (
+            FENCED in ran(said) or "refused: escape.py" in ran(said) or "NotImplementedError" in ran(said)), said
     time.sleep(0.3)
     assert not marker.exists() and got == []
     assert "the person wrote this" in (folder / "their_script.py").read_text()
