@@ -8663,10 +8663,13 @@
   }
   function shellStart(tab) {
     const css = getComputedStyle(document.documentElement), v = (name, or) => css.getPropertyValue(name).trim() || or;
+    const bg = v("--term-bg", "#121a23");
     const term = new window.Terminal({
       fontFamily: '"Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, Menlo, monospace', fontSize: 13,
       lineHeight: 1.15, cursorBlink: true, scrollback: 5000, allowProposedApi: false,
-      theme: { background: v("--term-bg", "#121a23"), foreground: v("--term-text", "#d5dee8"), cursor: v("--term-prompt", "#7cc0ff"),
+      // ANSI black is the panel's own colour, as in Windows Terminal: Windows PowerShell paints what's typed on black
+      // (PSReadLine, through ConPTY), which xterm's own black (#2e3436) drew as a gray box behind each command
+      theme: { background: bg, black: bg, foreground: v("--term-text", "#d5dee8"), cursor: v("--term-prompt", "#7cc0ff"),
                selectionBackground: "rgba(124, 192, 255, 0.35)" },
       // a link a program prints (OSC 8) opens only as a web page, in the browser, never another scheme (file:, a
       // program's own)

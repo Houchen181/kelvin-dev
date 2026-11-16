@@ -780,6 +780,19 @@ def test_links_a_program_prints_open_only_as_web_pages():
     assert "if (tab.locked) return;" in _function(js, "shellInput")
 
 
+def test_what_a_shell_paints_on_black_shows_on_the_panels_own_colour():
+    """Windows PowerShell paints what's typed on ANSI black (PSReadLine, through ConPTY): black is the panel's colour,
+    in both themes, never xterm's own #2e3436, which drew a gray box behind every command typed."""
+    from test_fit_rules import _function
+    static = Path(sh.__file__).parent / "static"
+    start = _function((static / "app.js").read_text(encoding="utf-8"), "shellStart")
+    assert 'const bg = v("--term-bg", "#121a23");' in start   # the panel's colour as the page shows it now
+    assert "theme: { background: bg, black: bg," in start
+    assert "brightBlack" not in start   # gray (PSReadLine's parameters) stays a gray that shows
+    css = (static / "app.css").read_text(encoding="utf-8")
+    assert ":root { --term-bg: #121a23;" in css   # the fallback is the panel's own colour
+
+
 # ---------------------------------------------------------------------------------- without a terminal
 
 def test_the_pipe_shell_shows_its_prompt_and_starts_fresh_after_ctrl_c(monkeypatch, tmp_path):
