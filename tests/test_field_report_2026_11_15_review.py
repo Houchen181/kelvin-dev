@@ -251,6 +251,8 @@ def test_check_script_beside_a_run_takes_the_labs_own_names(folder, tmp_path):
 
 
 def test_a_save_never_goes_over_an_instrument_added_while_it_connected(tmp_path, one_board_two_ways, monkeypatch):
+    pytest.importorskip("starlette")   # the portal: not in CI's core job (Python 3.9, PyYAML and pytest only)
+    pytest.importorskip("mcp")
     from labharness.web import app as app_module
     runtime, client, headers = portal(tmp_path)
     with client:

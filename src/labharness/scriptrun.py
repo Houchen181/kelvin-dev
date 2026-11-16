@@ -84,11 +84,12 @@ OUTPUT_TAIL = 12     # lines of the script's output in the answer
 REHEARSE_S = 60.0    # real seconds a rehearsal may take before Kelvin presses Stop on it
 # what reaches past the simulated lab, so a rehearsal (which nobody approves) never runs code that uses it: native
 # libraries, programs, COM and .NET, the registry, USB. The script's process refuses them too, as it rehearses
-# (kelvin_shim._fence); this says so in words before anything runs
+# (kelvin_shim._fence); this says so in words before anything runs. webbrowser starts a program too (antigravity
+# imports it): where no browser can start (a headless Linux) its call did nothing, so only reading it says so everywhere
 PAST_THE_LAB = ("ctypes", "_ctypes", "cffi", "_cffi_backend", "subprocess", "multiprocessing", "_winapi",
                 "_posixsubprocess", "pty", "winreg", "win32com", "win32api", "win32process", "win32file", "win32event",
                 "win32service", "pythoncom", "pywintypes", "comtypes", "clr", "pythonnet", "usb", "libusb_package",
-                "libusb1", "hid", "ftd2xx", "pyftdi", "pylibftdi")
+                "libusb1", "hid", "ftd2xx", "pyftdi", "pylibftdi", "webbrowser", "antigravity")
 PROGRAMS = ("system", "popen", "startfile", "posix_spawn", "posix_spawnp", "fork", "forkpty", "kill", "killpg")
 # what else a script reaches past the gate, which reading it for the lab's addresses misses, for auto mode, which runs a
 # script nobody looked at (auto_cover: _unread_reach): the network's clients (an instrument's web page or REST interface,

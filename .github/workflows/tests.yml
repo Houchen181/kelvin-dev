@@ -7,7 +7,9 @@ on:
 jobs:
   core:
     name: core (Python 3.9, PyYAML only)
-    runs-on: ubuntu-latest
+    # ubuntu-latest became Ubuntu 26.04 (November 2026), whose runners have no Python 3.9 for setup-python, and the
+    # job failed before any test ran; Kelvin still runs on 3.9 (a lab's conda environment), so the job keeps it
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
