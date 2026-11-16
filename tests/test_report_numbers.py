@@ -44,6 +44,19 @@ def test_sentences_round_only_their_uncertain_numbers():
     assert prose(kept) == "flat at 14.50 µV (fluctuations 3.965 nV rms); lock-in at 17.78 Hz, 41 of 41 points"
 
 
+def test_sentences_show_noise_and_prefixes_as_the_tables_do():
+    """The noise a sentence wrote to four figures is shown from its every digit, as the table shows it (never 3.97
+    from the 3.965 written); a value written with a prefix gets the one a table gives it."""
+    noise = {"name": "noise (rms)", "num": 3.96495e-9, "err": None, "unit": "V"}
+    kept = "lockin.X does not depend on stage.position: 14.50 µV (fluctuations 3.965 nV rms)"
+    assert prose(kept, [noise]) == "lockin.X does not depend on stage.position: 14.50 µV (fluctuations 3.96 nV rms)"
+    assert prose("laser.P_detected shows no signal above the noise (1.263 µW rms)",
+                 [{"name": "noise (rms)", "num": 1.26295e-6, "unit": "W"}]) == \
+        "laser.P_detected shows no signal above the noise (1.26 µW rms)"
+    assert prose("smu.I is linear in smu.V: R = 1000 ± 30 GΩ") == "smu.I is linear in smu.V: R = 1.00 ± 0.03 TΩ"
+    assert prose("width 12.5 ± 0.43 mm") == "width 12.5 ± 0.4 mm"     # millimetres: no prefix to take off
+
+
 def test_results_use_their_numbers_and_older_runs_their_text():
     assert result({"name": "center", "value": "1.500058 ± 0.000043 V", "num": 1.500058, "err": 4.3e-5,
                    "unit": "V"}) == "1.500 V"

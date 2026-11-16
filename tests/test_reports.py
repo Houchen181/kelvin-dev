@@ -145,7 +145,7 @@ def test_runs_written_up_as_pdf_and_slides(runtime):
     text = " ".join(pdf_strings(pdf))
     assert pages >= 2 and "page %d of %d" % (pages, pages) in text
     for want in ("Stage scans", "We scanned the stage.", "Nothing moved.", "1. stage_scan", "2. tc_map",
-                 "Decision: Scan the stage in 1 mm steps", "lockin.tc = 100 ms", "lockin.tc = 300 ms",
+                 "What's next", "DECISION Scan the stage in 1 mm steps", "lockin.tc = 100 ms", "lockin.tc = 300 ms",
                  "stage.position (mm)", "Virtual Lab (simulated instruments)", "Lab log", "Plan"):
         assert want in text, want
     slides = check_pptx(pdf.with_suffix(".pptx"))
@@ -158,6 +158,47 @@ def test_runs_written_up_as_pdf_and_slides(runtime):
     assert "Lab log" in slides[-1]
     assert "report custom/%s (2 runs)" % pdf.name in runtime.events(5)
     assert [r["name"] for r in runtime.reports_index()] == ["custom/" + n for n in sorted([pdf.name, pdf.with_suffix(".pptx").name], reverse=True)]
+
+
+def test_pdfs_have_the_look_chosen_on_2026_11_15(runtime):
+    """Option 14 (Kami's one-pager): parchment paper, Times, the key numbers first, each plot with its numbers under
+    it, what's next and the open questions; Ω from the Symbol font, not spelled out."""
+    from labharness.reports import pdf as P
+    c = P.Canvas()
+    c.text(10, 20, "R = 990 ± 20 GΩ", 9, "serif")
+    assert b"/F5 9 Tf" in c.ops[0] and b"(W) Tj" in c.ops[0] and b"/F6 9 Tf" in c.ops[0]
+    assert P.measure("Ω", 10, "serif") == pytest.approx(7.68) and P.measure("Ω", 10) > 20   # Helvetica: "Ohm"
+    assert P.spans("at 1.600 V; done", values=True) == [("at", False, False), ("1.600", True, False),
+                                                         ("V", True, False), (";", False, True), ("done", False, False)]
+    line = P.lines_of(P.spans("at 1.600 V; done", values=True), 10, 400)[0]
+    c = P.Canvas()
+    P.draw_line(c, line, 0, 20, 10, P.NEAR_BLACK)                     # the number in the accent, ";" right after it
+    assert [re.search(rb"\((.*)\) Tj", op).group(1) for op in c.ops] == [b"at", b"1.600 V", b"; done"]
+    from labharness.reports.chart import Table
+    from labharness.reports.model import RunPart
+    peak = Table(["Quantity", "Value"], [["center", "1.500 V"], ["background", "4.842 µV"], ["FWHM", "1.600 V"]],
+                 "lockin.X vs smu.V (peak)")
+    flat = Table(["Quantity", "Value"], [["mean", "0 ± 200 nW"]], "laser.P_detected vs stage.position (flat)")
+    steady = Table(["Quantity", "Value"], [["mean", "14.50 µV"], ["noise (rms)", "3.96 nV"]],
+                   "lockin.X vs stage.position (steady)")
+    gate = RunPart("a", "gate_sweep", "done", "", "", "41 of 41", "agent", results=[peak])
+    stage = RunPart("b", "stage_scan", "done", "", "", "41 of 41", "agent", results=[flat, steady])
+    assert P.key_numbers([gate, gate, stage]) == [("1.500 V", "center, gate_sweep ×2"), ("14.50 µV", "mean, stage_scan"),
+                                                  ("1.600 V", "FWHM, gate_sweep ×2")]   # no signal: no key number
+    runtime.run(LINE)
+    runtime.run(MAP)
+    out = runtime.make_report(last=2, title="Stage scans", summary="We scanned the stage.", fmt="pdf",
+                              notes=[("decision", "Scan the stage in 1 mm steps"), ("question", "Is it the stage?")])
+    pdf = runtime.report_path(out.split()[1])
+    data = pdf.read_bytes()
+    assert b"/BaseFont /Times-Roman" in data and b"/BaseFont /Symbol" in data
+    first = zlib.decompress(re.search(rb"stream\n(.*?)\nendstream", data, re.S).group(1))
+    assert first.startswith(b"q 0.961 0.957 0.929 rg 0 0 612 792 re f Q")      # the parchment page
+    text = " ".join(pdf_strings(pdf))
+    for want in ("REPORT", "SIMULATED DATA", "Runs", "1. stage_scan", "lockin.X vs stage.position",
+                 "What's next", "DECISION", "Open question. Is it the stage?", "Run details", "page 1 of"):
+        assert want in text, want
+    assert text.index("What's next") < text.index("Run details") < text.index("Lab log")   # the record after
 
 
 def test_a_report_survives_a_lab_without_the_runs_instruments(runtime, monkeypatch):

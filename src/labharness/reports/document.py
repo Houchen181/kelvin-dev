@@ -9,14 +9,14 @@ The three kinds (kinds.py) follow the project -> device (sample) -> scan hierarc
 A section that has nothing to show still appears, with a line saying so, so readers always find things in the same
 place. The PDF has one heading per section; the slides one or more slides per section, numbered the same way.
 A compact document (the scan report) is short instead: no contents, no numbers, and only the sections that have
-something to say."""
+something to say. The PDFs have the look the user chose (2026-11-15, option 14): see pdf.py."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Tuple
 
-from .chart import MUTED, Chart, Table
+from .chart import MUTED, Chart, Table, plot_title
 from . import pdf as P
 from . import pptx as X
 
@@ -32,6 +32,7 @@ class Section:
     charts: List[Chart] = field(default_factory=list)
     code: str = ""
     empty: str = "Nothing yet."                             # said when the section has nothing to show
+    callout: bool = False                                   # the PDF sets its words in a box (problems, questions)
 
     @property
     def is_empty(self) -> bool:
@@ -52,6 +53,9 @@ class Document:
     note: str = ""          # a muted line at the end (compact): where the rest is
     measured: str = ""      # when the data was taken (a scan): Nov 15 2026, 08:06 (18 s)
     source: str = ""        # where it comes from, at the foot of its slides: Run 2026...-gate_sweep · D3 · lab
+    byline: str = ""        # the PDF's line under the title (the subtitle, less what its header says elsewhere)
+    period: str = ""        # when the data was taken (device and master reports)
+    metrics: List[Tuple[str, str]] = field(default_factory=list)   # key numbers: the value, what it is
 
 
 KIND_LABEL = {"scan": "Scan report", "device": "Device report", "project": "Master report"}
@@ -59,81 +63,94 @@ KIND_LABEL = {"scan": "Scan report", "device": "Device report", "project": "Mast
 
 # ------------------------------------------------------------------ PDF
 
-def _compact_pdf(doc: Document, path: Path) -> int:
-    flow = P.Flow(doc.title)
-    flow.y += 12
-    flow.c.text(P.MARGIN, flow.y, KIND_LABEL.get(doc.kind, "Report").upper(), 8, "bold", "2a78d6")
-    flow.y += 17
-    flow.c.text(P.MARGIN, flow.y, doc.title, 18, "bold")
-    flow.y += 4
-    flow.para(doc.subtitle, 9.5, color=MUTED, gap=0)
-    flow.para("%s%s" % (doc.lab, " (simulated instruments)" if doc.simulated else ""), 8.5, color=MUTED, gap=2)
-    for s in doc.sections:
-        if s.is_empty:
-            continue
-        flow.rule()
-        flow.heading(s.title, 11.5, before=2)
+SHOWN_ABOVE = {"Project", "Material", "Scans", "Period"}   # facts a PDF's header says already
+
+
+def _foot(doc: Document) -> str:
+    return "%s%s  ·  made with Kelvin, %s" % (doc.lab, " (simulated instruments)" if doc.simulated else "", doc.created)
+
+
+def _head(flow: "P.Flow", doc: Document) -> None:
+    flow.header(KIND_LABEL.get(doc.kind, "Report"), doc.title, doc.byline or doc.subtitle,
+                [doc.lab, doc.measured or doc.period], "Simulated data" if doc.simulated else "")
+    flow.metrics(doc.metrics)
+
+
+def _plot_card(chart: Chart) -> "P.Card":
+    """A plot of a device or master report: named "gate_sweep, Nov 15 2026 08:06: lockin.X", its card says what
+    was measured and, under it, which scan."""
+    where, _, what = chart.title.rpartition(": ")
+    short = Chart(what or chart.title, chart.x_key, chart.x_unit, chart.y_unit, chart.series, chart.caption,
+                  chart.summary)
+    title = plot_title(short)
+    return P.Card(short, title if len(title) <= 34 else short.title, where)
+
+
+def _section(flow: "P.Flow", s: Section, title: str) -> None:
+    flow.h2(title, s.lead, keep=60)
+    if s.is_empty:
+        flow.para(s.empty, 10, P.STONE)
+        return
+    if s.callout:
+        flow.callout("", list(s.paras) + list(s.bullets))
+    else:
         for p in s.paras:
-            flow.para(p, 10, gap=4)
-        for b in s.bullets:
-            flow.para(b, 9.5, bullet="•", gap=2)
-        if s.facts:
-            flow.kv(s.facts, 9, key_w=96)
-        if s.charts:
-            flow.charts(s.charts, height=160)
-        flow.tables(s.tables)
-        if s.code:
-            flow.code(s.code)
+            flow.para(p, 10.5, P.DARK_WARM, 8)
+        if s.bullets:
+            flow.bullets(s.bullets)
+    if s.facts:
+        flow.kv(s.facts)
+    for t in s.tables:
+        flow.table(t)
+    if s.charts:
+        flow.cards([_plot_card(c) for c in s.charts])
+    if s.code:
+        flow.code(s.code)
+
+
+def _compact_flow(doc: Document, tight: int) -> "P.Flow":
+    flow = P.Flow(doc.title, _foot(doc), tight)
+    _head(flow, doc)
+    for k, s in enumerate([s for s in doc.sections if not s.is_empty]):
+        if k == 0 and (s.paras or s.charts):   # the result: what was found, then each plot with its numbers
+            flow.h2(s.title, s.lead, keep=60)
+            for j, p in enumerate(s.paras):
+                flow.lead(p, last=j == len(s.paras) - 1)
+            if s.bullets:
+                flow.callout("", s.bullets)
+            tables = list(s.tables)
+            flow.cards([P.card_for(c, tables, " ".join(s.paras)) for c in s.charts])
+            for t in tables:
+                flow.table(t)
+            if s.facts:
+                flow.kv(s.facts)
+            continue
+        _section(flow, s, s.title)
     if doc.note:
-        flow.rule()
-        flow.para(doc.note, 8, color=MUTED, gap=0)
+        flow.note(doc.note)
+    return flow
+
+
+def _compact_pdf(doc: Document, path: Path) -> int:
+    """The scan report: one page, smaller plots and type if it takes that to fit."""
+    flow = _compact_flow(doc, 0)
+    for tight in (1, 2):
+        if len(flow.pages) == 1:
+            break
+        flow = _compact_flow(doc, tight)
     return flow.finish(path, "%s: %s" % (KIND_LABEL.get(doc.kind, "Report"), doc.title))
 
 
 def write_document_pdf(doc: Document, path: Path) -> int:
     if doc.compact:
         return _compact_pdf(doc, path)
-    flow = P.Flow(doc.title)
-    flow.y += 12
-    flow.c.text(P.MARGIN, flow.y, KIND_LABEL.get(doc.kind, "Report").upper(), 8.5, "bold", "2a78d6")
-    flow.y += 18
-    flow.c.text(P.MARGIN, flow.y, doc.title, 22, "bold")
-    flow.y += 16
-    flow.c.text(P.MARGIN, flow.y, doc.subtitle, 10.5, color=MUTED)
-    flow.y += 14
-    flow.c.text(P.MARGIN, flow.y, "%s%s  ·  made with Kelvin %s" % (
-        doc.lab, " (simulated instruments)" if doc.simulated else "", doc.created), 8.5, color=MUTED)
-    flow.y += 8
-    flow.rule()
-    if doc.facts:
-        flow.kv(doc.facts, 9, key_w=96)
-    if len(doc.sections) > 3:
-        flow.heading("Contents", 10, MUTED, before=4)
-        for i, s in enumerate(doc.sections, 1):
-            flow.para("%d. %s" % (i, s.title), 9, color=MUTED, gap=0)
-        flow.space(4)
+    flow = P.Flow(doc.title, _foot(doc))
+    _head(flow, doc)
+    facts = [(k, v) for k, v in doc.facts if k not in SHOWN_ABOVE]
+    if facts:
+        flow.kv(facts, 9)
     for i, s in enumerate(doc.sections, 1):
-        flow.rule()
-        flow.heading("%d. %s" % (i, s.title), 13, before=8)
-        if s.lead:
-            flow.para(s.lead, 8.5, "italic", MUTED, gap=4)
-        if s.is_empty:
-            flow.para(s.empty, 9.5, "italic", MUTED, gap=4)
-            continue
-        for p in s.paras:
-            flow.para(p, 10, gap=5)
-        for b in s.bullets:
-            flow.para(b, 9.5, bullet="•", gap=2)
-        if s.bullets:
-            flow.space(3)
-        if s.facts:
-            flow.kv(s.facts, 9)
-        for t in s.tables:
-            flow.table(t)
-        if s.charts:
-            flow.charts(s.charts)
-        if s.code:
-            flow.code(s.code)
+        _section(flow, s, "%d. %s" % (i, s.title))
     return flow.finish(path, "%s: %s" % (KIND_LABEL.get(doc.kind, "Report"), doc.subtitle))
 
 

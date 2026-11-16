@@ -172,7 +172,8 @@ class Collector:
                        points="%s of %s" % (meta.get("points", len(rows)), meta.get("planned_points", len(rows))),
                        operator=str(meta.get("operator") or "?"), reason=str(meta.get("reason") or ""),
                        plan_text=plan_text)
-        part.assessment = numbers.prose(str(analysis.get("assessment") or ""))   # rounded as reports show
+        part.assessment = numbers.prose(str(analysis.get("assessment") or ""), [   # rounded as reports show
+            r for s in analysis.get("series") or [] for r in s.get("results") or []])
         part.next = str(analysis.get("next") or "")
         part.device = str(meta.get("device_name") or "")
         part.issues = [str(i) for i in analysis.get("issues") or []]
@@ -291,7 +292,8 @@ class Collector:
                 if how:   # a derived quantity says how it was worked out
                     caption = ("%s From the measurement chain: %s." % (caption, how)).strip()
                 own = [s for s in analysis.get("series") or [] if s.get("y") == m["key"] and not s.get("group")]
-                summary = numbers.prose(str(own[0].get("summary") or "")) if len(own) == 1 and not how else ""
+                summary = (numbers.prose(str(own[0].get("summary") or ""), own[0].get("results") or [])
+                           if len(own) == 1 and not how else "")
                 charts.append(Chart(title, xa["key"], xa.get("unit", ""), y_unit, series, caption, summary))
         for m in [m for m in measures if m.get("kind") == "trace"]:
             last = next((r for r in reversed(rows) if isinstance(r.get(m["key"]), list)), None)

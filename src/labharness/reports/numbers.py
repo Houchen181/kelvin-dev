@@ -11,12 +11,14 @@ from __future__ import annotations
 import math
 import re
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
-from ..cards import si_parts
+from ..cards import si, si_parts
 
 FIGURES = 4     # most significant figures of a value shown with its uncertainty
 BARE = 3        # significant figures of a value shown without one
+# results a report lists but does not lead with (its key numbers are centres, widths, slopes, a steady level)
+SECONDARY = {"background", "signal / noise", "noise (rms)", "intercept", "drift (slope)", "mean"}
 
 
 def prefixed(x: float, unit: str) -> Tuple[float, str]:
@@ -103,14 +105,34 @@ def result(r: Dict[str, Any]) -> str:
 _NUMBER = r"[-+]?\d+(?:\.\d+)?"
 _UNIT = r"(?: ([^\s,;:()]+))?"
 _PM = re.compile(r"\((%s) ± (%s)\)e([-+]?\d+)%s|(%s) ± (%s)%s" % (_NUMBER, _NUMBER, _UNIT, _NUMBER, _NUMBER, _UNIT))
+_PREFIX = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "μ": 1e-6, "m": 1e-3, "k": 1e3, "M": 1e6, "G": 1e9, "T": 1e12}
+_BASE = ("V", "A", "Ω", "Hz", "T", "K", "s", "W", "F")
 
 
-def prose(text: str) -> str:
+def _unprefixed(unit: str) -> Tuple[float, str]:
+    """(1e9, "Ω") for "GΩ": the prefix a sentence's number was written with, taken off so the number is shown as a
+    table shows it (R = 1000 ± 30 GΩ is 1.00 ± 0.03 TΩ); on a compound unit, its numerator's (pA/V)."""
+    top, slash, rest = unit.partition("/")
+    if len(top) > 1 and top[0] in _PREFIX and top[1:] in _BASE:
+        return _PREFIX[top[0]], top[1:] + slash + rest
+    return 1.0, unit
+
+
+def prose(text: str, results: Iterable[Dict[str, Any]] = ()) -> str:
     """A sentence with its "value ± uncertainty unit" numbers rounded as reports show them; everything else in it,
-    settings and counts included, stays as written."""
+    settings and counts included, stays as written. results: the analysis's results the sentence was written from;
+    its noise, written to four figures ("fluctuations 3.965 nV rms"), is then shown as the results table shows it
+    (3.96 nV, rounded from every digit, never from the four written)."""
     def one(m: "re.Match[str]") -> str:   # a word after the numbers that is no unit comes back as it was
         if m.group(1) is not None:
-            scale = 10.0 ** int(m.group(3))
-            return shown(float(m.group(1)) * scale, float(m.group(2)) * scale, m.group(4) or "")
-        return shown(float(m.group(5)), float(m.group(6)), m.group(7) or "")
-    return _PM.sub(one, text or "")
+            factor, unit = _unprefixed(m.group(4) or "")
+            scale = 10.0 ** int(m.group(3)) * factor
+            return shown(float(m.group(1)) * scale, float(m.group(2)) * scale, unit)
+        factor, unit = _unprefixed(m.group(7) or "")
+        return shown(float(m.group(5)) * factor, float(m.group(6)) * factor, unit)
+    out = _PM.sub(one, text or "")
+    for r in results:
+        value, unit = r.get("num"), str(r.get("unit") or "")
+        if r.get("name") == "noise (rms)" and isinstance(value, (int, float)) and math.isfinite(value) and value:
+            out = out.replace(si(value, unit) + " rms", shown(value, None, unit) + " rms")
+    return out

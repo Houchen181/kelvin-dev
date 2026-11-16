@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple, Union
 
-from .chart import AXIS, GRID, INK, MUTED, Chart, Geometry, Table, layout
+from .chart import AXIS, GRID, INK, MUTED, Chart, Geometry, Table, layout, matching, plot_title
 from .model import Report, RunPart
 
 EMU = 12700                     # per point
@@ -388,11 +388,6 @@ def title_slide(kicker: str, title: str, lines: Sequence[Para], words: Sequence[
     return s
 
 
-def plot_title(chart: Chart) -> str:
-    """A short title for a plot's slide: what was measured against what (the result goes beside the plot)."""
-    return chart.title if chart.x_key in ("", "x") else "%s vs %s" % (chart.title, chart.x_key)
-
-
 def _height(paras: Sequence[Para], width: float, size: float, space: float) -> float:
     """About how tall these paragraphs are in a box this wide."""
     total = 0.0
@@ -446,15 +441,6 @@ def _clip(text: str, n: int) -> str:
 def measured(when: str, duration: str = "") -> str:
     """When the data was taken, as a slide says it: Measured Nov 15 2026, 08:06 (18 s)."""
     return ("Measured %s%s" % (when, " (%s)" % duration if duration else "")) if when else ""
-
-
-def matching(chart: Chart, tables: List[Table]) -> Optional[Table]:
-    """The fit table of this plot's quantity ("lockin.X vs smu.V (peak)" for lockin.X), taken out of tables."""
-    subject = chart.title.split(" (")[0]
-    t = next((t for t in tables if t.title.split(" vs ")[0] == subject), None)
-    if t is not None:
-        tables.remove(t)
-    return t
 
 
 SINGLE = 3   # plots a run shows one to a slide, each with its result beside it; any more share a slide

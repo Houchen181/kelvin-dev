@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from ..cards import thin
-from .numbers import prefixed
+from .numbers import SECONDARY, prefixed
 
 PALETTE = ["2a78d6", "eb6834", "1baf7a", "eda100", "e87ba4", "008300", "6250d6", "e34948"]
 FIT = "3c4651"
@@ -218,3 +218,36 @@ class Table:
     header: List[str]
     rows: List[List[str]] = field(default_factory=list)
     title: str = ""
+
+
+def plot_title(chart: Chart) -> str:
+    """A short title for a plot: what was measured against what (its result goes beside it or under it)."""
+    return chart.title if chart.x_key in ("", "x") else "%s vs %s" % (chart.title, chart.x_key)
+
+
+def matching(chart: Chart, tables: List[Table]) -> Optional[Table]:
+    """The fit table of this plot's quantity ("lockin.X vs smu.V (peak)" for lockin.X), taken out of tables."""
+    subject = chart.title.split(" (")[0]
+    t = next((t for t in tables if t.title.split(" vs ")[0] == subject), None)
+    if t is not None:
+        tables.remove(t)
+    return t
+
+
+def picks(tables: Sequence[Table]) -> List[Tuple[str, str, str]]:
+    """A run's key numbers as (value, name, quantity), the main ones first: each fitted quantity's first result (a
+    centre, a slope), then their others; a steady signal gives its mean, one with no signal above its noise nothing.
+    Only the run's own fits, one curve each."""
+    firsts: List[Tuple[str, str, str]] = []
+    rest: List[Tuple[str, str, str]] = []
+    for t in tables:
+        if [h.lower() for h in t.header[:2]] != ["quantity", "value"] or t.title.startswith(("Kept fit", "Other fits")) \
+                or "(flat)" in t.title:
+            continue
+        quantity = t.title.split(" vs ")[0].split(" (")[0].strip()
+        rows = [r for r in t.rows if len(r) > 1 and r[1] not in ("", "-")]
+        main = [r for r in rows if r[0] not in SECONDARY] or [r for r in rows if r[0] == "mean"]
+        if main:
+            firsts.append((main[0][1], main[0][0], quantity))
+            rest += [(r[1], r[0], quantity) for r in main[1:]]
+    return firsts + rest
