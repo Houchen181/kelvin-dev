@@ -16,7 +16,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import yaml
 
 from ..cards import num
-from .chart import Chart, Series, Table
+from . import numbers
+from .chart import Chart, Series, Table, picks
 from .document import Document, Section
 from .model import RunPart
 
@@ -38,6 +39,15 @@ def _day(iso: str) -> str:
         return datetime.fromisoformat(iso).strftime("%b %d %Y").replace(" 0", " ")
     except (TypeError, ValueError):
         return "?"
+
+
+def _stamp(iso: str) -> str:
+    """The day and time data was taken: Nov 15 2026 08:06."""
+    try:
+        t = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return "?"
+    return "%s %d %d %s" % (t.strftime("%b"), t.day, t.year, t.strftime("%H:%M"))
 
 
 def _first_sentence(text: str) -> str:
@@ -107,7 +117,8 @@ class Digest:
 
     def key_result(self) -> str:
         r = next((r for r in self.results if not r.get("group")), self.results[0] if self.results else None)
-        return "%s %s" % (r["name"], r["value"]) if r else (_first_sentence(self.assessment) or self.reason or "")
+        return "%s %s" % (r["name"], numbers.result(r)) if r else (_first_sentence(self.assessment) or self.reason
+                                                                    or "")
 
 
 def digest(run_dir: Path) -> Optional[Digest]:
@@ -146,7 +157,9 @@ def digest(run_dir: Path) -> Optional[Digest]:
                   operator=str(meta.get("operator") or "?"), reason=str(meta.get("reason") or ""),
                   project=meta.get("project"), project_name=str(meta.get("project_name") or "General"),
                   device=meta.get("device"), device_name=str(meta.get("device_name") or ""),
-                  assessment=str(analysis.get("assessment") or ""), next=str(analysis.get("next") or ""),
+                  assessment=numbers.prose(str(analysis.get("assessment") or ""),
+                                           [r for s in analysis.get("series") or [] for r in s.get("results") or []]),
+                  next=str(analysis.get("next") or ""),
                   issues=[str(i) for i in analysis.get("issues") or []], results=results, ranges=ranges,
                   setup={str(k): v for k, v in (plan.get("setup") or {}).items()}, queue=meta.get("queue"),
                   attributed="project" in meta, lab=str(meta.get("lab") or ""),
@@ -170,13 +183,13 @@ def _named(chart: Chart, prefix: str) -> Chart:
     return Chart("%s: %s" % (prefix, chart.title), chart.x_key, chart.x_unit, chart.y_unit, chart.series, chart.caption)
 
 
-SECONDARY = {"background", "signal / noise", "noise (rms)", "intercept", "drift (slope)", "mean"}
+SECONDARY = numbers.SECONDARY
 
 
 def _trends(ds: Sequence[Digest], limit: int = 4) -> Tuple[List[Chart], List[str]]:
     """A fitted quantity followed across repeated scans of the same measurement (finished scans only); the main
     results first (centre, width, slope, time constants), not backgrounds or noise."""
-    series: "OrderedDict[Tuple[str, str, str], List[Tuple[datetime, float, str, str]]]" = OrderedDict()
+    series: "OrderedDict[Tuple[str, str, str], List[Tuple[datetime, float, str, Optional[float]]]]" = OrderedDict()
     for d in sorted(ds, key=lambda d: d.started):
         if not d.ok:
             continue
@@ -188,7 +201,7 @@ def _trends(ds: Sequence[Digest], limit: int = 4) -> Tuple[List[Chart], List[str
             if r.get("group") or r.get("num") is None or not math.isfinite(r["num"]) or r["name"] in SECONDARY:
                 continue
             series.setdefault((d.plan, str(r["y"]), str(r["name"])), []).append((when, r["num"], r["unit"],
-                                                                                str(r["value"])))
+                                                                                r.get("err")))
     charts, lines = [], []
     for (plan, y, name), pts in series.items():
         if len(pts) < 2 or len(charts) >= limit:
@@ -199,8 +212,49 @@ def _trends(ds: Sequence[Digest], limit: int = 4) -> Tuple[List[Chart], List[str
         xs = [(t - t0).total_seconds() / scale for t, _, _, _ in pts]
         charts.append(Chart("%s: %s %s" % (plan, y, name), "time since %s" % t0.strftime("%b %d %H:%M").replace(" 0", " "),
                             unit_t, pts[-1][2], [Series(name, xs, [v for _, v, _, _ in pts])], "%d scans" % len(pts)))
-        lines.append("%s, %s %s: %s, then %s (%d scans)." % (plan, y, name, pts[0][3], pts[-1][3], len(pts)))
+        # rounded, the first and last values often read the same: the change says how far it moved
+        (_, first, unit, e0), (_, last, _, e1) = pts[0], pts[-1]
+        err = math.hypot(e0, e1) if all(isinstance(e, (int, float)) and math.isfinite(e) for e in (e0, e1)) \
+            else None
+        scale = numbers.prefixed(max(abs(first), abs(last)), unit)   # the two values in one unit; the change in its own
+        lines.append("%s, %s %s: %s, then %s; a change of %s (%d scans)." % (
+            plan, y, name, numbers.shown(first, e0, unit, scale), numbers.shown(last, e1, unit, scale),
+            numbers.shown(last - first, err, unit), len(pts)))
     return charts, lines
+
+
+def _key_numbers(ds: Sequence[Digest], n: int = 6) -> List[Tuple[str, str]]:
+    """The key numbers of the latest finished scan of each measurement, the most frequent measurement first: each
+    one's main result (its first fitted value, or a steady level), then their others."""
+    latest: Dict[str, Digest] = {}
+    for d in sorted(ds, key=lambda d: d.started):
+        if d.ok:
+            latest[d.plan] = d
+    found = []
+    for plan, _ in Counter(d.plan for d in ds).most_common():
+        if plan not in latest:
+            continue
+        by_y: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
+        for r in latest[plan].results:
+            if not r.get("group") and r.get("num") is not None:
+                by_y.setdefault(str(r.get("y")), []).append(r)
+        firsts, rest = [], []
+        for rs in by_y.values():
+            main = [r for r in rs if r["name"] not in SECONDARY] or [r for r in rs if r["name"] == "mean"]
+            if main:
+                firsts.append(main[0])
+                rest += main[1:]
+        found.append((plan, firsts + rest))
+    out = []
+    for level in (0, 1):
+        for plan, rs in found:
+            for r in rs[:1] if level == 0 else rs[1:]:
+                out.append((numbers.result(r), "%s, %s" % (r["name"], plan)))
+    return out[:n]
+
+
+def _scans(ds: Sequence[Digest]) -> str:
+    return "%d scan%s (%s)" % (len(ds), "" if len(ds) == 1 else "s", _outcomes(ds)) if ds else "no scans yet"
 
 
 def _ranges(ds: Sequence[Digest]) -> Table:
@@ -261,9 +315,13 @@ def scan_document(part: RunPart, d: Digest, files: Iterable[str], lab: str, simu
     files = set(files)
     names = [n for n in FILE_NOTES if n in files]
     note = ("In the run's folder: " + "; ".join("%s (%s)" % (n, FILE_NOTES[n]) for n in names) + ".") if names else ""
+    source = "  ·  ".join(b for b in ("Run " + part.run_id, d.device_name,
+                                     lab + (" (simulated instruments)" if simulated else "")) if b)
     return Document("scan", "%s on %s" % (part.plan, d.device_name) if d.device_name else part.plan,
                     "  ·  ".join(bits), _now(), lab, simulated, [], [result, conditions, events], compact=True,
-                    note=note)
+                    note=note, measured=part.when + (" (%s)" % part.duration if part.duration else ""),
+                    source=source, byline="  ·  ".join(bits[:1] + bits[2:]),   # when: in the header's corner
+                    metrics=[(v, "%s, %s" % (name, quantity)) for v, name, quantity in picks(part.results)[:6]])
 
 
 # ------------------------------------------------------------------ the device report
@@ -289,7 +347,7 @@ def device_document(device: Dict[str, Any], project_name: str, ds: Sequence[Dige
         rows.append([plan, str(n), _day(last.started), last.key_result()[:60]])
         part = latest.get(plan)
         if part and part.charts:
-            charts.append(_named(part.charts[0], "%s, %s" % (plan, _day(last.started))))
+            charts.append(_named(part.charts[0], "%s, %s" % (plan, _stamp(last.started))))
     by_type = Section("Results by measurement", "each measurement's latest finished scan",
                       tables=[Table(["Measurement", "Scans", "Latest", "Key result"], rows)] if rows else [],
                       charts=charts[:6], empty="No scans on this device yet.")
@@ -300,11 +358,14 @@ def device_document(device: Dict[str, Any], project_name: str, ds: Sequence[Dige
     ranges = Section("Ranges explored", "the lowest and highest values swept or set in its scans",
                      tables=[rng] if rng.rows else [], empty="No sweeps recorded yet.")
     problems = _problems(ds)
+    problems.callout = bool(problems.bullets)
     index = Section("Scan index", "every scan, newest first; each has its own report in its run folder",
                     tables=[_index(ds, with_device=False)] if ds else [], empty="No scans yet.")
     title = device.get("name") or "Device"
     return Document("device", title, "%s  ·  %s" % (project_name, _period(ds)), _now(), lab, simulated, facts,
-                    [about, history, by_type, trends, ranges, problems, index])
+                    [about, history, by_type, trends, ranges, problems, index],
+                    byline="  ·  ".join(b for b in (project_name, device.get("material") or "", _scans(ds)) if b),
+                    period=_period(ds), metrics=_key_numbers(ds))
 
 
 def _problems(ds: Sequence[Digest]) -> Section:
@@ -365,7 +426,7 @@ def project_document(project: Dict[str, Any], ds: Sequence[Digest], latest: Dict
         if plan in latest and latest[plan][0].charts:
             part, dg = latest[plan]
             figures.append(_named(part.charts[0], "%s%s, %s" % (plan, " on " + dg.device_name if dg.device_name else "",
-                                                               _day(dg.started))))
+                                                               _stamp(dg.started))))
     main = Section("Main results and figures", "each measurement's latest finished scan, and what it found",
                    tables=[Table(["Measurement", "Scans", "Devices", "Latest result"], rows)] if rows else [],
                    charts=figures[:6], empty="No finished scans yet.")
@@ -379,6 +440,7 @@ def project_document(project: Dict[str, Any], ds: Sequence[Digest], latest: Dict
             nexts.append(d.next)
     open_items.bullets += ["Next (%s): %s" % (p, n) for p, n in
                            [(next(x.plan for x in ds if x.next == n), n) for n in nexts[:4]]]
+    open_items.callout = bool(open_items.bullets)
     refs = Section("References", "the project's reading list", bullets=list(project.get("references") or []),
                    empty="No papers on the reading list yet.")
     index_tables = []
@@ -389,8 +451,11 @@ def project_document(project: Dict[str, Any], ds: Sequence[Digest], latest: Dict
         index_tables.append(_index(ds, with_device=True))
     index = Section("Index", "device reports in this folder; each scan's report is in its run folder",
                     tables=index_tables, empty="No reports yet.")
+    on = "%d device%s" % (len(devices), "" if len(devices) == 1 else "s") if devices else ""
     return Document("project", name, "Master report  ·  %s" % _period(ds), _now(), lab, simulated, facts,
-                    [summary, goals, compared, main, timeline, open_items, refs, index])
+                    [summary, goals, compared, main, timeline, open_items, refs, index],
+                    byline="  ·  ".join(b for b in (on, _scans(ds)) if b), period=_period(ds),
+                    metrics=_key_numbers(ds))
 
 
 def _devices_compared(devices: Sequence[Dict[str, Any]], ds: Sequence[Digest]) -> Section:
@@ -421,7 +486,7 @@ def _by_result(ds: Sequence[Digest]) -> Dict[Tuple[str, str, str], Dict[str, str
             continue
         for r in d.results:
             if not r.get("group"):
-                out.setdefault((d.plan, str(r["y"]), str(r["name"])), {})[d.device_name] = str(r["value"])
+                out.setdefault((d.plan, str(r["y"]), str(r["name"])), {})[d.device_name] = numbers.result(r)
     return out
 
 

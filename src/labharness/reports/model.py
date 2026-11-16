@@ -17,6 +17,7 @@ class RunPart:
     points: str                       # "63 of 63"
     operator: str
     reason: str = ""
+    device: str = ""                  # the sample measured, if one was mounted
     plan_text: str = ""
     sweep: List[str] = field(default_factory=list)       # "smu.V: 0 ... 4 V, step 0.2 V"
     setup: List[str] = field(default_factory=list)       # "lockin.amplitude 50 mV"

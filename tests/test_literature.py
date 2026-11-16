@@ -220,8 +220,8 @@ def test_reading_list_in_projects_and_reports(runtime, tmp_path):
         assert r.status_code == 400                                      # no runs in the project's chats yet
         files = runtime.report(runtime.pick_runs(last=1), references=["Esteras and Baldovi (2022). Magnon. Nano Letters."])
         drawn = pdf_strings(runtime.report_path(files[0]["name"]))
-        assert drawn[drawn.index("References") + 1:drawn.index("References") + 3] == \
-            ["[1]", "Esteras and Baldovi (2022). Magnon. Nano Letters."]
+        assert drawn[drawn.index("References") + 1:drawn.index("References") + 4] == \
+            ["the reading list", "•", "Esteras and Baldovi (2022). Magnon. Nano Letters."]
 
         assert client.delete("/api/projects/%s/papers/%s" % (project["id"], papers[0]["id"]), headers=headers).json() == {"ok": True}
         assert client.delete("/api/projects/%s/papers/%s" % (project["id"], papers[0]["id"]), headers=headers).status_code == 404
