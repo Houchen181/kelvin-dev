@@ -5235,10 +5235,21 @@ class LabRuntime:
                               folder=whose.get("folder"), chat=whose.get("chat"), rules=whose.get("rules"),
                               confidential=bool(whose.get("confidential")), unpublished=bool(whose.get("unpublished")),
                               then_pause=then_pause, legacy=bool(whose.get("legacy")), library=library,
-                              outside=whose.get("outside"))
+                              outside=whose.get("outside") or self._outside_read())
         self.gate.log.write("queue_add", by=by, item=item.id, kind=item.kind, name=item.name,
                             position=self.queue.items.index(item) + 1, then_pause=then_pause or None)
         return item
+
+    def _outside_read(self) -> Optional[str]:
+        """What text from outside the lab the model has read that keeps auto mode asking now (gate.outside_reason),
+        for an item queued now to carry (Item.outside): a portal chat's own account comes with its attribution; an
+        agent's over MCP is the gate's own, read in the last minutes, which an item queued then keeps when the queue
+        runs it later (a review of 2026-11-15)."""
+        if self.gate.outside_reason() is None:
+            return None
+        if self.gate.outside_chat:
+            return self.gate.outside_chat
+        return self.gate.outside[1] if self.gate.outside is not None else "text from outside the lab"
 
     def _version_marks(self, text: str) -> Dict[str, Any]:
         """The marks of the run a script item's version: comes from ({} for any other item): its script.py, run again,
@@ -5895,8 +5906,8 @@ class LabRuntime:
                         "the lab's experiment %s, version %d, approved: this approval covers it, as it covers a "
                         "scan%s" % (c[1].name, c[1].number, ", rehearsed with the queue" if self.gate.auto else ""))
                         if c else "a script: it asks you itself when it starts, as it can't be rehearsed%s" % (
-                            ", unless auto mode covers it then, as it covers run_script's" if self.gate.auto
-                            else "")))
+                            ", unless it is one of Kelvin's own and auto mode covers it then, fenced, as it covers "
+                            "run_script's" if self.gate.auto else "")))
             pause = ["The queue pauses after %s" % self._item_line(len(items), items[-1])] \
                 if items[-1].then_pause else []
             first = ["These were added to the queue, or changed, after it was approved: it waits for your answer "
@@ -6341,8 +6352,9 @@ class LabRuntime:
     @_lookups_kept
     def _queue_script(self, item: Item, position: int, gen: int) -> Tuple[bool, str]:
         """A script item, run as run_script runs one: it can't be rehearsed, so it asks a person as it starts (the
-        queue's approval doesn't cover it), unless auto mode covers it as it covers run_script's run
-        (scriptrun.auto_cover), and its run records its place in the queue. gen: the stop generation when
+        queue's approval doesn't cover it), unless it is one of Kelvin's own and auto mode covers it as it covers
+        run_script's run, fenced (_auto_judged; never one a chat queued after it read text from outside the lab: its
+        item's outside), and its run records its place in the queue. gen: the stop generation when
         the queue picked it (a stop since then, or while its card waited, is a stop, not a failure)."""
         from .. import scriptrun
         q = self.queue
@@ -6358,7 +6370,8 @@ class LabRuntime:
         queued = kept is not None and kept.approved and self._queue_covered.get(item.id) == kept.number
         text, report = self._script_run(prep, lambda t: t, {"queue": {
             "item": item.id, "position": position, "note": item.note}}, told=False, queued=queued, since=gen,
-            ready=lambda: q.mark(item, "running"))   # running once its preflight passed, as a plan is
+            ready=lambda: q.mark(item, "running"),   # running once its preflight passed, as a plan is
+            outside=item.outside)   # queued by a chat that had read text from outside the lab: never auto mode's
         stopped = self.gate.stop_generation != gen
         if report is None:   # refused, declined or not ready: it never started
             q.mark(item, "stopped" if stopped else "failed", text[:300])
@@ -9529,30 +9542,52 @@ class LabRuntime:
                                  python=self.scripts_python() or "", chosen=chosen, source=source, sha256=sha,
                                  version=version, named=python, action=action)
         from .. import folderfiles
-        if folderfiles.written(prep.path) is not None:   # Kelvin's own: its card shows what changed since a yes
+        if folderfiles.written(prep.path) is not None:   # Kelvin's own: what auto mode needs of it, with its modules,
+            prep.own = scriptrun.own_script(prep)        # and what changed since a person's yes, for its card
             prep.before = self._approved_before(prep.path)
         return prep
 
-    def _approved_before(self, path: Path) -> Optional[Tuple[str, str]]:
+    def _approved_run(self, path: Path) -> Optional[Tuple[str, Any]]:
         """The latest run of a script that a person approved (not auto mode, nor the queue's yes; a run from before
-        Kelvin kept who approved was a person's: every script's run asked one), and the text it ran, as its record
-        fingerprinted it (_script_as_run): for a card of a script Kelvin wrote to show what changed since a person's yes
-        rather than the whole script again. None: none (its card shows the whole script)."""
-        from .. import scriptrun
+        Kelvin kept who approved was a person's: every script's run asked one), and its record (rundata.load, without
+        rows); None: none. What a card measures "changed since" from: the library's own last run moves on with every
+        run, auto mode's too (a review of 2026-11-15)."""
         from ..scanlibrary import script_id
         try:
             runs = list(self.library.get(script_id(path)).get("runs") or [])
         except (KeyError, OSError):
             return None
-        for run_id in runs:   # the latest first
+        for run_id in runs[:50]:   # the latest first
             try:
-                meta = rundata.load(self._run_dir(run_id), with_rows=False).meta or {}
-                if meta.get("approved", "person") != "person":
-                    continue
-                return run_id, self._script_as_run(run_id, path)[0]
-            except (KeyError, OSError, ValueError, scriptrun.ScriptError):
+                rec = rundata.load(self._run_dir(run_id), with_rows=False)
+            except (KeyError, OSError, ValueError):
                 continue
+            if (rec.meta or {}).get("approved", "person") == "person":
+                return run_id, rec
         return None
+
+    def _approved_before(self, path: Path) -> Optional[Tuple[str, str, Dict[str, str]]]:
+        """For a card of a script Kelvin wrote: the latest run of it a person approved (_approved_run), the text it
+        ran, as its record fingerprinted it (_script_as_run), and the copies it kept of Kelvin's own modules the script
+        imported (modules/, by their paths from the script's folder), so the card shows what changed since a person's
+        yes rather than all the code again. None: none (its card shows all of it)."""
+        from .. import scriptrun
+        found = self._approved_run(path)
+        if found is None:
+            return None
+        run_id, rec = found
+        try:
+            text = self._script_as_run(run_id, path)[0]
+        except (KeyError, OSError, ValueError, scriptrun.ScriptError):
+            return None
+        modules: Dict[str, str] = {}
+        for rel in (rec.meta or {}).get("modules") or {}:
+            safe = "/".join(p for p in str(rel).split("/") if p not in ("", ".", ".."))
+            try:
+                modules[safe] = (self._run_dir(run_id) / "modules" / safe).read_text(encoding="utf-8")
+            except (OSError, ValueError, KeyError):
+                continue
+        return run_id, text, modules
 
     def _script_as_run(self, run_id: str, path: Path) -> Tuple[str, Optional[str]]:
         """A run's script.py, the script as that run ran it, and the sha256 of the file as it read it then. Only from
@@ -9653,6 +9688,8 @@ class LabRuntime:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", stem):
             return ("not saved: name it with letters, digits, _ and - (odmr_check, say): it is saved as %s/<name>.py"
                     % self.SCRIPTS)
+        if re.fullmatch(r"(?i)(con|prn|aux|nul|com[0-9]|lpt[0-9])", stem):
+            return "not saved: %s is a name Windows keeps for a device; name it otherwise (odmr_check, say)" % stem
         if not isinstance(code, str) or not code.strip():
             return "not saved: give the script's whole code"
         try:
@@ -9674,9 +9711,10 @@ class LabRuntime:
         count = code.count("\n") + (0 if code.endswith("\n") else 1)
         return ("saved %s (%d line%s)%s. Run it with run_script (script: %s): every command it sends to a lab "
                 "instrument goes through the gate, and its card shows a person this code, or in auto mode it runs "
-                "without one when it stays within auto's ranges (check_script says which)"
+                "without one, fenced (writing only in %s and its run's folder; no programs, network or native code), "
+                "when it stays within auto's ranges (check_script says which)"
                 % (target, count, "" if count == 1 else "s",
-                   "; the version it replaced is kept as %s" % before if before else "", target))
+                   "; the version it replaced is kept as %s" % before if before else "", target, self.SCRIPTS))
 
     def check_script(self, path: str, params: Optional[Dict[str, Any]] = None, action: str = "", module: str = "",
                      python: str = "") -> str:
@@ -9722,21 +9760,23 @@ class LabRuntime:
                 if exp.actions:
                     lines.append("Actions: " + ", ".join(a + (" (main)" if a == exp.main else "") for a in exp.actions))
             lines += ["will be refused now: " + p for p in problems]
-            lines.append("run_script asks a person once: (in auto mode it may run without asking: the last line says)")
+            lines.append("run_script asks a person once:" if prep.own is None else
+                         "run_script asks a person once: (in auto mode it may run without asking: the last line says)")
             kept = self._kept_version(prep.path)
             if kept is not None:   # one of the lab's experiments: its version, as its run's card says it
                 self._kept_card(kept, prep, request)
-            lines += ["  " + i for i in request.items]
-            if kept is None:   # what auto mode makes of it, on now or not, as _script_run judges it (auto_cover)
-                ok, why = scriptrun.auto_cover(gate, prep, grants, now=False)
-                if gate.auto:
-                    lines.append(("Auto mode is on: run_script runs it without the card (%s)" if ok else
+            # each of the card's lines, code (one item of many lines, as the portal shows it) indented as a whole
+            lines += ["  " + ln for i in request.items for ln in (str(i).rstrip("\n").split("\n") or [""])]
+            if kept is None and prep.own is not None:   # what auto mode makes of it now, as _script_run judges it
+                ok, why = self._auto_judged(prep, grants, now=False)
+                if self.gate.auto:
+                    lines.append(("Auto mode is on: run_script runs it without the card, fenced (%s)" if ok else
                                   "Auto mode is on, but doesn't cover it: the card asks a person (%s)")
                                  % "; ".join(why))
                 else:
                     lines.append(("Auto mode is off, so the card asks a person; with it on, it would run without the "
-                                  "card (%s)" if ok else "Auto mode is off, so the card asks a person; with it on, "
-                                  "the card would ask all the same (%s)") % "; ".join(why))
+                                  "card, fenced (%s)" if ok else "Auto mode is off, so the card asks a person; with it "
+                                  "on, the card would ask all the same (%s)") % "; ".join(why))
             return "\n".join(lines)
 
         def seen() -> str:   # beside the work that has the lab: never waits for it, sends nothing (_CheckGate)
@@ -9842,22 +9882,58 @@ class LabRuntime:
     def _run_script(self, prep: Any, mark: Callable[[str], str], since: Optional[int] = None) -> str:
         return self._script_run(prep, mark, since=since)[0]
 
+    def _fence_ends(self) -> Dict[Tuple[str, str], str]:
+        """Kelvin's own scripts whose last run in auto mode ended at its fence, by (path, sha256): auto mode doesn't
+        run one fenced again (it would end there again), so a person approves a run of it unfenced; until the file
+        changes, or Kelvin starts again."""
+        return self.__dict__.setdefault("_fence_ended", {})
+
+    @staticmethod
+    def _fence_key(prep: Any) -> Tuple[str, str]:
+        import os
+        return os.path.normcase(str(prep.path)), str(prep.sha256)
+
+    def _auto_judged(self, prep: Any, grants: Dict[str, Any], now: bool = True,
+                     outside: Optional[str] = None) -> Tuple[bool, List[str]]:
+        """Whether auto mode runs this script without a card, fenced (scriptrun.auto_cover: one of Kelvin's own, as it
+        saved it, judged as a plan is), unless its last run in auto mode ended at the fence (_fence_ends). outside: a
+        queue item's own mark of text from outside the lab its chat had read. (covered, why.)"""
+        from .. import scriptrun
+        ok, why = scriptrun.auto_cover(self.gate, prep, grants, now=now, outside=outside)
+        ended = self._fence_ends().get(self._fence_key(prep)) if ok else None
+        return (False, [ended]) if ended else (ok, why)
+
     def _changed_since(self, prep: Any) -> List[str]:
-        """Lines for a script's card on what changed since its last run (the library keeps, of each run, the sha256 of
-        the file it read and of the Python files beside it): the file itself (not for a run's own copy, whose card
-        says it runs as it ran), and the files beside it it may import, by name; so the person approves what runs now
-        knowingly. None of it for a script never run before."""
+        """Lines for a script's card on what changed since the last run of it a person approved (the library keeps, of
+        each run, the sha256 of the file it read and of the Python files beside it; the lab's own scripts' runs are each
+        a person's): the file itself (not for a run's own copy, whose card says it runs as it ran), and the files beside
+        it it may import, by name; so the person approves what runs now knowingly. For one of Kelvin's own, which auto
+        mode may run, from the record of the last run a person approved (_approved_run), never one auto mode approved,
+        which nobody looked at (the library's last run moves on with those too: a review of 2026-11-15). None of it for
+        a script no person approved a run of before."""
         from ..scanlibrary import script_id
         try:
             entry = self.library.get(script_id(prep.path))
         except (KeyError, OSError):
             return []
-        last = (entry.get("runs") or [None])[0]
-        since = "since its last run%s" % (" (%s)" % last if last else "")
+        latest = (entry.get("runs") or [None])[0]
+        last, sha, then = latest, entry.get("sha256"), entry.get("beside")
+        if getattr(prep, "own", None) is not None:
+            found = self._approved_run(prep.path)
+            if found is None:
+                return []
+            last, rec = found
+            try:
+                ran = yaml.safe_load(rec.plan_text) or {}
+            except (yaml.YAMLError, ValueError):
+                ran = {}
+            sha = ran.get("sha256") if isinstance(ran, dict) else None
+            then = (rec.meta or {}).get("beside")
+        since = "since its last run%s" % (" (%s)" % last if last else "") if last == latest else             "since its last run a person approved (%s)" % last
         lines = []
-        if not prep.version and entry.get("sha256") and entry["sha256"] != prep.sha256:
+        if not prep.version and sha and sha != prep.sha256:
             lines.append("%s has changed %s: what runs is the file as it is now" % (prep.name, since))
-        then, now = entry.get("beside"), prep.near
+        now = prep.near
         if isinstance(then, dict):
             changed = sorted((n for n in set(then) | set(now) if then.get(n) != now.get(n)), key=str.lower)
             if changed:
@@ -9869,14 +9945,15 @@ class LabRuntime:
 
     def _script_run(self, prep: Any, mark: Callable[[str], str], extra: Optional[Dict[str, Any]] = None,
                     told: bool = True, queued: bool = False, since: Optional[int] = None,
-                    ready: Optional[Callable[[], None]] = None) -> Tuple[str, Any]:
+                    ready: Optional[Callable[[], None]] = None, outside: Optional[str] = None) -> Tuple[str, Any]:
         """A prepared script, run after its one approval: (the answer, its ScriptReport; None when it never started:
         refused, declined, stopped, or an instrument it opens not ready). extra: more for its run's record (its place
         in the queue). told: a notice when it ends (a queue's account says it at the end instead). queued: an approved
         version of one of the lab's experiments the queue's approval covered, which runs without asking again. In
-        auto mode an approved version is rehearsed first and covered as a plan is (_auto_experiment), and any other
-        script, the lab's or Kelvin's own, is covered as a plan is by what reading it ahead found (scriptrun.auto_cover:
-        its drives low-risk, nothing past the gate); a new version of an experiment asks a person once. since: the
+        auto mode an approved version is rehearsed first and covered as a plan is (_auto_experiment), and one of
+        Kelvin's own scripts, as it saved it, is covered as a plan is by what reading it ahead found (_auto_judged:
+        its drives low-risk, nothing past the gate, nothing outside read: outside, a queue item's own mark) and runs
+        fenced; a new version of an experiment asks a person once, and the lab's own scripts each run. since: the
         gate's stops when the run was asked for (the tool's call, the queue picking it; else now): a person's Stop
         since then, while it was rehearsed, approved or starting, means it doesn't run, never that it runs anyway.
         ready: called once its preflight passed (the queue's item reads running from then). Its preflight stops it for
@@ -9937,10 +10014,11 @@ class LabRuntime:
         elif gate.auto and kept is not None:   # a new version of one of the lab's experiments: a person's, once
             request.items.append("Auto mode does not cover this run: version %d is new, and a person approves a new "
                                  "version once" % kept.number)
-        elif gate.auto:   # a script, the lab's or Kelvin's own, judged as a plan is (asked for 2026-11-15)
-            ok, why = scriptrun.auto_cover(gate, prep, grants)
+        elif gate.auto:   # one of Kelvin's own scripts, judged as a plan is, run fenced; the lab's: a person's
+            ok, why = self._auto_judged(prep, grants, outside=outside)
             if ok:
                 covered = why
+                prep.fenced = "auto"
             else:
                 request.items.append("Auto mode does not cover this run: " + "; ".join(why))
         said = stopped("while it was read and checked")   # its card is never shown after a Stop
@@ -9990,6 +10068,11 @@ class LabRuntime:
                 self._live_ended(job.rec_id)
         for name in names if report.status != "done" else []:
             self.engine._healthy.pop(name, None)   # checked again before the next run on them
+        if prep.fenced == "auto" and str(job.failed or "").startswith(scriptrun.FENCE_REFUSED.split("%s")[0]):
+            what = str(job.failed)[len(scriptrun.FENCE_REFUSED.split("%s")[0]):].split("; to run it unfenced")[0]
+            self._fence_ends()[self._fence_key(prep)] = (
+                "its last run in auto mode (%s) ended at auto mode's fence, which refused %s: a person approves a run "
+                "of it unfenced" % (report.run_id, what))
         made = self._auto_report(report.run_id)
         if told:
             self.tell("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + prep.name,

@@ -277,6 +277,17 @@ def module_named(name: str) -> bool:
     return low in NOT_OWN_MODULES or low in getattr(sys, "stdlib_module_names", ())
 
 
+def test_named(name: str) -> bool:
+    """Whether a test runner collects a Python file of this name by itself (pytest's defaults: test_*.py, *_test.py,
+    and conftest.py, which it imports): a review of Kelvin's own scripts (2026-11-15) had the person's pytest at the
+    scripts folder collect kelvin_scripts/test_laser.py and run it with no stand-in and no gate."""
+    low = name.lower()
+    if not low.endswith(".py"):
+        return False
+    stem = low[:-3]
+    return low == "conftest.py" or stem.startswith("test_") or stem.endswith("_test")
+
+
 def beside_scripts(target: Path, root: Any) -> Optional[str]:
     """Why Kelvin's AI may not save target among the person's scripts (root: a scripts folder, or an imported script's
     folder; target in it, resolved), or None when it may: a note, table, picture, or a script of Kelvin's own and its
@@ -308,6 +319,10 @@ def beside_scripts(target: Path, root: Any) -> Optional[str]:
         return ("%s is named as a module a script means (Kelvin's stand-in's, pyvisa or pyserial the gate goes "
                 "through, or one of Python's own): a script beside it would import it in that module's place, so "
                 "Kelvin names it otherwise (odmr_check.py, say)" % named[0])
+    if suffix == ".py" and test_named(target.name):
+        return ("%s is named as a test a test runner collects (pytest runs test_*.py, *_test.py and conftest.py in "
+                "every folder under where it starts): the person's pytest in the scripts folder would run it with no "
+                "stand-in and no gate, so Kelvin names it otherwise (laser_check.py, say)" % target.name)
     level = root
     for part in parts:   # each folder down to the file's: Kelvin's own while it is there, the rest made now
         level = level / part

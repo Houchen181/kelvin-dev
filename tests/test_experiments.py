@@ -682,9 +682,7 @@ def test_a_live_default_written_as_a_constant_is_read_ahead_and_reaches_the_scri
 
 
 def test_an_experiments_card_in_auto_mode_does_not_say_it_cant_be_rehearsed(lab, folder, tmp_path):
-    """Since 2026-11-15 auto mode covers a script's run as it covers a plan's: an experiment within auto's ranges runs
-    without its card (test_kelvins_own_scripts.py); one beyond them asks, saying why, never "can't be dry-run"."""
-    write(folder, "exp.py", EXP_SWEEP.replace("[0, 0.5, 1.0]", "[0, 0.5, 6.0]"))
+    write(folder, "exp.py", EXP_SWEEP)
     rt = script_runtime(lab, folder, tmp_path, timeout=20)
     rt.gate.auto = True
     out = {}
@@ -695,8 +693,4 @@ def test_an_experiments_card_in_auto_mode_does_not_say_it_cant_be_rehearsed(lab,
     t.join(30)
     text = "\n".join(entry["items"])
     assert "can't be dry-run" not in text
-    assert "Auto mode does not cover this run: smu.V goes 60% of the way from safe to its limit (auto mode covers 25%)" \
-        in text, text
-    write(folder, "within.py", EXP_SWEEP)   # within auto's ranges: no card at all
-    assert "script within.py done" in rt.run_script("within.py")
-    assert rt.approver.pending_list() == [] and [e for e in rt.approver.history_list() if e.get("by") == "auto mode"]
+    assert "Auto mode does not cover this run: a person approves each run of a script, experiments too" in text
