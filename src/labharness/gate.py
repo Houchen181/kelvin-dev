@@ -326,9 +326,65 @@ def reading_away(spec: ParamSpec, reading: Any) -> bool:
 
 
 UNDO_DEPTH = 20      # changes each chat can undo, the latest first
-OUTSIDE_S = 1800   # how long auto mode pauses after the model read text from the web, for clients without chats
+OUTSIDE_S = 1800   # how long Kelvin's own approvals pause after the model read such text, for clients without chats
 ARRIVED_SETTLE = 5.0   # lab seconds a reading may take to settle once its stage's status says the move is over
 WAIT_STALL_S = 600.0   # a wait for a set point ends once its reading has not got closer for this long (lab seconds)
+# The two kinds of text a model reads that could try to steer it (outside_reason). From outside the lab (WEB: a web
+# page, search results, a paper, a file in a chat's folder, the team chat): every approval Kelvin would give itself
+# waits for a person, auto mode's drives included. From the lab's own work (LAB_WORK: what a script printed, the lab's
+# scripts and files the survey tools read): only what reaches outside the lab or outlasts the chat waits (installing a
+# package, adding an instrument, trying a card, keeping a skill, a recipe or a note, saving code a maker's library
+# loads); auto mode's own drives within its ranges (a plan, a change, a fenced run of Kelvin's own script) go on.
+# Decided by the person, 2026-11-15 ("only outside the lab").
+WEB, LAB_WORK = "web", "lab"
+
+
+def read_marks(mark: Any) -> Dict[str, Tuple[str, Optional[float]]]:
+    """A portal chat's account of the text it has read since the person last wrote (chat["outside"]), by kind: {WEB
+    or LAB_WORK: (what, when it was read: time.time(), or None)}. A chat saved before the two kinds kept a bare
+    string: text from outside the lab."""
+    if not mark:
+        return {}
+    if isinstance(mark, str):
+        return {WEB: (mark, None)}
+    out: Dict[str, Tuple[str, Optional[float]]] = {}
+    if isinstance(mark, dict):
+        for kind in (WEB, LAB_WORK):
+            v = mark.get(kind)
+            if isinstance(v, str) and v:
+                out[kind] = (v, None)
+            elif isinstance(v, (list, tuple)) and v and v[0]:
+                when = v[1] if len(v) > 1 and isinstance(v[1], (int, float)) and not isinstance(v[1], bool) else None
+                out[kind] = (str(v[0]), float(when) if when is not None else None)
+    return out
+
+
+def mark_read(mark: Any, what: str, kind: str, when: Optional[float] = None) -> Dict[str, List[Any]]:
+    """A chat's account (read_marks) with this reading added, the latest of each kind kept: what to save as
+    chat["outside"]."""
+    marks: Dict[str, List[Any]] = {k: [w, t] for k, (w, t) in read_marks(mark).items()}
+    marks[kind] = [what, time.time() if when is None else when]
+    return marks
+
+
+def web_read(mark: Any) -> Optional[str]:
+    """What a chat's account says it read from outside the lab (WEB), if anything: the mark an item it queues
+    carries, which keeps auto mode from covering it (text from the lab's own work never does)."""
+    m = read_marks(mark).get(WEB)
+    return m[0] if m else None
+
+
+def _clock(when: Optional[float]) -> str:
+    return time.strftime("%H:%M", time.localtime(when)) if when is not None else ""
+
+
+def _paused(kind: str, read: str, until: str) -> str:
+    """Why Kelvin asks a person: what was read (read), of which kind, and until when."""
+    if kind == WEB:
+        return "%s, text from outside the lab that could try to steer a model, so a person approves %s" % (read, until)
+    return ("%s, text from the lab's own work that could try to steer a model, so what reaches outside the lab or "
+            "outlasts the chat (a package, an instrument, a card, a skill or recipe, a note) waits for a person %s; "
+            "auto mode's drives within its ranges go on" % (read, until))
 
 
 class SafetyGate:
@@ -342,11 +398,12 @@ class SafetyGate:
         self.envelope = envelope
         self.operator = operator
         self.auto = False  # auto mode: set by a person through the portal, never by the agent
-        # text from outside the lab the model has read (a web page, a manual, a board's output): it could try to
-        # steer the model, so auto mode asks a person instead. outside_chat: the portal's chat has read some.
-        self.outside: Optional[Tuple[float, str, bool]] = None   # (when, what, whether from the web)
-        self.outside_chat: Optional[str] = None
-        self.in_chat = False   # a portal chat's turn: the chat's own account of web text counts, not the clock's
+        # text the model has read that could try to steer it, by kind (WEB, LAB_WORK: outside_reason), as an agent
+        # over MCP read it: (time.monotonic(), time.time(), what). outside_chat: a portal chat's own account, during
+        # its turn (read_marks)
+        self.outside: Dict[str, Tuple[float, float, str]] = {}
+        self.outside_chat: Any = None
+        self.in_chat = False   # a portal chat's turn: the chat's own account counts, not the clock's
         self._grants: Dict[str, Allowed] = {}
         self._standing: Dict[str, Allowed] = {}   # what a person approved for a whole queue of scans, while it runs
         # the actions that drive the sample (instr.action) its scans start, which the queue's card showed: approved
@@ -702,25 +759,33 @@ class SafetyGate:
             key, 100 * worst, whose, 100 * fraction)
 
     def note_outside(self, source: str, web: bool = True) -> None:
-        """The model has read text from the web (web), or from the lab's own files or a script's printed output:
-        until it has been a while, auto mode asks a person (a portal chat keeps its own account instead, in_chat and
-        outside_chat)."""
-        self.outside = (time.monotonic(), source, web)
+        """The model has read text from outside the lab (web: the web's), or from the lab's own work (its files, what a
+        script printed): for OUTSIDE_S, Kelvin's own approvals that kind pauses ask a person (outside_reason; a portal
+        chat keeps its own account instead, in_chat and outside_chat)."""
+        self.outside[WEB if web else LAB_WORK] = (time.monotonic(), time.time(), source)
 
-    def outside_reason(self, chat: Optional[str] = None) -> Optional[str]:
-        """Why auto mode asks a person now, because the model read text from outside the lab (the web; in a portal
-        chat, also a file in the chat's folder); None when it hasn't. In a portal chat, until the person writes again
-        in it; for other clients, for OUTSIDE_S. chat: what a portal chat has read ("" for nothing), for a request it
-        makes outside the lab's turn, which doesn't set outside_chat."""
-        read = self.outside_chat if chat is None else chat
-        if read:
-            return ("this chat has read text from outside the lab (%s) since the person last wrote, which could try "
-                    "to steer a model, so a person approves" % read)
-        if chat is None and not self.in_chat and self.outside is not None and \
-                time.monotonic() - self.outside[0] < OUTSIDE_S:
-            return ("Kelvin read text from %s (%s) in the last %d minutes, which could try to steer a model, so a "
-                    "person approves" % ("the web" if self.outside[2:3] != (False,) else "outside the lab",
-                                         self.outside[1], OUTSIDE_S // 60))
+    def outside_reason(self, chat: Any = None, drives: bool = False) -> Optional[str]:
+        """Why a person approves what Kelvin would approve itself now, because the model read text that could try to
+        steer it, naming which kind and when; None when nothing it read pauses this. drives: auto mode's own coverage
+        of drives (a plan or a change within its ranges, a fenced run of Kelvin's own script), which only text from
+        outside the lab pauses; else anything Kelvin approves itself, which text from the lab's own work pauses too
+        (WEB, LAB_WORK). In a portal chat, until the person writes again in it; for other clients, for OUTSIDE_S.
+        chat: what a portal chat has read (read_marks; "" for nothing), for a request it makes outside the lab's turn,
+        which doesn't set outside_chat."""
+        kinds = (WEB,) if drives else (WEB, LAB_WORK)
+        marks = read_marks(self.outside_chat if chat is None else chat)
+        for kind in kinds:
+            if kind in marks:
+                what, when = marks[kind]
+                return _paused(kind, "this chat read %s%s" % (what, " at " + _clock(when) if when else ""),
+                               "until they write in the chat again")
+        if chat is None and not self.in_chat:
+            now = time.monotonic()
+            for kind in kinds:
+                mark = self.outside.get(kind)
+                if mark is not None and now - mark[0] < OUTSIDE_S:
+                    return _paused(kind, "Kelvin read %s at %s" % (mark[2], _clock(mark[1])), "for %d minutes, until %s"
+                                   % (OUTSIDE_S // 60, _clock(mark[1] + OUTSIDE_S)))
         return None
 
     def _draft(self, inst: Instrument) -> bool:
@@ -737,10 +802,11 @@ class SafetyGate:
         return " and ".join(steps)
 
     def auto_plan(self, grants: Dict[str, Allowed], dry_run: Any) -> Tuple[bool, List[str]]:
-        """Can auto mode approve a plan with these drive ranges? Needs a clean dry run and every drive low-risk."""
+        """Can auto mode approve a plan with these drive ranges? Needs a clean dry run and every drive low-risk, and no
+        text from outside the lab read meanwhile (the lab's own work's doesn't pause it: outside_reason)."""
         if not self.auto:
             return False, []
-        outside = self.outside_reason()
+        outside = self.outside_reason(drives=True)
         if outside:
             return False, [outside]
         if dry_run is None or not getattr(dry_run, "ok", False):
@@ -780,7 +846,8 @@ class SafetyGate:
         """Kelvin's own yes to a request that drives nothing (trying a card, adding an instrument at an address,
         keeping a skill or recipe, installing or removing a maker's package, saving code a library loads): approved
         without asking, whatever the approval mode, and said so; only driving the sample waits for a person. False
-        when the model has read text from the web, which could be steering it (then the request says so, and a person
+        when the model has read text that could be steering it, from outside the lab or from the lab's own work (a
+        script's output): each reaches outside the lab or outlasts the chat (then the request says which, and a person
         answers). chat: as for outside_reason."""
         outside = self.outside_reason(chat)
         if outside:
@@ -1093,8 +1160,8 @@ class SafetyGate:
                     elif unsure:
                         ok, why = False, "nothing on %s is automatic until a person reviews it: %s" % (
                             inst.name, self.review_steps(inst))
-                    elif self.outside_reason():
-                        ok, why = False, self.outside_reason()
+                    elif self.outside_reason(drives=True):   # auto mode's own drive: only the web's text pauses it
+                        ok, why = False, self.outside_reason(drives=True)
                     elif undo:
                         ok, why = False, "it undoes an earlier change, which a person approves"
                     elif acts:

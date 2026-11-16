@@ -98,7 +98,7 @@ def test_kelvin_reads_the_labview_as_text_from_outside_the_lab(tmp_path, lab_vis
     assert result.startswith('<outside_text from="the lab\'s LabVIEW files">') and "GPIB0::24::INSTR" in result
     assert "not read yet: Main.vi" in result and "scan iv_sweep: smu.V 0 → 1 V, 11 points" in result
     assert "The scans name them: smu (GPIB0::24::INSTR, keithley/2400)" in result and "Never run a VI" in result
-    assert chat["outside"] == "the lab's LabVIEW files"                 # auto mode asks until the person writes
+    assert chat["outside"]["lab"][0] == "the lab's LabVIEW files"   # the lab's own work: what outlasts the chat asks
 
 
 def test_real_vis_are_read_by_kelvins_own_reader_in_set_up(bench, monkeypatch, tmp_path):

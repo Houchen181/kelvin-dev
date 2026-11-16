@@ -408,7 +408,7 @@ CASES = {
                "it imports ctypes, which reaches past the gate: auto mode covers only what the gate checks"),
     "a maker's library": ("import zhinst\n" + SWEEP, "it uses zhinst, which reaches instruments past the gate"),
     "an unsure instrument": (SWEEP, "smu.V: Kelvin added it to the lab itself"),
-    "outside text": (SWEEP, "Kelvin read text from the web (a web page)"),
+    "outside text": (SWEEP, "Kelvin read a web page at "),
     # what reading a script for the lab's addresses misses: a USB instrument's device file, opened as a file; code
     # put together as it runs; an instrument's web interface
     "a device file": (SWEEP + 'with open("/dev/usbtmc0", "w") as f:\n    f.write("OUTP ON")\n',

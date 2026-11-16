@@ -140,7 +140,7 @@ def test_kelvin_reads_the_scripts_as_text_from_outside_the_lab(tmp_path):
     result = next(e for e in events if e["type"] == "tool_end")["content"]
     assert result.startswith('<outside_text from="the lab\'s scripts">') and "GPIB0::24::INSTR" in result
     assert "likely Kelvin card: keithley/2400" in result and "Never run the scripts" in result
-    assert chat["outside"] == "the lab's scripts"                    # auto mode asks until the person writes
+    assert chat["outside"]["lab"][0] == "the lab's scripts"   # the lab's own work: what outlasts the chat asks
 
 
 def test_the_cards_matched_against_follow_the_labs_cards_folder(tmp_path):

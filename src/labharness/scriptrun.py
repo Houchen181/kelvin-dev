@@ -3975,7 +3975,8 @@ def auto_cover(gate: Any, prep: Prepared, grants: Dict[str, Allowed], now: bool 
     what reading it ahead found standing in for the dry run a script can't have. Only one of Kelvin's own, as it saved
     it, with every module it imports (own_script): the lab's own scripts write beside themselves, which a fence would
     break mid-measurement, so a person approves each run of one, in auto mode too. Then: the model hasn't read text
-    from outside the lab (gate.outside_reason; outside: a queue item's own mark, queued by a chat that had), every drive
+    from outside the lab (gate.outside_reason with drives: the lab's own work's, a script's output, doesn't keep auto
+    mode from its own drives; outside: a queue item's own mark, queued by a chat that had), every drive
     it sets is low-risk on an instrument Kelvin is sure of (gate.auto_drives: a plan's own judgement), it does no card
     action that drives the sample, and nothing in it is read as reaching past the gate (an address outside the lab, a
     maker's library, ctypes, COM, a program, the network, a device file, code it puts together as it runs). The
@@ -3989,7 +3990,7 @@ def auto_cover(gate: Any, prep: Prepared, grants: Dict[str, Allowed], now: bool 
         return False, [LAB_EXPERIMENT if prep.found.experiment else LAB_SCRIPT]
     if own.why_not:
         return False, list(own.why_not)
-    read = gate.outside_reason()
+    read = gate.outside_reason(drives=True)
     if read:
         return False, [read]
     if outside:

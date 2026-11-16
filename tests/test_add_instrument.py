@@ -328,7 +328,7 @@ def test_auto_mode_adds_and_tries_at_an_address_the_scan_missed(tmp_path, bench)
     bench.devices["GPIB0::12::INSTR"] = Device("srs/sr830", name="sr830c")
     rt.gate.approver = ScriptedApprover([False])
     assert rt.add_instrument("GPIB0::12::INSTR", card="srs/sr830").startswith("declined")
-    assert "read text from the web (a web page)" in str(rt.gate.approver.requests[0])
+    assert "Kelvin read a web page at " in str(rt.gate.approver.requests[0])
 
 
 def test_a_persons_change_while_kelvin_asks_stays_in_the_lab_config(tmp_path, bench):

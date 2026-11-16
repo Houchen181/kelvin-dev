@@ -147,7 +147,8 @@ def test_after_reading_a_file_a_person_answers_for_code_an_instrument_loads(tmp_
     turns = [[{"type": "tool_call", "id": "r1", "name": "read_file", "input": {"path": "readme.txt"}}]] + save_turns()
     rt, result, shown, events = chat_day(tmp_path, Scripted(turns), folder, answers=[False], library_here=True)
     [asked] = rt.approver.requests                                            # the file could be steering the model
-    assert "Not approved by Kelvin itself: this chat has read text from outside the lab" in str(asked)
+    assert "Not approved by Kelvin itself: this chat read a file in the chat's folder at " in str(asked)
+    assert "text from outside the lab that could try to steer a model" in str(asked)
     assert asked.items[2] == "The file:\n" + TEXT
     assert result["is_error"] and result["content"].startswith("declined: nothing was saved")
     assert not (folder / "kelvin_counter.py").exists()

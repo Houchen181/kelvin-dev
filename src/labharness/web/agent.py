@@ -31,7 +31,7 @@ from ..agent.runtime import LabRuntime, Viewer
 from .. import guide, workbench
 from ..agent.server import INSTRUCTIONS, OUTSIDE, VIEWER_META
 from ..folderfiles import MAX_PDF_PAGES
-from ..gate import ApprovalRequest
+from ..gate import LAB_WORK, WEB, ApprovalRequest, mark_read, web_read
 from ..protection import summary as protection_summary
 from .hubmodels import through_hub
 from .providers.base import (ANSWER, EFFORT, RESUMABLE, SESSION, Emit, ModelInfo, Provider, TurnResult,
@@ -87,17 +87,21 @@ This project's rules: {rules}. Keep its details inside this conversation: never 
 services."""
 WEB_TOOLS = {"search_papers", "read_paper", "web_search", "read_web_page", "save_manual",   # reach the internet
              "install_for_instrument"}
-# tools whose results carry text from outside the lab (the open web, the chat's files, the lab's scripts, what a
-# script printed): once a chat has read some, auto mode asks a person there until the person writes again (manuals,
-# makers' files and instruments' replies are marked for the model, nothing more); over MCP the same tools make it ask
-# for a while (server.STEERING). Kelvin's own reading of a script (check_script) isn't among them: its last line says
+# tools whose results carry text that could steer a model, (what it is, its kind: gate.WEB, LAB_WORK): once a chat has
+# read some, Kelvin asks a person there until the person writes again, before anything it would approve itself after
+# text from outside the lab (the open web, the chat's files, the team chat), auto mode's drives and runs included, and
+# after text from the lab's own work (the lab's scripts and files, what a script printed) before what reaches outside
+# the lab or outlasts the chat, never auto mode's own drives (decided 2026-11-15). Manuals, makers' files and
+# instruments' replies are marked for the model, nothing more; over MCP the same tools make it ask for a while, by the
+# same kinds (server.STEERING). Kelvin's own reading of a script (check_script) isn't among them: its last line says
 # whether the next run is auto mode's, which it would make wrong (a review of 2026-11-15)
-OUTSIDE_TOOLS = {"read_web_page": "a web page", "web_search": "web search results", "search_papers": "paper search "
-                 "results", "read_paper": "a paper", "read_file": "a file in the chat's folder",
-                 "survey_scripts": "the lab's scripts",
-                 "survey_labview": "the lab's LabVIEW files", "run_script": "a lab script's output",
-                 "survey_specialmeasure": "the lab's Special Measure files",
-                 "team_chat": "the team chat"}
+OUTSIDE_TOOLS = {"read_web_page": ("a web page", WEB), "web_search": ("web search results", WEB),
+                 "search_papers": ("paper search results", WEB), "read_paper": ("a paper", WEB),
+                 "read_file": ("a file in the chat's folder", WEB), "team_chat": ("the team chat", WEB),
+                 "survey_scripts": ("the lab's scripts", LAB_WORK),
+                 "survey_labview": ("the lab's LabVIEW files", LAB_WORK),
+                 "survey_specialmeasure": ("the lab's Special Measure files", LAB_WORK),
+                 "run_script": ("a script's output", LAB_WORK)}
 MAX_LANES = 3
 PROJECT = """# Project “{name}”
 This conversation is filed under the project “{name}”. The project's instructions below come from the user and
@@ -531,7 +535,8 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
            "notebook", "search_records", "digest",
            "shared_memory"}
 # agents over MCP keep a note in the lab's memory with remember_shared; the portal's chats with remember (scope lab),
-# which knows whose chat it is and asks the person after the chat read text from outside the lab
+# which knows whose chat it is and asks the person after the chat read text that could steer it (from the web, or
+# the lab's own work: a script's output)
 MCP_ONLY = {"remember_shared"}
 # the lab's memory, looked up: never in an incognito chat, which uses no memory at all
 LAB_MEMORY_TOOLS = {"shared_memory"}
@@ -1300,7 +1305,8 @@ class ChatAgent:
             message = {"role": "user", "text": text, "steer": True}
             self._sent(chat, message)
             chat["messages"].append(message)
-        # the person wrote after the outside text came back: what the chat read before no longer pauses auto mode
+        # the person wrote after the outside text came back: what the chat read before no longer pauses Kelvin's own
+        # approvals
         # (its next lab call sets the gate's mark from the chat; the gate's mark now may be another chat's, working
         # the lab meanwhile). A message typed while it was being read keeps the mark: they hadn't seen it yet
         if len(waiting) > before:
@@ -1641,8 +1647,8 @@ class ChatAgent:
     async def _remember_note(self, chat: Dict[str, Any], context: Dict[str, Any], call: Dict[str, Any],
                              emit: Emit) -> Tuple[str, bool]:
         """remember in the person's notes for every conversation, or the project's: as for the lab's memory, a chat
-        that has read text from outside the lab since the person last wrote asks the person first, since the note
-        comes back in later chats."""
+        that has read text that could steer it since the person last wrote (from the web, or the lab's own work: a
+        script's output) asks the person first, since the note comes back in later chats."""
         args = call["input"]
         scope = args.get("scope") if isinstance(args, dict) else None
         outside = self.runtime.gate.outside_reason(chat.get("outside") or "")
@@ -1656,8 +1662,9 @@ class ChatAgent:
 
     async def _remember_lab(self, chat: Dict[str, Any], call: Dict[str, Any], emit: Emit) -> Tuple[str, bool]:
         """remember with scope lab: kept in the lab's memory, which every chat and everyone here sees (labmemory.py),
-        as Kelvin's in this person's chat. A chat that has read text from outside the lab since the person last wrote
-        asks the person first: a note goes into every chat's prompt."""
+        as Kelvin's in this person's chat. A chat that has read text that could steer it since the person last wrote
+        (from the web, or the lab's own work: a script's output) asks the person first: a note goes into every
+        chat's prompt."""
         args, rt = call["input"], self.runtime
         replaces = str(args.get("replaces") or "")
         try:
@@ -1919,7 +1926,7 @@ class ChatAgent:
             if attachments:
                 message["attachments"] = attachments
             self._sent(chat, message)
-            if not wake:   # the person is writing: what the chat read from the web before no longer pauses auto mode
+            if not wake:   # the person is writing: what the chat read before no longer pauses Kelvin's own approvals
                 chat.pop("outside", None)
                 self._slash(chat, message)
             self.recall(chat, message)
@@ -2065,7 +2072,7 @@ class ChatAgent:
         self.lab_holder = chat["id"]
         self.runtime.attribution = self._attribution(chat)
         self.runtime.gate.in_chat = True
-        self.runtime.gate.outside_chat = chat.get("outside")   # web text read since the person last wrote
+        self.runtime.gate.outside_chat = chat.get("outside")   # what it read since the person last wrote, by kind
         try:
             return await self._dispatch(chat, provider, context, call, emit)
         finally:
@@ -2258,7 +2265,8 @@ class ChatAgent:
                         "is_error": is_error, "run_id": (runs_named(call["name"], content) or [None])[-1],
                         "images": [k["file"] for k in kept] or None})
         if call["name"] in OUTSIDE_TOOLS and not is_error and "<outside_text from=" in content:   # remembered
-            chat["outside"] = OUTSIDE_TOOLS[call["name"]]   # the gate reads it with the chat's next lab call
+            what, kind = OUTSIDE_TOOLS[call["name"]]   # by kind, with when: the gate reads it with the next lab call
+            chat["outside"] = mark_read(chat.get("outside"), what, kind)
             self._before_outside[chat["id"]] = len(self._steer.get(chat["id"], []))   # typed before it came back
         entry = {"id": call["id"], "name": call["name"], "content": content, "is_error": is_error}
         if kept:
@@ -2347,8 +2355,9 @@ class ChatAgent:
         rt = self.runtime
         if name == "stop_run":
             return rt.stop_work(str(args.get("reason") or ""), by="agent (in “%s”)" % chat.get("title", "a chat")), False
-        # and what the chat read from outside the lab since its person last wrote: the queue's auto mode asks for it
-        with rt.attributed(dict(self._attribution(chat), outside=chat.get("outside"))):
+        # and what the chat read from outside the lab (the web's kind) since its person last wrote: the queue's auto
+        # mode asks for it; the lab's own work's (a script's output) doesn't keep auto mode from its drives
+        with rt.attributed(dict(self._attribution(chat), outside=web_read(chat.get("outside")))):
             if name == "queue_load":
                 text = rt.queue_load(str(args.get("name") or ""))
                 return text, not text.startswith("added")
@@ -2980,7 +2989,8 @@ class ChatAgent:
     async def _keep_know(self, chat: Dict[str, Any], context: Dict[str, Any], call: Dict[str, Any],
                          emit: Emit) -> Tuple[str, bool]:
         """save_skill and save_recipe: kept at once and shown in the chat (keeping one drives nothing), or once the
-        person approves when the chat has read text from the web; the person can switch one off or delete it."""
+        person approves when the chat has read text from the web or a script's output; the person can switch one
+        off or delete it."""
         from .. import recipes
         args = call["input"] if isinstance(call["input"], dict) else {}
         project = context["project"]
@@ -3119,7 +3129,8 @@ class ChatAgent:
         """write_file: a text file saved in the folder the person chose for this chat, at once (folderfiles.py).
         Python code in a folder an instrument's maker's library loads from (a lib:// address names it) runs on the
         instrument with no card command to check it, so it shows in the chat whole, approved by Kelvin itself (saving
-        drives nothing), or by the person when the chat has read text from the web. Every save is in the lab's record."""
+        drives nothing), or by the person when the chat has read text from the web or a script's output. Every save
+        is in the lab's record."""
         from .. import folderfiles, library
         folder = chat.get("folder")
         if not folder:
@@ -3151,7 +3162,7 @@ class ChatAgent:
             if go:   # shown in the chat like any approval Kelvin gave itself: what it saved, and why
                 await emit({"type": "approval", "call_id": call["id"], "id": "auto-" + call["id"],
                             "title": request.title, "items": request.items, "auto": True, "reasons": [why]})
-            else:   # it has read text from the web, which could be steering it: a person answers
+            else:   # it has read text that could be steering it (the web's, a script's output): a person answers
                 go = await self._ask_human(call["id"], emit, request)
                 rt.gate.log.write("ask", by="agent", request=str(request), answer="approved" if go else "declined",
                                   note=request.note or None)

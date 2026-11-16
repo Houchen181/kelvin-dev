@@ -548,7 +548,7 @@ def test_run_script_over_mcp_with_a_person_approving_at_the_page(lab, folder, tm
     assert "script sweep.py done" in ran, ran
     assert "assessment:" in ran or "its readings: 6 rows of lockin.X, lockin.Y against smu.V" in ran   # no numpy
     assert "rows: get_run_data" in ran and "files it wrote beside the script: sweep.dat" in ran
-    assert "<outside_text from=\"the lab's script output\">" in ran
+    assert "<outside_text from=\"a script's output\">" in ran
     run_id = re.search(r"get_run_data\(run_id='([^']+)'\)", ran).group(1)
     assert rt.describe_run(run_id)   # in the catalog like any run
 

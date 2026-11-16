@@ -194,7 +194,7 @@ def test_an_agent_that_read_the_web_asks_a_person_before_it_keeps_a_note(tmp_pat
                           ("remember_shared", {"kind": "fact", "text": "The fridge's base temperature is 8 mK."}))
     assert declined.startswith("not kept: the person declined") and kept.startswith("kept in the lab's memory")
     assert approver.requests[0].title == "Keep this in the lab's memory, which every chat and everyone here sees?"
-    assert "Not kept by Kelvin itself: Kelvin read text from the web (a web page)" in str(approver.requests[0])
+    assert "Not kept by Kelvin itself: Kelvin read a web page at " in str(approver.requests[0])
     assert [n["text"] for n in rt.lab_notes()] == ["The fridge's base temperature is 8 mK."]
     assert rt.lab_notes()[0]["by"] == "agent"
 
@@ -364,7 +364,7 @@ def test_a_chat_that_read_a_web_page_asks_the_person_before_it_keeps_a_lab_note(
     asked = approver.requests[0]
     assert asked.title.startswith("Keep this in the lab's memory") and asked.items[0] == \
         "lesson [magnet]: Ramp the magnet at 2 T/min."
-    assert "this chat has read text from outside the lab (a web page) since the person last wrote" in asked.items[1]
+    assert "this chat read a web page at " in asked.items[1] and "until they write in the chat again" in asked.items[1]
 
 
 def test_each_chat_is_shown_an_instruments_notes_at_its_first_use(tmp_path):
