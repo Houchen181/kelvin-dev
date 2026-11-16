@@ -27,6 +27,7 @@ from ..homeboard import describe as describe_block
 from .._version import __version__
 from ..catalog import MAX_ROWS as QUERY_ROWS, SCHEMA_TEXT
 from ..collection import Collection
+from ..gate import LAB_WORK, WEB as WEB_TEXT
 from ..labconfig import load_envelope
 from ..homelab import open_home_lab
 from .approval import ApprovalServer, WebApprover
@@ -52,7 +53,9 @@ You are connected to a physics lab through Kelvin.
   command, a raw command, a script, another instrument, a plan). Tell the person what was refused and why.
 - Only driving the sample, and installing software on this computer, wait for a person. What drives nothing (keeping a
   skill or recipe, trying a card, saving a file) Kelvin approves itself and shows in the chat, unless the chat has read
-  text from the web since the person last wrote: then the person answers.
+  text that could steer a model since the person last wrote (for 30 minutes over MCP): from the web, which also stops
+  auto mode's drives and runs, or from the lab's own work (a script's output, the lab's scripts), which doesn't. Then
+  the person answers.
 - An instrument's limits are its card's range (the instrument's own), narrowed only where the lab config's limits:
   or a mounted device's protection say so. describe_instrument shows where each limit comes from, a refusal says
   whose limit it hit, and lab_config shows the lab config itself. Tell the person exactly that, never a guess.
@@ -249,11 +252,13 @@ VIEWER_META = "kelvin.viewer"   # a portal chat's tool call names its viewer her
 
 def outside(rt: LabRuntime, source: str, text: str, web: bool = False, steers: bool = False) -> str:
     """A tool's text from outside the lab, marked as data for the model. web: text from the open web, which also
-    makes auto mode ask a person for a while (an instrument's manual, a maker's files or an instrument's reply
-    don't); while searching outside the lab is switched off, such a tool says so itself, unmarked. steers: text from
-    the lab's own files or a script's printed output, which makes auto mode ask a person for a while too, as the
-    portal's chat does after the same tools (web/agent.py OUTSIDE_TOOLS: STEERING here); Kelvin's own reading of a
-    script (check_script) doesn't (a review of 2026-11-15: over MCP nothing a script printed ever stopped auto mode)."""
+    makes Kelvin ask a person for a while before anything it would approve itself, auto mode's drives and runs
+    included (gate.WEB; an instrument's manual, a maker's files or an instrument's reply don't); while searching
+    outside the lab is switched off, such a tool says so itself, unmarked. steers: text from the lab's own work (its
+    files, a script's printed output), which makes Kelvin ask a person for a while before what reaches outside the lab
+    or outlasts the chat, never auto mode's own drives (gate.LAB_WORK, decided 2026-11-15), as the portal's chat does
+    after the same tools (web/agent.py OUTSIDE_TOOLS: STEERING here); Kelvin's own reading of a script (check_script)
+    doesn't (a review of 2026-11-15: over MCP nothing a script printed ever stopped auto mode)."""
     if web:
         if not rt.literature.enabled:
             return text
@@ -263,10 +268,12 @@ def outside(rt: LabRuntime, source: str, text: str, web: bool = False, steers: b
     return OUTSIDE % (source, text)
 
 
-# the tools whose text makes auto mode ask a person for a while, over MCP as in the portal's chat (OUTSIDE_TOOLS): the
-# web's, the lab's own files, and what a script printed; never Kelvin's own reading of a script (check_script)
-STEERING = ("read_web_page", "search_papers", "read_paper", "survey_scripts", "survey_labview",
-            "survey_specialmeasure", "run_script")
+# the tools whose text makes Kelvin ask a person for a while, over MCP as in the portal's chat (OUTSIDE_TOOLS), by
+# kind: the web's (gate.WEB: everything Kelvin would approve itself waits, auto mode's drives and runs too), and the
+# lab's own work's (LAB_WORK: its files, what a script printed: only what reaches outside the lab or outlasts the chat
+# waits); never Kelvin's own reading of a script (check_script)
+STEERING = {"read_web_page": WEB_TEXT, "search_papers": WEB_TEXT, "read_paper": WEB_TEXT, "survey_scripts": LAB_WORK,
+            "survey_labview": LAB_WORK, "survey_specialmeasure": LAB_WORK, "run_script": LAB_WORK}
 WEB = ToolAnnotations(readOnlyHint=True, openWorldHint=True)   # reads the public literature, never the lab
 ACT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
 FETCH = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
@@ -694,7 +701,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
         stays within auto's ranges on instruments Kelvin is sure of and reading it finds nothing that reaches past the
         gate (an address outside the lab, a maker's library, ctypes, COM, a program, the network, a device file, code
         it puts together as it runs, an action that drives the sample, a module beside it you didn't write, a module
-        from outside its Python's own packages); the card says why not when it asks. The lab's own scripts ask a person each run. Kelvin reads the script first for the
+        from outside its Python's own packages), and you haven't read text from the web for a while (a script's output
+        doesn't count); the card says why not when it asks. The lab's own scripts ask a person each run. Kelvin reads
+        the script first for the
         drive ranges it uses. params: values for its settings for this
         run, without editing the file ({"VMAX": 2});
         args: its command-line arguments; drives: the range of a drive the script works out as it runs, when you
@@ -708,7 +717,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         library, is not rehearsed); background: true runs it through the queue and returns at once, so set_live
         can change its live inputs from this chat while it runs."""
         return rt.run_script(script, params or {}, args or [], drives or {},
-                             mark=lambda text: outside(rt, "the lab's script output", text, steers=True),
+                             mark=lambda text: outside(rt, "a script's output", text, steers=True),
                              action=action, dry_run=dry_run, background=background, module=module, python=python)
 
     @server.tool(annotations=ACT, structured_output=False)
@@ -1591,7 +1600,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
         excitation (what drives the sample, and whether it is stated rms or peak) or fact; text: the fact in a
         sentence (at most 300 characters); instruments: those it concerns (it is shown when one is used); replaces:
         the id of a note it corrects. Only what a person said or a run showed, never a guess; a person sees, changes
-        and deletes every note in the portal. After reading text from the web, a person approves it first."""
+        and deletes every note in the portal. After reading text from the web or a script's output, a person approves
+        it first."""
         return rt.remember_shared(kind, text, instruments, replaces)
 
     @server.tool(annotations=ACT, structured_output=False)

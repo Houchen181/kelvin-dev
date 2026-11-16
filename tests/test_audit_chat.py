@@ -192,7 +192,7 @@ def test_c3_a_message_typed_while_outside_text_is_read_keeps_the_chats_mark(tmp_
     p = portal(tmp_path)
     asked, gate_saw, kept = steered_turn(p, chat_with_folder(p, tmp_path), "read_file")
     assert any("gate-setup" in t for t in asked)                    # the skill asked a person
-    assert gate_saw == kept == "a file in the chat's folder"
+    assert gate_saw == kept and kept["web"][0] == "a file in the chat's folder"
 
 
 def test_c3_a_message_typed_after_the_outside_text_came_back_still_clears_it(tmp_path):
@@ -269,7 +269,7 @@ def test_c5_an_item_a_chat_queues_after_reading_outside_text_asks_a_person(tmp_p
     assert [i.status for i in p.rt.queue.items] == ["done", "done"]
     asked = [r for r in p.asked if any("added to the queue" in line for line in r.items)]
     if reads_first:   # its card went to a person, saying why
-        assert len(asked) == 1 and any("read text from outside the lab" in line for line in asked[0].items)
+        assert len(asked) == 1 and any("text from outside the lab" in line for line in asked[0].items)
     else:             # nothing read: auto mode's yes, as before
         assert asked == []
 

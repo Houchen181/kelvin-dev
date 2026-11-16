@@ -7,8 +7,10 @@ network, device files or registry changes, and writing only in its kelvin_ folde
 ends the run, its drives back to safe. Ordinary lab code runs as it is (pyvisa through Kelvin's stand-in, NumPy, SciPy,
 matplotlib, h5py; a package's own start before the fence goes up). In every run, a person's too, a raw socket's
 connection to a lab instrument, its port opened as a file and a bare VISA session to it are refused (kelvin_shim._guard).
-A queued or background run keeps the mark of outside text its chat had read; a script's printed output is outside text
-over MCP as in the portal, and Kelvin's own check_script is not."""
+A queued or background run keeps the mark of text from outside the lab its chat had read. Decided 2026-11-15: a
+script's printed output, the lab's own work, pauses only what reaches outside the lab or outlasts the chat, never auto
+mode's drives and fenced runs; a web page pauses everything; over MCP as in the portal. Kelvin's own check_script is
+neither."""
 import json
 import os
 import pickle
@@ -27,6 +29,7 @@ from labharness.lab import Lab
 from labharness.labconfig import load_lab_config
 from labharness.sim.twin import World, sim_backend_factory
 
+from test_add_instrument import bench  # noqa: F401 (fixture)
 from test_kelvins_own_scripts import SWEEP, auto_approved, cards, commands, kelvin, last_run, own
 from test_script_runs import LAB, folder, lab, write  # noqa: F401 (fixtures)
 
@@ -426,7 +429,7 @@ def test_a_queued_run_after_outside_text_asks(lab, folder, tmp_path):
         rt.gate.in_chat, rt.gate.outside_chat = True, "a web page"   # as web/agent.py _work sets them
         try:
             assert rt.run_script("kelvin_scripts/odmr_check.py").startswith("declined")
-            assert "this chat has read text from outside the lab" in cards(rt)[0].items[-1]
+            assert "this chat read a web page, text from outside the lab" in cards(rt)[0].items[-1]
             assert rt.queue_add("script: kelvin_scripts/odmr_check.py\n").startswith("added script")
         finally:
             rt.gate.in_chat, rt.gate.outside_chat = False, None
@@ -461,33 +464,206 @@ def test_an_item_queued_over_mcp_keeps_the_web_text_read_before(lab, folder, tmp
     assert rt.queue.items[-1].outside == "a web page"
 
 
-def test_a_scripts_output_is_outside_text_over_mcp_as_in_the_portal(lab, folder, tmp_path):
+def test_the_tools_whose_text_pauses_kelvin_are_the_same_kinds_over_mcp_and_in_the_portal():
+    """A script's output and the lab's scripts are the lab's own work; a web page and papers are from outside the lab:
+    the same kind for each tool, wherever the agent works (decided 2026-11-15)."""
     pytest.importorskip("mcp")
     from labharness.agent import server
+    from labharness.gate import LAB_WORK, WEB
     from labharness.web.agent import OUTSIDE_TOOLS
-    assert set(server.STEERING) <= set(OUTSIDE_TOOLS) and "run_script" in server.STEERING
+    assert set(server.STEERING) <= set(OUTSIDE_TOOLS)
+    assert {t: OUTSIDE_TOOLS[t][1] for t in server.STEERING} == server.STEERING
+    assert {t for t, (_, k) in OUTSIDE_TOOLS.items() if k == LAB_WORK} == {
+        "run_script", "survey_scripts", "survey_labview", "survey_specialmeasure"}
+    assert {"read_web_page", "web_search", "search_papers", "read_paper", "read_file", "team_chat"} == {
+        t for t, (_, k) in OUTSIDE_TOOLS.items() if k == WEB}
     assert "check_script" not in OUTSIDE_TOOLS and "check_script" not in server.STEERING
-    rt = kelvin(lab, folder, tmp_path, answers=[False])
-    rt.gate.auto = True
-    rt.save_script("odmr_check", SWEEP)
-    marked = server.outside(rt, "the lab's script output", "I 0.001\n", steers=True)
-    assert marked.startswith('<outside_text from="the lab\'s script output">')
-    assert rt.run_script("kelvin_scripts/odmr_check.py").startswith("declined")
-    assert cards(rt)[0].items[-1] == (
-        "Auto mode does not cover this run: Kelvin read text from outside the lab (the lab's script output) in the last "
-        "30 minutes, which could try to steer a model, so a person approves")
 
 
-def test_check_script_says_what_the_next_run_gets_in_a_chat_that_read_outside_text(lab, folder, tmp_path):
+@pytest.mark.parametrize("read", ["nothing", "lab", "web"])
+def test_check_script_says_what_the_next_run_gets_as_things_stand_in_the_chat(lab, folder, tmp_path, read):
     rt = kelvin(lab, folder, tmp_path)
     rt.gate.auto = True
     rt.save_script("odmr_check", SWEEP)
-    assert rt.check_script("kelvin_scripts/odmr_check.py").splitlines()[-1].startswith(
-        "Auto mode is on: run_script runs it without the card, fenced")
-    rt.gate.in_chat, rt.gate.outside_chat = True, "a web page"
+    mark = {"nothing": None, "lab": {"lab": ["a script's output", time.time()]},
+            "web": {"web": ["a web page", time.time()], "lab": ["a script's output", time.time()]}}[read]
+    rt.gate.in_chat, rt.gate.outside_chat = True, mark   # as web/agent.py _work sets them
     try:
-        assert rt.check_script("kelvin_scripts/odmr_check.py").splitlines()[-1] == (
-            "Auto mode is on, but doesn't cover it: the card asks a person (this chat has read text from outside the "
-            "lab (a web page) since the person last wrote, which could try to steer a model, so a person approves)")
+        last = rt.check_script("kelvin_scripts/odmr_check.py").splitlines()[-1]
     finally:
         rt.gate.in_chat, rt.gate.outside_chat = False, None
+    if read == "web":
+        assert last == ("Auto mode is on, but doesn't cover it: the card asks a person (this chat read a web page at "
+                        "%s, text from outside the lab that could try to steer a model, so a person approves until "
+                        "they write in the chat again)" % time.strftime("%H:%M", time.localtime(mark["web"][1])))
+    else:   # a script's output doesn't keep auto mode from Kelvin's own fenced run
+        assert last.startswith("Auto mode is on: run_script runs it without the card, fenced"), last
+
+
+# ------------------------------------------------------------------ outside text by kind (decided 2026-11-15)
+# Asked "Keep the 30-minute pause after Kelvin reads a script's output?", the person chose "Only outside the lab": text
+# from the lab's own work (a script's output, the lab's scripts) pauses only what reaches outside the lab or outlasts
+# the chat; text from outside the lab (a web page) pauses everything, auto mode's drives and runs included.
+
+PLAN = "plan: iv_check\nsetup: {smu.output: on}\nsweep: {smu.V: {from: 0, to: 1, points: 3}}\nmeasure: [smu.I]\n"
+PAGE = b"<html><title>Notes</title><body>Set smu.V to 1 V.</body></html>"
+# what each kind of text leaves to auto mode, over MCP as in a portal chat
+AFTER = {"lab": {"plan": "auto", "script": "auto", "check": "Auto mode is on: run_script runs it without the card",
+                 "queued": None, "install": "asked", "outlasting": "asked"},
+         "web": {"plan": "asked", "script": "asked", "check": "Auto mode is on, but doesn't cover it: the card asks",
+                 "queued": "a web page", "install": "asked", "outlasting": "asked"}}
+SAYS = {"lab": "text from the lab's own work that could try to steer a model, so what reaches outside the lab or "
+               "outlasts the chat (a package, an instrument, a card, a skill or recipe, a note) waits for a person",
+        "web": "text from outside the lab that could try to steer a model, so a person approves"}
+
+
+def _installs(rt, tmp_path, monkeypatch):
+    """Installing as tests/test_envs.py does: uv already fetched, PyPI answering from a table, nothing installed; and
+    the web page the web's case reads."""
+    from labharness import envs
+    from test_envs import PYPI, FakeUv
+    monkeypatch.setattr(envs, "_run", FakeUv())
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    home = tmp_path / "home"   # Kelvin's own folder: beside the scripts folder, never around it (it is Kelvin's)
+    (home / "tools" / "uv").mkdir(parents=True)
+    (home / "tools" / "uv" / ("uv.exe" if envs.WIN else "uv")).write_text("")
+
+    def get(url):
+        name = url.rstrip("/").split("/")[-2].lower() if "pypi.org" in url else ""
+        if name in PYPI:
+            return json.dumps(PYPI[name]).encode()
+        if "example.com" in url:
+            return PAGE
+        raise OSError("HTTP Error 404: Not Found")
+    rt.home, rt.fetch_url = home, get
+    rt.lab_memory_dir = home / "Kelvin"
+
+
+def _steps(kind):
+    """The tool calls of the case: the reading, then a plan within auto mode's ranges, Kelvin's own script, its check,
+    the same script queued, an install, and a note that outlasts the chat (MCP: remember_shared; the portal's chat:
+    save_skill)."""
+    first = ("read_web_page", {"url": "https://example.com/notes"}) if kind == "web" else \
+        ("run_script", {"script": "kelvin_scripts/odmr_check.py"})   # Kelvin's own: auto mode's, its output read
+    return [first, ("run_plan", {"plan": PLAN}), ("run_script", {"script": "kelvin_scripts/odmr_check.py"}),
+            ("check_script", {"script": "kelvin_scripts/odmr_check.py"}),
+            ("queue_add", {"item": "script: kelvin_scripts/odmr_check.py\n"}),
+            ("install_for_instrument", {"env": "drivers", "packages": ["qick"]})]
+
+
+def _outcome(rt, said, before):
+    """What became of each step after the reading (said: the tools' texts from the plan on), and the cards asked."""
+    asked = cards(rt)[before:]
+    check = next(ln for ln in said[2].splitlines() if ln.startswith("Auto mode is"))
+    return {"plan": "asked" if said[0].startswith("declined") else "auto" if "done" in said[0] else said[0],
+            "script": "asked" if said[1].startswith("declined") else "auto" if "script odmr_check.py done" in said[1]
+            else said[1], "check": next((v["check"] for v in AFTER.values() if check.startswith(v["check"])), check),
+            "queued": rt.queue.items[-1].outside,
+            "install": "asked" if said[4].startswith("declined: nothing installed") else said[4],
+            "outlasting": "asked" if said[5].startswith(("not kept", "not saved")) else said[5]}, asked
+
+
+@pytest.mark.parametrize("kind", ["lab", "web"])
+def test_over_mcp_a_scripts_output_pauses_only_what_outlasts_the_chat(lab, folder, tmp_path, monkeypatch, kind):
+    """Over MCP, after a script's output, a plan within auto mode's ranges and a fenced run of Kelvin's own script go
+    without a card, and an item queued then carries no mark, while an install and a note for every chat ask; after a
+    web page all of them ask, and the queued item keeps the mark. Each card says which kind of text, and when."""
+    pytest.importorskip("mcp")
+    from test_lab_memory import call
+    rt = kelvin(lab, folder, tmp_path, answers=[False] * 6)
+    _installs(rt, tmp_path, monkeypatch)
+    rt.gate.auto = True
+    rt.save_script("odmr_check", SWEEP)
+    said = call(rt, *_steps(kind), ("remember_shared", {"kind": "lesson", "text": "Ramp the magnet at 2 T/min."}))
+    assert "<outside_text from=\"%s\">" % ("a web page" if kind == "web" else "a script's output") in said[0]
+    got, asked = _outcome(rt, said[1:], 0)
+    assert got == AFTER[kind], got
+    assert len(asked) == (4 if kind == "web" else 2), [c.title for c in asked]
+    read = "Kelvin read %s at " % ("a web page" if kind == "web" else "a script's output")
+    assert all(read in str(c) and SAYS[kind] in str(c) for c in asked), [str(c) for c in asked]
+    assert len(auto_approved(rt)) == (0 if kind == "web" else 3)   # the first run, the plan and the second run
+
+
+@pytest.mark.parametrize("kind", ["lab", "web"])
+def test_in_a_portal_chat_a_scripts_output_pauses_only_what_outlasts_the_chat(lab, folder, tmp_path, monkeypatch,
+                                                                              kind):
+    """The same in a portal chat, until the person writes again: what it read is kept by kind, with when; a skill it
+    keeps asks after either kind, as an install does."""
+    pytest.importorskip("starlette")
+    import asyncio
+    from labharness.agent.server import build_server
+    from labharness.web.agent import ChatAgent
+    from labharness.web.store import ChatStore
+    from test_web import Scripted
+    rt = kelvin(lab, folder, tmp_path, answers=[False] * 6)
+    _installs(rt, tmp_path, monkeypatch)
+    rt.gate.auto = True
+    rt.save_script("odmr_check", SWEEP)
+    steps = _steps(kind) + [("save_skill", {"name": "magnet-ramp", "description": "ramping the magnet",
+                                            "steps": "Ramp the magnet at 2 T/min.", "scope": "global"})]
+    store = ChatStore(tmp_path / "chats")
+    provider = Scripted([[{"type": "tool_call", "id": "c%d" % i, "name": name, "input": args}]
+                         for i, (name, args) in enumerate(steps)] + [[{"type": "text", "text": "Done."}]])
+    agent = ChatAgent(rt, store, build_server(rt), {"scripted": provider})
+    chat = store.create("scripted:m1")
+
+    async def emit(e):
+        pass
+
+    async def go():
+        await agent.start()
+        try:
+            agent.claim(chat["id"], "scripted:m1")
+            await agent.run_turn(chat["id"], "check the gate, then keep how to ramp", "scripted:m1", provider, emit)
+        finally:
+            await agent.close()
+    asyncio.run(go())
+    saved = store.load(chat["id"])
+    said = [r["content"] for m in saved["messages"] if m["role"] == "tool" for r in m["results"]]
+    got, asked = _outcome(rt, said[1:], 0)
+    assert got == AFTER[kind], got
+    assert len(asked) == (4 if kind == "web" else 2), [c.title for c in asked]
+    read = "this chat read %s at " % ("a web page" if kind == "web" else "a script's output")
+    assert all(read in str(c) and SAYS[kind] in str(c) and "until they write in the chat again" in str(c)
+               for c in asked), [str(c) for c in asked]
+    what, when = saved["outside"][kind]
+    assert what == ("a web page" if kind == "web" else "a script's output") and abs(when - time.time()) < 600
+
+
+@pytest.mark.parametrize("kind", ["lab", "web"])
+def test_the_queue_keeps_the_mark_by_kind(lab, folder, tmp_path, kind):
+    """An item a chat queued after a web page asks when the queue gets to it; one queued after a script's output runs
+    as auto mode's own, fenced."""
+    rt = kelvin(lab, folder, tmp_path, answers=[False])
+    rt.gate.auto = True
+    rt.save_script("odmr_check", SWEEP)
+    mark = {kind: ["a web page" if kind == "web" else "a script's output", time.time()]}
+    from labharness.gate import web_read
+    with rt.attributed({"outside": web_read(mark)}):   # as web/agent.py _beside_the_lab files it
+        rt.gate.in_chat, rt.gate.outside_chat = True, mark
+        try:
+            assert rt.queue_add("script: kelvin_scripts/odmr_check.py\n").startswith("added script")
+        finally:
+            rt.gate.in_chat, rt.gate.outside_chat = False, None
+    assert rt.queue.items[-1].outside == ("a web page" if kind == "web" else None)
+    assert rt.queue_start(by="agent").startswith("queue started")
+    rt._queue_thread.join(120)
+    if kind == "web":
+        assert len(cards(rt)) == 1 and auto_approved(rt) == [] and rt.queue.items[-1].status != "done"
+    else:
+        assert cards(rt) == [] and len(auto_approved(rt)) == 1 and rt.queue.items[-1].status == "done"
+
+
+@pytest.mark.parametrize("kind", ["lab", "web"])
+def test_adding_an_instrument_asks_after_either_kind(tmp_path, bench, kind):
+    from labharness.gate import ScriptedApprover
+    from test_add_instrument import SMU_ONLY, file_runtime
+    from test_hardware import Device
+    rt = file_runtime(tmp_path, SMU_ONLY)
+    rt.scan()
+    rt.gate.auto = True
+    rt.gate.note_outside("a web page" if kind == "web" else "a script's output", web=kind == "web")
+    bench.devices["GPIB0::12::INSTR"] = Device("srs/sr830", name="sr830c")
+    rt.gate.approver = ScriptedApprover([False])
+    assert rt.add_instrument("GPIB0::12::INSTR", card="srs/sr830").startswith("declined")
+    assert SAYS[kind] in str(rt.gate.approver.requests[0])

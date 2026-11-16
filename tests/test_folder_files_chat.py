@@ -75,7 +75,7 @@ def test_a_model_that_reads_pdfs_gets_the_pages_whole_and_auto_mode_waits(tmp_pa
     assert kept["mime"] == "application/pdf" and "data" not in kept               # the chat keeps the file's name
     sent = next(r for m in seen[1] if m["role"] == "tool" for r in m["results"])
     assert base64.b64decode(sent["documents"][0]["data"])[:5] == b"%PDF-"       # the pages, for the model
-    assert chat["outside"] == "a file in the chat's folder"                     # auto mode asks until the person writes
+    assert chat["outside"]["web"][0] == "a file in the chat's folder"   # outside the lab: all asks until they write
 
 
 def test_another_model_gets_the_text_and_a_chat_without_a_folder_reads_nothing(tmp_path):

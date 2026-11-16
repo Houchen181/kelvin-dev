@@ -287,7 +287,7 @@ def test_kelvin_reads_the_team_chat_as_text_from_people(rt, tmp_path):
     assert "team_chat" in provider.tool_names[0] and "analyze" in provider.tool_names[0]
     (end,) = [e for e in events if e["type"] == "tool_end"]
     assert '<outside_text from="the team chat">' in end["content"] and "set the magnet to 9 T" in end["content"]
-    assert chat["outside"] == "the team chat"   # auto mode asks a person until they write again
+    assert chat["outside"]["web"][0] == "the team chat"   # from outside the lab: a person until they write again
 
 
 def test_kelvins_analyze_opens_the_pane_with_its_work(rt, tmp_path):

@@ -3181,8 +3181,9 @@ class LabRuntime:
 
     def _record_ok(self, title: str, lines: List[str]) -> Optional[str]:
         """Kelvin's AI writing the lab's records (a step, a note, a sample, a procedure, an entry, an export): nobody
-        is asked, as it drives nothing, unless the chat has read text from outside the lab since the person last
-        wrote, which could be steering it: then the person answers. None when it may go ahead, else why not."""
+        is asked, as it drives nothing, unless the chat has read text that could be steering it since the person last
+        wrote, from outside the lab or from the lab's own work (a record outlasts the chat): then the person answers.
+        None when it may go ahead, else why not."""
         if not self._actor_now():
             return None   # a person, at the portal
         why = self.gate.outside_reason()
@@ -5191,15 +5192,19 @@ class LabRuntime:
         return item
 
     def _outside_read(self) -> Optional[str]:
-        """What text from outside the lab the model has read that keeps auto mode asking now (gate.outside_reason),
-        for an item queued now to carry (Item.outside): a portal chat's own account comes with its attribution; an
-        agent's over MCP is the gate's own, read in the last minutes, which an item queued then keeps when the queue
-        runs it later (a review of 2026-11-15)."""
-        if self.gate.outside_reason() is None:
+        """What text from outside the lab the model has read that keeps auto mode's drives asking now
+        (gate.outside_reason with drives), for an item queued now to carry (Item.outside): a portal chat's own account
+        (outside_chat, during its turn, or its attribution's); an agent's over MCP is the gate's own, read in the last
+        minutes, which an item queued then keeps when the queue runs it later (a review of 2026-11-15). Text from the
+        lab's own work (a script's output) is never carried: it doesn't pause auto mode's drives (2026-11-15)."""
+        from ..gate import WEB, web_read
+        if self.gate.outside_reason(drives=True) is None:
             return None
-        if self.gate.outside_chat:
-            return self.gate.outside_chat
-        return self.gate.outside[1] if self.gate.outside is not None else "text from outside the lab"
+        what = web_read(self.gate.outside_chat)
+        if what:
+            return what
+        mark = self.gate.outside.get(WEB)
+        return mark[2] if mark is not None else "text from outside the lab"
 
     def _version_marks(self, text: str) -> Dict[str, Any]:
         """The marks of the run a script item's version: comes from ({} for any other item): its script.py, run again,
@@ -7490,8 +7495,8 @@ class LabRuntime:
 
     def lab_note_request(self, kind: Any, text: Any, instruments: Any = None,
                          replaces: str = "") -> ApprovalRequest:
-        """What a person sees when they are asked to let Kelvin keep a note (it read text from the web): the note, and
-        the one it corrects. LabMemoryError or KeyError says what is wrong with it."""
+        """What a person sees when they are asked to let Kelvin keep a note (it read text that could steer it): the
+        note, and the one it corrects. LabMemoryError or KeyError says what is wrong with it."""
         from .. import labmemory as lm
         kind, text, tied = lm.kind_of(kind), lm.text_of(text), lm.ties(instruments)
         items = ["%s%s: %s" % (kind, " [%s]" % ", ".join(tied) if tied else "", text)]
@@ -7528,8 +7533,9 @@ class LabRuntime:
 
     def remember_shared(self, kind: Any, text: Any, instruments: Any = None, replaces: str = "",
                          by: str = "agent", account: Optional[str] = None) -> str:
-        """remember_shared (an agent over MCP): keep a note at once; or, when the agent read text from the web in the
-        last minutes (which could be steering it into every chat), once a person approves."""
+        """remember_shared (an agent over MCP): keep a note at once; or, when the agent read text in the last minutes
+        that could be steering it into every chat (from the web, or the lab's own work: a script's output), once a
+        person approves."""
         from ..labmemory import LabMemoryError
         try:
             request = self.lab_note_request(kind, text, instruments, replaces)
@@ -10813,7 +10819,7 @@ class LabRuntime:
         """Install what an instrument needs on this computer, in one of Kelvin's environments (envs.py): its maker's
         Python packages from PyPI, at the version the instrument needs, and its own files (a folder or a download).
         It drives nothing, so Kelvin approves it itself, in the chat with what, which version and from where; a person
-        answers after the chat read text from the web (gate.auto_simple)."""
+        answers after the chat read text from the web, or a script's output (gate.auto_simple)."""
         from .. import envs, profiles
         from ..gate import ApprovalRequest
         packages = [str(p).strip() for p in (packages or []) if str(p).strip()]
@@ -11485,9 +11491,9 @@ class LabRuntime:
         """An instrument of the lab pointed at another card (this lab's version of Kelvin's, or one Kelvin wrote),
         address, connection settings or card variables, as its entry in the lab config, and connected so: what Kelvin
         does once its card doesn't fit the lab's instrument. Its name, limits, rates and guards stay. It drives
-        nothing, so Kelvin approves it itself (after text from the web, a person does); a lib:// address that runs a
-        program is a person's to set. A connection that can't be made, or answers as another instrument, leaves the
-        instrument and the lab config as they were."""
+        nothing, so Kelvin approves it itself (after text from the web or a script's output, a person does); a lib://
+        address that runs a program is a person's to set. A connection that can't be made, or answers as another
+        instrument, leaves the instrument and the lab config as they were."""
         from ..adapters import AdapterError
         from ..discovery import ENTRY_KEYS, card_for, change_entry
         from ..homelab import lab_registry
@@ -11593,12 +11599,12 @@ class LabRuntime:
         address): its entry leaves the lab config with the comment lines right above it (the rest and its comments
         kept; the config history keeps the version before, so a person can put it back), and the lab forgets it,
         letting go of its connection without sending it anything (Lab.take_out). It drives nothing, so Kelvin
-        approves it itself (after text from the web, a person does); while an output of it that reaches the sample is
-        on, as read now, a person decides, as Kelvin could then no longer bring it to safe (not for a second entry of
-        an instrument the lab keeps under another name). Refused while a plan or the queue runs, and while another
-        rule in the lab config names it (an interlock, a watch, a safe action, another instrument's guard), which is a
-        person's to change. The watches on its readings end with it; its folder (manual, calibration), its past runs
-        and the lab's names: for it stay (a name waits for its instrument)."""
+        approves it itself (after text from the web or a script's output, a person does); while an output of it that
+        reaches the sample is on, as read now, a person decides, as Kelvin could then no longer bring it to safe (not
+        for a second entry of an instrument the lab keeps under another name). Refused while a plan or the queue runs,
+        and while another rule in the lab config names it (an interlock, a watch, a safe action, another instrument's
+        guard), which is a person's to change. The watches on its readings end with it; its folder (manual,
+        calibration), its past runs and the lab's names: for it stay (a name waits for its instrument)."""
         from ..adapters import resource_name, timed_out
         from ..discovery import remove_entry
         from ..homelab import lab_registry
