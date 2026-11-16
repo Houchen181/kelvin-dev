@@ -651,3 +651,24 @@ Reported (2026-11-15), from bringing up an NV pulsed-measurement rig while a 289
 - **The Terminal is this computer's own shell (item 13)**, as Claude Code's terminal panel is: it opens on a shell, in tabs (PowerShell through Windows' pseudo-console, with pywinpty; the person's shell on a pty elsewhere), starting in the lab's scripts folder, with ＋ for more and × to close one. Kelvin's console (talking to Kelvin, `/use` an instrument through the gate) is gone, as the user asked: approvals are the chat's and the Lab panel's cards. Its commands are the person's own, past the safety gate, as in any terminal on that computer. It opens only for this computer's own page (the access key, Host and Origin checked as it connects), never for a phone, the Kelvin hub or the AI, and is covered while Claude operates the screen. The lab's record notes each shell opened and closed, never what is typed. Shells end with their tab, sign-out and Kelvin. No approval is ever asked in a shell (the review found `y` and Enter typed in PowerShell could approve a laser's power, while the console was a tab beside it). Output a page can't keep up with is dropped, said, never kept without bound. xterm.js 6.0.0 and its fit addon are carried in the app. Not yet: reattaching a shell after a page reload; macOS untested.
 - **Independent reviews** of each part (three reviewers) found 18 problems in the first versions, and two more turned up as they were fixed; a fourth, of the Terminal, found 6 more; each is fixed, with its script as a test, and the serious ones are said above.
 - **Not done:** a QICK pulse-sequence card with its PMOD outputs (item 4), a feature of its own; built-in cards with USB IDs (no Cobolt card yet); a card or connection for ZeroMQ instruments; a try on the real hardware.
+
+Asked for (2026-11-15): "for the script it should be pretty safe once the user has asked to run, so let Kelvin be able to do so", then "no need for the approval, this should be covered by auto mode". Kelvin writes scripts of its own and runs them, and auto mode covers their runs. Status: built, not yet released.
+- **Kelvin's own scripts:** `save_script` saves one in `kelvin_scripts/` of the lab's scripts folder, from any chat. `write_file` saves code and settings in Kelvin's own `kelvin_…` folders there. `run_script` runs either like one of the lab's scripts.
+  - Its card says Kelvin wrote it and shows all its code, the modules it imports too, with their indentation; or what changed since a run a person approved.
+  - Never saved there: programs, batch or PowerShell files, a name a test runner collects (`test_*.py`, `conftest.py`), a file or folder named like a module the lab's scripts import or like Kelvin's stand-in, or anything in the person's own folders.
+- **Auto mode covers the runs of Kelvin's own scripts, fenced.** It covers a run only while the script and every module of Kelvin's it imports are as Kelvin saved them.
+  - With no card, a run must stay within auto mode's ranges, use no instrument Kelvin added or has a draft card for, do no card action that drives the sample, and reach nothing past the gate: no port outside the lab, no maker's library, no program, no network client, no device file, no code it builds as it runs. Its chat must also have read no text from outside the lab.
+  - Every such run is fenced: it writes only in its own `kelvin_` folder and its run folder, and starts no program. It reaches lab instruments only through the gate, and nothing outside the lab.
+  - On Windows the run also drops to low integrity, so Windows itself refuses writes elsewhere, from compiled code too.
+  - Like `run_python`'s sandbox, the fence guards against mistakes, not against code written to get around it, and the docs say so.
+  - The lab's own scripts ask a person each run, as before. Most write their data beside themselves, which a fence would stop halfway.
+- **A lab instrument only through the gate, in every script run:** found by the reviews, older than this change.
+  - A raw socket, a datagram, a device file (however spelled: `\\?\COM7`, a symlink, bytes, an IPv4-mapped IPv6 address), or the asyncio internals could reach a lab instrument past the gate. They are refused, and the run ends.
+  - Another way into a lab instrument (its raw port beside its VXI-11, its Prologix adapter) is refused without asking.
+  - A forked worker gets its own link and never hangs.
+- **Four independent reviews** of this work found about 30 problems, each fixed with its script as a test. The serious ones:
+  - a Stop lost while an auto run loaded its libraries;
+  - a library loaded before the fence went up;
+  - the guard switched off from inside the script;
+  - a queued run after web text approved by auto mode;
+  - a person's own `pytest` collecting Kelvin's scripts.
