@@ -696,10 +696,20 @@ def flood(count):
 
 
 def printed(count):
-    try:
-        return int(count.read_text().strip() or 0)
-    except (OSError, ValueError):
-        return 0
+    """How many lines the flood has printed, as it last wrote. It writes the file anew every 500 lines (truncated,
+    then written), so a read can fall in between and find it empty: read again, as an empty file is that moment, never
+    a count of 0 (on a loaded Linux, a full run once read 0 just after reading 10000)."""
+    for _ in range(50):
+        try:
+            text = count.read_text().strip()
+            if text:
+                return int(text)
+        except (OSError, ValueError):
+            pass
+        if not count.exists():
+            return 0
+        time.sleep(0.01)
+    return 0
 
 
 @pytest.mark.parametrize("which", MODES)
