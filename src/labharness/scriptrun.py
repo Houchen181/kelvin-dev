@@ -1239,7 +1239,7 @@ def _way(address: str) -> Optional[Tuple[str, str, str]]:
     by its board and primary address, the way its secondary address; a USB instrument by its ids and serial number,
     the way its interface; a serial port. None where Kelvin can't tell (sim://, a Prologix adapter's address)."""
     a = canonical(address)
-    m = re.match(r"^TCPIP\d+::([^:]+)(?:::(.+?))?::(INSTR|SOCKET)$", a)
+    m = re.match(r"^TCPIP\d+::(\[[^\]]*\]|[^:\[\]]+)(?:::(.+?))?::(INSTR|SOCKET)$", a)
     if m:
         host, middle, end = m.groups()
         if end == "SOCKET":
@@ -1298,9 +1298,37 @@ def lab_name(lab: Any, address: str) -> Optional[str]:
 
 
 def _lan(address: str) -> Optional[Tuple[str, str]]:
-    """A LAN address's (host, the rest), or None."""
-    m = re.match(r"^TCPIP\d+::([^:]+)::(.+)$", address)
+    """A LAN address's (host, the rest), or None; an IPv6 host is in brackets ([fe80::1])."""
+    m = re.match(r"^TCPIP\d+::(\[[^\]]*\]|[^:\[\]]+)::(.+)$", address)
     return (m.group(1), m.group(2)) if m else None
+
+
+def _plain_host(address: str) -> bool:
+    """Whether a socket's address is one Kelvin reads (a host, an IPv6 one in brackets, and a port), so that it can say
+    it reaches no lab instrument: one it can't read never goes as one that doesn't (a review of 2026-11-15: a socket's
+    ::ffff:127.0.0.1, read as no lab instrument's, reached the lab's lock-in; the stand-in now writes it 127.0.0.1)."""
+    lan = _lan(canonical(address))
+    return lan is not None and bool(re.match(r"^\d+::SOCKET$", lan[1]))
+
+
+def _lab_device(lab: Any, path: str) -> Optional[str]:
+    """The lab instrument whose serial port a device file is: COM7 however Windows spells it (canonical); elsewhere
+    through any link to it as this computer resolves both (/dev/serial/by-id/..., /proc/self/root/dev/...)."""
+    name = lab_name(lab, path)
+    if name is not None or os.name == "nt":
+        return name
+    try:
+        real = os.path.realpath(path)
+    except (OSError, ValueError):
+        return None
+    for other, ic in lab.config.instruments.items():
+        m = re.match(r"^(?:serial://|ASRL)(/dev/[^:]+?)(?:::INSTR)?$", str(ic.address or "").strip(), re.I)
+        try:
+            if m and os.path.realpath(m.group(1)) == real:
+                return other
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 _HOSTS: Dict[str, frozenset] = {}
@@ -1313,16 +1341,17 @@ def _addresses(host: str) -> frozenset:
     if key in _HOSTS:
         return _HOSTS[key]
     box: Dict[str, Any] = {}
+    name = host[1:-1] if host.startswith("[") and host.endswith("]") else host   # an IPv6 address, in brackets
 
     def look() -> None:
         try:
-            box["found"] = frozenset(i[4][0] for i in socket.getaddrinfo(host, None))
+            box["found"] = frozenset(str(i[4][0]).lower() for i in socket.getaddrinfo(name, None))
         except (OSError, UnicodeError):
             box["found"] = frozenset()
     t = threading.Thread(target=look, name="kelvin-host-look", daemon=True)
     t.start()
     t.join(HOST_LOOK_S)
-    found = box.get("found", frozenset()) | {key}
+    found = box.get("found", frozenset()) | {key, name.lower()}
     if len(_HOSTS) > 200:
         _HOSTS.clear()
     _HOSTS[key] = found
@@ -1356,12 +1385,14 @@ def outside(lab: Any, address: str) -> str:
     which the card called only "not in this lab", and it emitted about 40 mW while Kelvin saw none of it)."""
     under = behind(lab, address)
     if under:
-        return ("%s, the Prologix adapter this lab's %s %s behind: commands sent through it skip the safety gate"
+        return ("%s, the Prologix adapter this lab's %s %s behind: commands sent through it skip the safety gate, "
+                "so Kelvin refuses it as the script opens it, and the run ends there"
                 % (address, ", ".join(under), "is" if len(under) == 1 else "are"))
     other = same_device(lab, address)
     if other:
         return ("%s, which reaches this lab's %s another way than its address in the lab (%s): commands sent there skip "
-                "the safety gate" % (address, other, lab.config.instruments[other].address))
+                "the safety gate, so Kelvin refuses it as the script opens it, and the run ends there"
+                % (address, other, lab.config.instruments[other].address))
     said = "%s, which is not in this lab: Kelvin can't check what it sends there" % address
     device = port_device(lab, address)
     if device is None:
@@ -1896,6 +1927,9 @@ OWN_ENCODINGS = ("utf-8", "utf-8-sig")
 # browser, a window)
 NOT_PRELOADED = ("kelvin", "kelvin_api", "kelvin_shim", "antigravity", "this", "webbrowser", "turtle", "turtledemo",
                  "tkinter", "idlelib", "pydoc", "__main__", "__future__")
+# the modules Kelvin's stand-in loads and patches itself, before anything else, wherever its Python has them: what
+# reaches a lab instrument through them goes through Kelvin, so where they come from is never asked
+STAND_INS = ("pyvisa", "serial", "kelvin", "kelvin_api", "kelvin_shim")
 _SYS_PATHS = ("path", "meta_path", "path_hooks", "path_importer_cache")   # where Python finds modules
 _LOADERS = ("spec_from_file_location", "module_from_spec", "SourceFileLoader", "SourcelessFileLoader",
             "ExtensionFileLoader", "load_dynamic", "load_source", "load_compiled", "load_module", "addsitedir",
@@ -2098,6 +2132,21 @@ def own_script(prep: Prepared) -> Own:
                     continue
                 own.modules.append((f, ftext, sha))
                 todo.append((f, ftext))
+    # what it imports from elsewhere must be its Python's own packages (its installation, its site-packages): one on
+    # PYTHONPATH, an editable install's or a .pth's folder, a kelvin_ folder on its path, is code Kelvin doesn't read
+    # ahead (a review of 2026-11-15: a lab library on PYTHONPATH ran a program and a raw socket in an auto run). Its
+    # Python says where each comes from (_probe: looked for, not imported); one it can't ask is a reason to ask too
+    std = set(getattr(sys, "stdlib_module_names", ()))
+    tops = sorted({d.split(".")[0] for d in preload} - std - set(STAND_INS))
+    if tops and getattr(prep, "python", None) is not None:
+        found = _probe(list(prep.python.command), prep.path.parent, tops)
+        if "error" in found:
+            own.why_not.append("Kelvin couldn't ask its Python where what it imports comes from (%s)" % found["error"])
+        foreign = found.get("foreign") or {}
+        for name in sorted(foreign):
+            own.why_not.append("it imports %s from %s, which isn't one of its Python's own packages (PYTHONPATH, an "
+                               "editable install, a .pth's folder): Kelvin doesn't read it ahead" % (name, foreign[name]))
+        preload = {d: None for d in preload if d.split(".")[0] not in foreign}
     own.preload = list(preload)[:60]
     return own
 
@@ -2458,6 +2507,7 @@ class ScriptRun:
         # as it runs, a socket too; a maker's library another loads)
         self.auto = self.meta.get("approved") == "auto mode"
         self.told: List[str] = []   # what its preflight couldn't read (a script that drives nothing): its record's warnings
+        self.low = False   # its folders labelled for Windows' low integrity, where it lowers itself (_label)
         # unknown addresses a person allowed, as VISA resources however they are spelled (the approval's serial://COM5
         # is the script's COM5 or ASRL5::INSTR), and makers' libraries, by name
         self.allowed = {a if a in OPAQUE else canonical(a) for a in allowed}
@@ -2534,6 +2584,25 @@ class ScriptRun:
         if self.rec is not None:
             self._emit(event="point", run_id=self.rec_id, done=len(self.rows), total=None, row=row, eta_s=None,
                        columns=self._columns())   # its axes and readings so far: they grow as it runs
+
+    def _label(self, run_dir: Path) -> None:
+        """Windows, a run auto mode approved: its two folders (its run's, its kelvin_ folder) labelled Windows' low
+        integrity, as run_python's scratch folder is, so the process, which lowers itself there before its fence goes
+        up, may write in them and Windows itself refuses its writes anywhere else, h5py's or SQLite's own C code's too
+        (a review of 2026-11-15). The kelvin_ folder keeps its label. Not done (another system, or the call failed): said
+        in the run's record, and the fence alone guards what it writes."""
+        self.low = False
+        if self.prep.fenced != "auto" or self.rehearsal or os.name != "nt":
+            return
+        from .sandbox import _label_low
+        own = self.prep.own
+        whys = [w for w in (_label_low(run_dir), _label_low(own.folder) if own is not None and own.folder else
+                            "no folder of Kelvin's") if w]
+        if whys:
+            self.told.append("Windows' low integrity couldn't be set on its folders (%s): the fence alone guards what "
+                             "it writes" % "; ".join(whys))
+        else:
+            self.low = True
 
     def _pin(self, run_dir: Path) -> Optional[str]:
         """Kelvin's own modules the script imports (prep.own), as its card showed them or auto mode read them: a copy
@@ -3200,11 +3269,13 @@ class ScriptRun:
             return {"instrument": name}
         if self.rehearsal:
             raise _Refuse("refused: a rehearsal reaches only the simulated lab, not %s" % address)
+        if same_device(self.lab, address) or behind(self.lab, address):   # another way into a lab instrument:
+            raise _Refuse("refused: %s opens %s" % (self.prep.name, outside(self.lab, address)))   # never asked
         if canonical(address) in self.allowed:
             return {}   # a person allowed it
         if self.auto:
             raise _Refuse(FENCE_REFUSED % ("opening %s, outside the lab" % address))
-        if kind == "socket" and not behind(self.lab, address) and not same_device(self.lab, address):
+        if kind == "socket" and _plain_host(address):
             return {}   # a socket that reaches no lab instrument, in a run a person approved
         request = ApprovalRequest("Let %s open %s?" % (self.prep.name, address), [
             "%s opens %s, so it runs as the script wrote it" % (self.prep.name, outside(self.lab, address))])
@@ -3224,7 +3295,8 @@ class ScriptRun:
         reaches no lab instrument, a device or address outside the lab once a person allows it)."""
         if self.rehearsal:
             raise _Refuse("refused: a rehearsal reaches only the simulated lab, not %s" % address)
-        way = lab_name(self.lab, address) or same_device(self.lab, address) or ", ".join(behind(self.lab, address))
+        way = (_lab_device(self.lab, address) if how == "device" else lab_name(self.lab, address)) or \
+            same_device(self.lab, address) or ", ".join(behind(self.lab, address))
         if way:
             raise _Refuse("refused: %s %s, which is the lab's %s, past Kelvin's stand-in, so the safety gate would "
                           "never see what goes there: a script reaches a lab instrument through pyvisa's "
@@ -3379,15 +3451,23 @@ class ScriptRun:
         env.update(KELVIN_IPC="127.0.0.1:%d" % port, KELVIN_IPC_TOKEN=self.token, KELVIN_RUN_DIR=str(run_dir),
                    KELVIN_SCRIPT=str(self.prep.path), KELVIN_ACTION=self.prep.action, MPLBACKEND="Agg",
                    PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+        from .sandbox import RUNNER   # run_python's sandbox, whose refusals a fenced run shares (KELVIN_SANDBOX)
         if self.rehearsal:   # its own folder for what Matplotlib keeps, and no bytecode written beside the lab's code
-            env.update(KELVIN_REHEARSAL="1", PYTHONDONTWRITEBYTECODE="1", MPLCONFIGDIR=str(run_dir / ".matplotlib"))
+            env.update(KELVIN_REHEARSAL="1", PYTHONDONTWRITEBYTECODE="1", MPLCONFIGDIR=str(run_dir / ".matplotlib"),
+                       KELVIN_SANDBOX=str(RUNNER))
         elif self.prep.fenced == "auto":   # a run auto mode approved of one of Kelvin's own scripts: fenced, writing in
             own = self.prep.own              # its kelvin_ folder and the run's; its Python's packages loaded first
             env.update(KELVIN_FENCE="auto", PYTHONDONTWRITEBYTECODE="1", MPLCONFIGDIR=str(run_dir / ".matplotlib"),
                        KELVIN_FENCE_WRITES=str(own.folder) if own is not None and own.folder is not None else "",
-                       KELVIN_PRELOAD=",".join(own.preload) if own is not None else "")
+                       KELVIN_PRELOAD=",".join(own.preload) if own is not None else "", KELVIN_SANDBOX=str(RUNNER),
+                       # the modules of Kelvin's it may import, each with the sha256 Kelvin read: no other one beside it
+                       KELVIN_OWN_MODULES=json.dumps({str(f): sha for f, _, sha in (own.modules if own else [])}),
+                       TEMP=str(run_dir), TMP=str(run_dir))   # a temporary file: in its run's folder, as run_python's
+            if self.low:   # its two folders labelled: the process lowers itself to Windows' low integrity
+                env["KELVIN_LOW_INTEGRITY"] = "1"
         elif self.prep.fenced:   # one of the lab's kept experiments: kelvin.lab and nothing past it, in the real run too
-            env.update(KELVIN_FENCE="1", PYTHONDONTWRITEBYTECODE="1", MPLCONFIGDIR=str(run_dir / ".matplotlib"))
+            env.update(KELVIN_FENCE="1", PYTHONDONTWRITEBYTECODE="1", MPLCONFIGDIR=str(run_dir / ".matplotlib"),
+                       KELVIN_SANDBOX=str(RUNNER))
         env["PYTHONPATH"] = os.pathsep.join([str(SHIM_DIR)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
         return env
 
@@ -3468,6 +3548,7 @@ class ScriptRun:
         try:
             proc = None
             changed = self._pin(run_dir)
+            self._label(run_dir)
             if self._stop_pressed():   # stopped while it was approved or starting: its Python never starts
                 self._begin_stop("stop requested", conns)
             elif changed:   # a module of Kelvin's it imports isn't what was approved, or read for auto mode: not run
@@ -3620,6 +3701,9 @@ class ScriptRun:
             report.warnings.append("past the gate, let through with the run: " + ", ".join(self.through))
         if self.bye.get("refused") and not self.rehearsal:   # a kept experiment's fence: what it refused
             report.warnings.append("its process refused: " + "; ".join(str(r) for r in self.bye["refused"]))
+        if self.bye.get("restricted") and not self.rehearsal:   # Windows' low integrity, which it couldn't take
+            report.warnings.append("it couldn't lower itself to Windows' low integrity (%s): the fence alone guarded "
+                                   "what it wrote" % "; ".join(str(r) for r in self.bye["restricted"]))
         if self.reported:
             report.warnings.append("the instruments refused %d of its commands, as they would have without Kelvin "
                                    "(commands.jsonl says which and why)" % self.reported)

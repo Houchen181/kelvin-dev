@@ -38,6 +38,10 @@ WRITES = {"os.remove": (0,), "os.rmdir": (0,), "os.mkdir": (0,), "os.rename": (0
           "shutil.move": (0, 1), "shutil.chown": (0,), "shutil.make_archive": (0,), "shutil.unpack_archive": (1,),
           "tempfile.mkstemp": (0,), "tempfile.mkdtemp": (0,), "sqlite3.connect": (0,)}
 LISTS = {"os.listdir": (0,), "os.scandir": (0,), "os.listdrives": (), "os.listvolumes": (), "os.listmounts": (0,)}
+# an open that writes: a file opened to be deleted when it is closed (O_TEMPORARY) is a write too, as one the code may
+# only read was gone (a fenced script run, labharness/data/scriptshim/kelvin_shim.py, shares this and the lists above)
+WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC | getattr(os, "O_EXCL", 0) | \
+    getattr(os, "O_TEMPORARY", 0) | getattr(os, "O_SHORT_LIVED", 0)
 
 
 def _low_integrity():
@@ -162,9 +166,7 @@ def _install_hook(scratch, reads):
     full, fold, sep = _canon_factory(scratch)
     writable = _roots([scratch], full, fold)
     readable = _roots(list(reads) + [scratch], full, fold)
-    # a file opened to be deleted when it is closed (O_TEMPORARY) is a write too: one the code may only read was gone
-    write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC | getattr(os, "O_EXCL", 0) | \
-        getattr(os, "O_TEMPORARY", 0) | getattr(os, "O_SHORT_LIVED", 0)
+    write_flags = WRITE_FLAGS   # O_TEMPORARY too: a file opened to be deleted when it is closed is a write
 
     def hook(event, args, _sw=str.startswith, _fspath=os.fspath, _isinstance=isinstance, _str=str, _bytes=bytes,
              _int=int, _decode=bytes.decode, _full=full, _fold=fold, _sep=sep, _w=writable, _r=readable,

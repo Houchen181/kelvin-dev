@@ -372,16 +372,15 @@ def test_a_lab_script_that_opens_the_adapter_itself_is_named_and_asked_about(tmp
         net = socket.create_connection((host, 1234), timeout=1)
         print("connected past Kelvin")
     """)
-    gate = SafetyGate(lab, ScriptedApprover([True, False]), EventLog(None, clock))
+    gate = SafetyGate(lab, ScriptedApprover([True]), EventLog(None, clock))   # its card; nothing else is asked
     prep = scriptrun.prepare(lab, "worked_out.py", [folder], choose_python=_python)
     request, grants, problems = scriptrun.approval(gate, prep)
     assert gate.ask(request) and not problems
     report = scriptrun.ScriptRun(gate, prep, RunStore(tmp_path / "runs"), grants, set()).execute()
-    asked = str(gate.approver.requests[-1])
-    assert "Let worked_out.py open TCPIP0::127.0.0.1::1234::SOCKET?" in asked
-    assert "the Prologix adapter this lab's lockin is behind" in asked
+    assert len(gate.approver.requests) == 1   # another way into a lab instrument: refused, never asked (2026-11-15)
     assert report.status == "aborted", report.message
-    assert "declined: worked_out.py may not open TCPIP0::127.0.0.1::1234::SOCKET" in report.message
+    assert ("refused: worked_out.py opens TCPIP0::127.0.0.1::1234::SOCKET, the Prologix adapter this lab's lockin is "
+            "behind") in report.message, report.message
     assert "connected past Kelvin" not in output(report)
 
 
