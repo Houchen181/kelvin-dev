@@ -662,6 +662,11 @@ Asked for (2026-11-15): "for the script it should be pretty safe once the user h
   - On Windows the run also drops to low integrity, so Windows itself refuses writes elsewhere, from compiled code too.
   - Like `run_python`'s sandbox, the fence guards against mistakes, not against code written to get around it, and the docs say so.
   - The lab's own scripts ask a person each run, as before. Most write their data beside themselves, which a fence would stop halfway.
+- **What pauses Kelvin's own yes** (asked: "Only outside the lab"): text a chat reads is of two kinds.
+  - **Text from the lab's own work** (a script's output, the lab's scripts and folders read by `survey_*`) pauses only what reaches outside the lab or outlasts the chat: installing a package, adding an instrument, trying a card at an address, keeping a skill, a recipe or a note, saving code a maker's library loads. Auto mode's drives within its ranges (a plan, a change, a fenced run of Kelvin's own script) go on.
+  - **Text from outside the lab** (a web page, search results, a paper, a file read, the team chat) pauses every self-approval, as before.
+  - The pause lasts in a portal chat until the person writes again, and for 30 minutes over MCP. Each card names the kind and the time.
+  - A queued item keeps only the web kind.
 - **A lab instrument only through the gate, in every script run:** found by the reviews, older than this change.
   - A raw socket, a datagram, a device file (however spelled: `\\?\COM7`, a symlink, bytes, an IPv4-mapped IPv6 address), or the asyncio internals could reach a lab instrument past the gate. They are refused, and the run ends.
   - Another way into a lab instrument (its raw port beside its VXI-11, its Prologix adapter) is refused without asking.
