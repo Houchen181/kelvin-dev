@@ -75,6 +75,9 @@ def env_dir(name: str, home: Any = None) -> Path:
 
 
 def python_of(name: str, home: Any = None) -> Path:
+    """An environment's Python, which starts its base Python by that version's own folder (pin_python), so Windows'
+    RedirectionGuard doesn't stop it at uv's link."""
+    pin_python(name, home)
     return env_dir(name, home) / ("Scripts/python.exe" if WIN else "bin/python")
 
 
@@ -162,6 +165,141 @@ def _save(rec: Dict[str, Any], home: Any = None) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(rec, indent=1), encoding="utf-8")
     os.replace(tmp, path)
+
+
+# ------------------------------------------------------------------ the Pythons uv fetched; RedirectionGuard
+
+# uv keeps each Python it fetches in a folder of its own version (cpython-3.13.9-windows-x86_64-none) and links the
+# minor version's folder to the newest (cpython-3.13-windows-x86_64-none, a junction on Windows), through which it makes
+# and finds environments. Windows refuses a process with RedirectionGuard on every junction a non-administrator made
+# (os error 448), and uv stopped there: no environment could be made, nor a package installed (field report
+# 2026-11-17). So Kelvin names a version's own folder, never its link.
+_PATCH_DIR = re.compile(r"^cpython-(\d+\.\d+)\.(\d+)-(?:windows|linux|macos|darwin)-([a-z0-9_]+)-(?:none|gnu|musl)$")
+GUARD_448 = ("os error 448", "untrusted mount point")   # how uv says Windows refused it a link
+
+
+def redirection_guard() -> bool:
+    """Whether Windows' RedirectionGuard (redirection trust) is on in this process. Windows then refuses it, and every
+    program it starts, which inherit it, any junction a non-administrator made: "The path cannot be traversed because
+    it contains an untrusted mount point" (os error 448). Inno Setup 6.7 turns it on for itself, and a per-user
+    installer passes it to the program it starts: a Kelvin started by its installer, or started again after an update,
+    had it, and so had uv (field report 2026-11-17; the installer now starts Kelvin through the desktop, which never
+    has it). False where Windows has no such thing (before Windows 10 22H2), and on other systems."""
+    if not WIN:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.GetProcessMitigationPolicy.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+        k32.GetProcessMitigationPolicy.restype = wintypes.BOOL
+        flags = wintypes.DWORD()
+        if not k32.GetProcessMitigationPolicy(k32.GetCurrentProcess(), 16, ctypes.byref(flags), 4):   # ProcessRedir-
+            return False                                                                                # ectionTrust
+        return bool(flags.value & 1)   # EnforceRedirectionTrust
+    except Exception:
+        return False
+
+
+def _arches(bits: int) -> Tuple[str, ...]:
+    """How uv names this computer's processor in a Python's folder, for a Python of these bits."""
+    if bits == 32:
+        return ("x86", "i686")
+    return ("aarch64", "arm64") if platform.machine().lower() in ("arm64", "aarch64") else ("x86_64", "amd64")
+
+
+def managed_python(python: str, bits: int = 64, home: Any = None) -> Optional[Path]:
+    """The newest patch of a Python version uv fetched for Kelvin (~/Kelvin/tools/python), in that patch's own folder,
+    never through the minor version's link; None when uv has none of that version and bits. Free-threaded, debug and
+    pre-release builds are passed over."""
+    best: Optional[Tuple[int, Path]] = None
+    try:
+        entries = list(os.scandir(root(home) / "tools" / "python"))
+    except OSError:
+        return None
+    for entry in entries:
+        m = _PATCH_DIR.match(entry.name)
+        if not m or m.group(1) != python or m.group(3) not in _arches(bits):
+            continue
+        try:
+            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        exe = Path(entry.path) / ("python.exe" if WIN else "bin/python3")
+        if exe.is_file() and (best is None or int(m.group(2)) > best[0]):
+            best = (int(m.group(2)), exe)
+    return best[1] if best else None
+
+
+def _link_target(path: Path) -> Optional[Path]:
+    """Where a link leads (a symbolic link, or a junction on Windows), read from the link itself, never through it,
+    which RedirectionGuard refuses; None for a plain folder, or nothing there."""
+    try:
+        target = os.readlink(str(path))
+    except (OSError, ValueError, NotImplementedError, AttributeError):
+        return None
+    if target.startswith("\\\\?\\") and not target.upper().startswith("\\\\?\\UNC\\"):
+        target = target[4:]
+    t = Path(target)
+    return t if t.is_absolute() else path.parent / t
+
+
+def _same_folder(a: Path, b: Path) -> bool:
+    return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
+
+
+def pin_python(name: str, home: Any = None) -> Optional[str]:
+    """An environment's base Python named by its version's own folder where uv named it through the minor version's
+    link (pyvenv.cfg: home = ...\\tools\\python\\cpython-3.13-windows-x86_64-none). The environment's python.exe starts
+    the Python in home, through that link, which RedirectionGuard refuses: uv's query of the environment then failed,
+    and so would a library's helper in it (field report 2026-11-17). Done whenever Kelvin uses an environment (it reads
+    one small file); uv's way of moving an environment to a newer patch through the link goes with it, and Kelvin
+    upgrades no Python. Returns the folder it names now, or None when nothing changed."""
+    try:
+        d = env_dir(name, home)
+    except ValueError:
+        return None
+    cfg = d / "pyvenv.cfg"
+    try:
+        text = cfg.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = re.search(r"(?m)^home\s*=\s*(.*?)\s*$", text)
+    if not m or not m.group(1):
+        return None
+    base = Path(m.group(1))
+    pythons = root(home) / "tools" / "python"
+    # uv's link is home itself (Windows: python.exe at the top of its folder) or the folder above (bin, elsewhere)
+    for link in (base, base.parent):
+        if not _same_folder(link.parent, pythons) or _PATCH_DIR.match(link.name):
+            continue
+        target = _link_target(link)
+        if target is None:
+            rec = info(name, home) or {}
+            exe = managed_python(str(rec.get("python") or ""), int(rec.get("bits") or 64), home)
+            if exe is None or not re.match(r"^cpython-\d+\.\d+-", link.name):
+                return None
+            target = exe.parent if WIN else exe.parent.parent
+        if not (target / ("python.exe" if WIN else "bin/python3")).is_file():   # a Python's own folder, or nothing
+            return None
+        old, new = str(link), str(target)
+        lines = []
+        for line in text.splitlines(True):   # home, and any other line that names the link (executable, command)
+            key, sep, value = line.partition("=")
+            v = value.strip()
+            if sep and os.path.normcase(v).startswith(os.path.normcase(old)):
+                line = "%s= %s%s\n" % (key.rstrip() + " ", new, v[len(old):])
+            lines.append(line)
+        tmp = cfg.with_suffix(".tmp")
+        try:
+            tmp.write_text("".join(lines), encoding="utf-8")
+            os.replace(tmp, cfg)
+        except OSError:
+            return None
+        return str(Path(new) / base.relative_to(link)) if base != link else new
+    return None
 
 
 # ------------------------------------------------------------------ uv
@@ -318,25 +456,94 @@ def _run(cmd: List[str], env: Dict[str, str]) -> Tuple[int, str]:
 
 
 # uv's lines on its progress and on the Python it works with, and its [stderr] labels: none says what went wrong
-_UV_PROGRESS = re.compile(r"^(Using \S+ \S+ (environment|interpreter) at|Creating virtual environment|Resolved \d|"
+_UV_PROGRESS = re.compile(r"^(Using \S+ \S+ (environment|interpreter) at|Using CPython \S+$|"
+                          r"Creating virtual environment|Resolved \d|"
                           r"Prepared \d|Installed \d|Uninstalled \d|Audited \d|Checked \d|Bytecode compiled|"
                           r"Downloading |Downloaded |Building |Built |[-+~] \S|\[std(out|err)\]$)")
 # how uv marks an error and its causes: "error:" and "cause:", or (an older uv) "×", "├─▶" and "╰─▶"
 _UV_MARK = re.compile(r"^(error:|cause:|×|[├╰]─▶|│)\s*")
+# uv's own words on what went wrong: its error, each cause it gives (cause:, Caused by:, or an older uv's ×, ├─▶ and
+# ╰─▶) and its hints; anything else after its error is a failed build's own output
+_UV_SAYS = re.compile(r"^(error:|cause:|caused by:|warning:|hint:|×|[├╰]─▶)", re.I)
+_UV_BOX = re.compile(r"^(×|[├╰]─▶|│)\s*")
+SAID = 6000   # characters of what uv said, at most: its whole error and causes; a build's own output only its end
+BUILD_LINES = 8   # the last lines of a failed build's own output kept, where its error is
+
+
+def _cut(text: str, most: int) -> str:
+    """text, or its first `most` characters cut at a word and marked as cut."""
+    if len(text) <= most:
+        return text
+    cut = text[:most]
+    space = cut.rfind(" ", most - 200)
+    return (cut[:space] if space > 0 else cut).rstrip(" |,;") + " …"
 
 
 def _said(text: str) -> str:
-    """What uv says went wrong, on one line. Versions that can't go together: its whole reason, which names them
-    ("Because you require numpy==2.2.6 and numpy==2.5.4, ..."). Anything else: its last lines, where a failed
-    build's own error is."""
+    """What uv says went wrong, on one line and whole: its error with every cause it gives, where a field report's
+    message, cut at 400 characters, lost the end of the one that said why ("... untrusted mount point. (os erro",
+    2026-11-17). Versions that can't go together: its whole reason, which names them ("Because you require
+    numpy==2.2.6 and numpy==2.5.4, ..."). A failed build: uv's words, with the last lines of the build's own output
+    among them, where its error is. At most SAID characters, cut at a word (uv_output keeps all it wrote)."""
+    return _said_whole(text)[0]
+
+
+def _said_whole(text: str) -> Tuple[str, bool]:
+    """_said's words, and whether they hold all uv said (no line of a build's output left out, nothing cut)."""
     lines = [ln.strip() for ln in (text or "").splitlines()]
     lines = [ln for ln in lines if ln and not _UV_PROGRESS.match(ln)]
     start = next((i for i, ln in enumerate(lines) if "No solution found" in ln), None)
-    if start is None:
-        return " | ".join(lines[-3:])[:400] or "no message"
-    head = _UV_MARK.sub("", lines[start]).rstrip(":")
-    why = " ".join(_UV_MARK.sub("", ln) for ln in lines[start + 1:])
-    return ("%s: %s" % (head, why) if why else head)[:1500]
+    if start is not None:
+        head = _UV_MARK.sub("", lines[start]).rstrip(":")
+        why = " ".join(_UV_MARK.sub("", ln) for ln in lines[start + 1:])
+        said = "%s: %s" % (head, why) if why else head
+        return _cut(said, SAID), len(said) <= SAID
+    first = next((i for i, ln in enumerate(lines) if _UV_SAYS.match(ln)), None)
+    if first is None:   # nothing in uv's own words: the end of what it wrote
+        said = " | ".join(lines[-BUILD_LINES:])
+        return (_cut(said, SAID) or "no message"), len(lines) <= BUILD_LINES and len(said) <= SAID
+    own = [i for i in range(first, len(lines)) if _UV_SAYS.match(lines[i])]
+    build = [i for i in range(first, len(lines)) if not _UV_SAYS.match(lines[i])]
+    keep = sorted(set(own) | set(build[-BUILD_LINES:]))
+    said = " | ".join(_UV_BOX.sub("", lines[i]) for i in keep)
+    return _cut(said, SAID), first == 0 and len(keep) == len(lines) and len(said) <= SAID
+
+
+def _refused_a_link(out: str) -> str:
+    """What to say after uv's words when Windows refused it a link (os error 448), else ""."""
+    if not any(w in (out or "").lower() for w in GUARD_448):
+        return ""
+    if redirection_guard():
+        return (" Windows refused uv the link in Kelvin's Python folder because Windows' RedirectionGuard is on in "
+                "Kelvin, and every program Kelvin starts has it too: the installer that started Kelvin (after an "
+                "update too) passed it on. Close Kelvin, start it again from the Start menu or its desktop shortcut, "
+                "and install again.")
+    return (" Windows refused uv a link in Kelvin's Python folder (an untrusted mount point: Windows' RedirectionGuard "
+            "in the program that started Kelvin, or the folder kept by OneDrive's Files On-Demand). Close Kelvin, "
+            "start it again from the Start menu or its desktop shortcut, and install again.")
+
+
+def uv_output(home: Any, what: str, out: str) -> Optional[Path]:
+    """All uv wrote when it failed, kept in ~/Kelvin/tools/uv/failed (the last 20), for the whole of a long build's
+    output; its path, or None when it couldn't be written."""
+    folder = root(home) / "tools" / "uv" / "failed"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / ("%s-%s.txt" % (time.strftime("%Y%m%d-%H%M%S"), re.sub(r"[^A-Za-z0-9_.-]+", "_", what)[:60]))
+        path.write_text(out or "", encoding="utf-8")
+        for old in sorted(folder.glob("*.txt"))[:-20]:
+            old.unlink()
+        return path
+    except OSError:
+        return None
+
+
+def _failed(home: Any, what: str, out: str, also: str = "") -> str:
+    """uv's words on a failure (and `also`, said right after them), what Windows' refusal of a link means if it was
+    that, and, when uv's words leave some of what it wrote out, where all of it is kept."""
+    said, whole = _said_whole(out)
+    kept = None if whole else uv_output(home, what, out)
+    return "%s%s%s%s" % (said, also, _refused_a_link(out), " (all uv wrote: %s)" % kept if kept else "")
 
 
 def _uv(home: Any) -> Path:
@@ -350,7 +557,10 @@ def _uv(home: Any) -> Path:
 
 def create(name: str, python: str = "", bits: int = 64, home: Any = None, run: Optional[Run] = None,
            why: str = "") -> Dict[str, Any]:
-    """A new environment with its own Python, which uv fetches if it has none of that version and bitness."""
+    """A new environment with its own Python, which uv fetches if it has none of that version and bitness. A Python uv
+    has already is named by its version's own folder, never through uv's link to it, which Windows refuses under
+    RedirectionGuard (field report 2026-11-17); where uv fetched the Python and then stopped at that link, it is asked
+    again with the folder it fetched. The environment then names its Python so too (pin_python)."""
     run = run or _run
     if bits not in (32, 64):
         raise ValueError("bits is 32 or 64")
@@ -361,12 +571,25 @@ def create(name: str, python: str = "", bits: int = 64, home: Any = None, run: O
     if bits == 32:
         env["UV_PYTHON_ARCH"] = "x86"
     d = env_dir(name, home)
-    code, out = run([str(_uv(home)), "venv", str(d), "--python", python], env)
+    uv = str(_uv(home))
+
+    def make(exe: Optional[Path]) -> Tuple[int, str]:
+        if d.exists() and info(name, home) is None:   # what an attempt that failed left: no environment of Kelvin's
+            shutil.rmtree(d, ignore_errors=True)
+        return run([uv, "venv", str(d), "--python", str(exe) if exe is not None else python], env)
+    exe = managed_python(python, bits, home)
+    code, out = make(exe)
+    if code and exe is None:
+        exe = managed_python(python, bits, home)   # fetched, then refused its link: there in its own folder now
+        if exe is not None:
+            code, again = make(exe)
+            out = again if not code else out + "\n" + again
     if code:
-        raise RuntimeError("uv could not make the environment %s: %s" % (name, _said(out)))
+        raise RuntimeError("uv could not make the environment %s: %s" % (name, _failed(home, "venv " + name, out)))
     rec = {"name": name, "python": python, "bits": bits, "packages": {}, "files": [], "for": [why] if why else [],
            "created": time.time()}
     _save(rec, home)
+    pin_python(name, home)
     return rec
 
 
@@ -396,12 +619,11 @@ def _pip(name: str, what: List[str], home: Any, run: Run) -> Dict[str, Any]:
         cmd += ["--constraint", str(env_dir(name, home) / "constraints.txt")]
     code, out = run(cmd + what, env)
     if code:
-        said = _said(out)
-        held = [p for p in pins if p in said]
-        if held:   # the conflict is with the app's own version, which a person can't change here
-            said += (" (%s is Kelvin's own. Kelvin's built-in drivers run with it whatever this environment has, so "
-                     "the environment keeps it.)" % " and ".join(held))
-        raise RuntimeError("uv could not install %s: %s" % (", ".join(Path(w).name for w in what), said))
+        held = [p for p in pins if p in _said(out)]
+        also = (" (%s is Kelvin's own. Kelvin's built-in drivers run with it whatever this environment has, so the "
+                "environment keeps it.)" % " and ".join(held)) if held else ""   # a person can't change it here
+        raise RuntimeError("uv could not install %s: %s" % (", ".join(Path(w).name for w in what),
+                                                            _failed(home, "pip " + name, out, also)))
     code, out = run([str(uv), "pip", "list", "--python", str(py), "--format", "json"], env)
     try:
         rec["installed"] = {d["name"].lower().replace("_", "-"): d["version"] for d in json.loads(out[out.find("["):])}

@@ -292,15 +292,22 @@ def rpc_identity(found: Dict[str, Any]) -> str:
 # A ZeroMQ peer greets a connection at once with a signature: 0xFF, eight bytes of padding, 0x7F (libzmq's padding is
 # its identity's length plus one, as ZMTP 1.0 read it). Then the version, the security mechanism and READY commands,
 # then messages of frames. A field report's IDQ Time Controller answered port 5555 so, which Kelvin showed as one odd
-# character, and its *IDN?, sent as SCPI's text, never came back (2026-11-15).
+# character, and its *IDN?, sent as SCPI's text, never came back (2026-11-15). Kelvin's look at a port (zmtp_ask) and
+# its zmq:// connection to such an instrument (zeromq.py, field report 2026-11-17) both speak it through Zmtp.
 ZMTP_SIGNATURE = b"\xff\x00\x00\x00\x00\x00\x00\x00\x01\x7f"
 ZMTP_ASKS = ("REP", "ROUTER")   # the sockets that answer what a REQ socket asks
 ZMTP_MOST = 65536               # the longest frame read: an identity is a line, not a block
 ZMTP_FRAMES = 16                # the most frames read for one reply
+ZMTP_READ = 1 << 20             # the most read at once: a long reply (a histogram, over zmq://) comes in large pieces
 
 
-class _ZmtpStop(Exception):
-    """A ZeroMQ exchange that can't go on: the peer closed it, the time is up, or it sent what ZMTP doesn't."""
+class ZmtpStop(Exception):
+    """A ZeroMQ exchange that can't go on: the peer closed it, the time is up, or it sent what ZMTP doesn't. kind:
+    "time" (nothing came in time), "closed" (the connection ended), "" (what the peer sent, or its refusal)."""
+
+    def __init__(self, text: str, kind: str = ""):
+        super().__init__(text)
+        self.kind = kind
 
 
 def zmtp_signature(data: bytes) -> bool:
@@ -332,7 +339,7 @@ def _zmtp_command(name: bytes, properties: List[Tuple[bytes, bytes]]) -> bytes:
 def _zmtp_parts(body: bytes) -> Tuple[bytes, bytes]:
     """A command's name and what follows it."""
     if not body or len(body) < 1 + body[0]:
-        raise _ZmtpStop("it sent a command ZMTP doesn't have")
+        raise ZmtpStop("it sent a command ZMTP doesn't have")
     return body[1:1 + body[0]], body[1 + body[0]:]
 
 
@@ -351,101 +358,221 @@ def _zmtp_properties(data: bytes) -> Dict[str, str]:
     return out
 
 
-def zmtp_ask(sock: socket.socket, query: str = "*IDN?", seconds: float = 1.5, said: bytes = b"") -> Dict[str, Any]:
-    """Ask a ZeroMQ instrument one question (who it is) as a REQ socket does, without pyzmq (ZMTP 3.0, no security:
-    mechanism NULL), on a connection it greeted (said: what it sent so far). The greetings are exchanged (signature and
-    version, then the rest), each side sends READY (this one's Socket-Type REQ), and only a REP or ROUTER is asked: an
-    empty delimiter frame, then the question. Its reply's frames are read, short or long, commands it sends meanwhile
-    passed over. Never more than `seconds` in all, nor a frame longer than ZMTP_MOST. Returns {version, socket: its
-    socket type, reply: what it said} or, where it went no further, {error: why}."""
-    end = time.monotonic() + seconds
-    buf = bytearray(said)
-    out: Dict[str, Any] = {}
+def _zmtp_refused(data: bytes) -> str:
+    """An ERROR command's reason, in words."""
+    reason = data[1:1 + data[0]].decode("utf-8", "replace") if data else ""
+    return "it refused the connection%s" % (": " + _clean(reason.encode("utf-8"), 120) if reason else "")
 
-    def need(n: int) -> bytes:   # exactly n bytes from the peer
-        while len(buf) < n:
-            left = end - time.monotonic()
-            if left <= 0:
-                raise _ZmtpStop("it sent nothing more within %.1f s" % seconds)
-            sock.settimeout(left)
-            try:
-                chunk = sock.recv(min(ZMTP_MOST, max(4096, n - len(buf))))
-            except socket.timeout:
-                raise _ZmtpStop("it sent nothing more within %.1f s" % seconds)
-            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):   # Windows' word for a close
-                raise _ZmtpStop("it closed the connection")
-            except OSError as e:
-                raise _ZmtpStop("its connection ended (%s)" % e)
-            if not chunk:
-                raise _ZmtpStop("it closed the connection")
-            buf.extend(chunk)
-        got = bytes(buf[:n])
-        del buf[:n]
+
+class Zmtp:
+    """One ZeroMQ connection as Kelvin speaks it, without pyzmq: ZMTP 3.0 with no security (mechanism NULL), as a REQ
+    socket. What the peer sends is read exactly and by a deadline (until), a frame's size before its body. A command
+    it sends between messages is passed over: a PING answered with its PONG (ZMTP 3.1's heartbeat), its ERROR ending
+    the exchange with its reason. Every way it can't go on raises ZmtpStop."""
+
+    def __init__(self, sock: socket.socket, said: bytes = b"", seconds: float = 1.5):
+        self.sock = sock
+        self.buf = bytearray(said)   # what the peer sent that isn't read yet
+        self.until(seconds)
+
+    def until(self, seconds: float, longest: float = 0.0) -> None:
+        """What is read and sent next is waited for `seconds` at most in all. longest: a reply that keeps coming (a
+        long one, in pieces) is waited for `seconds` from its last bytes, and `longest` at most in all."""
+        now = time.monotonic()
+        self.seconds, self.longest = seconds, longest
+        self.end = now + seconds
+        self.last = now + max(seconds, longest)
+
+    def _recv(self, wait: float, size: int = 65536) -> bytes:
+        """What the peer sends next, `wait` seconds at most (0: only what is here already); b"" when nothing came."""
+        self.sock.settimeout(wait)
+        try:
+            chunk = self.sock.recv(min(ZMTP_READ, max(4096, size)))
+        except (socket.timeout, BlockingIOError, InterruptedError):
+            return b""
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:   # Windows' word for a close
+            raise ZmtpStop("it closed the connection", "closed") from e
+        except OSError as e:
+            raise ZmtpStop("its connection ended (%s)" % e, "closed") from e
+        if not chunk:
+            raise ZmtpStop("it closed the connection", "closed")
+        return chunk
+
+    def _send(self, data: bytes) -> None:
+        self.sock.settimeout(max(0.05, self.end - time.monotonic()))
+        try:
+            self.sock.sendall(data)
+        except socket.timeout as e:
+            raise ZmtpStop("it took nothing more within %.1f s" % self.seconds, "time") from e
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:   # to a peer that closed
+            raise ZmtpStop("it closed the connection", "closed") from e
+        except OSError as e:
+            raise ZmtpStop("its connection ended (%s)" % e, "closed") from e
+
+    def need(self, n: int) -> bytes:
+        """Exactly n bytes from the peer, by the deadline."""
+        while len(self.buf) < n:
+            now = time.monotonic()
+            if now >= self.end:
+                stalled = not self.longest or self.end < self.last
+                raise ZmtpStop("it sent nothing more within %.1f s" % self.seconds if stalled else
+                               "it was still sending after %d s" % round(self.longest), "time")
+            chunk = self._recv(self.end - now, n - len(self.buf))
+            if chunk:
+                self.buf.extend(chunk)
+                if self.longest:   # a reply that keeps coming is waited for as long as it does, to `last` at most
+                    self.end = min(time.monotonic() + self.seconds, self.last)
+        got = bytes(self.buf[:n])
+        del self.buf[:n]
         return got
 
-    def frame() -> Tuple[int, bytes]:
-        flags = need(1)[0]
+    def frame(self, most: int, too_long: str) -> Tuple[int, bytes]:
+        """One frame: its flags (MORE 0x01, LONG 0x02, COMMAND 0x04) and its body, refused before any of it is read
+        when it is longer than `most` bytes (too_long: in words, with its size)."""
+        flags = self.need(1)[0]
         if flags & 0xF8:
-            raise _ZmtpStop("it sent a frame ZMTP doesn't have (flags 0x%02x)" % flags)
-        size = struct.unpack(">Q", need(8))[0] if flags & 0x02 else need(1)[0]
-        if size > ZMTP_MOST:
-            raise _ZmtpStop("it sent a frame of %d bytes, not an answer to who it is" % size)
-        return flags, need(size)
+            raise ZmtpStop("it sent a frame ZMTP doesn't have (flags 0x%02x)" % flags)
+        size = struct.unpack(">Q", self.need(8))[0] if flags & 0x02 else self.need(1)[0]
+        if size > most:
+            raise ZmtpStop(too_long % size)
+        return flags, self.need(size)
 
-    def refused(data: bytes) -> str:
-        reason = data[1:1 + data[0]].decode("utf-8", "replace") if data else ""
-        return "it refused the connection%s" % (": " + _clean(reason.encode("utf-8"), 120) if reason else "")
-    try:
-        if not zmtp_signature(need(10)):
-            raise _ZmtpStop("its greeting isn't ZeroMQ's")
-        sock.sendall(ZMTP_SIGNATURE + b"\x03")   # this side's signature and major version: 3
-        major = need(1)[0]
+    def _command(self, body: bytes) -> None:
+        """A command the peer sent between messages: its PING answered with a PONG (the PING's context back, as ZMTP
+        3.1 asks), its ERROR the end of the exchange; any other passed over."""
+        name, data = _zmtp_parts(body)
+        if name == b"ERROR":
+            raise ZmtpStop(_zmtp_refused(data))
+        if name == b"PING":   # its time to live (2 bytes), then its context
+            self._send(_zmtp_frame(0x04, b"\x04PONG" + data[2:18]))
+
+    def greet(self, out: Dict[str, Any], who: str = "Kelvin's look") -> None:
+        """The greetings exchanged (signature and version, then the rest), this side's READY sent as a REQ socket's
+        and the peer's read. out: its version and socket type, as far as they came. ZmtpStop when it can't be asked:
+        not ZeroMQ, older than ZMTP 3.0, with security, refusing, or a socket that takes no requests (only a REP or a
+        ROUTER answers a REQ). who: who speaks, in a refusal's words."""
+        if not zmtp_signature(self.need(10)):
+            raise ZmtpStop("its greeting isn't ZeroMQ's")
+        self._send(ZMTP_SIGNATURE + b"\x03")   # this side's signature and major version: 3
+        major = self.need(1)[0]
         out["version"] = "%d" % major
         if major < 3:
-            raise _ZmtpStop("it speaks an older ZeroMQ (ZMTP revision %d, before 3.0), which Kelvin's look doesn't"
-                            % major)
-        sock.sendall(b"\x00" + b"NULL".ljust(20, b"\x00") + b"\x00" + bytes(31))   # 3.0, NULL, not as server, filler
-        rest = need(53)
+            raise ZmtpStop("it speaks an older ZeroMQ (ZMTP revision %d, before 3.0), which %s doesn't" % (major, who))
+        self._send(b"\x00" + b"NULL".ljust(20, b"\x00") + b"\x00" + bytes(31))   # 3.0, NULL, not as server, filler
+        rest = self.need(53)
         out["version"] = "%d.%d" % (major, rest[0])
         mechanism = rest[1:21].rstrip(b"\x00").decode("ascii", "replace")
         if mechanism != "NULL":
-            raise _ZmtpStop("it wants ZeroMQ's %s security, which Kelvin's look doesn't speak" % mechanism)
-        sock.sendall(_zmtp_command(b"READY", [(b"Socket-Type", b"REQ"), (b"Identity", b"")]))
+            raise ZmtpStop("it wants ZeroMQ's %s security, which %s doesn't speak" % (mechanism, who))
+        self._send(_zmtp_command(b"READY", [(b"Socket-Type", b"REQ"), (b"Identity", b"")]))
         properties: Optional[Dict[str, str]] = None
         while properties is None:
-            flags, body = frame()
+            flags, body = self.frame(ZMTP_MOST, "it sent a frame of %d bytes before its READY")
             if not flags & 0x04:
-                raise _ZmtpStop("it sent a message before its READY")
+                raise ZmtpStop("it sent a message before its READY")
             name, data = _zmtp_parts(body)
             if name == b"ERROR":
-                raise _ZmtpStop(refused(data))
+                raise ZmtpStop(_zmtp_refused(data))
             if name == b"READY":
                 properties = _zmtp_properties(data)
         out["socket"] = kind = properties.get("Socket-Type", "")
         if kind not in ZMTP_ASKS:   # nothing is asked of a socket that takes no requests (PUB, PUSH...)
-            raise _ZmtpStop("its socket is %s, which takes no questions: Kelvin asked it nothing" % (kind or "unnamed"))
-        sock.sendall(_zmtp_frame(0x01, b"") + _zmtp_frame(0x00, query.encode("ascii")))
+            raise ZmtpStop("its socket is %s, which takes no questions: Kelvin asked it nothing" % (kind or "unnamed"))
+
+    def request(self, body: bytes) -> None:
+        """A request, as a REQ socket sends it: an empty delimiter frame, then the body."""
+        self._send(_zmtp_frame(0x01, b"") + _zmtp_frame(0x00, body))
+
+    def reply(self, frames: int, most: int, too_long: str) -> List[bytes]:
+        """A reply's frames, short or long, without the empty delimiter in front of a REP's: `frames` of them at most,
+        `most` bytes in all (too_long: a frame past that, in words with its size). A command meanwhile is passed over
+        or answered (_command)."""
         parts: List[bytes] = []
+        total = 0
         while True:
-            flags, body = frame()
-            if flags & 0x04:   # a command meanwhile (PING): passed over, unless it ends the connection
-                name, data = _zmtp_parts(body)
-                if name == b"ERROR":
-                    raise _ZmtpStop(refused(data))
+            flags, body = self.frame(most - total, too_long)
+            if flags & 0x04:   # a command meanwhile (PING): answered or passed over, unless it ends the connection
+                self._command(body)
                 continue
             parts.append(body)
+            total += len(body)
             if not flags & 0x01:
                 break
-            if len(parts) >= ZMTP_FRAMES:
-                raise _ZmtpStop("its reply went on past %d frames" % ZMTP_FRAMES)
+            if len(parts) >= frames:
+                raise ZmtpStop("its reply went on past %d frames" % frames)
         if parts and parts[0] == b"":   # the empty delimiter in front of a REP's reply
             parts = parts[1:]
+        return parts
+
+    def _ahead(self) -> str:
+        """The whole commands at the front of what the peer sent, answered or passed over (_command); then what is
+        left there: "message" where a message's frame begins, "" where nothing or only part of a command is (its rest
+        is read with what follows)."""
+        while self.buf:
+            flags = self.buf[0]
+            if flags & 0xF8:
+                raise ZmtpStop("it sent a frame ZMTP doesn't have (flags 0x%02x)" % flags)
+            if not flags & 0x04:
+                return "message"
+            head = 9 if flags & 0x02 else 2
+            if len(self.buf) < head:
+                break
+            size = struct.unpack(">Q", bytes(self.buf[1:9]))[0] if flags & 0x02 else self.buf[1]
+            if len(self.buf) < head + size:
+                break
+            body = bytes(self.buf[head:head + size])
+            del self.buf[:head + size]
+            self._command(body)
+        return ""
+
+    def wait(self, seconds: float, stopped: Callable[[], bool], step: float = 0.2) -> bool:
+        """A reply's first bytes awaited `seconds` at most, `step` at a time, stopped() asked between steps (the PINGs
+        of ZMTP 3.1's heartbeat meanwhile answered): True once they came, False when stopped() says to wait no longer;
+        ZmtpStop when the time is up first."""
+        end = time.monotonic() + seconds
+        while self._ahead() != "message":
+            if stopped():
+                return False
+            left = end - time.monotonic()
+            if left <= 0:
+                raise ZmtpStop("it sent nothing within %.1f s" % seconds, "time")
+            self.buf.extend(self._recv(min(step, left)))
+        return True
+
+    def idle(self) -> bool:
+        """Whether a connection nothing was asked on for a while is still there, before a request goes on it: what the
+        peer sent meanwhile is read without waiting, its PINGs answered. False when it closed the connection or refused
+        it (ERROR), or sent a message, which a REP never sends unasked: the request then goes on a new connection."""
+        try:
+            while len(self.buf) <= ZMTP_MOST:
+                chunk = self._recv(0.0)
+                if not chunk:
+                    break
+                self.buf.extend(chunk)
+            else:
+                return False   # far more than a few PINGs: not a REP's
+            return self._ahead() != "message"
+        except ZmtpStop:
+            return False
+
+
+def zmtp_ask(sock: socket.socket, query: str = "*IDN?", seconds: float = 1.5, said: bytes = b"") -> Dict[str, Any]:
+    """Ask a ZeroMQ instrument one question (who it is) as a REQ socket does, without pyzmq (Zmtp: ZMTP 3.0, no
+    security), on a connection it greeted (said: what it sent so far). The greetings are exchanged (signature and
+    version, then the rest), each side sends READY (this one's Socket-Type REQ), and only a REP or ROUTER is asked: an
+    empty delimiter frame, then the question. Its reply's frames are read, short or long, commands it sends meanwhile
+    passed over. Never more than `seconds` in all, nor more than ZMTP_MOST bytes. Returns {version, socket: its socket
+    type, reply: what it said} or, where it went no further, {error: why}."""
+    out: Dict[str, Any] = {}
+    link = Zmtp(sock, said, seconds)
+    try:
+        link.greet(out)
+        link.request(query.encode("ascii"))
+        parts = link.reply(ZMTP_FRAMES, ZMTP_MOST, "it sent a frame of %d bytes, not an answer to who it is")
         out["reply"] = _clean(b" | ".join(parts), 200)   # a reply of several frames: each shown
-    except _ZmtpStop as e:
+    except ZmtpStop as e:
         out["error"] = str(e)
-    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):   # sending, to a peer that closed
-        out["error"] = "it closed the connection"
-    except OSError as e:   # sending: the connection ended
+    except OSError as e:   # the connection ended where Zmtp doesn't look (a timeout set on a socket already gone)
         out["error"] = "its connection ended (%s)" % e
     return out
 
@@ -595,11 +722,16 @@ def identify_host(ip: str, ports: Iterable[int], seconds: float = 0.8, connect: 
     return {"host": ip, "ip": ip, "found": found, "lxi": lxi, "looked": [p for p, _, _ in table]}
 
 
-def what_answers(f: Dict[str, Any]) -> str:
-    """One port's finding in words, with what it likely is."""
+def what_answers(f: Dict[str, Any], host: str = "") -> str:
+    """One port's finding in words, with what it likely is. host: the address it was found at, for the zmq:// address
+    Kelvin connects to a ZeroMQ instrument at."""
     port, bits = f["port"], []
-    if f.get("zmq") is not None:   # not SCPI over a socket, whatever usually answers there
-        return "port %d: %s. Kelvin has no card or connection for ZeroMQ instruments yet" % (port, zmtp_words(f["zmq"]))
+    z = f.get("zmq")
+    if z is not None:   # not SCPI over a socket, whatever usually answers there
+        if z.get("socket") in ZMTP_ASKS:   # it answers requests: Kelvin's zmq:// connection asks it as the look did
+            shown = "[%s]" % host if ":" in host else host or "<its address>"
+            return "port %d: %s; Kelvin's address for it: zmq://%s:%d" % (port, zmtp_words(z), shown, port)
+        return "port %d: %s" % (port, zmtp_words(z))
     if f.get("jsonrpc"):
         bits.append("answers attocube's JSON-RPC: %s" % ("it is an %s" % f["device"] if f.get("device") else
                                                          "not a cryostat controller (it said %r)" % f.get("rpc_error")))

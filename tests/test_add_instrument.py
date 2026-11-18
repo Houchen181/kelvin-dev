@@ -255,9 +255,10 @@ def test_the_app_keeps_what_kelvin_changed(tmp_path):
 
 def test_an_address_that_names_a_program_is_a_persons_to_add(tmp_path, bench):
     rt = file_runtime(tmp_path, SMU_ONLY)
-    evil = "lib://COM1?python=C:/evil.exe&path=C:/x"
-    assert "names a program for Kelvin to run" in rt.add_instrument(evil, card="keithley/2400", name="cryo")
-    assert "names a program for Kelvin to run" in rt.try_card("keithley/2400", evil)
+    evil = "lib://COM1?python=C:/evil.exe&path=C:/x"   # no Python: never put to anyone (a person approves a Python's)
+    assert "python= names evil.exe, which is not a Python interpreter" in rt.add_instrument(evil, card="keithley/2400",
+                                                                                            name="cryo")
+    assert "python= names evil.exe, which is not a Python interpreter" in rt.try_card("keithley/2400", evil)
     assert rt.gate.approver.requests == [] and "cryo" not in rt.lab.instruments    # refused without asking anyone
 
 

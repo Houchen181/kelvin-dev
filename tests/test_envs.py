@@ -159,9 +159,9 @@ def test_what_uv_said_reads_whole_however_it_wraps():
     built = ("Resolved 1 package in 120ms\nerror: Failed to build `oddpkg==1.0`\n  cause: The build backend returned an "
              "error\n\n  [stderr]\n  error: Microsoft Visual C++ 14.0 or greater is required\n\n"
              "hint: This usually indicates a problem with the package or the build environment.\n")
-    assert envs._said(built) == ("cause: The build backend returned an error | error: Microsoft Visual C++ 14.0 or "
-                                 "greater is required | hint: This usually indicates a problem with the package or the "
-                                 "build environment.")
+    assert envs._said(built) == ("error: Failed to build `oddpkg==1.0` | cause: The build backend returned an error | "
+                                 "error: Microsoft Visual C++ 14.0 or greater is required | hint: This usually "
+                                 "indicates a problem with the package or the build environment.")   # all of it
     assert envs._said("") == "no message"
 
 

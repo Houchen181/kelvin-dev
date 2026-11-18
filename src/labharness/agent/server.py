@@ -51,11 +51,13 @@ You are connected to a physics lab through Kelvin.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. A refusal covers
   the outcome, not only the command: never reach the same level, field, temperature or output another way (another
   command, a raw command, a script, another instrument, a plan). Tell the person what was refused and why.
-- Only driving the sample, and installing software on this computer, wait for a person. What drives nothing (keeping a
-  skill or recipe, trying a card, saving a file) Kelvin approves itself and shows in the chat, unless the chat has read
-  text that could steer a model since the person last wrote (for 30 minutes over MCP): from the web, which also stops
-  auto mode's drives and runs, or from the lab's own work (a script's output, the lab's scripts), which doesn't. Then
-  the person answers.
+- Only driving the sample waits for a person. What drives nothing (installing a maker's package into Kelvin's
+  environments, trying a card, adding an instrument, keeping a skill or recipe, saving a file) Kelvin approves itself
+  and shows in the chat, auto mode on or off, unless the chat has read text that could steer a model since the person
+  last wrote (for 30 minutes over MCP): from the web, which also stops auto mode's drives and runs, or from the lab's
+  own work (a script's output, the lab's scripts), which doesn't. Then the person answers, and a declined request says
+  why they were asked. A program a lib:// address names (python=, path=) only the person approves. A maker's installer
+  (a USB driver, a runtime) is the person's to run.
 - An instrument's limits are its card's range (the instrument's own), narrowed only where the lab config's limits:
   or a mounted device's protection say so. describe_instrument shows where each limit comes from, a refusal says
   whose limit it hit, and lab_config shows the lab config itself. Tell the person exactly that, never a guess.
@@ -732,10 +734,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @cancellable   # it may hold the lab a while: the chat's Stop or a cancel ends it
     def try_card(card: str, instrument: str = "") -> str:
         """Try a card on the instrument before using it: card is its YAML text, or the id of a card Kelvin has (one
-        draft_card wrote); instrument is its name in the lab or its address (one the last scan did not find asks the
-        person first). Asks who it is, reads every reading, and writes one setting with the value it already has to
-        check the card's set command; it changes nothing, and skips reads that could start something (said as not
-        tried, never as checked). Compare the values with what the person sees, fix the card, and try again."""
+        draft_card wrote); instrument is its name in the lab or its address: a serial port (COM11, /dev/ttyUSB0), a
+        VISA resource or one of Kelvin's addresses. One the last scan did not find Kelvin approves itself, as trying
+        changes nothing, unless the chat has read text that could steer a model since the person last wrote: then
+        they answer. A lib:// address with python= or path= runs a program: only the person approves it, on a card
+        that names the program. Asks who it is, reads every reading, and writes one setting with the value it already
+        has to check the card's set command; it changes nothing, and skips reads that could start something (said as
+        not tried, never as checked). Compare the values with what the person sees, fix the card, and try again."""
         return rt.try_card(card, instrument)
 
     @server.tool(annotations=ACT, structured_output=False)
@@ -788,10 +793,12 @@ def build_server(rt: LabRuntime) -> MCPServer:
         the person (baud_rate, read_termination...); vars: the card's per-installation names (sensor, channel). Kelvin
         connects it and checks who it is; the other instruments stay as they are. It reads and configures at once;
         every output change on it asks the person until they review its limits. An address the scan did not find
-        asks the person first. At an address the lab's Special Measure rack has (survey_specialmeasure, or the lab's
-        scripts folder), it takes the rack's name, and the rack's limits and ramp rates wait in its review for the
-        person to accept: the result says which; never set them yourself. A run or the queue going on doesn't keep it
-        waiting unless that work uses every instrument, or the GPIB bus of its address."""
+        Kelvin approves itself (it connects and reads), unless the chat has read text that could steer a model since
+        the person last wrote; a lib:// address with python= or path= runs a program, so only the person approves it,
+        on a card that names the program. At an address the lab's Special Measure rack has (survey_specialmeasure, or
+        the lab's scripts folder), it takes the rack's name, and the rack's limits and ramp rates wait in its review
+        for the person to accept: the result says which; never set them yourself. A run or the queue going on doesn't
+        keep it waiting unless that work uses every instrument, or the GPIB bus of its address."""
         return rt.add_instrument(address, card, name, connection, vars)
 
     @server.tool(annotations=ACT, structured_output=False)
@@ -802,7 +809,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
         doesn't fit how this lab's instrument is reached (another interface, library or firmware: what the lab's own
         scripts or the maker's examples use). card: this lab's version of Kelvin's card (save_card version: true), or
         another card's id; address, connection, vars as for add_instrument. Its name and limits stay. It drives
-        nothing; a connection that fails, or answers as another instrument, leaves it as it was."""
+        nothing; a connection that fails, or answers as another instrument, leaves it as it was. A lib:// address with
+        python= or path= only the person approves."""
         return rt.change_instrument(instrument, address, card, connection, vars)
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True,
@@ -973,7 +981,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def install_for_instrument(env: str, packages: Optional[List[str]] = None, python: str = "", bits: int = 64,
                                files: str = "", why: str = "") -> str:
         """Install what an instrument needs on this computer (the chat shows what, which version and from where;
-        it drives nothing, so Kelvin approves it itself): its maker's Python packages from PyPI (pip names, with ==version where it must
+        it drives nothing, so Kelvin approves it itself, auto mode or not, unless the chat has read text that could
+        steer a model since the person last wrote: then they answer, and a decline says why they were asked): its
+        maker's Python packages from PyPI (pip names, with ==version where it must
         match the instrument's own, e.g. qick==0.2.436, or a range, numpy>=2.1,<2.3; never an option, a URL or a
         path), and/or the maker's files (files: a folder or file here, or
         a web address: an SDK's Python package is installed, a DLL is kept). env: drivers for Kelvin's built-in

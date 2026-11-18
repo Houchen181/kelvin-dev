@@ -71,7 +71,10 @@ Each parameter:
   [brackets], e.g. "SOURce:VOLTage[:LEVel] {value}".
 - limits: [min, max] the instrument accepts (the vendor's, not the lab's).
 - Drives must have safe: the value that takes the drive away from the sample (0, off), and for continuous drives
-  ramp: gate with max_rate (units per second) so Kelvin ramps instead of jumping.
+  ramp: gate with max_rate (units per second) so Kelvin ramps instead of jumping. A light source's or a source's
+  mode (a laser's run mode) is safe in the state that emits least without anyone acting: off, standby, or a mode that
+  emits only on a signal (a modulation or TTL input), never one that emits by itself (constant power, constant
+  current, CW), even when another setting (a pause, a key switch) stops it for now.
 - applies_when: <bool drive> when the value only reaches the sample while that switch is on; enables: [...] on the
   switch itself.
 - Replies: field: n (0-based) for comma-separated replies; parse: a regex with one group for odd formats;
@@ -103,6 +106,15 @@ with a method for each. Then get: "GET <method> [arguments]" and set: "SET <meth
 each method written in full as the examples call it (com.attocube.cryostat.interface.sample.getTemperature). A get
 must call a method that only reads; only methods the card names are ever called.
 
+Instruments that speak SCPI over ZeroMQ (IDQ's ID900 and ID1000 Time Controllers, and any whose examples connect
+pyzmq's REQ socket to tcp://<ip>:<port> and send each command as a string): the address is zmq://<ip>:<port> (port
+5555 when it names none), and the card is an ordinary card of text commands, written as the examples send them,
+without line ends. Every command gets one reply, a set command too, and Kelvin reads it: a reply with SCPI_ERR in it is
+the instrument's error, said in its own words (connection: {error_reply: <a regex>} for one that words its errors
+another way; set_reply when a set command's reply says whether it took it). A value with a unit after it, as IDQ's
+time values end in TB: read it with parse: '([-+0-9.eE]+)\\s*TB', and write the unit in the set template, as in
+set: "<command> {value}TB".
+
 Instruments the maker controls through a library (its example scripts in Python, MATLAB or C call a module or a
 DLL instead of sending text): the card gets a library section, and each command calls one function.
 - library: module: <the Python module the examples import> (object: <the class or object the functions hang on>;
@@ -127,6 +139,11 @@ DLL instead of sending text): the card gets a library section, and each command 
   the calls they end with.
 - set: "SET setUserTemperature {value}", get: "GET getSampleTemperature"; fixed arguments may follow the name
   ("GET getChannelTemperature 2"). A get must call a function that only reads (get..., is..., query...).
+- A function that records for a while, then returns what it got (acquire..., record..., capture..., take..., run...:
+  a time tagger's acquireHistogram(gate), a camera's frame) is a reading that acquires, one call with no commands
+  before it: get: "GET acquireHistogram 1" (type: trace for a histogram), acquires: true, wait: <the longest it
+  records, in seconds>. Kelvin calls it only when a plan or a person reads it, and never a function whose name sets
+  or changes something.
 - A switch the library can only toggle (toggleFullTemperatureControl), with a function that reads its state
   (isControllingTemperature): library.toggles: {setTemperatureControl: {toggle: toggleFullTemperatureControl, state:
   isControllingTemperature}}, then set: "SET setTemperatureControl {value}" and get: "GET isControllingTemperature".
@@ -193,14 +210,65 @@ def extract_yaml(text: str) -> str:
     return (text[i:] if i >= 0 else text or "").strip() + "\n"
 
 
+NOTE_MOST = 2000   # characters in one of the model's notes: each kept whole up to here, then cut at a word
+NOTES_MOST = 20    # notes kept, at most
+
+
 def notes_in(text: str) -> List[str]:
-    """What the model wrote beside its card: what it left out or is unsure of (at most five lines)."""
+    """What the model wrote beside its card: what it left out or is unsure of, each note whole. They were cut at 300
+    characters, mid-word ("...so you can add them ba"), in the chat and in the card's header (field report
+    2026-11-17)."""
     m = re.search(r"```(?:ya?ml)?\s*\n.*?```", text or "", re.S)
     if not m:
         return []
     rest = text[:m.start()] + "\n" + text[m.end():]
     lines = [re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", line).strip() for line in rest.splitlines()]
-    return [line[:300] for line in lines if line][:5]
+    out = []
+    for line in [line for line in lines if line][:NOTES_MOST]:
+        if len(line) > NOTE_MOST:
+            cut = line[:NOTE_MOST]
+            line = cut[:cut.rfind(" ")] + " …" if " " in cut else cut + " …"
+        out.append(line)
+    return out
+
+
+# A light source's modes (a laser's run mode): some emit by themselves, at a setpoint (constant power, constant current,
+# CW), others nothing until something asks (off, standby, a modulation input with no signal). Kelvin can't tell from a
+# name which is which, so a draft's choice is said, and one that looks like it emits is warned of.
+_LIGHT = re.compile(r"laser|light|\bled\b|lamp|diode|illuminat|superlum", re.I)
+_EMITS = re.compile(r"constant (power|current)|\b(cw|apc|acc)\b|continuous|lasing|emi(t|ssion)|^on$|^enabled?$", re.I)
+_QUIET = re.compile(r"off|stand ?by|pause|disabl|idle|modulat|ttl|digital|analog|extern|gate|trigger|shutter closed",
+                    re.I)
+
+
+def _light(card: Card) -> bool:
+    return bool(_LIGHT.search("%s %s" % (card.kind, card.model)))
+
+
+def safe_modes(card: Card) -> List[str]:
+    """For a light source (a laser, an LED, a lamp), each mode setting that drives it with the value its card makes
+    safe ("run_mode → current_modulation"): what a person checks against the manual before keeping a draft."""
+    if not _light(card):
+        return []
+    return ["%s → %s" % (p.name, p.safe) for p in card.params.values()
+            if p.is_drive and p.type == "enum" and p.safe is not None]
+
+
+def emitting_safe(card: Card) -> List[str]:
+    """Warnings for a light source's mode settings whose safe value looks like a mode that emits by itself. A Cobolt
+    laser's draft made run_mode's safe constant_power, its CW mode at the 40 mW setpoint: going to safe paused it
+    first, but the resting "safe" state was full power as soon as anyone un-paused it, where the lab's TTL-gated mode
+    emits nothing without a signal (field report 2026-11-17)."""
+    out = []
+    for p in card.params.values():
+        if not (_light(card) and p.is_drive and p.type == "enum" and p.safe is not None):
+            continue
+        safe = str(p.safe).replace("_", " ").replace("-", " ")
+        if _EMITS.search(safe) and not _QUIET.search(safe):
+            out.append("%s's safe value is %s, a mode that may emit by itself: a light source's safe value is the "
+                       "state that emits least without anyone acting (off, standby, or a mode that waits for a "
+                       "modulation signal); check it in the manual" % (p.name, p.safe))
+    return out
 
 
 def check(text: str, source: str = "draft") -> Tuple[Optional[Card], List[str], List[str]]:
@@ -225,6 +293,7 @@ def check(text: str, source: str = "draft") -> Tuple[Optional[Card], List[str], 
         warnings.append("say which manual (and chapter) the card follows, under manual:")
     if not any(p.is_drive for p in card.params.values()):
         warnings.append("no drives: Kelvin can read this instrument but not set anything that reaches the sample")
+    warnings += emitting_safe(card)
     return card, [], warnings
 
 
@@ -365,9 +434,10 @@ def delete(cards_dir: Path, card_id: str) -> None:
 DRAFT_SYSTEM = GUIDE + """
 
 You write one card for the instrument the user names, from the manual text or example scripts they give you. Answer with the card in
-one ```yaml block, then at most five short lines on what you left out or are unsure of. If the manual leaves an output's
-ranges to another document (its specifications or a datasheet), keep that output as a reading only and add the line
-"Ranges in: <that document's title>; for: <those outputs, e.g. amplitude, offset>". Status: draft."""
+one ```yaml block, then short lines, one point each, on what you left out or are unsure of, and one for each mode
+setting you made a drive, saying which value you made safe and why it emits or drives least. If the manual leaves an
+output's ranges to another document (its specifications or a datasheet), keep that output as a reading only and add
+the line "Ranges in: <that document's title>; for: <those outputs, e.g. amplitude, offset>". Status: draft."""
 
 
 def draft_prompt(manual: str, name: str, specs: str = "") -> str:

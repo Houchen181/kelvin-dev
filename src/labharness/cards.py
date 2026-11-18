@@ -35,6 +35,9 @@ CONNECTION_KEYS = {"read_termination": str, "write_termination": str, "baud_rate
                    # checked; for a reply only set commands get (an Arduino's "OK"), set_reply
                    "ack": str,
                    "set_reply": str,   # a regex every set command's reply must match (e.g. ":VALID$"); read after each set
+                   # over ZeroMQ (zeromq.py), where every command is answered: a regex for a reply that is the
+                   # instrument's error (SCPI_ERR, as IDQ's Time Controllers say it, when a card names none)
+                   "error_reply": str,
                    # lines an instrument sends by itself when a connection opens (the AMI 430's greeting on its LAN
                    # port), read and dropped before the first command; none coming is fine (its serial port has none)
                    "greeting_lines": int,
@@ -979,6 +982,14 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         err("connection.stop_bits", "1, 1.5 or 2")
     if connection.get("greeting_lines") is not None and not 0 <= connection["greeting_lines"] <= 20:
         err("connection.greeting_lines", "how many lines the instrument sends when a connection opens (0 to 20)")
+    if "error_reply" in connection:
+        try:
+            re.compile(connection["error_reply"])
+        except re.error as e:
+            err("connection.error_reply", "not a valid regex: %s" % e)
+        if not connection["error_reply"].strip():   # an empty one would match every reply
+            err("connection.error_reply", "a regex for the replies that are the instrument's errors; leave it out for "
+                                          "SCPI_ERR")
     connection = serial_settings(connection)
     on_connect = [as_sent(c) for c in data.get("on_connect") or []]
     from .scpi import split_compound
@@ -1064,12 +1075,47 @@ LIB_CALL = re.compile(r"^\s*(SET|GET)\s+(" + LIB_PATH + r")(?![\w.])")
 LIB_READS = re.compile(r"^(get|is|has|query|read|measure|fetch|status|current|actual)", re.I)   # names that only read
 LIB_ACTS = re.compile(r"^(toggle|start|stop|go|sweep|move|set|apply|run|reset|calibrat|upload|download|delete|"
                       r"write|save|store|shutdown|home|zero|exchange|pump)", re.I)
+# names of functions that record for a while, then return what they got: a reading whose card says it acquires may
+# call one (a lab's acquireHistogram(gate) records a time tagger's histogram for the gate; field report 2026-11-17)
+LIB_ACQUIRES = re.compile(r"^(acquire|record|capture|take|run|count|integrate|accumulate|average|snap|grab|collect|"
+                          r"poll)", re.I)
+# names that set or change something: never called by a reading, not even one that acquires
+LIB_CHANGES = re.compile(r"^(toggle|start|stop|go|sweep|move|set|apply|reset|calibrat|upload|download|delete|write|"
+                         r"save|store|shutdown|home|zero|exchange|pump|clear|erase|enable|disable|fire|load|init)",
+                         re.I)
+# words that do so wherever they are in the name of the function a reading that acquires calls, after a verb as wide
+# as run or take: runCalibration calibrates
+LIB_CHANGING_WORDS = ("apply", "toggle", "reset", "calibrate", "calibration", "upload", "download", "delete", "erase",
+                      "move", "home", "homing", "shutdown")
+
+
+def _lib_reading(name: str, acquires: bool) -> Optional[str]:
+    """Why a reading may not call a library's function (name: the last part of its path), or None when it may: one
+    whose name only reads (getTemperature); with acquires: true on the reading, also one that records for a while and
+    returns what it got (acquireHistogram); never one whose name sets or changes something, whatever the card says."""
+    words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name)]
+    changing = [w for w in words[1:] if w in LIB_CHANGING_WORDS] if acquires else []
+    starts = LIB_CHANGES.match(name)
+    if starts or changing:
+        return ("does not look like a function that only reads: its name sets or changes something (%s), and no "
+                "reading calls such a function, not even one that acquires"
+                % (starts.group(1).lower() + "..." if starts else changing[0]))
+    if acquires:
+        return None if LIB_READS.match(name) or LIB_ACQUIRES.match(name) else (
+            "does not look like a function that reads or acquires (get..., is..., acquire..., record..., capture..., "
+            "take..., run...)")
+    if LIB_READS.match(name) and not LIB_ACTS.match(name):
+        return None
+    return ("does not look like a function that only reads (get..., is..., query...); a reading must never start "
+            "anything. A function that records for a while and returns what it got (acquireHistogram 1) is a reading "
+            "that acquires: say so with acquires: true and wait: the seconds it may take")
 
 
 def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
              err: Callable[[str, str], None]) -> Dict[str, Any]:
     """The maker's library and how to call it; see library.py. Checked so that only the maker's own functions,
-    named here, can be called, and readings call only functions that read."""
+    named here, can be called, and readings call only functions that read (or, for a reading that acquires, that
+    record and return what they got: _lib_reading)."""
     if lib is None:
         return {}
     if not isinstance(lib, dict):
@@ -1189,9 +1235,12 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
             if known is not None and fn not in known:
                 err(path, "%s is not under library.functions" % fn)
             last = fn.rsplit(".", 1)[-1]   # sample.getTemperature reads as getTemperature
-            if verb == "GET" and (not LIB_READS.match(last) or LIB_ACTS.match(last)):
-                err(path, "%s does not look like a function that only reads (get..., is..., query...); a reading must "
-                    "never start anything" % fn)
+            why = _lib_reading(last, p.acquires) if verb == "GET" else None
+            if why:
+                err(path, "%s %s" % (fn, why))
+        if p.get_before:   # a text card's arm, trigger, then fetch: a library's reading is one call, which does it all
+            err("parameters.%s.get" % p.name, "with a library, a reading calls one function: GET <function> "
+                "[arguments]; one that records first and then returns what it got is acquires: true")
     query = str(identify.get("query") or "")
     if query and query != "*IDN?":
         m = LIB_CALL.match(query)

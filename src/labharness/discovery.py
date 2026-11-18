@@ -77,7 +77,7 @@ def match_card(idn: str, registry: CardRegistry) -> Optional[Card]:
 
 
 # any instrument's: no card follows from the address alone
-GENERIC_SCHEMES = ("http", "https", "lib", "serial", "visa", "sim", "modbus", "jsonrpc")
+GENERIC_SCHEMES = ("http", "https", "lib", "serial", "visa", "sim", "modbus", "jsonrpc", "zmq")
 _OPTION = re.compile(r"[?&]([a-z0-9_]+=[^&\s\"',)]+)", re.I)
 
 

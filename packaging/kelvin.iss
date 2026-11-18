@@ -36,6 +36,12 @@ AppMutex=Kelvin-8C0F6E5A
 #ifdef Sign
 SignTool=azure
 #endif
+; Inno Setup 6.7 turns Windows' RedirectionGuard on for Setup, and a Setup that runs for one user (no administrator
+; rights asked) passes it to every program it starts: Kelvin had it, and so did everything Kelvin started, uv among
+; them, which then couldn't follow the junction in its own Python folder (os error 448: field report 2026-11-17)
+#if VER >= EncodeVer(6,7,0)
+RedirectionGuard=no
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
@@ -48,9 +54,12 @@ Name: "{autoprograms}\Kelvin"; Filename: "{app}\Kelvin.exe"
 Name: "{autodesktop}\Kelvin"; Filename: "{app}\Kelvin.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\Kelvin.exe"; Description: "Start Kelvin"; Flags: nowait postinstall skipifsilent
+; Kelvin is started by the desktop (explorer.exe asks the running desktop to open it), as from the Start menu, never as
+; Setup's own child: a Setup started by a Kelvin that had RedirectionGuard (its updater) has it too, whatever the
+; setting above, and its child would again (tried with Inno Setup 6.7.4, 2026-11-17)
+Filename: "{win}\explorer.exe"; Parameters: """{app}\Kelvin.exe"""; Description: "Start Kelvin"; Flags: nowait postinstall skipifsilent
 ; an update Kelvin installed itself (updater.py, /RELAUNCH=1): start it again afterwards
-Filename: "{app}\Kelvin.exe"; Flags: nowait runasoriginaluser; Check: Relaunch
+Filename: "{win}\explorer.exe"; Parameters: """{app}\Kelvin.exe"""; Flags: nowait runasoriginaluser; Check: Relaunch
 
 [Code]
 function Relaunch: Boolean;

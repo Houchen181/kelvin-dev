@@ -4,10 +4,10 @@ value it already has.
 This is the step that makes a drafted card trustworthy: the person (or Kelvin, on an instrument a person connected)
 sees each reading's value next to the front panel, or the error it gave, and the card is fixed until they agree.
 Nothing changes: no drive, no connect commands for text instruments; reads that would start something (MEASure?,
-READ?, INITiate, *TST?, *CAL?) are skipped, and said to be (a skip is not a check). One setting (never a drive) is
-written with the value it reads, then read back with the error queue: a set command the instrument doesn't take (a
-long form it refuses, -113) shows here rather than in the first run, where it once passed for a set. A library card
-runs its open calls, which connect it."""
+READ?, INITiate, *TST?, *CAL?, an acquisition) are skipped, and said to be (a skip is not a check). One setting
+(never a drive) is written with the value it reads, then read back with the error queue: a set command the instrument
+doesn't take (a long form it refuses, -113) shows here rather than in the first run, where it once passed for a set. A
+library card runs its open calls, which connect it."""
 from __future__ import annotations
 
 import math
@@ -35,13 +35,15 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
     An instrument of the lab is asked through the lab's own connection, however the address is spelled (GPIB::12 is
     GPIB0::12::INSTR, COM3 is ASRL3::INSTR): another spelling once opened a second session to it, and on a COM port
     the error then blamed another program."""
+    from .drivers import is_driver_address, sends_text
     from .scriptrun import canonical
     reuse = None
     if lab is not None:
         want = canonical(address)
         for name, inst in lab.instruments.items():
             if canonical(inst.config.address) == want and not inst.simulated:
-                if card.library or "://" in address and not address.lower().startswith(("serial://", "prologix://")):
+                if card.library or "://" in address and not address.lower().startswith(("serial://", "prologix://")) \
+                        and not sends_text(address):
                     raise AdapterError("%s is connected in the lab as %s: save this card and use it for %s, or take %s "
                                        "out of the lab config (Lab, Set up) to try another card on it."
                                        % (address, name, name, name))
@@ -59,8 +61,8 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
     inst = Instrument("try", card, backend, InstrumentConfig(name="try", card=card.id, address=address),
                       getattr(lab, "stops", None))   # a person's stop ends its waits too
     out: Dict[str, Any] = {"address": address, "card": card.id, "reused": reuse is not None, "readings": []}
-    from .drivers import is_driver_address
-    text = not card.library and not is_driver_address(address)   # a text instrument: only queries are sent
+    # a text instrument (over ZeroMQ too: sends_text): only queries are sent
+    text = not card.library and (not is_driver_address(address) or sends_text(address))
 
     def unsafe(command: str) -> Optional[str]:
         if not text:
@@ -92,9 +94,11 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
             row: Dict[str, Any] = {"name": spec.name, "label": spec.label or spec.name, "unit": spec.unit,
                                    "kind": spec.kind}
             why = unsafe(spec.get_cmd.render() if "{value}" not in spec.get_cmd.text else spec.get_cmd.text)
-            if spec.get_before and not why:
+            # an acquisition runs only when a plan or a person reads it: a library's is one call, with no commands
+            # before it (GET acquireHistogram 1, which records for its gate; field report 2026-11-17)
+            if (spec.get_before or spec.acquires) and not why:
                 why = "this reading runs an acquisition (%s); try it with the instrument in the lab" % "; ".join(
-                    spec.get_before)
+                    spec.get_before or [spec.get_cmd.text])
             if why:
                 row["skipped"] = why
                 out["readings"].append(row)

@@ -631,16 +631,18 @@ def test_a_zeromq_peer_that_misbehaves_never_holds_the_look(rep_server, how, kw,
     if kw.get("socket_type") or kw.get("mechanism") or kw.get("major") or how in ("error", "closes"):
         assert rep.requests == []                      # nothing asked
     line = probe.what_answers(dict(found, hint="SCPI over a socket"))
-    assert line.startswith("port %d: a ZeroMQ instrument" % rep.port)
-    assert line.endswith("Kelvin has no card or connection for ZeroMQ instruments yet") and "SCPI" not in line
+    assert line.startswith("port %d: a ZeroMQ instrument" % rep.port) and "SCPI" not in line
+    # Kelvin's zmq:// address for it only where it answers requests (field report 2026-11-17)
+    offered = "; Kelvin's address for it: zmq://<its address>:%d" % rep.port
+    assert line.endswith(offered) == (found["zmq"].get("socket") == "REP"), line
 
 
 def test_what_a_zeromq_instrument_said_and_which_macs_are_macs():
     from labharness import probe
     said = probe.what_answers({"port": 5555, "hint": "SCPI over a socket: TCPIP0::10.0.0.7::5555::SOCKET", "zmq": {
-        "version": "3.1", "socket": "REP", "reply": "ID Quantique,ID900,SN01234,v7.0.4"}})
-    assert said == ("port 5555: a ZeroMQ (REQ) instrument; it says: ID Quantique,ID900,SN01234,v7.0.4. Kelvin has no "
-                    "card or connection for ZeroMQ instruments yet")
+        "version": "3.1", "socket": "REP", "reply": "ID Quantique,ID900,SN01234,v7.0.4"}}, "10.0.0.7")
+    assert said == ("port 5555: a ZeroMQ (REQ) instrument; it says: ID Quantique,ID900,SN01234,v7.0.4; Kelvin's "
+                    "address for it: zmq://10.0.0.7:5555")   # since 2026-11-17: its connection (zeromq.py)
     for written in ("70-B3-D5-65-78-CF", "70:b3:d5:65:78:cf", "70b3.d565.78cf", "70B3D56578CF", " 70-b3-d5-65-78-cf "):
         assert probe.mac_of(written) == "70:b3:d5:65:78:cf"
     for other in ("192.168.1.0/24", "192.168.1.*", "70-B3-D5-65-78", "70-B3-D5-65-78-CG", ""):
@@ -719,11 +721,11 @@ def test_find_on_network_says_what_the_time_controller_is_and_each_hosts_mac(lab
     said = rt.find_on_network()
     lines = said.splitlines()
     assert lines[0].endswith("and for instruments that announce themselves: 1 address answered")
-    assert ("- 192.168.1.78: port 5555: a ZeroMQ (REQ) instrument; it says: ID Quantique,ID900,SN01234,v7.0.4. Kelvin "
-            "has no card or connection for ZeroMQ instruments yet; MAC 70:b3:d5:65:78:cf") in lines
+    assert ("- 192.168.1.78: zmq://192.168.1.78:5555 answers 'ID Quantique,ID900,SN01234,v7.0.4' → no card yet: "
+            "draft_card zmq://192.168.1.78:5555; MAC 70:b3:d5:65:78:cf") in lines   # its address since 2026-11-17
     assert rep.requests == [[b"", b"*IDN?"]]           # the sweep's knock asked nothing; the look asked once
     assert asked == [["arp", "-a", "-N", "192.168.1.10"]]   # read once, after the sweep
-    assert not any("192.168.1.78" in a for a in rt.last_found)   # no address Kelvin could connect to it through
+    assert "zmq://192.168.1.78:5555" in rt.last_found   # Kelvin connects to it there (zeromq.py)
 
     inspected = rt.inspect_address("192.168.1.78")
     assert inspected.splitlines()[0] == ("192.168.1.78 (MAC 70:b3:d5:65:78:cf): 2 of the ports instruments use "
@@ -746,7 +748,7 @@ def test_find_on_network_finds_a_device_by_its_mac(lab_network, tmp_path):
     assert lines[1] == ("MAC 70:b3:d5:65:78:cf is 192.168.1.78 (on Ethernet), in this computer's neighbour table after "
                         "the sweep: looked at on every port below")
     idq = next(ln for ln in lines if ln.startswith("- 192.168.1.78:"))
-    assert "port 5555: a ZeroMQ (REQ) instrument; it says: ID Quantique,ID900" in idq
+    assert "zmq://192.168.1.78:5555 answers 'ID Quantique,ID900" in idq
     assert "port 8080: web page 'Time Controller'" in idq and idq.endswith("MAC 70:b3:d5:65:78:cf")
     assert "looked for MAC 70:b3:d5:65:78:cf on the network (192.168.1.0/24)" in rt.events(5, "network")
 

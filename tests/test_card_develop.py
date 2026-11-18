@@ -94,7 +94,7 @@ instruments:
     out = rt.try_card(text, "li")
     assert "matches the card" in out and "readings answered" in out
     refused = rt.try_card(text, "lib://COM1?python=C:/evil.exe")
-    assert refused.startswith("Kelvin tries a card only on an instrument in the lab")
+    assert refused.startswith("not tried: python= names evil.exe, which is not a Python interpreter")
     rt.last_found = ["GPIB0::9::INSTR"]
     assert "GPIB0::9::INSTR" in rt.try_card(text, "nowhere")
     assert "not read" in rt.read_examples(str(tmp_path / "missing"))

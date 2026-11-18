@@ -34,7 +34,7 @@ from .. import frames, pulses
 from ..cards import ParamSpec, num, plot_points, thin, trace_x
 from ..engine import RunEngine, RunReport
 from ..eventlog import EventLog, RunFolderError, RunFolders, RunStore, plan_text
-from ..gate import ApprovalRequest, Approver, SafetyGate, _dur, reading_away
+from ..gate import ApprovalRequest, Approver, SafetyGate, _dur, asked_because, reading_away
 from ..instrument import briefly, ended_by
 from ..lab import Lab
 from ..lablock import HELD, LabLock
@@ -417,11 +417,22 @@ def _names_a_secret(address: str) -> Optional[str]:
                 None)
 
 
+def _an_address(text: str) -> bool:
+    """Whether what was given as an instrument is an address Kelvin can open rather than a name: a VISA resource
+    (GPIB0::12::INSTR, ASRL11::INSTR), one of Kelvin's (serial://COM3, zmq://..., lib://...), or a serial port as this
+    computer names it: COM11 on Windows, /dev/ttyUSB0 on Linux, /dev/cu.usbserial-1410 on a Mac. try_card took only the
+    first two for addresses, and refused a laser's COM11 as neither in the lab nor scanned (field report 2026-11-17)."""
+    t = (text or "").strip()
+    return bool(t) and ("::" in t or "://" in t or re.match(r"^(?:\\\\\.\\)?COM\d+:?$", t, re.I) is not None
+                        or re.match(r"^/dev/(?:tty|cu)[\w.:/-]*$", t) is not None)
+
+
 def _runs_a_program(address: str) -> bool:
     """A lib:// address that names a Python (python=), a folder of files anywhere (path=), or neither, runs a
-    program a person chose: only a person writes one (Lab setup); Kelvin uses it once it is in the lab. One that
-    names an environment Kelvin installed with a person's approval (env=, envs.py), or the folder a maker's installer
-    put its library in (path= in Program Files, /Applications or /opt), Kelvin may try and add itself."""
+    program a person chose: only a person approves one, never Kelvin itself nor auto mode, in Lab setup or on the
+    chat's card that names the program (_program_items); Kelvin uses it once it is in the lab. One that names an
+    environment Kelvin installed with a person's approval (env=, envs.py), or the folder a maker's installer put its
+    library in (path= in Program Files, /Applications or /opt), Kelvin may try and add itself."""
     import urllib.parse
     if not address.strip().lower().startswith("lib://"):
         return False
@@ -431,6 +442,53 @@ def _runs_a_program(address: str) -> bool:
     if q.get("path"):
         return not _installed_by_a_maker(q["path"])
     return not q.get("env")
+
+
+# a Python interpreter's own file name: python.exe, pythonw.exe, python3.11.exe, python3
+_A_PYTHON = re.compile(r"^pythonw?(\d+(\.\d+)?)?(\.exe)?$", re.I)
+
+
+def _program_problem(address: str) -> Optional[str]:
+    """Why a lib:// address that runs a program can't be put to a person at all, in words; None when it can: python=
+    names no Python interpreter that is on this computer (Kelvin's helper speaks to it line by line, and another
+    program, a shell, would take those lines for commands), or path= no folder."""
+    import urllib.parse
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(address.strip()).query))
+    if q.get("python"):
+        exe = Path(q["python"]).expanduser()
+        if not _A_PYTHON.match(exe.name):
+            return "python= names %s, which is not a Python interpreter (python.exe)" % exe.name
+        if not exe.is_file():
+            return "there is no %s on this computer" % exe
+    if q.get("path") and not Path(q["path"]).expanduser().is_dir():
+        return "there is no folder %s on this computer" % q["path"]
+    return None
+
+
+def _program_items(address: str, card: Any, joins: bool = False) -> List[str]:
+    """What a person sees before Kelvin runs a program a lib:// address names (_runs_a_program): the program, the
+    folder its code comes from, what the card loads and the functions it calls. A field report asked for this card in
+    the chat (2026-11-17): only Lab setup could take such an address, and with the environments uv makes refused by
+    Windows there was no other way to a library."""
+    import urllib.parse
+    from ..library import card_calls
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(address.strip()).query))
+    lib = getattr(card, "library", None) or {}
+    items = ["Program: %s, which Kelvin starts with its helper %s." % (
+        q["python"] if q.get("python") else "Kelvin's own Python",
+        "whenever the lab connects the instrument" if joins else "for the try")]
+    if q.get("path"):
+        items.append("Folder: %s. The maker's code is loaded from it: code saved there runs on this computer when the "
+                     "instrument connects." % q["path"])
+    loads = ["%s %s" % (k, json.dumps(lib[k])) for k in ("module", "object", "create", "create_args", "dll",
+                                                         "assembly", "type", "setup", "com") if lib.get(k)]
+    sets, gets = card_calls(card)
+    steps = [str(s) for k in ("open", "close") for s in lib.get(k) or []]
+    items.append("The card loads %s and calls only %s%s." % (
+        ", ".join(loads) or "nothing it names", ", ".join(sorted(sets | gets)) or "no function",
+        " (connecting and closing: %s)" % ", ".join(steps) if steps else ""))
+    items.append("Only a person approves this: never Kelvin itself, nor auto mode.")
+    return items
 
 
 def writable_folder(path: Any) -> Path:
@@ -1512,7 +1570,12 @@ class LabRuntime:
         chat (stop_readings), as only the Stop for everything ended it before."""
         key = "%s.%s" % (instrument, parameter)
         spec = self._spec(key)
-        self._reading_now[instrument] = (key, time.time(), float(getattr(spec, "wait_s", 0) or 0))
+        allowed = float(getattr(spec, "wait_s", 0) or 0)
+        inst = self.lab.instruments.get(instrument)
+        if allowed and getattr(spec, "acquires", False) and inst is not None and \
+                str(inst.config.address).startswith("lib://"):   # a library's acquisition: its wait on top of the
+            allowed += float(inst.card.connection.get("timeout_ms", 10000)) / 1000.0   # call's timeout (library.py)
+        self._reading_now[instrument] = (key, time.time(), allowed)
         chat = getattr(_VIEWER.get(), "chat", None)
         flag = threading.Event()
         if chat:
@@ -10082,28 +10145,41 @@ class LabRuntime:
             if card is None:
                 return "not valid:\n" + "\n".join("- " + p for p in problems)
         targets = cardtry.addresses_for_agent(self.lab, self.last_found)
+        instrument = (instrument or "").strip()
         address = targets.get(instrument)
-        if address is None and _runs_a_program(instrument):
-            return ("Kelvin tries a card only on an instrument in the lab or an address the scan found: a lib:// "
-                    "address with python= or path= names a program for Kelvin to run, so a person tries it in Lab, "
-                    "Cards; or install the maker's library with install_for_instrument and use "
-                    "lib://<address>?env=<environment>")
+        if address is None and instrument and not _runs_a_program(instrument):
+            from ..scriptrun import lab_name
+            if lab_name(self.lab, instrument) is not None:   # a lab instrument's address, spelled otherwise (COM11 for
+                address = instrument                          # ASRL11::INSTR): in the lab already, nothing to ask
+        trying = ("Trying the %s card asks it who it is and reads its readings; it changes nothing (one setting is "
+                  "written with the value it already has, to check the card's set command)." % card.model)
+        if address is None and _runs_a_program(instrument):   # a program a person chose: theirs to approve, here too
+            bad = _program_problem(instrument)
+            if bad:
+                return "not tried: %s" % bad
+            request = ApprovalRequest("Start a program to try a card on %s?" % instrument,
+                                      _program_items(instrument, card) + [trying])
+            outside = self.gate.outside_reason()
+            if outside:
+                request.items.append("Careful: " + outside)
+            if not self.gate.ask(request):   # a person's yes only: never Kelvin's own, nor auto mode's
+                return "declined: the person did not want Kelvin to start %s%s" % (instrument, asked_because(request))
+            address = instrument
         if address is None and _names_a_secret(instrument):
             return ("not tried: %s sends the value of the environment variable %s with every request; only a person "
                     "writes such an address, in the lab config (Lab, Set up)" % (instrument, _names_a_secret(instrument)))
-        if address is None and ("::" in instrument or "://" in instrument):
+        if address is None and _an_address(instrument):
+            # an address the scan missed (a laser on a USB serial port, COM11, was refused as not an address at all:
+            # field report 2026-11-17): Kelvin approves it itself, as it drives nothing, unless a person must
             request = ApprovalRequest("Try a card on %s?" % instrument, [
-                "Kelvin's last scan did not find an instrument at %s. Trying the %s card asks it who it is and reads "
-                "its readings; it changes nothing (one setting is written with the value it already has, to check "
-                "the card's set command)." % (instrument, card.model)])
-            web = instrument.strip().lower().startswith(("http://", "https://"))   # it may be anything on the
-            if web:                                                               # network: a person says
+                "Kelvin's last scan did not find an instrument at %s. %s" % (instrument, trying)])
+            web = instrument.lower().startswith(("http://", "https://"))   # it may be anything on the
+            if web:                                                       # network: a person says
                 request.items.append("It is a web address: Kelvin sends it requests a person should know of")
             if (web or not self.gate.auto_simple(request, "trying a card asks the instrument who it is and reads it, "
                                                           "and changes nothing")) \
                     and not self.gate.ask(request):
-                note = " (%s)" % request.note if request.note else ""
-                return "declined: the person did not want Kelvin to try %s%s" % (instrument, note)
+                return "declined: the person did not want Kelvin to try %s%s" % (instrument, asked_because(request))
             address = instrument
         if address is None:
             return ("%s: an instrument in the lab or an address (the lab and the last scan have: %s)" % (
@@ -10227,6 +10303,11 @@ class LabRuntime:
             lines.append("parameters: " + r["parameters"])
         if r.get("notes"):   # what the model left out or is unsure of: the person should hear it
             lines.append("the model's notes: " + " | ".join(r["notes"]))
+        if r.get("safe_modes"):   # a light source's modes: which one rests as safe is the person's to check
+            lines.append("The safe value it chose for each mode (tell the person, to check against the manual: a light "
+                         "source rests safe in the state that emits least): " + "; ".join(r["safe_modes"]))
+        for check in r.get("checks") or []:   # one that looks like it emits by itself (field report 2026-11-17)
+            lines.append("Check before keeping it: " + check)
         if r.get("ranges_in"):
             lines.append("Some outputs stay readings: their ranges are in %r, which Kelvin could not get. Ask the person "
                          "for its PDF or web address, then draft_card again with specs." % r["ranges_in"])
@@ -10350,7 +10431,7 @@ class LabRuntime:
         GPIB-ETHERNET (its port 1234 answers, or prologix://<address>): the instruments on its GPIB bus."""
         from .. import probe, prologix
         from ..adapters import resource_name
-        from ..discovery import identify, match_card
+        from ..discovery import Found, identify, look_up, match_card
         if prologix.is_prologix(address):
             try:
                 adapter = prologix.adapter_of(address)
@@ -10383,7 +10464,7 @@ class LabRuntime:
                          % ", ".join("%s (%s)" % kv for kv in in_lab.items()))
         found_here = []
         for f in res["found"]:
-            line = "- " + probe.what_answers(f)
+            line = "- " + probe.what_answers(f, ip)
             resource = None
             if f.get("jsonrpc"):   # a controller with a JSON-RPC interface (attocube's eNSPIRE): its own address
                 resource = "jsonrpc://%s:%d" % (ip, f["port"])
@@ -10395,6 +10476,21 @@ class LabRuntime:
                                                             "card_id": card.id if card else None,
                                                             "model": card.model if card else "",
                                                             "kind": card.kind if card else ""}
+            elif (f.get("zmq") or {}).get("socket") in probe.ZMTP_ASKS:   # a ZeroMQ instrument that answers requests
+                # (IDQ's Time Controllers): Kelvin's zmq:// connection reaches it (field report 2026-11-17)
+                resource = "zmq://%s:%d" % (ip, f["port"])
+                idn = str(f["zmq"].get("reply") or "")
+                card = match_card(idn, self.lab.registry) if idn else None
+                got = Found(resource, idn, card.id if card else None, card.model if card else "",
+                            card.kind if card else "", "its ZeroMQ answer" if card else "no card fits it yet")
+                if idn and card is None:   # the instrument collection may know it, and where its manual is
+                    got = look_up(got, self.collection)
+                line += (" → card %s (%s): add_instrument %s" % (card.id, card.model, resource) if card else
+                         " → no card matches it yet%s: draft_card %s" % (
+                             " (the instrument collection knows it as %s)" % got.collection if got.collection else "",
+                             resource) if idn else
+                         " → add_instrument %s with its card (find_card), or try_card one on it" % resource)
+                self.found_info[resource_name(resource)] = dict(vars(got))
             elif f.get("idn"):
                 resource = "TCPIP0::%s::%d::SOCKET" % (ip, f["port"])
                 card = match_card(f["idn"], self.lab.registry)
@@ -10508,6 +10604,17 @@ class LabRuntime:
                             keep(ip, Found("jsonrpc://%s:%d" % (ip, f["port"]), idn, card.id if card else None,
                                            card.model if card else "", card.kind if card else "",
                                            "its JSON-RPC answer" if card else "no card fits it yet"))
+                    elif (f.get("zmq") or {}).get("socket") in probe.ZMTP_ASKS:   # a ZeroMQ instrument (IDQ's Time
+                        # Controllers): Kelvin's zmq:// connection reaches it (field report 2026-11-17)
+                        address = "zmq://%s:%d" % (ip, f["port"])
+                        idn = str(f["zmq"].get("reply") or "")
+                        if idn:   # one that said who it is; another is told as what_answers says it, its address kept
+                            card = match_card(idn, self.lab.registry)
+                            got = Found(address, idn, card.id if card else None, card.model if card else "",
+                                        card.kind if card else "", "its ZeroMQ answer")
+                            keep(ip, got if card else look_up(got, self.collection))
+                        elif address not in self.last_found:
+                            self.last_found.append(address)   # found here: try_card and add_instrument may use it
                     elif f.get("idn"):
                         card = match_card(f["idn"], self.lab.registry)
                         got = Found("TCPIP0::%s::%d::SOCKET" % (ip, f["port"]), f["idn"], card.id if card else None,
@@ -10567,7 +10674,8 @@ class LabRuntime:
         for host in everyone:
             seen = said.get(host) or {"found": [], "lxi": {}}
             bits = [probe.gige_line(c) for c in near["cameras"] if c["ip"] == host]
-            bits += [probe.what_answers(f) for f in seen["found"] if not f.get("idn") and not f.get("device")]
+            bits += [probe.what_answers(f, host) for f in seen["found"]   # what said who it is is listed below
+                     if not f.get("idn") and not f.get("device") and not (f.get("zmq") or {}).get("reply")]
             if seen["lxi"]:
                 bits.append("LXI identification: " + ", ".join("%s %s" % kv for kv in seen["lxi"].items()))
             for got in found.get(host, []):
@@ -10812,6 +10920,11 @@ class LabRuntime:
         uv = envs.uv_path(self.home)
         lines.append("(uv: %s) A library card uses one with lib://<address>?env=<name>; Kelvin's built-in drivers use "
                      "%r." % (uv or "not here yet", envs.DRIVERS))
+        if envs.redirection_guard():   # what made uv fail with os error 448 (field report 2026-11-17)
+            lines.append("Windows' RedirectionGuard is on in this Kelvin (the installer that started it passed it on), "
+                         "and every program Kelvin starts has it: Windows refuses them the links a program made, so uv "
+                         "may fail with os error 448. Kelvin names its Pythons around uv's links; if it still fails, "
+                         "the person closes Kelvin and starts it again from the Start menu or its desktop shortcut.")
         return "\n".join(lines)
 
     def install_for_instrument(self, env: str, packages: Optional[List[str]] = None, python: str = "", bits: int = 64,
@@ -10878,8 +10991,7 @@ class LabRuntime:
         if not by.startswith("human") and not self.gate.auto_simple(request, "installing a maker's package drives "
                                                                               "nothing") \
                 and not self.gate.ask(request):
-            note = " (%s)" % request.note if request.note else ""
-            return "declined: nothing installed%s" % note
+            return "declined: nothing installed%s" % asked_because(request)   # and why a person was asked
         try:
             if envs.uv_path(self.home) is None:
                 envs.fetch_uv(self.home, self._get)
@@ -10894,8 +11006,8 @@ class LabRuntime:
                 rec = envs.info(env, self.home) or rec
                 kept = self._fetch_files(env, files)
                 rec = envs.info(env, self.home) or rec
-        except Exception as e:   # uv's whole reason (envs._said): cut at 200, it lost the versions that clash
-            said = profiles._first_line(e, 2000)
+        except Exception as e:   # uv's whole reason (envs._said, which bounds it): cut at 200, it lost the versions
+            said = profiles._first_line(e, 20000)   # that clash; at 400, why Windows refused it (2026-11-17)
             self.gate.log.write("install_failed", by=by, env=env, packages=packages, files=files or None, error=said)
             return "could not install: %s" % said
         if env == envs.DRIVERS:
@@ -11239,9 +11351,10 @@ class LabRuntime:
         """Kelvin adds an instrument connected to this computer to the lab (lab.yaml), marked added_by: kelvin, and
         connects it; the others stay connected as they are. It reads and configures at once; until a person reviews
         its limits, every output change on it asks them. An address the last scan did not find is approved by Kelvin
-        itself (it connects and reads); a program to run asks a person in Lab setup. At an address the lab's Special
-        Measure rack has (rack_at), it takes the rack's name, so plans written from the lab's scans name it, and the
-        rack's limits and ramp rates wait in its review for the person: only a person sets limits (field test #9)."""
+        itself (it connects and reads); a lib:// address that runs a program asks a person, on a card that names the
+        program. At an address the lab's Special Measure rack has (rack_at), it takes the rack's name, so plans written
+        from the lab's scans name it, and the rack's limits and ramp rates wait in its review for the person: only a
+        person sets limits (field test #9)."""
         from .. import specialmeasure
         from ..adapters import AdapterError, resource_name
         from ..cards import CONNECTION_KEYS
@@ -11356,22 +11469,26 @@ class LabRuntime:
             if ic is None or ic.address != address or ic.card != the_card.id:
                 return "not added: the lab config changed while Kelvin was adding it; try again"
             asks = []
-            if resource_name(address) not in {resource_name(a) for a in self.last_found}:
-                if _runs_a_program(address):
-                    return ("not added: a lib:// address with python= or path= names a program for Kelvin to run, "
-                            "so a person adds it in Lab setup (the card is ready for them); or install the maker's "
-                            "library with install_for_instrument and use lib://<address>?env=<environment>")
+            program = _runs_a_program(address)   # a program a person chose: theirs to approve, on this card too
+            if program:
+                bad = _program_problem(address)
+                if bad:
+                    return "not added: %s" % bad
+                asks += _program_items(address, the_card, joins=True)
+                outside = self.gate.outside_reason()
+                if outside:
+                    asks.append("Careful: " + outside)
+            elif resource_name(address) not in {resource_name(a) for a in self.last_found}:
                 asks.append("Kelvin's last scan did not find an instrument at %s. Kelvin would connect to it as %s "
                             "(%s) and read it." % (address, new, the_card.model))
             if asks:
                 request = ApprovalRequest("Add %s to the lab?" % new, asks + [
                     "Every output change on it still asks you until you review its limits."])
-                simple = len(asks) == 1   # only an address the scan missed: it connects and reads
+                simple = len(asks) == 1 and not program   # only an address the scan missed: it connects and reads
                 if not (simple and self.gate.auto_simple(request, "adding an instrument connects it and reads it; "
                                                                   "every output change on it still asks")) \
                         and not self.gate.ask(request):
-                    note = " (%s)" % request.note if request.note else ""
-                    return "declined: the person did not want %s added%s" % (new, note)
+                    return "declined: the person did not want %s added%s" % (new, asked_because(request))
             if beside:   # the card may have waited for a person: what has the lab now, and what it uses, may be other
                 why = self._beside_problem([], [address])
                 if why is not None:
@@ -11492,8 +11609,9 @@ class LabRuntime:
         address, connection settings or card variables, as its entry in the lab config, and connected so: what Kelvin
         does once its card doesn't fit the lab's instrument. Its name, limits, rates and guards stay. It drives
         nothing, so Kelvin approves it itself (after text from the web or a script's output, a person does); a lib://
-        address that runs a program is a person's to set. A connection that can't be made, or answers as another
-        instrument, leaves the instrument and the lab config as they were."""
+        address that runs a program only a person approves, on a card that names the program (_program_items). A
+        connection that can't be made, or answers as another instrument, leaves the instrument and the lab config as
+        they were."""
         from ..adapters import AdapterError
         from ..discovery import ENTRY_KEYS, card_for, change_entry
         from ..homelab import lab_registry
@@ -11509,10 +11627,9 @@ class LabRuntime:
         address, named = (address or "").strip(), (card or "").strip()
         if not (address or named or connection is not None or card_vars is not None):
             return "nothing to change: give its address, card, connection or vars"
-        if address and _runs_a_program(address):
-            return ("not changed: a lib:// address with python= or path= names a program to run, so a person sets "
-                    "it in Lab setup; or install the maker's library with install_for_instrument and use "
-                    "lib://<address>?env=<environment>")
+        program = bool(address) and _runs_a_program(address)   # a program a person chose: theirs to approve
+        if program and _program_problem(address):
+            return "not changed: %s" % _program_problem(address)
         registry = lab_registry(self.home, self.collection)
         old = self.lab.config.instruments[name]
         changes: Dict[str, Any] = {}
@@ -11557,10 +11674,15 @@ class LabRuntime:
             request = ApprovalRequest("Change %s's entry?" % name, said + [
                 "Kelvin connects it again and asks who it is; it sends nothing else. Every output change on a draft "
                 "card still asks you."])
-            if not self.gate.auto_simple(request, "pointing an instrument at another card or address connects it and "
-                                                  "reads it; it drives nothing") and not self.gate.ask(request):
-                note = " (%s)" % request.note if request.note else ""
-                return "declined: the person did not want %s changed%s" % (name, note)
+            if program:   # never Kelvin's own yes, nor auto mode's: the person sees the program first
+                request.items[len(said):len(said)] = _program_items(ic.address, the_card, joins=True)
+                outside = self.gate.outside_reason()
+                if outside:
+                    request.items.append("Careful: " + outside)
+            if (program or not self.gate.auto_simple(request, "pointing an instrument at another card or address "
+                                                              "connects it and reads it; it drives nothing")) \
+                    and not self.gate.ask(request):
+                return "declined: the person did not want %s changed%s" % (name, asked_because(request))
             try:
                 undo = self.lab.replace(ic, the_card)
             except (AdapterError, OSError, ValueError, RuntimeError) as e:

@@ -168,7 +168,9 @@ def least_squares(fun: Callable[[Any], Any], p0: Sequence[float], free: Optional
     js, norms = scaled(jac)
     sv = np.linalg.svd(js, compute_uv=False) if js.size else np.zeros(0)
     rank = int((sv > sv[0] * 1e-8).sum()) if sv.size and sv[0] > 0 else 0
-    cov = np.linalg.pinv(js.T @ js, rcond=1e-14) / np.outer(norms, norms) if js.size else np.zeros((0, 0))
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):   # a parameter the fit can't tell has an
+        # infinite variance, which is what it says: the callers check what is finite, and numpy's warning said nothing
+        cov = np.linalg.pinv(js.T @ js, rcond=1e-14) / np.outer(norms, norms) if js.size else np.zeros((0, 0))
     return Solution(p, cov, cost, r, it, converged, message, rank, free)
 
 # ------------------------------------------------------------------ special functions NumPy lacks
@@ -303,6 +305,151 @@ def _lorentz(x: Any, c: float, w: float) -> Any:
     return 1.0 / (1.0 + ((x - c) / (abs(w) / 2 + 1e-300)) ** 2)
 
 
+def _smooth(np: Any, y: Any, m: int) -> Any:
+    """Each point's mean with its neighbours, about m points in all (fewer near the ends): from cumulative sums, so a
+    wide window over a long trace (a fit takes 200,000 points) costs no more than a narrow one."""
+    y = np.asarray(y, dtype=float)
+    half = int(m) // 2
+    if half < 1 or y.size < 3:
+        return y
+    total = np.concatenate([[0.0], np.cumsum(y)])
+    i = np.arange(y.size)
+    lo, hi = np.maximum(i - half, 0), np.minimum(i + half + 1, y.size)
+    return (total[hi] - total[lo]) / (hi - lo)
+
+
+def _halfway(np: Any, v: Any, i: int) -> Tuple[int, int]:
+    """The nearest points either side of i where v is down to half of v[i] (the ends where it never is)."""
+    out = np.flatnonzero(v[:i] <= v[i] / 2)
+    lo = int(out[-1]) if out.size else 0
+    out = np.flatnonzero(v[i:] <= v[i] / 2)
+    return lo, (i + int(out[0]) if out.size else v.size - 1)
+
+
+def _doublet_starts(np: Any, x: Any, y: Any) -> Tuple[List[Tuple[float, List[float]]], int]:
+    """Places to start two Lorentzians, best first, each as the sum of squares it leaves with its best level and
+    amplitudes (linear least squares, cheap) and its [y0, A1, x1, w1, A2, x2, w2]; and the largest feature's half
+    maximum, in points. Both lines have that feature's sign. They sit at two features of that sign where the curve shows
+    two (a valley between them), at the one feature split in two, evenly or lopsided, or at it and where its own line
+    leaves most behind (a shoulder); neither line is wider than twice the gap between them."""
+    n = y.size
+    base, amp, _, _, k = _peak(np, x, y)
+    step = _step(np, x)
+    # the largest feature is the one standing highest above the noise on the curve averaged over 1, 3, 5, 9, ... points
+    # (the noise falling as the root of their number; not at the ends, where fewer are averaged): a noisy point stands
+    # out unaveraged, a line averaged over about its width. On the points alone, one noisy point above a broad shallow
+    # dip gave the dip's lines the wrong sign
+    sign, top, most, size, h = (-1.0 if amp < 0 else 1.0), k, abs(amp), 1, 1
+    while 2 * h + 1 <= n // 8:
+        d = (_smooth(np, y, 2 * h + 1) - base)[h:n - h]
+        i = int(np.argmax(np.abs(d)))
+        stands = abs(float(d[i])) * math.sqrt(2 * h + 1)
+        if stands > most:
+            sign, top, most, size = (-1.0 if d[i] < 0 else 1.0), h + i, stands, 2 * h + 1
+        h *= 2
+    height = most / math.sqrt(size)
+    # a point's noise, from the differences between neighbours (a line wider than a few steps hardly moves them); the
+    # features are looked for on a curve averaged over enough points that the noise's largest excursion among them all
+    # (about √(2 ln n) times its size) is a third of the largest feature, never over more than a quarter of that one's
+    # width: a valley between two lines must survive the averaging
+    noise = 1.05 * _median(np, np.abs(np.diff(y))) if n > 2 else 0.0
+    want = (3 * noise * math.sqrt(2 * math.log(max(n, 2))) / height) ** 2 if height else 1.0
+    lo, hi = _halfway(np, sign * (_smooth(np, y, size) - base), top)
+    m, v = 0, sign * (y - base)
+    for _ in range(10):   # noise ends a half maximum early: measured again on the averaged curve until it holds
+        wider = int(min(want, (hi - lo) / 4))
+        if wider <= m:
+            break
+        m = wider
+        v = sign * (_smooth(np, y, m) - base)
+        lo, hi = _halfway(np, v, int(np.argmax(v)))
+    top = int(np.argmax(v))
+    lo, hi = _halfway(np, v, top)
+    c0 = float(x[top])
+    mid, wide = (float(x[lo]) + float(x[hi])) / 2, max(float(x[hi] - x[lo]), 2 * step)
+    narrow = max(2 * min(c0 - float(x[lo]), float(x[hi]) - c0), 2 * step)   # the side with no second line in it
+
+    def outer(i: int, other: int) -> float:
+        """A line's width from its half maximum on the side away from the other line."""
+        a, b = _halfway(np, v, i)
+        return 2 * float(x[i] - x[a] if other > i else x[b] - x[i])
+
+    # two features: the top and each of the others standing highest above the valley between them, or above the level
+    # where that valley reaches it (the lowest point between, from running minima outward from the top: one pass over
+    # the points however many maxima noise makes)
+    valley = np.concatenate([np.minimum.accumulate(v[top::-1])[::-1][:-1], np.minimum.accumulate(v[top:])])
+    maxima = np.flatnonzero((v[1:-1] > v[:-2]) & (v[1:-1] >= v[2:]) & (v[1:-1] > 0)) + 1
+    maxima = maxima[maxima != top]
+    above = v[maxima] - np.maximum(valley[maxima], 0.0)
+    starts = [(c0, outer(top, j), float(x[j]), outer(j, top)) for j in maxima[np.argsort(-above, kind="stable")][:4]]
+    starts.append((mid - wide / 4, wide / 2, mid + wide / 4, wide / 2))   # one feature split in two
+    if abs(mid - c0) >= step:   # a lopsided one: the second line on its broad side
+        starts.append((c0, narrow, 2 * mid - c0, wide / 2))
+    # the top's own line, and the second where that one leaves most behind of the same sign (a shoulder)
+    one = _lorentz(x, c0, narrow)
+    cols = np.column_stack([np.ones(n), one])
+    rest = _smooth(np, sign * (y - cols @ np.linalg.lstsq(cols, y, rcond=None)[0]), m)
+    j = int(np.argmax(rest))
+    a, b = _halfway(np, rest, j)
+    starts.append((c0, narrow, float(x[j]), float(x[b] - x[a])))
+    scored = []
+    for c1, w1, c2, w2 in starts:
+        cap = max(2 * abs(c2 - c1), 2 * step)   # no line takes in both
+        w1, w2 = min(max(w1, 2 * step), cap), min(max(w2, 2 * step), cap)
+        cols = np.column_stack([np.ones(n), _lorentz(x, c1, w1), _lorentz(x, c2, w2)])
+        coef = np.linalg.lstsq(cols, y - base, rcond=None)[0]
+        if not (sign * coef[1] > 0 and sign * coef[2] > 0):   # a line of the other sign: not a start this guess gives
+            continue
+        r = y - base - cols @ coef
+        scored.append((float(r @ r), [base + float(coef[0]), float(coef[1]), c1, w1, float(coef[2]), c2, w2]))
+    if not scored:   # no start's best amplitudes both have that sign (a flat curve): the top's line and a small second
+        scored.append((0.0, [base, sign * height, c0, narrow, sign * height / 10, starts[-1][2],
+                             max(starts[-1][3], 2 * step)]))
+    scored.sort(key=lambda s: s[0])
+    return scored, hi - lo
+
+
+def _doublet_guess(np: Any, x: Any, y: Any) -> Dict[str, float]:
+    """Where two Lorentzians start: from each of _doublet_starts a short fit, its amplitudes kept to the largest
+    feature's sign and its widths to at least the step, and of those the one that leaves least behind.
+
+    The second line once started where one Lorentzian of the largest feature's width left most behind, whatever its
+    sign. For a doublet whose half maximum spans both dips, that width took in both: the line overshot beside them and
+    the second started as a peak. An ODMR doublet of two 8 % dips 6 MHz apart was fitted as a broad dip with a peak in
+    it, R² 0.846, where two dips gave 0.907 (field report 2026-11-17). One start, however placed, can still leave the
+    fit in a doublet's wrong minimum; the best of a few short fits seldom does, and costs about what the long fit from
+    a poor start did."""
+    starts, wide = _doublet_starts(np, x, y)
+    sign = -1.0 if starts[0][1][1] < 0 else 1.0
+    keep = (0.0, math.inf) if sign > 0 else (-math.inf, 0.0)
+    # a long trace is fitted from each start on the means of a few points at a time: 4000 to 8000 of them, each mean
+    # over no more than an eighth of the largest feature's half maximum, which they leave as it is
+    b = int(max(1, min(x.size // 4000, wide // 8)))
+    if b > 1:
+        cut = x.size // b * b
+        x, y = x[:cut].reshape(-1, b).mean(axis=1), y[:cut].reshape(-1, b).mean(axis=1)
+    step = _step(np, x)   # no narrower than the step: a line on one noisy point is no start
+    lower = [-math.inf, keep[0], -math.inf, step, keep[0], -math.inf, step]
+    upper = [math.inf, keep[1], math.inf, math.inf, keep[1], math.inf, math.inf]
+    size = float(np.ptp(y)) or 1.0
+
+    def resid(p: Any) -> Any:
+        return p[0] + p[1] * _lorentz(x, p[2], p[3]) + p[4] * _lorentz(x, p[5], p[6]) - y
+    best = None
+    for _, p in starts:
+        try:
+            sol = least_squares(resid, p, lower=lower, upper=upper, max_iter=50,
+                                scale=[size, size, p[3], p[3], size, p[6], p[6]])
+        except FitError:
+            continue
+        if best is None or sol.cost < best[0]:
+            best = (sol.cost, [float(v) for v in sol.p])
+    y0, a1, c1, w1, a2, c2, w2 = best[1] if best else starts[0][1]
+    if abs(a2) > abs(a1):   # the larger line first, as the largest feature was
+        a1, c1, w1, a2, c2, w2 = a2, c2, w2, a1, c1, w1
+    return {"y0": y0, "A1": a1, "x1": c1, "w1": w1, "A2": a2, "x2": c2, "w2": w2}
+
+
 def _gauss(np: Any, x: Any, c: float, w: float) -> Any:
     return np.exp(-4 * math.log(2) * (x - c) ** 2 / (w * w + 1e-300))
 
@@ -352,11 +499,7 @@ def _double_lorentzian() -> Model:
         return p["y0"] + p["A1"] * _lorentz(x, p["x1"], p["w1"]) + p["A2"] * _lorentz(x, p["x2"], p["w2"])
 
     def guess(x: Any, y: Any) -> Dict[str, float]:
-        np = _np()
-        b, a, c, w, k = _peak(np, x, y)
-        rest = y - a * _lorentz(x, c, w)
-        _, a2, c2, w2, _ = _peak(np, x, rest)
-        return {"y0": b, "A1": a, "x1": c, "w1": w, "A2": a2, "x2": c2, "w2": w2}
+        return _doublet_guess(_np(), x, y)
     return Model("double_lorentzian", ("y0", "A1", "x1", "w1", "A2", "x2", "w2"), f,
                  "y0 + A1/(1 + ((x - x1)/(w1/2))²) + A2/(1 + ((x - x2)/(w2/2))²)", guess,
                  lambda xu, yu: {"y0": yu, "A1": yu, "x1": xu, "w1": xu, "A2": yu, "x2": xu, "w2": xu},

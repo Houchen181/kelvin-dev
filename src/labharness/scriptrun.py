@@ -68,7 +68,8 @@ RUNNABLE = (".py", ".ipynb")
 OPAQUE = ("zhinst", "nidaqmx", "PyDAQmx", "MultiPyVu", "pylablib", "seabreeze", "pypylon", "clr", "pythonnet",
           "thorlabs_apt", "pyximc", "instrumental", "qick", "picosdk", "pyAndorSDK2", "pyAndorSDK3", "andor3",
           "pymmcore", "spcm", "pyspcm", "TimeTagger", "pulsestreamer", "spinapi", "harvesters", "pyueye", "pyvcam",
-          "pyftdi", "ftd2xx", "usb", "hid", "pymodbus", "minimalmodbus", "pylibftdi")
+          "pyftdi", "ftd2xx", "usb", "hid", "pymodbus", "minimalmodbus", "pylibftdi",
+          "zmq")   # pyzmq: a ZeroMQ instrument (zmq://, an IDQ Time Controller) from C, which the fence never sees
 STOPS = ("refused", "declined", "tripped", "stopped", "timeout")   # gate results that end a script's run
 GRACE_S = 10.0       # after a stop, how long the script may go without a change (or, its main script ended, take to
                      # end its process) before Kelvin ends it
@@ -1208,10 +1209,18 @@ def canonical(address: str) -> str:
     """An address as a VISA resource, so the script's spelling and the lab's compare (GPIB::24 = GPIB0::24::INSTR,
     COM3 = ASRL3::INSTR, USB ids in hex or decimal, a USB instrument's default interface 0 written or not, TCPIP::
     for TCPIP0:: whatever follows). Two spellings of one lab instrument once read as "not in this lab", and a person's
-    yes then let the script open its own session to it, past the safety gate."""
+    yes then let the script open its own session to it, past the safety gate. A ZeroMQ instrument (zmq://host:port) is
+    the TCP port it listens on, as a script's raw socket there names it: it is that lab instrument (field report
+    2026-11-17)."""
     a = (address or "").strip()
     if a.lower().startswith("sim://"):
         return a.lower()
+    if a.lower().startswith("zmq://"):
+        from .zeromq import as_socket
+        try:
+            return as_socket(a).upper()
+        except ValueError:   # not an address Kelvin connects to: as written
+            return a.upper()
     # a serial port as Windows names it (\\.\COM7, COM7:) or as some write it in VISA (ASRLCOM7::INSTR)
     m = re.match(r"^(?:\\\\\.\\)?(?:ASRL)?COM(\d+):?(?:::INSTR)?$", a, re.I)
     if m:

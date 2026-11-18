@@ -14,6 +14,8 @@ like a SCPI instrument. The address names the driver:
     lib://COM4?python=...&path=...        the maker's Python module or DLL, as its example scripts use it (library.py)
     jsonrpc://10.0.0.40:9090              instruments with a JSON-RPC interface, e.g. attocube's eNSPIRE cryostat
                                           controller (jsonrpc.py)
+    zmq://192.168.1.78:5555               instruments that speak SCPI over ZeroMQ, e.g. IDQ's Time Controllers: the
+                                          card's own text commands, not SET/GET (zeromq.py)
     nidaq://Dev1                          National Instruments DAQ cards through NI-DAQmx (daq.py)
     seabreeze://<serial>                  Ocean Insight spectrometers through python-seabreeze (spectra.py)
     shamrock://0                          Andor Shamrock / Kymera spectrographs through Andor's DLL (spectra.py)
@@ -45,7 +47,10 @@ from .cards import Card
 log = logging.getLogger("kelvin")
 SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick", "lib",
            "nidaq", "seabreeze", "shamrock", "picam", "lightfield", "pylon", "andor", "anc300", "anc350", "modbus",
-           "uvc", "genicam", "jsonrpc")
+           "uvc", "genicam", "jsonrpc", "zmq")
+# addresses whose connection sends the card's own text commands (SCPI over ZeroMQ: zeromq.py), not a maker's SET/GET
+# paths: a card is tried on one as on any text instrument, asking only what only reads (cardtry)
+TEXT_SCHEMES = ("zmq",)
 # how long opening takes at most, for the makers' drivers that take longer than a lab waits for any (lab.OPEN_S, 60 s)
 # by themselves: LightField starting its program, PICam's helper starting PICam (60 s) then opening the camera (30 s),
 # the lib:// helper starting (30 s) and loading the maker's library (60 s), an Andor spectrograph's library starting,
@@ -65,6 +70,11 @@ _COMMAND = re.compile(r"^\s*(SET|GET)\s+(\S+)(?:\s+(\S+))?\s*$", re.I)
 
 def is_driver_address(address: str) -> bool:
     return address.split("://", 1)[0].lower() in SCHEMES and "://" in address
+
+
+def sends_text(address: str) -> bool:
+    """Whether a driver's address carries the card's own text commands (TEXT_SCHEMES), as VISA does."""
+    return address.split("://", 1)[0].lower() in TEXT_SCHEMES and "://" in address
 
 
 def parse_command(command: str) -> Tuple[str, str, Optional[str]]:
@@ -994,7 +1004,7 @@ LATER = {"m2": ("m2", "M2Laser"), "toptica": ("decop", "DeCoP"), "qick": ("rfsoc
          "anc300": ("positioners", "ANC300"), "anc350": ("positioners", "ANC350"),
          "modbus": ("modbus", "ModbusInstrument"), "uvc": ("cameras", "UsbCamera"),
          "genicam": ("cameras", "GenicamCamera"),
-         "jsonrpc": ("jsonrpc", "JsonRpcInstrument")}   # they import this module
+         "jsonrpc": ("jsonrpc", "JsonRpcInstrument"), "zmq": ("zeromq", "ZmqInstrument")}   # they import this module
 
 
 def library_notes() -> List[str]:

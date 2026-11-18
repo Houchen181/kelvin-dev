@@ -611,8 +611,10 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
     another document, Kelvin finds it (or reads found's specs, which the person gave) and writes the card again.
     builtin_ids: the ids Kelvin has cards for (its own and the collection's). catalog: the instrument collection
     (collection.py), when it is on: if it knows the instrument, its manual addresses come first and it names the card.
-    Returns {card_id, model, kind, manual: {url, data, kind}, changed, parameters, notes, specs, ranges_in} (specs:
-    where the ranges came from; ranges_in: the document they are in, if Kelvin could not get it) or {error}."""
+    Returns {card_id, model, kind, manual: {url, data, kind}, changed, parameters, notes, specs, ranges_in, checks,
+    safe_modes} (specs: where the ranges came from; ranges_in: the document they are in, if Kelvin could not get it;
+    checks: a light source's safe values that look like they emit, safe_modes: each of its modes' safe value, both for
+    a person to check: carddraft.emitting_safe, safe_modes) or {error}."""
     fetch = fetch or profiles.http_get
     idn = str(found.get("idn") or "")
     entry = catalog.instrument_for(idn) if catalog is not None and idn else None
@@ -684,6 +686,12 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
         except Exception as e:
             log("could not write the card again with %s: %s" % (specs["url"], profiles._first_line(e)))
             specs = None
+    drafted, _, _ = carddraft.check(text)
+    checks = carddraft.emitting_safe(drafted) if drafted is not None else []
+    if checks:   # at the end of the card's header too, where a person reviewing it reads (field report 2026-11-17)
+        lines = text.splitlines(True)
+        at = next((i for i, ln in enumerate(lines) if not ln.startswith("#")), len(lines))
+        text = "".join(lines[:at] + ["# Check: %s\n" % c for c in checks] + lines[at:])
     try:
         card, path, _ = carddraft.save(cards_dir, text, builtin_ids, by="kelvin")
     except Exception as e:
@@ -693,4 +701,5 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
                                       ", " + p.unit if p.unit else "") for p in card.params.values())
     return {"card_id": card.id, "model": card.model, "kind": card.kind, "changed": changed, "by": key,
             "manual": {"url": manual["url"], "data": manual["data"], "kind": manual["kind"]}, "path": str(path),
-            "parameters": params, "notes": notes, "specs": specs["url"] if specs else "", "ranges_in": ranges_in}
+            "parameters": params, "notes": notes, "specs": specs["url"] if specs else "", "ranges_in": ranges_in,
+            "checks": checks, "safe_modes": carddraft.safe_modes(card)}

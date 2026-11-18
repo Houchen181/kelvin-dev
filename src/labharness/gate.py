@@ -378,6 +378,20 @@ def _clock(when: Optional[float]) -> str:
     return time.strftime("%H:%M", time.localtime(when)) if when is not None else ""
 
 
+# how a request Kelvin would approve itself says, among its items, why a person answers it instead (auto_simple)
+NOT_ITSELF = "Not approved by Kelvin itself: "
+
+
+def asked_because(request: ApprovalRequest) -> str:
+    """Why a request Kelvin approves itself went to a person (auto_simple's item), and how it ended (its note), for
+    the words a declined one comes back with: an install the person didn't answer was said only as "declined", and
+    the model took the rule for auto mode's (field report 2026-11-17)."""
+    why = next((str(i)[len(NOT_ITSELF):] for i in request.items if str(i).startswith(NOT_ITSELF)), "")
+    bits = ([request.note] if request.note else []) + (["a person was asked, not Kelvin itself, because " + why]
+                                                       if why else [])
+    return " (%s)" % "; ".join(bits) if bits else ""
+
+
 def _paused(kind: str, read: str, until: str) -> str:
     """Why Kelvin asks a person: what was read (read), of which kind, and until when."""
     if kind == WEB:
@@ -851,7 +865,7 @@ class SafetyGate:
         answers). chat: as for outside_reason."""
         outside = self.outside_reason(chat)
         if outside:
-            request.items.append("Not approved by Kelvin itself: " + outside)
+            request.items.append(NOT_ITSELF + outside)
             return False
         self.auto_approve(request, [why], "drives nothing")
         return True

@@ -176,6 +176,16 @@ def a_look() -> bool:
     return bool(now is not None and len(now) > 2 and now[2])
 
 
+def this_wait() -> Tuple[Optional[Callable[[], bool]], Optional[float], bool]:
+    """This thread's stop, patience and whether its call is a look's own (stoppable), while it waits on a call;
+    (None, None, False) outside one. For a connection that waits for its driver's answer itself, not through a Courier:
+    a maker's library in its helper process (library.Bridge)."""
+    now = getattr(_waits, "now", None)
+    if now is None:
+        return None, None, False
+    return now[0], now[1], bool(len(now) > 2 and now[2])
+
+
 def stoppable(stopped: Callable[[], bool], patience: Optional[float] = None, look: bool = False) -> Any:
     """While this thread waits on a call into a driver (a with block): stopped() ends its wait, a person's Stop
     coming back at once (instrument.Stopped), and patience (a look's: the monitor's, a run's record of the
@@ -648,7 +658,7 @@ def where_and_cause(address: str) -> Tuple[str, str]:
             return "through a Prologix adapter (%s)" % rest, "cable or power?"
         return ("on GPIB (address %d) through the Prologix %s" % (at.pad, place(at.adapter)),
                 "cable or power? (or the adapter: unplugged, or held by another program)")
-    if sep and scheme.lower() == "jsonrpc":   # its own interface on the network, no maker's program between
+    if sep and scheme.lower() in ("jsonrpc", "zmq"):   # its own interface on the network, no maker's program between
         host = rest.split("?", 1)[0].split("/", 1)[0].rsplit(":", 1)[0] or rest
         return "on the network (%s)" % host, "network cable, power or its IP address?"
     if sep and scheme.lower() not in ("visa", "serial"):
@@ -921,6 +931,9 @@ def resource_name(address: str) -> str:
     if address.lower().startswith("prologix://"):   # not VISA's: one way to write it (prologix.py)
         from .prologix import canonical
         return canonical(address)
+    if address.lower().startswith("zmq://"):   # not VISA's either: one way to write it, its port spelt out (zeromq.py)
+        from .zeromq import canonical as zmq_canonical
+        return zmq_canonical(address)
     m = re.match(r"^serial://(.+)$", address)
     if m:
         port = m.group(1)

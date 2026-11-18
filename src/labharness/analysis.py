@@ -324,10 +324,12 @@ def _guess(model: str, us: Any, vs: Any) -> List[float]:
     if model == "step":
         return _step_starts(us, vs)[0]
     b, a, c, w = _peak_guess(us, vs)
-    if model == "double_lorentzian":   # the second line where the first leaves most behind
-        rest = vs - _lorentzian(us, [0.0, a, c, w])
-        _, a2, c2, _ = _peak_guess(us, rest)
-        return [b, a, c, w, a2, c2, w]
+    if model == "double_lorentzian":   # the second line where the first leaves most behind of its own sign (of either,
+        rest = vs - _lorentzian(us, [0.0, a, c, w])   # a doublet of dips started as a dip and a peak: 2026-11-17)
+        sign = -1.0 if a < 0 else 1.0
+        k = int(np.argmax(sign * rest))
+        a2 = float(rest[k]) if sign * rest[k] > 0 else 0.3 * a
+        return [b, a, c, w, a2, float(us[k]), w]
     return [b, a, c, w]
 
 
@@ -1060,14 +1062,18 @@ def _height(f: Dict[str, Any]) -> float:
 
 def _double_starts(np: Any, single: Dict[str, Any], x: Any, y: Any) -> List[List[float]]:
     """Where to start two lines from the best one (normalised as fit() will): the second where the one leaves most
-    behind, or the one split in two (a doublet fitted as one broad line)."""
+    behind of its own sign, or the one split in two (a doublet fitted as one broad line). The second started where it
+    left most of either sign: one line as wide as a doublet of dips overshoots beside them, and the second started as a
+    peak, as in fitting's double_lorentzian (field report 2026-11-17)."""
     xc, xs_, yc, ys_ = single["_norm"]
     b, a, c, w = single["_p"]
     w = abs(w)
     us, vs = (x - xc) / xs_, ((10 ** (y / 10) if single.get("on_power") else y) - yc) / ys_
     rest = vs - b - a / (1 + ((us - c) / (w / 2 + 1e-12)) ** 2)
-    k = int(np.argmax(np.abs(rest)))
-    return [[b, a, c, w, float(rest[k]), float(us[k]), w],
+    sign = -1.0 if a < 0 else 1.0
+    k = int(np.argmax(sign * rest))
+    a2 = float(rest[k]) if sign * rest[k] > 0 else 0.3 * a   # none of its sign left: a small one beside it
+    return [[b, a, c, w, a2, float(us[k]), w],
             [b, 0.8 * a, c - w / 4, w / 2, 0.8 * a, c + w / 4, w / 2]]
 
 

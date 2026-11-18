@@ -35,9 +35,11 @@ the static calls its examples make first, and the factory that makes the object:
                close: [StopPolling, Disconnect] }
 with "GET Position" (a property, read without calling) and "SET MoveTo {value} 60000" (Kelvin passes the value as
 the Decimal the method takes). A COM object (an older maker's program's automation) is library: {com: <ProgID>},
-and a property it sets is "SET Exposure= {value}". The library runs in a helper process (data/bridge/
-kelvin_bridge.py), so a crash or a 32-bit DLL never takes Kelvin down, only functions the card names can be called,
-and only on objects the maker's own package made."""
+and a property it sets is "SET Exposure= {value}". A reading whose function records for a while before it answers
+(a lab's acquireHistogram(gate)) is "GET acquireHistogram 1" with acquires: true and wait: <seconds>: its call may
+take that long on top of the connection's timeout, and a person's Stop ends Kelvin's wait for it. The library runs in
+a helper process (data/bridge/kelvin_bridge.py), so a crash or a 32-bit DLL never takes Kelvin down, only functions
+the card names can be called, and only on objects the maker's own package made."""
 from __future__ import annotations
 
 import collections
@@ -50,11 +52,11 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from .adapters import AdapterError, LinkLost, NoAnswer
+from .adapters import STOP_SLICE_S, AdapterError, LinkLost, NoAnswer, this_wait
 from .cards import Card
-from .drivers import DriverBackend
+from .drivers import LOOK_CALL_S, DriverBackend
 
 BRIDGE = Path(__file__).parent / "data" / "bridge" / "kelvin_bridge.py"
 # a helper whose Kelvin has gone (crashed, or was ended): the card's close calls, then it ends; past this it ends anyway,
@@ -121,12 +123,32 @@ def card_calls(card: Card) -> Tuple[Set[str], Set[str]]:
     return sets, gets
 
 
+def acquisitions(card: Card) -> Dict[str, float]:
+    """The functions the card's readings that acquire call (acquires: true: they record for a while, then answer),
+    with the seconds such a call may take on top of the connection's timeout: its reading's wait (0 without one; the
+    longest where several readings call it)."""
+    out: Dict[str, float] = {}
+    for spec in card.params.values():
+        m = _CALL.match(spec.get_cmd.text) if spec.acquires and spec.get_cmd is not None else None
+        if m and m.group(1).upper() == "GET":
+            out[m.group(2)] = max(out.get(m.group(2), 0.0), float(spec.wait_s or 0.0))
+    return out
+
+
 class Bridge:
     """The helper process: one request at a time, each answered within a timeout.
 
     A helper that stopped (the maker's library crashed it) is gone: LinkLost, and connecting the instrument again
     starts a fresh one. So is one whose call didn't return in time: Kelvin ends it (NoAnswer), as the call may never
-    return and every request after it would wait behind it, and the helper would hold the device for good."""
+    return and every request after it would wait behind it, and the helper would hold the device for good.
+
+    Inside an exchange with the instrument (Instrument._io), a person's Stop ends Kelvin's wait for an answer at once
+    (instrument.Stopped), as it does a maker's driver's call (adapters.stoppable), and a look (the monitor's) waits for
+    its own call LOOK_CALL_S at most (instrument.GaveUp): an acquisition may take its card's wait and more (a lab's
+    acquireHistogram records for its gate first; field report 2026-11-17). The call goes on in the helper, which
+    answers one request at a time, so nothing more is sent until it has answered (left); a Stop, or a look's patience,
+    ends that wait too, with nothing sent, and past the time the call had, the helper is ended, as for any call that
+    doesn't return."""
 
     def __init__(self, name: str, command: List[str]):
         self.name = name
@@ -143,6 +165,9 @@ class Bridge:
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._drain, daemon=True).start()
         self.next_id = 0
+        # a call Kelvin stopped waiting for (a person's Stop, a look that gave up), which the helper may still be
+        # making: (its id, what it calls, the time it had, when that is up), answered before anything more is sent
+        self.left: Optional[Tuple[int, str, float, float]] = None
 
     @property
     def gone(self) -> str:
@@ -175,6 +200,13 @@ class Bridge:
         if self._gone:
             raise LinkLost("%s: the library's helper was ended (%s); connecting the instrument again starts a fresh "
                            "one" % (self.name, self._gone))
+        stopped, patience, look = this_wait()   # this thread's own, inside an exchange (Instrument._io); else none
+        if self.left is not None:
+            self._behind(stopped, patience)
+        what = fields.get("name", op)
+        if stopped is not None and stopped():   # a Stop came first: the call is never made
+            from .instrument import Stopped
+            raise Stopped("%s: stopped by a person before Kelvin called %s" % (self.name, what))
         self.next_id += 1
         rid = self.next_id
         try:
@@ -183,28 +215,80 @@ class Bridge:
         except OSError as e:
             self._gone = "its helper process has stopped"
             raise LinkLost("%s: the library's helper has stopped%s" % (self.name, self._said())) from e
-        deadline = time.monotonic() + timeout
+        return self._answer(rid, what, timeout, stopped, LOOK_CALL_S if look else None)
+
+    def _answer(self, rid: int, what: str, timeout: float, stopped: Optional[Callable[[], bool]],
+                give_up: Optional[float]) -> Any:
+        """The helper's answer to request rid, waited for `timeout` seconds at most: past that the helper is ended
+        (NoAnswer). stopped() (a person's Stop) ends the wait at once, and a look's after give_up seconds: the call
+        is left to the helper (left). An answer there already is taken first, as a courier's is."""
+        began = time.monotonic()
+        deadline = began + timeout
         while True:
-            try:
-                line = self.lines.get(timeout=max(0.01, deadline - time.monotonic()))
-            except queue.Empty:
-                what = fields.get("name", op)
+            reply = self._reply(deadline)
+            if reply is not None and reply.get("id") == rid:   # else none yet, or one Kelvin no longer waits for
+                if not reply.get("ok"):
+                    raise AdapterError("%s: %s" % (self.name, reply.get("error")))
+                return reply.get("value")
+            now = time.monotonic()
+            if now >= deadline:
                 self._end("the library didn't answer %s within %g s" % (what, timeout))
                 raise NoAnswer("%s: the library did not answer %s within %g s%s; Kelvin ended its helper, as the call "
                                "may never return: connecting the instrument again starts a fresh one"
                                % (self.name, what, timeout, self._said()))
-            if line is None:
-                self._gone = "its helper process has stopped"
-                raise LinkLost("%s: the library's helper stopped%s" % (self.name, self._said()))
-            try:
-                reply = json.loads(line.decode("utf-8"))
-            except ValueError:
-                continue
-            if reply.get("id") != rid:
-                continue   # the answer to a request that timed out
-            if not reply.get("ok"):
-                raise AdapterError("%s: %s" % (self.name, reply.get("error")))
-            return reply.get("value")
+            if stopped is not None and stopped():
+                self.left = (rid, what, timeout, deadline)
+                from .instrument import Stopped
+                raise Stopped("%s: stopped by a person while its library was still in %s, which goes on in its helper: "
+                              "nothing more is sent to it until that is done" % (self.name, what))
+            if give_up is not None and now - began > give_up:
+                self.left = (rid, what, timeout, deadline)
+                from .instrument import GaveUp
+                raise GaveUp("%s is busy: its library hasn't returned from %s in %d s; a look waits no longer (the "
+                             "call goes on)" % (self.name, what, round(give_up)))
+
+    def _behind(self, stopped: Optional[Callable[[], bool]], patience: Optional[float]) -> None:
+        """Waits for the answer to the call Kelvin stopped waiting for (left), which the helper gives before any other,
+        with nothing sent beside it. A person's Stop (Stopped) and a look's or a way to safe's patience (Busy) end this
+        wait, nothing sent; past the time that call had, the helper is ended (NoAnswer), as for any call that doesn't
+        return."""
+        rid, what, timeout, deadline = self.left
+        began = time.monotonic()
+        while True:
+            reply = self._reply(deadline)
+            if reply is not None and reply.get("id") == rid:
+                self.left = None
+                return
+            now = time.monotonic()
+            if now >= deadline:
+                self.left = None
+                self._end("the library didn't answer %s within %g s" % (what, timeout))
+                raise NoAnswer("%s: the library did not answer %s within %g s%s (a call Kelvin had stopped waiting "
+                               "for); Kelvin ended its helper, as the call may never return: connecting the "
+                               "instrument again starts a fresh one" % (self.name, what, timeout, self._said()))
+            if stopped is not None and stopped():
+                from .instrument import Stopped
+                raise Stopped("%s: stopped by a person while its library was still in %s; nothing was sent"
+                              % (self.name, what))
+            if patience is not None and now - began > patience:
+                from .instrument import Busy
+                raise Busy("%s is busy: its library is still in %s; nothing was sent" % (self.name, what))
+
+    def _reply(self, until: float) -> Optional[Dict[str, Any]]:
+        """The helper's next answer, waited for STOP_SLICE_S at most and never past `until`, so a caller waiting for
+        one looks for a Stop that often: None when none came. LinkLost once the helper has stopped."""
+        try:
+            line = self.lines.get(timeout=max(0.01, min(STOP_SLICE_S, until - time.monotonic())))
+        except queue.Empty:
+            return None
+        if line is None:
+            self._gone, self.left = "its helper process has stopped", None
+            raise LinkLost("%s: the library's helper stopped%s" % (self.name, self._said()))
+        try:
+            reply = json.loads(line.decode("utf-8"))
+        except ValueError:
+            return None
+        return reply if isinstance(reply, dict) else None
 
     def _said(self) -> str:
         last = [e for e in self.errors if e.strip()][-3:]
@@ -237,6 +321,7 @@ class LibraryInstrument(DriverBackend):
         self.target = (url.netloc + url.path).strip("/")
         self.timeout = float(card.connection.get("timeout_ms", 10000)) / 1000.0
         self.sets, self.gets = card_calls(card)
+        self.acquiring = acquisitions(card)   # function -> the seconds its acquisition takes besides the timeout
         self.toggles: Dict[str, Dict[str, str]] = dict(lib.get("toggles") or {})
         self.properties = set(lib.get("properties") or [])   # read and set without calling (.NET, COM)
         python = q.get("python")
@@ -329,7 +414,9 @@ class LibraryInstrument(DriverBackend):
         with self.lock:
             if fn in self.properties:
                 return _text(self.bridge.request("read", self.timeout, name=fn))
-            return _text(self.bridge.request("call", self.timeout, name=fn, args=args))
+            # an acquisition answers once it has recorded (acquireHistogram 1: a gate of a second): its reading's wait
+            # on top of the timeout, past which alone the helper would be ended mid-recording (field report 2026-11-17)
+            return _text(self.bridge.request("call", self.timeout + self.acquiring.get(fn, 0.0), name=fn, args=args))
 
     def identity(self) -> str:
         self.check_gone()
@@ -358,6 +445,10 @@ def _text(value: Any) -> str:
         return "%.12g" % value
     if isinstance(value, (int, str)):
         return str(value)
+    if isinstance(value, list) and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+        # numbers (an acquisition's histogram, a spectrum) separated by commas, as a trace and a field: read a reply:
+        # in JSON's brackets, "[0, 3, 5]" was no list of numbers to a trace (field report 2026-11-17)
+        return ",".join(_text(v) for v in value)
     return json.dumps(value)
 
 

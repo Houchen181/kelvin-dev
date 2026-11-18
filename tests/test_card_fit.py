@@ -90,7 +90,8 @@ def test_a_change_that_cannot_connect_or_finds_another_instrument_leaves_it_as_i
     assert rt.lab.instruments["lockin"].config.address == "GPIB0::8::INSTR"
     assert rt.lab.read("lockin", "R") is not None                        # connected again as it was
     assert (tmp_path / "lab.yaml").read_text(encoding="utf-8") == before
-    assert "names a program" in rt.change_instrument("cryo", address="lib://COM4?python=C:/x/python.exe")
+    said = rt.change_instrument("cryo", address="lib://COM4?python=C:/x/python.exe")   # a person's, once it is there
+    assert said.startswith("not changed: there is no") and "python.exe on this computer" in said
     assert rt.change_instrument("cryo", card="no/such-card").startswith("not changed: there is no card")
     rt.lab.switch("lockin", False)
     assert "lockin is disconnected from Kelvin in the Lab panel" in rt.change_instrument("lockin", address="GPIB0::9::INSTR")
