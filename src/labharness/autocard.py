@@ -21,9 +21,17 @@ manual's command reference with your model, and makes it safe to try whatever th
        *TST?, *CAL?: on some instruments they switch an output on or run a self-test) are left out. The identity
        pattern is checked against the instrument's own reply; for an instrument that gave none (the person named
        it), the manual's identity check stays as written, for try_card to test.
+    4. No manual with a command reference: an open driver's code instead (drivercode.py), the drivers the collection
+       lists first, then the open driver libraries on GitHub, then a web search; or the driver a person gave. The
+       model reads the commands it sends and the ranges of its validators; the card names the driver (library,
+       repository, path, commit, license) as its source, says in its header that it was not written from the
+       maker's manual, and is a draft like any other. A driver that reaches the instrument through the maker's
+       library (a DLL, a .NET assembly, a COM object, the maker's package) is named with what it loads: its card is
+       a library card.
 
-Only the maker and the model name leave the computer (to your model and the maker's site), never the serial number.
-A person reviews the card against the manual and marks it reviewed; until then nothing on it changes without them."""
+Only the maker and the model name leave the computer (to your model and the maker's site; from GitHub Kelvin only
+downloads public code), never the serial number. A person reviews the card against the manual and marks it reviewed;
+until then nothing on it changes without them."""
 from __future__ import annotations
 
 import html as html_lib
@@ -436,13 +444,38 @@ def framing(serial: Dict[str, Any]) -> str:
                           float(serial.get("stop_bits", 1)))
 
 
+# a driver's code in a card's words: a method, self., an import, a lambda, a driver library's own calls
+_CODE = re.compile(r"\bself\.|\bdef \w+\s*\(|\blambda\b|^\s*(?:import|from)\s+\w|\b(?:Instrument\.(?:control|measurement|"
+                   r"setting)|add_parameter|sendcmd)\s*\(|\"\"\"|'''", re.M)
+
+
+def _uncoded(data: Dict[str, Any]) -> bool:
+    """A card drafted from a driver keeps its commands and ranges, never the driver's code or comments: a label,
+    description or note that is code is left out. Whether one was."""
+    dropped = False
+    params = data.get("parameters") if isinstance(data.get("parameters"), dict) else {}
+    for p in params.values():
+        for key in ("label", "description"):
+            if isinstance(p, dict) and isinstance(p.get(key), str) and _CODE.search(p[key]):
+                p.pop(key)
+                dropped = True
+    if isinstance(data.get("notes"), list):
+        kept = [n for n in data["notes"] if not (isinstance(n, str) and _CODE.search(n))]
+        dropped = dropped or len(kept) < len(data["notes"])
+        data["notes"] = kept
+    return dropped
+
+
 def make_safe(text: str, maker: str, model: str, idn: str, url: str, model_key: str,
               serial: Optional[Dict[str, Any]] = None, notes: Optional[List[str]] = None,
-              specs: str = "", entry: Optional[Dict[str, Any]] = None) -> Tuple[str, List[str]]:
+              specs: str = "", entry: Optional[Dict[str, Any]] = None,
+              driver: Optional[Dict[str, Any]] = None) -> Tuple[str, List[str]]:
     """The card as Kelvin keeps it, whatever the model wrote (see the module's notes), and what was changed.
     serial: the settings a serial instrument answered the scan with, for a card whose manual pages did not say.
     notes: what the model left out or is unsure of, and specs: where the ranges came from, for the card's header.
-    entry: the instrument collection's entry for the instrument, which names the card."""
+    entry: the instrument collection's entry for the instrument, which names the card. driver: the open driver it
+    was written from (drivercode.py), which its manual field and header name; url is then the maker's manual Kelvin
+    found without a command reference, if any, for checking the driver's limits against."""
     import yaml
     from .yamlio import load_yaml
     data = load_yaml(carddraft.extract_yaml(text))   # its numbers as the lab reads them: 1e-3 a number, not text
@@ -503,7 +536,13 @@ def make_safe(text: str, maker: str, model: str, idn: str, url: str, model_key: 
     if display.get("headline") and (display["headline"] not in params or not params[display["headline"]].get("get")):
         data.pop("display", None)
     data["manual_url"] = url if url.startswith("https://") else ""
-    data.setdefault("manual", "%s %s manual" % (maker, model))
+    if driver:   # the driver it came from, whatever the model wrote there: library, repository, path, commit, license
+        from .drivercode import source_words
+        data["manual"] = source_words(driver)
+        if _uncoded(data):
+            changed.append("left out text copied from the driver's code (a card holds commands and ranges)")
+    else:
+        data.setdefault("manual", "%s %s manual" % (maker, model))
     raw = data.get("raw") if isinstance(data.get("raw"), dict) else {}
     blocked = list(raw.get("blocked") or [])
     for b in ("CALibration", "SYSTem:FIRMware"):
@@ -511,9 +550,17 @@ def make_safe(text: str, maker: str, model: str, idn: str, url: str, model_key: 
             blocked.append(b)
     raw["blocked"] = blocked
     data["raw"] = raw
-    head = ("# Drafted by Kelvin on %s from %s%s with %s.\n# A draft: check every command, limit and safe value "
-            "against the manual, then mark it reviewed in Lab setup.\n"
-            % (time.strftime("%Y-%m-%d"), url, " (ranges from %s)" % specs if specs else "", model_key))
+    if driver:
+        from .drivercode import describe
+        head = ("# Drafted by Kelvin on %s with %s from %s, not from the maker's manual%s\n# A draft: its commands, "
+                "limits and safe values are the driver's; check each against the maker's manual%s, then mark it "
+                "reviewed in Lab setup.\n" % (time.strftime("%Y-%m-%d"), model_key, describe(driver),
+                                             ":\n# " + driver["url"] if driver.get("url") else ".",
+                                             " (%s)" % data["manual_url"] if data["manual_url"] else ""))
+    else:
+        head = ("# Drafted by Kelvin on %s from %s%s with %s.\n# A draft: check every command, limit and safe value "
+                "against the manual, then mark it reviewed in Lab setup.\n"
+                % (time.strftime("%Y-%m-%d"), url, " (ranges from %s)" % specs if specs else "", model_key))
     if notes:
         head += "# What the model left out or was unsure of:\n" + "".join("#   %s\n" % n for n in notes)
     return head + yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=110), changed
@@ -561,12 +608,27 @@ def specs_excerpt(pages: List[str], model: str, about: List[str], limit: int = 2
     return "\n\n".join("[specifications, page %s]\n%s" % parts[n] for n in sorted(chosen))
 
 
+class LibraryDriver(ValueError):
+    """The model found that the driver reaches the instrument through the maker's library, not text: what it
+    loads."""
+
+
+def library_answer(answer: str) -> str:
+    """What a driver loads, when the model answered "Library: ..." instead of a card ('' for a card)."""
+    m = re.match(r"^\s*\**Library:\**\s*(.+)", answer or "", re.I | re.S)
+    return re.sub(r"\s+", " ", m.group(1)).strip()[:300] if m and "```" not in answer else ""
+
+
 def draft(manual_pages: List[str], maker: str, model: str, idn: str, url: str, ask: Ask,
           serial: Optional[Dict[str, Any]] = None, specs: Optional[Dict[str, Any]] = None,
-          entry: Optional[Dict[str, Any]] = None) -> Tuple[str, List[str], str, List[str]]:
+          entry: Optional[Dict[str, Any]] = None,
+          driver: Optional[Dict[str, Any]] = None) -> Tuple[str, List[str], str, List[str]]:
     """Write the card with the model, check it, and have the model repair it once. specs: the document with the
     instrument's ranges ({url, pages, about}), whose pages go first. entry: the instrument collection's entry for it,
-    whose id the card takes. Returns (card text, changes, model, what the model left out or is unsure of)."""
+    whose id the card takes. driver: an open driver's code to write it from instead of the manual's pages
+    (drivercode.py; url is then the maker's manual without a command reference, if Kelvin found one); LibraryDriver
+    when the model finds it calls the maker's library. Returns (card text, changes, model, what the model left out
+    or is unsure of)."""
     name = ("%s %s (it answers *IDN? with %r)" % (maker, model, ",".join(idn.split(",")[:2])) if idn else
             "%s %s (as the person named it; Kelvin has no identity reply from it)" % (maker, model))
     if entry and idn:
@@ -574,17 +636,25 @@ def draft(manual_pages: List[str], maker: str, model: str, idn: str, url: str, a
             entry.get("name") or "%s %s" % (maker, model), entry["id"], ",".join(idn.split(",")[:2]))
     if serial and serial.get("baud_rate"):
         name += "; over serial it answered at %s" % framing(serial)
-    ranges = specs_excerpt(specs["pages"], model, specs.get("about") or []) if specs else ""
-    answer, key = ask(carddraft.DRAFT_SYSTEM, carddraft.draft_prompt(command_excerpt(manual_pages, model=model), name,
-                                                                      ranges))
+    if driver:
+        from . import drivercode
+        system = carddraft.DRIVER_SYSTEM
+        prompt = carddraft.driver_prompt(drivercode.code(driver), name, drivercode.about(driver, model))
+    else:
+        ranges = specs_excerpt(specs["pages"], model, specs.get("about") or []) if specs else ""
+        system = carddraft.DRAFT_SYSTEM
+        prompt = carddraft.draft_prompt(command_excerpt(manual_pages, model=model), name, ranges)
+    answer, key = ask(system, prompt)
+    if driver and library_answer(answer):
+        raise LibraryDriver(library_answer(answer))
     notes = carddraft.notes_in(answer)
     where = (specs or {}).get("url", "")
-    text, changed = make_safe(answer, maker, model, idn, url, key, serial, notes, where, entry)
+    text, changed = make_safe(answer, maker, model, idn, url, key, serial, notes, where, entry, driver)
     card, problems, _ = carddraft.check(text)
     if problems:
-        answer, key = ask(carddraft.DRAFT_SYSTEM, carddraft.repair_prompt(text, problems))
+        answer, key = ask(system, carddraft.repair_prompt(text, problems))
         notes = carddraft.notes_in(answer) or notes
-        text, changed = make_safe(answer, maker, model, idn, url, key, serial, notes, where, entry)
+        text, changed = make_safe(answer, maker, model, idn, url, key, serial, notes, where, entry, driver)
         card, problems, _ = carddraft.check(text)
     if problems:
         raise ValueError("the card the model wrote still has problems: " + "; ".join(problems[:4]))
@@ -604,17 +674,27 @@ def draft_id(entry_id: str, model: str, taken: Any) -> str:
 
 def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: Optional[Fetch] = None,
               builtin_ids: Any = (), log: Callable[[str], None] = lambda m: None,
-              search: Optional[Callable[[str], List[str]]] = None, catalog: Any = None) -> Dict[str, Any]:
+              search: Optional[Callable[[str], List[str]]] = None, catalog: Any = None,
+              drivers_dir: Any = None) -> Dict[str, Any]:
     """For an instrument that matches no card: find its manual (or read the one the person gave: found's manual, a
     file or a web address), write its card, keep it as a draft. Maker and model come from its identity reply, else
     from found's maker and model (what the person said it is). Where the model says the manual leaves some ranges to
     another document, Kelvin finds it (or reads found's specs, which the person gave) and writes the card again.
+    Without a manual that has a command reference (and none given), the card is written from an open driver's code
+    (drivercode.find), or from found's driver, which the person gave: a GitHub address, a dotted name in one of the
+    open libraries, a file on this computer, or a driver drivercode.local read already.
     builtin_ids: the ids Kelvin has cards for (its own and the collection's). catalog: the instrument collection
-    (collection.py), when it is on: if it knows the instrument, its manual addresses come first and it names the card.
+    (collection.py), when it is on: if it knows the instrument, its manual addresses come first and it names the card;
+    its drivers are tried first too. drivers_dir: where the open libraries' file lists are kept (~/Kelvin/drivers;
+    None: for this card only). fetch: the manuals' and, when given, GitHub's (else drivercode.http_get's).
     Returns {card_id, model, kind, manual: {url, data, kind}, changed, parameters, notes, specs, ranges_in, checks,
     safe_modes} (specs: where the ranges came from; ranges_in: the document they are in, if Kelvin could not get it;
     checks: a light source's safe values that look like they emit, safe_modes: each of its modes' safe value, both for
-    a person to check: carddraft.emitting_safe, safe_modes) or {error}."""
+    a person to check: carddraft.emitting_safe, safe_modes); for a card written from a driver, also driver: {library,
+    repo, commit, path, license, url}, its manual the maker's Kelvin found (with no command reference) or None. Else
+    {error}, with loads and driver for a driver that reaches the instrument through the maker's library."""
+    from . import drivercode
+    github = drivercode.GitHub(fetch, drivers_dir, log)
     fetch = fetch or profiles.http_get
     idn = str(found.get("idn") or "")
     entry = catalog.instrument_for(idn) if catalog is not None and idn else None
@@ -637,6 +717,13 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
                 "Kelvin needs the maker and the model to find the manual"}
     if ask is None:
         return {"error": "Kelvin needs a model to write the %s %s card: add an API key in Settings" % (maker, model)}
+    named = found.get("driver")
+    if named:   # the person gave the driver: the card is written from it
+        try:
+            driver = named if isinstance(named, dict) else drivercode.given(str(named), github, model)
+        except Exception as e:
+            return {"error": "Kelvin could not read the driver %s: %s" % (named, profiles._first_line(e))}
+        return _from_driver(driver, found, maker, model, idn, ask, entry, None, "", cards_dir, builtin_ids, log)
     given = str(found.get("manual") or "").strip()
     if given:   # the person gave it: a file on this computer or its web address
         try:
@@ -652,9 +739,25 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
                              known=manuals(entry) if entry else ())
         if manual is None and asked:
             return {"error": "Kelvin could not ask a model about the %s %s (%s)" % (maker, model, asked[0])}
+    if manual is None or (manual["score"] < 15 and not given):   # no command reference: an open driver's code
+        why = ("Kelvin could not find the %s %s manual online" % (maker, model) if manual is None else
+               "the %s %s manual (%s) has no command reference" % (maker, model, manual["url"]))
+        try:
+            driver, problems = drivercode.find(github, maker, model,
+                                               entry or drivercode.entry_named(catalog, maker, model), search, log)
+        except Exception as e:   # the search for a driver never takes the manual's answer away
+            log("looking for an open driver: %s" % profiles._first_line(e))
+            driver, problems = None, [profiles._first_line(e)]
+        if driver is not None:
+            log("%s; writing the card from %s" % (why, drivercode.describe(driver)))
+            return _from_driver(driver, found, maker, model, idn, ask, entry, manual, why, cards_dir, builtin_ids,
+                                log)
+        nor = " (%s)" % problems[0] if problems else ""
         if manual is None:
-            return {"error": "Kelvin could not find the %s %s manual online: choose its PDF under Make a card for "
-                             "it from its manual" % (maker, model)}
+            return {"error": "%s, nor an open driver for it on GitHub%s: choose its PDF under Make a card for it from "
+                             "its manual" % (why, nor)}
+        return {"error": "%s, and Kelvin found no open driver for it on GitHub%s: choose the programming manual's PDF "
+                         "in Lab setup" % (why, nor)}
     if manual["score"] < 15:
         return {"error": "the %s %s manual (%s) has no command reference: choose the programming manual's PDF in "
                          "Lab setup" % (maker, model, manual["url"])}
@@ -686,6 +789,15 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
         except Exception as e:
             log("could not write the card again with %s: %s" % (specs["url"], profiles._first_line(e)))
             specs = None
+    return _kept(text, changed, key, notes, maker, model, cards_dir, builtin_ids, log, manual,
+                 specs["url"] if specs else "", ranges_in)
+
+
+def _kept(text: str, changed: List[str], key: str, notes: List[str], maker: str, model: str, cards_dir: Any,
+          builtin_ids: Any, log: Callable[[str], None], manual: Optional[Dict[str, Any]], specs: str = "",
+          ranges_in: str = "", driver: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The drafted card kept in the person's cards folder as a draft (make_card's result): a light source's safe
+    values that look like they emit, said in its header too."""
     drafted, _, _ = carddraft.check(text)
     checks = carddraft.emitting_safe(drafted) if drafted is not None else []
     if checks:   # at the end of the card's header too, where a person reviewing it reads (field report 2026-11-17)
@@ -696,10 +808,46 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
         card, path, _ = carddraft.save(cards_dir, text, builtin_ids, by="kelvin")
     except Exception as e:
         return {"error": "Kelvin could not write the %s %s card: %s" % (maker, model, profiles._first_line(e))}
-    log("wrote %s from %s with %s (%s)" % (card.id, manual["url"], key, "; ".join(changed) or "as drafted"))
+    source = (driver.get("url") or driver["path"]) if driver else manual["url"]
+    log("wrote %s from %s with %s (%s)" % (card.id, source, key, "; ".join(changed) or "as drafted"))
     params = ", ".join("%s (%s%s)" % (p.name, "output" if p.is_drive else "setting" if p.set_cmd else "reading",
                                       ", " + p.unit if p.unit else "") for p in card.params.values())
-    return {"card_id": card.id, "model": card.model, "kind": card.kind, "changed": changed, "by": key,
-            "manual": {"url": manual["url"], "data": manual["data"], "kind": manual["kind"]}, "path": str(path),
-            "parameters": params, "notes": notes, "specs": specs["url"] if specs else "", "ranges_in": ranges_in,
-            "checks": checks, "safe_modes": carddraft.safe_modes(card)}
+    out = {"card_id": card.id, "model": card.model, "kind": card.kind, "changed": changed, "by": key,
+           "manual": {"url": manual["url"], "data": manual["data"], "kind": manual["kind"]} if manual else None,
+           "path": str(path), "parameters": params, "notes": notes, "specs": specs, "ranges_in": ranges_in,
+           "checks": checks, "safe_modes": carddraft.safe_modes(card)}
+    if driver:
+        out["driver"] = _public(driver)
+    return out
+
+
+def _public(driver: Dict[str, Any]) -> Dict[str, Any]:
+    """A driver as make_card's result names it: where it is, never its code."""
+    return {k: driver.get(k) or "" for k in ("library", "repo", "commit", "path", "license", "url")}
+
+
+def _from_driver(driver: Dict[str, Any], found: Dict[str, Any], maker: str, model: str, idn: str, ask: Ask,
+                 entry: Optional[Dict[str, Any]], manual: Optional[Dict[str, Any]], why: str, cards_dir: Any,
+                 builtin_ids: Any, log: Callable[[str], None]) -> Dict[str, Any]:
+    """The card written from an open driver's code (drivercode.py), kept as a draft like any Kelvin writes. manual:
+    the maker's manual Kelvin found without a command reference (its address goes on the card, to check the driver's
+    limits against). why: why not from the manual, said first when the driver calls the maker's library instead."""
+    from .drivercode import describe
+    what = "; ".join(driver.get("loads") or [])
+    try:
+        if not what:
+            url = manual["url"] if manual and str(manual["url"]).startswith("https://") else ""
+            text, changed, key, notes = draft([], maker, model, idn, url, ask, found.get("serial"), entry=entry,
+                                              driver=driver)
+            return _kept(text, changed, key, notes, maker, model, cards_dir, builtin_ids, log,
+                         manual if manual and manual.get("data") else None, driver=driver)
+    except LibraryDriver as e:
+        what = str(e)
+    except Exception as e:
+        return {"error": "Kelvin could not write the %s %s card from %s: %s" % (maker, model, describe(driver),
+                                                                               profiles._first_line(e)),
+                "driver": _public(driver)}
+    lead = "%s; the open driver Kelvin found, %s," % (why, describe(driver)) if why else describe(driver)
+    return {"error": "%s reaches the %s %s through the maker's library, not text commands: it loads %s. A text card "
+                     "can't be written from it, only a library card" % (lead, maker, model, what),
+            "loads": list(driver.get("loads") or []) or [what], "driver": _public(driver)}

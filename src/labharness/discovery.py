@@ -51,6 +51,7 @@ class Found:
     collection: str = ""   # no card matches, but the instrument collection knows it: its id there
     manuals: List[str] = field(default_factory=list)   # and the addresses of its public manuals
     usb: str = ""          # its USB ID (VID:PID), when it is on USB and this computer says so
+    software: List[str] = field(default_factory=list)   # and, briefly, its drivers, SDKs and examples there
 
     def suggest_name(self, taken: Iterable[str] = ()) -> str:
         base = SHORT_NAMES.get(self.kind, re.sub(r"[^a-z0-9]+", "", self.kind.lower()) or "instr")
@@ -68,15 +69,19 @@ class Found:
             return "%s: %s → card %s (%s)%s" % (self.address, self.model, self.card_id, self.kind, where)
         if self.idn and self.collection:
             return ("%s: %s (%s in the instrument collection) answered, but there is no card for it yet; a card can be "
-                    "drafted from its manual%s%s" % (self.address, self.model, self.collection,
-                                                     " (%s)" % self.manuals[0] if self.manuals else "", where))
+                    "drafted from its manual%s%s%s" % (
+                        self.address, self.model, self.collection, " (%s)" % self.manuals[0] if self.manuals else "",
+                        " or an open driver; the collection lists %s" % "; ".join(self.software) if self.software else "",
+                        where))
         if self.idn:
             return "%s: answered %r but no card matches; a card can be drafted for it%s" % (self.address, self.idn[:80], where)
         if self.collection:   # named by its USB ID: it said nothing of who it is
             return ("%s: %s (%s in the instrument collection, by its USB ID %s) didn't say who it is, and there is no "
-                    "card for it yet; a card can be drafted from its manual%s%s" % (
+                    "card for it yet; a card can be drafted from its manual%s%s%s" % (
                         self.address, self.model, self.collection, self.usb,
-                        " (%s)" % self.manuals[0] if self.manuals else "", where))
+                        " (%s)" % self.manuals[0] if self.manuals else "",
+                        " or an open driver; the collection lists %s" % "; ".join(self.software) if self.software else "",
+                        where))
         return "%s: %s%s" % (self.address, self.how or "no answer", where)
 
 
@@ -219,7 +224,8 @@ def find_cards(query: str, registry: CardRegistry, catalog: Any = None, limit: i
 
 def look_up(found: Found, catalog: Any) -> Found:
     """An instrument that answered but matches no card: its name, kind and public manuals from the instrument
-    collection (collection.Collection), if the collection knows its identity reply."""
+    collection (collection.Collection), if the collection knows its identity reply; and, briefly, the drivers, SDKs
+    and examples it lists for it (drivercode.listed)."""
     entry = catalog.instrument_for(found.idn) if catalog is not None and found.idn else None
     if entry:
         _as_entry(found, entry, "no card yet; the instrument collection knows it as %s" % entry["id"])
@@ -227,9 +233,14 @@ def look_up(found: Found, catalog: Any) -> Found:
 
 
 def _as_entry(found: Found, entry: Dict[str, Any], how: str) -> Found:
-    """An instrument named as the instrument collection's entry names it: its id there, name, kind, public manuals."""
+    """An instrument named as the instrument collection's entry names it: its id there, name, kind, public manuals, and
+    briefly the drivers, SDKs and examples it lists (a card can be drafted from an open driver: drivercode.py)."""
     from .collection import manuals
+    from .drivercode import listed
     found.collection, found.manuals = str(entry["id"]), manuals(entry)
+    more = listed(entry, drivers=3, examples=1)
+    found.software = ["drivers and SDKs: %s" % "; ".join(more["drivers"])] if more["drivers"] else []
+    found.software += ["examples: %s" % "; ".join(more["examples"])] if more["examples"] else []
     found.model = str(entry.get("name") or "%s %s" % (entry.get("maker", ""), entry.get("model", ""))).strip()
     found.kind = str(entry.get("kind") or "")
     found.how = how

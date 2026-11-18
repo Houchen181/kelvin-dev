@@ -4,9 +4,9 @@ Removed, Kelvin's own:  settings and API keys, the ChatGPT sign-in (revoked with
                         memory, the team chat, the accounts, the lab owner's PIN and the lab's roles (with the copy of
                         the owner's notification settings), the lab config and its history, the lab's memory and
                         timings, your instrument cards, the instrument folders with their manuals, the manuals Kelvin
-                        kept, its copy of the instrument collection, what it installed for instruments (its
-                        environments, uv and their Pythons), downloaded updates, Claude Code's working folder, the
-                        app's log, lock file and window cache. With accounts, each person's too.
+                        kept, its copy of the instrument collection and its lists of open drivers, what it installed
+                        for instruments (its environments, uv and their Pythons), downloaded updates, Claude Code's
+                        working folder, the app's log, lock file and window cache. With accounts, each person's too.
 Kept, your measurements: every run folder, the record of commands and approvals (events.jsonl) and reports, in
                         ~/Kelvin/lab (what was done while nobody was signed in), ~/Kelvin/virtual-lab, in each lab's
                         ~/Kelvin/labs/<lab>, in each person's ~/Kelvin/users/<name>/data and in any data folder chosen
@@ -30,8 +30,9 @@ HARNESS = ("settings.json", "chatgpt.json", "app.json", "kelvin.log", "lab.yaml"
            "lab-memory.json", "virtual-lab-memory.json", "lab-memory.tmp", "virtual-lab-memory.tmp",   # labmemory.py
            "timing.json", "timing.json.tmp",   # how long this lab's readings and ramp steps take (timing.py)
            "team-chat.jsonl",   # the team chat: what people here wrote to each other (teamchat.py)
-           "collection", "updates", "claude-code")   # the instrument collection's copy, downloaded installers
+           "collection", "updates", "claude-code",   # the instrument collection's copy, downloaded installers
                                                      # (updater.py), Claude Code's working folder (claudecode.py)
+           "drivers")   # the open driver libraries' file lists, for cards written from drivers (drivercode.py)
 DATA_HARNESS = ("chats",)   # in the default data folders (lab, virtual-lab): the conversations, projects and memory
 PERSON = ("settings.json", "settings.tmp", "chatgpt.json", "chatgpt.tmp", "chats")   # in each ~/Kelvin/users/<name>
 MEASUREMENTS = ("runs", "reports", "events.jsonl")

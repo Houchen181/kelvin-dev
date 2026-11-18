@@ -8242,9 +8242,11 @@ class LabRuntime:
     def find_card(self, query: str = "") -> str:
         """The cards Kelvin has (its own, the instrument collection's, the lab's) for a maker and model, a kind, an
         identity reply or a driver address, and the instruments the collection knows that have no card yet, with
-        their manuals: what to look up before writing a card. Only reads Kelvin's files."""
+        their manuals, drivers, SDKs and examples (briefly): what to look up before writing a card. Only reads
+        Kelvin's files."""
         from ..collection import manuals
         from ..discovery import find_cards
+        from ..drivercode import listed
         from ..homelab import lab_registry
         registry = lab_registry(self.home, self.collection) if self.home is not None else self.lab.registry
         found = find_cards(query, registry, self.collection)
@@ -8262,9 +8264,18 @@ class LabRuntime:
                 lines.append("No card yet, but the instrument collection knows:")
             links = manuals(e)
             lines.append("- %s: %s (%s)%s" % (e.get("id"), e.get("name") or e.get("model"), e.get("kind") or "?",
-                                              "; manual " + links[0] if links else ""))
+                                              "; manual " + links[0] if links else "; no public manual"))
+            more = listed(e)
+            if more["drivers"]:
+                lines.append("  drivers and SDKs: " + "; ".join(more["drivers"]))
+            if more["examples"]:
+                lines.append("  examples: " + "; ".join(more["examples"]))
         if found["entries"]:
-            lines.append("draft_card writes its card from the manual the collection links (or draft_card with manual).")
+            lines.append("draft_card writes its card from the manual the collection links (or draft_card with "
+                         "manual); without a manual that has a command reference, from an open driver's code (the "
+                         "drivers listed, or draft_card with driver: a GitHub address or a dotted name). A driver or "
+                         "SDK that calls the maker's library makes a library card (install_for_instrument, "
+                         "library_api).")
         if not lines:
             lines.append("Kelvin has no card for %r%s; draft_card finds the maker's manual and writes one." % (
                 query, "" if self.collection is not None and self.collection.index() else
@@ -10271,17 +10282,25 @@ class LabRuntime:
                             opened=opened, copied=copied if offer.copy else None)
         return contribute.said(offer, opened, copied)
 
-    def draft_card(self, address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "") -> str:
+    def draft_card(self, address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "",
+                   driver: str = "") -> str:
         """A card for an instrument Kelvin has none for: Kelvin finds the maker's manual online (or reads the one the
         person gave: `manual`, a file on this computer or its web address), writes the card from its command reference
         with the app's model, checks it and keeps it as a draft (autocard.py). Where the manual leaves some ranges to
-        another document, Kelvin looks for it too (or reads `specs`, which the person gave). The maker and model come
-        from the instrument's identity reply (the last scan), else from what the person said. Only they leave the
-        computer, never a serial number. Sends the instrument nothing."""
+        another document, Kelvin looks for it too (or reads `specs`, which the person gave). Without a manual that has
+        a command reference, Kelvin writes it from an open driver's code instead (drivercode.py), or from `driver`,
+        the one the person or the agent names: a GitHub address, a dotted name in one of the open libraries, or a file
+        on this computer the file tools may read (_unreadable). The maker and model come from the instrument's
+        identity reply (the last scan), else from what the person said. Only they leave the computer, never a serial
+        number. Sends the instrument nothing."""
         from ..adapters import resource_name
         if self.card_writer is None:
             return ("Kelvin writes cards from manuals in the Kelvin app. Here, write it yourself: the person gives the "
                     "manual's text, then card_guide, check_card, try_card and save_card")
+        driver = (driver or "").strip().strip('"')
+        if driver and ((manual or "").strip() or (specs or "").strip()):
+            return ("no card yet: a card is written from the manual (with specs) or from a driver: give manual or "
+                    "driver, not both")
         address = (address or "").strip()
         found = self.found_info.get(resource_name(address), {}) if address else {}
         idn = str(found.get("idn") or "")
@@ -10301,23 +10320,51 @@ class LabRuntime:
         if not idn and not (maker.strip() and model.strip()):
             return ("%s did not answer who it is%s: give the maker and the model the person named"
                     % (address or "the instrument", "" if found else " (or the last scan did not find it)"))
+        from .. import drivercode
+        source: Any = driver
+        if drivercode.on_this_computer(driver):   # read here, as the file tools read a file
+            refused = self._unreadable(driver)
+            if refused:
+                return "no card yet: %s" % refused
+            try:   # read here, each file of its package as the file tools would read it
+                source = drivercode.local(driver, refuse=self._unreadable)
+            except (OSError, ValueError) as e:
+                return "no card yet: Kelvin could not read the driver %s: %s" % (driver, str(e).splitlines()[0])
+        asked = {"address": address, "idn": idn, "maker": maker.strip(), "model": model.strip(),
+                 "manual": (manual or "").strip(), "specs": (specs or "").strip(), "serial": found.get("serial") or {}}
+        if source:   # its address or dotted name, or the driver on this computer as read here
+            asked["driver"] = source
         try:
-            r = self.card_writer({"address": address, "idn": idn, "maker": maker.strip(), "model": model.strip(),
-                                  "manual": (manual or "").strip(), "specs": (specs or "").strip(),
-                                  "serial": found.get("serial") or {}})
+            r = self.card_writer(asked)
         except Exception as e:   # the model or the maker's site failed in a way autocard did not catch
             r = {"error": str(e).splitlines()[0] if str(e) else type(e).__name__}
         if r.get("error"):
-            hint = "" if manual or "manual" not in r["error"] else (
-                " (ask the person for the manual's PDF or web address, then draft_card with manual)")
+            if r.get("loads"):   # a driver that calls the maker's library: a library card, not a text one
+                return ("no card yet: %s. To write that library card: card_guide (its library section), "
+                        "install_for_instrument for the maker's package or files in an environment of their own, "
+                        "library_api for their functions, then the card with library: at the address "
+                        "lib://<address>?env=<that environment>; check_card, try_card and save_card" % r["error"])
+            hint = "" if manual or driver or "manual" not in r["error"] else (
+                " (ask the person for the manual's PDF or web address, then draft_card with manual; or a driver: "
+                "draft_card with driver, its GitHub address or file)")
             return "no card yet: %s%s" % (r["error"], hint)
         if r.get("manual") and address:
             self.manuals_found[resource_name(address)] = r["manual"]
-        self.gate.log.write("card", by="agent", card=r["card_id"], status="draft", manual=(r.get("manual") or {}).get("url"))
+        used = r.get("driver") or {}
+        self.gate.log.write("card", by="agent", card=r["card_id"], status="draft",
+                            manual=(r.get("manual") or {}).get("url"), driver=used.get("url") or used.get("path"))
+        if used:   # library, repository@commit, path and license
+            where = "%s, not from the maker's manual" % drivercode.describe(used)
+        else:
+            where = (r.get("manual") or {}).get("url") or "its manual"
         lines = ["drafted card %s (%s, %s) from %s%s%s." % (
-            r["card_id"], r["model"], r["kind"], (r.get("manual") or {}).get("url") or "its manual",
+            r["card_id"], r["model"], r["kind"], where,
             " with ranges from %s" % r["specs"] if r.get("specs") else "",
             "; " + "; ".join(r["changed"]) if r.get("changed") else "")]
+        if used:
+            lines.append("Its commands, limits and safe values are the driver's: tell the person to check them against "
+                         "the maker's manual%s before marking it reviewed." % (
+                             " (%s)" % r["manual"]["url"] if r.get("manual") else ""))
         if r.get("parameters"):
             lines.append("parameters: " + r["parameters"])
         if r.get("notes"):   # what the model left out or is unsure of: the person should hear it

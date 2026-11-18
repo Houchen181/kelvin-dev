@@ -527,11 +527,17 @@ class AutoSetup:
                                 how="card written by Kelvin"))
             if r.get("manual"):
                 self._manuals[f["address"]] = r["manual"]
+            used = r.get("driver") or {}   # no manual with a command reference: an open driver's code (drivercode.py)
+            if used:
+                from .drivercode import describe
+                source = "From %s (%s), not from the maker's manual: check its limits against the manual" % (
+                    describe(used), used.get("url") or "on this computer")
+            else:
+                source = "From its manual (%s)" % r["manual"]["url"]
             self.runtime.notifier("setup", "Kelvin wrote a card for the %s" % r["model"],
-                                  "From its manual (%s). It is a draft: Kelvin asks you before each setting or output "
-                                  "change on it until you review it in Lab setup.%s" % (
-                                      r["manual"]["url"], " Left out or unsure: " + " ".join(r["notes"])
-                                      if r.get("notes") else ""))
+                                  "%s. It is a draft: Kelvin asks you before each setting or output change on it until "
+                                  "you review it in Lab setup.%s" % (
+                                      source, " Left out or unsure: " + " ".join(r["notes"]) if r.get("notes") else ""))
         return written, problems
 
     def _theirs_meanwhile(self, started: Any) -> bool:

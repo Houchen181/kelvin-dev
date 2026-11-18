@@ -1,5 +1,5 @@
-"""Cards for instruments Kelvin does not know yet: drafted from the manual or the maker's example scripts, checked,
-tried on the instrument, kept in ~/Kelvin/cards.
+"""Cards for instruments Kelvin does not know yet: drafted from the manual, the maker's example scripts or an open
+driver's code (drivercode.py), checked, tried on the instrument, kept in ~/Kelvin/cards.
 
 A card Kelvin writes is always a draft. On real hardware a draft card's readings work, so it can be tried against
 the instrument, but every setting and output change on it asks a person, saying the card is a draft, until a person
@@ -438,6 +438,38 @@ one ```yaml block, then short lines, one point each, on what you left out or are
 setting you made a drive, saying which value you made safe and why it emits or drives least. If the manual leaves an
 output's ranges to another document (its specifications or a datasheet), keep that output as a reading only and add
 the line "Ranges in: <that document's title>; for: <those outputs, e.g. amplitude, offset>". Status: draft."""
+
+
+DRIVER_RULES = """
+
+This time the source is an open-source driver's code, read as text (none of it runs), not the maker's manual:
+- The commands are the strings the driver sends: get_cmd and set_cmd (QCoDeS), Instrument.control, measurement and
+  setting (PyMeasure), a property helper's command (InstrumentKit's unitful_property and the like), and its write,
+  query, ask and sendcmd calls. Where an f-string or a template (%g, %d, %s, {}, {:.4f}) puts the value, the card has
+  {value}; a channel or an index the driver fills in is written out for each channel, or becomes a var.
+- The ranges are its validators: strict_range, truncated_range, strict_discrete_set and their values (PyMeasure),
+  vals=Numbers(lo, hi), Ints(lo, hi) and Enum(...) (QCoDeS), valid_range (InstrumentKit), a values=[...] list. A drive
+  the driver gives no range has no limits from it: make it a reading, or leave it out, and say so.
+- A value mapping (val_mapping; map_values with values; a dict of codes) gives an enum's codes; get_parser, cast and
+  get_process say how a reply is read.
+- A default in the driver (a keyword argument's default, a value it sets as it starts) is never a safe value: safe is
+  the state that takes the drive away from the sample, as for any card.
+- Anything the driver does not show stays out: no command, range, reply format or line end from memory. Say in your
+  notes what is missing, and that the limits are the driver's, to check against the maker's manual.
+- Copy no code and no comments into the card: it holds commands, ranges, replies and short descriptions in your own
+  words.
+- If the driver sends no text commands (it calls a maker's library: a DLL through ctypes or cffi, a .NET assembly, a
+  COM object, the maker's own Python package; or it speaks a binary protocol), write no card: answer with one line,
+  "Library: " and what it loads or speaks."""
+DRIVER_SYSTEM = DRAFT_SYSTEM + DRIVER_RULES
+
+
+def driver_prompt(code: str, name: str, about: str) -> str:
+    """code: the driver's files as one text, the driver first, then the files of its package it is built on (they
+    fit drivercode.BUDGET, which keeps them within the model's context); about: which driver it is, why Kelvin took
+    it, and how its library sends commands."""
+    return ("Instrument: %s\n\nAn example of a finished card, for the format:\n%s\n\nWrite it from %s\n\nIts code:\n%s"
+            % (name or "(see the driver)", example(), about, code.strip()))
 
 
 def draft_prompt(manual: str, name: str, specs: str = "") -> str:

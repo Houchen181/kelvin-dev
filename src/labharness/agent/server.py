@@ -543,9 +543,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def find_card(query: str = "") -> str:
         """The cards Kelvin has for an instrument: its own, the instrument collection's and the lab's, by maker and
         model (e.g. "AMI 430", "Mercury iTC"), kind ("lock-in"), identity reply or driver address (qd://...); and the
-        instruments the collection knows that have no card yet, with their manuals. Look here before draft_card or
-        writing a card: a card Kelvin has is used as it is, unless it doesn't fit this lab's instrument (then this
-        lab's version of it: save_card with version: true). No query lists every card."""
+        instruments the collection knows that have no card yet, with their manuals, and briefly their drivers and
+        SDKs (name, kind, dotted name, address) and the makers' examples. Look here before draft_card or writing a
+        card: a card Kelvin has is used as it is, unless it doesn't fit this lab's instrument (then this lab's version
+        of it: save_card with version: true). No query lists every card."""
         return rt.find_card(query)
 
     @server.tool(annotations=READ, structured_output=False)
@@ -778,15 +779,25 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=FETCH, structured_output=False)
     @cancellable
-    def draft_card(address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "") -> str:
+    def draft_card(address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "",
+                   driver: str = "") -> str:
         """Write a card for a connected instrument Kelvin has none for: Kelvin finds the maker's manual online, writes
-        the card from its command reference, checks it and keeps it as a draft. Maker and model come from the
-        instrument's identity reply (scan_instruments first); for one that gave none, pass what the person said it is.
+        the card from its command reference, checks it and keeps it as a draft. Without a public manual that has a
+        command reference, Kelvin writes it from an open driver's code instead: the drivers the instrument collection
+        lists (find_card), then the open driver libraries on GitHub (PyMeasure, QCoDeS and its contrib drivers,
+        InstrumentKit, pyLabLib), read as text at a fixed commit, never run; the card then names the driver it came
+        from (library, repository@commit, path, license), and its limits are the driver's, for the person to check
+        against the manual. A driver that calls the maker's library (a DLL, .NET, COM, the maker's package) gives no
+        text card: the result names what it loads, for a library card. Maker and model come from the instrument's
+        identity reply (scan_instruments first); for one that gave none, pass what the person said it is.
         manual: when Kelvin can't find it online, the manual the person gives (a file on this computer or its web
         address). specs: likewise, the specifications document an output's ranges are in, when the manual leaves them
-        there and Kelvin can't find it. Only the maker and model leave the computer. Takes a minute or two; sends the
-        instrument nothing."""
-        return outside(rt, "the maker's manual, through draft_card", rt.draft_card(address, maker, model, manual, specs))
+        there and Kelvin can't find it. driver: the driver to write the card from instead of a manual (not with
+        manual or specs): its GitHub address (a file, folder or repository), a dotted name in one of those libraries
+        (pymeasure.instruments.keithley.Keithley2000), or a file on this computer. Only the maker and model leave the
+        computer. Takes a minute or two; sends the instrument nothing."""
+        return outside(rt, "the maker's manual or a driver's code, through draft_card",
+                       rt.draft_card(address, maker, model, manual, specs, driver))
 
     @server.tool(annotations=WEB, structured_output=False)
     def read_web_page(url: str, start: int = 0, max_chars: int = 12000) -> str:

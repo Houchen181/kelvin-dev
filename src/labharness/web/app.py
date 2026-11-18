@@ -575,7 +575,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     def write_card(found: Dict[str, Any]) -> Dict[str, Any]:
         r = autocard.make_card(found, runtime.cards_dir, ask_model, builtin_ids=kelvin_ids(runtime.collection),
-                               log=lambda m: setup_log.info("  %s", m), search=search_web, catalog=runtime.collection)
+                               log=lambda m: setup_log.info("  %s", m), search=search_web, catalog=runtime.collection,
+                               drivers_dir=home / "drivers")   # the open driver libraries' file lists (drivercode.py)
         if r.get("path"):   # usable at once in Lab setup, like a card a person saves
             runtime.refresh_cards([r["card_id"]])
             runtime.config_changed("Kelvin (setup)", "wrote a draft card for %s" % (found.get("model") or
@@ -3678,8 +3679,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         r = await asyncio.to_thread(write_card, found)
         if r.get("error"):
             return error(400, r["error"])
+        source = (r.get("driver") or {}).get("url") or (r.get("manual") or {}).get("url")   # a driver's, or the manual
         return JSONResponse({k: r.get(k) for k in ("card_id", "model", "kind", "changed", "by")} |
-                            {"manual_url": (r.get("manual") or {}).get("url")})
+                            {"manual_url": source})
 
     async def draft_view(request: Request) -> Response:
         """Add chosen instruments [{name, card, address}] to a lab config text (`base`), keeping what is there."""
