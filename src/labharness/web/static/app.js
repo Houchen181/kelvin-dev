@@ -8170,7 +8170,8 @@
       check.checked = !!f.card_id;
       const name = h("input", { class: "found-input", value: f.suggested || "", placeholder: "name", spellcheck: "false", "aria-label": "Name" });
       const model = f.card_id ? h("span", { class: "found-model", title: f.idn || f.how }, f.model)
-        : cardSelect("", f.idn ? "Answered, but no card matches: choose one…" : "No answer: choose its card…");
+        : cardSelect("", f.idn ? "Answered, but no card matches: choose one…"
+          : f.collection ? "Named by its USB ID, no card yet: choose one…" : "No answer: choose its card…");
       if (!f.card_id) model.addEventListener("change", () => {
         check.checked = !!model.value;
         const card = LAB.cards.find((c) => c.id === model.value);
@@ -8178,12 +8179,14 @@
       });
       f.ui = { check, name, model };
       const row = h("label", { class: "found" }, check, name, model, h("code", { class: "found-addr", title: f.settings || "" }, f.address));
-      if (f.card_id || !f.idn) return row;
-      // it said who it is, but Kelvin has no card: Kelvin can find its manual and write one (a draft)
+      if (f.card_id || !(f.idn || f.collection)) return row;
+      // it said who it is (or the collection knows its USB ID), but Kelvin has no card: Kelvin can find its manual
+      // and write one (a draft)
       const write = h("button", { class: "link", type: "button" }, "Find its manual and write its card");
       write.addEventListener("click", (e) => { e.preventDefault(); writeCardFor(f, write); });
       return h("div", { class: "found-wrap" }, row, h("div", { class: "found-write" }, write,
-        h("span", { class: "muted small", title: f.idn }, f.collection ? f.model + " (the instrument collection knows it)"
+        h("span", { class: "muted small", title: f.idn || f.how }, f.collection ? f.model + (f.idn
+          ? " (the instrument collection knows it)" : " (the instrument collection knows its USB ID " + f.usb + ")")
           : f.idn.split(",").slice(0, 2).join(" "))));
     }));
   }
@@ -8191,7 +8194,7 @@
     btn.disabled = true;
     btn.textContent = "Finding its manual and writing the card (a minute or two)…";
     try {
-      const r = await api("/api/instruments/card", { body: { address: f.address, idn: f.idn } });
+      const r = await api("/api/instruments/card", { body: { address: f.address, idn: f.idn, collection: f.collection } });
       LAB.cards = (await api("/api/lab")).cards;
       Object.assign(f, { card_id: r.card_id, model: r.model, kind: r.kind, how: "card written by Kelvin" });
       if (!f.suggested) f.suggested = KIND_NAME[r.kind] || "instr";

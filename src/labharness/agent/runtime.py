@@ -10317,9 +10317,22 @@ class LabRuntime:
                     "unsure); draft_card writes cards only for instruments Kelvin has none for" % (
                         "a card" if len(have) == 1 else "cards",
                         "; ".join("%s (%s)" % (c.id, c.model) for c in have[:4])))
-        if not idn and not (maker.strip() and model.strip()):
+        named = str(found.get("collection") or "") if not idn else ""   # said nothing; the collection knows its USB ID
+        if not idn and not named and not (maker.strip() and model.strip()):
             return ("%s did not answer who it is%s: give the maker and the model the person named"
                     % (address or "the instrument", "" if found else " (or the last scan did not find it)"))
+        kept = Path(self.home) / "manuals" if self.home is not None else None   # where save_manual keeps them
+        for what, given in (("manual", manual), ("specs", specs)):   # a file here: what the file tools may read
+            given = (given or "").strip().strip('"')
+            if not given or re.match(r"^https?://", given):
+                continue
+            try:
+                saved = kept is not None and Path(given).expanduser().resolve().is_relative_to(kept.resolve())
+            except (OSError, RuntimeError, ValueError):
+                saved = False
+            refused = None if saved else self._unreadable(given)
+            if refused:
+                return "no card yet: %s (%s)" % (refused, what)
         from .. import drivercode
         source: Any = driver
         if drivercode.on_this_computer(driver):   # read here, as the file tools read a file
@@ -10332,6 +10345,8 @@ class LabRuntime:
                 return "no card yet: Kelvin could not read the driver %s: %s" % (driver, str(e).splitlines()[0])
         asked = {"address": address, "idn": idn, "maker": maker.strip(), "model": model.strip(),
                  "manual": (manual or "").strip(), "specs": (specs or "").strip(), "serial": found.get("serial") or {}}
+        if named:   # the collection's entry it was named by (its USB ID): the card's maker, model and manual
+            asked["collection"] = named
         if source:   # its address or dotted name, or the driver on this computer as read here
             asked["driver"] = source
         try:

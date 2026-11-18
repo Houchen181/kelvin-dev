@@ -3671,10 +3671,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(503, str(e))
 
     async def card_for_found(request: Request) -> Response:
-        """A person asks Kelvin to write the card for an instrument a scan found: {address, idn}."""
+        """A person asks Kelvin to write the card for an instrument a scan found: {address, idn}, or {address,
+        collection} for one that said nothing but the instrument collection knows by its USB ID (discovery.by_usb)."""
         body = await request.json()
-        found = {"address": str(body.get("address") or ""), "idn": str(body.get("idn") or "")}
-        if not found["idn"]:
+        found = {"address": str(body.get("address") or ""), "idn": str(body.get("idn") or ""),
+                 "collection": str(body.get("collection") or "")}
+        if not found["idn"] and not found["collection"]:
             return error(400, "That instrument did not say who it is, so Kelvin can't look up its manual.")
         r = await asyncio.to_thread(write_card, found)
         if r.get("error"):

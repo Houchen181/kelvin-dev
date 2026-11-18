@@ -698,6 +698,8 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
     fetch = fetch or profiles.http_get
     idn = str(found.get("idn") or "")
     entry = catalog.instrument_for(idn) if catalog is not None and idn else None
+    if entry is None and catalog is not None and found.get("collection"):   # said nothing; named by its USB ID
+        entry = catalog.instrument(str(found["collection"]))
     maker, model = maker_model(idn) if idn else ("", "")
     if entry and str(entry.get("id")) in set(builtin_ids):
         # Kelvin has a card under the collection's id, and it doesn't fit this instrument (the scan would have matched
