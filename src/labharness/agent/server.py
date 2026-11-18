@@ -192,8 +192,14 @@ You are connected to a physics lab through Kelvin.
   instruments and their gateways use, and asks each who it is), inspect_address for one at a known address (what its
   ports answer), inspect_serial for one on a serial port (its speed and framing),
   connected_devices for one plugged in (USB devices, also without a driver; serial ports; this computer's networks),
-  installed_software and find_maker_files for the maker's software, SDK, examples and manual on this computer. Then how its maker talks to it (the manual, the maker's examples, the web)
-  decides the card: text commands give an ordinary card; a maker's Python package, DLL, .NET assembly (Thorlabs
+  installed_software and find_maker_files for the maker's software, SDK, examples and manual on this computer. A USB
+  device that doesn't say who it is is named by its USB ID (VID:PID) where Kelvin's cards or the instrument collection
+  list it, with its manual; otherwise scan_instruments and connected_devices name its maker by vendor ID ("USB vendor
+  1313: Thorlabs") and the collection's instruments from that maker it may be: confirm the model (its label, the
+  person) before you take one. An FTDI, Prolific, Silicon Labs or CH340 adapter's ID is the chip's and names no
+  instrument: ask the instrument behind it (inspect_serial with its manual's identity query and speed). For an ID
+  nothing names, web_search the query connected_devices gives (USB VID_xxxx&PID_yyyy). Then how its maker talks to
+  it (the manual, the maker's examples, the web) decides the card: text commands give an ordinary card; a maker's Python package, DLL, .NET assembly (Thorlabs
   Kinesis) or COM object gives a library card (library_api lists a package's, an assembly's or a COM object's
   functions). Cameras: uvc://<index> for a USB webcam or microscope camera, genicam://<serial> for an industrial one
   (card generic/usb-camera or generic/genicam-camera). A Teledyne Princeton Instruments camera, also one on GigE
