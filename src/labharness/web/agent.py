@@ -185,7 +185,7 @@ INTERRUPTED = ("interrupted: this call never gave its result (Kelvin was closed 
                "ended the answer), so its outcome is unknown. If it could have changed the lab (a drive, a ramp, a "
                "run), read the instruments' state before acting on them; never repeat a drive or a run that may have "
                "gone ahead (find_runs shows runs that started).")
-# Words in a message that ask for the deepest thinking for its answer (Thinking in Settings sets the rest)
+# Words in a message that ask for at least Deepest thinking (xhigh) for its answer (Thinking in Settings sets the rest)
 THINK_HARD = re.compile(r"\bultrathink\b|\bthink\s+(?:it\s+through\s+)?(?:really\s+|very\s+)?"
                         r"(?:hard(?:er)?|deeply|carefully)"   # not "I think hard drives fail": only before these
                         r"(?=\s*(?:$|[.,;:!?)]|(?:about|on|over|before|first|here|this|it|and|then|please)\b))",
@@ -1965,10 +1965,10 @@ class ChatAgent:
             self._before_outside.pop(chat_id, None)
 
     def _effort(self, text: str) -> str:
-        """How hard the model thinks in this answer: Settings → Models → Thinking, or the deepest (xhigh) when the
-        person's message asks Kelvin to think hard ("think hard", "think carefully", "ultrathink")."""
+        """How hard the model thinks in this answer: Settings → Models → Thinking, raised to Deepest (xhigh) when the
+        person's message asks Kelvin to think hard ("think hard", "think carefully", "ultrathink"); Maximum stays."""
         chosen = self.settings.thinking if self.settings else "high"
-        return "xhigh" if THINK_HARD.search(text or "") else chosen
+        return "xhigh" if THINK_HARD.search(text or "") and chosen != "max" else chosen
 
     @staticmethod
     def _sent(chat: Dict[str, Any], message: Dict[str, Any]) -> None:

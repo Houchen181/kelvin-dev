@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from .base import DOCUMENTS_NOTE, PICTURES_NOTE, data_url, safe_id, text_of, user_text
 
 INCLUDE = ["reasoning.encrypted_content"]
-EFFORTS = ("low", "medium", "high", "xhigh")   # Kelvin's efforts the API takes ("max" goes as the model's own)
+EFFORTS = ("low", "medium", "high", "xhigh")   # Kelvin's efforts the API takes (Maximum goes as xhigh: effort_for)
 
 
 def plain(item: Any) -> Dict[str, Any]:
@@ -118,6 +118,12 @@ def without_calls(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """A cut or declined answer as it is sent again: no call that never ran (a call without its output is refused),
     nor the reasoning that led to it."""
     return [i for i in raw if i["type"] not in ("function_call", "reasoning")]
+
+
+def effort_for(effort: str) -> str:
+    """The reasoning effort GPT is asked for in a turn of this effort (base.EFFORT): Kelvin's own, but Maximum (max),
+    which the API doesn't take, as the deepest it does (xhigh); "" for none, the model's own."""
+    return "xhigh" if effort == "max" else effort if effort in EFFORTS else ""
 
 
 def relax(body: Dict[str, Any], e: Exception, model: str, no_effort: Set[str], no_include: Set[str]) -> bool:

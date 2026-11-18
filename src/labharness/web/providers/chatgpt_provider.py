@@ -87,8 +87,8 @@ class ChatGPTProvider(Provider):
             body["tools"] = tool_list(tools, self.tool_style)
         if model not in self.no_include:
             body["include"] = list(responses.INCLUDE)
-        effort = EFFORT.get()
-        if model not in self.no_effort and effort in responses.EFFORTS:
+        effort = responses.effort_for(EFFORT.get())   # Maximum as xhigh, the deepest GPT takes
+        if model not in self.no_effort and effort:
             body["reasoning"] = {"effort": effort}
         for _ in range(6):   # each refusal below takes one thing away, once
             try:

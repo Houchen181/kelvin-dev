@@ -330,8 +330,8 @@ class OpenAIProvider(Provider):
                               "parameters": t["schema"], "strict": False} for t in tools]
         if model not in self.no_include:
             body["include"] = list(responses.INCLUDE)
-        effort = EFFORT.get()
-        if model not in self.no_effort and effort in responses.EFFORTS:
+        effort = responses.effort_for(EFFORT.get())   # Maximum as xhigh, the deepest GPT takes
+        if model not in self.no_effort and effort:
             body["reasoning"] = {"effort": effort}
         key = session_key()
         if key:   # a chat's requests go to the cache holding its prompt (from GPT-5.6, one of its own)

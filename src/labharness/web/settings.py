@@ -39,7 +39,7 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "heartbeat_minutes", "approval_wait", "lab_scripts_python",
                      "sequence_react",   # Kelvin answers a stop or a failure of the sequence at once (notices.py)
                      "compare_models",   # Compare under the message box (Settings -> Models): off unless on
-                     "thinking",   # how hard the model thinks (Settings -> Models -> Thinking): medium, high, xhigh
+                     "thinking",   # how hard the model thinks (Settings -> Models -> Thinking): one of THINKING
                      "wakes_per_day"}    # how often a chat may be continued by itself in 24 hours (wakeups.py)
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
@@ -48,9 +48,10 @@ LAB = {"access_key", "auto_setup", "manuals", "scan_network", "auto_cards", "pho
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
 # How hard the model thinks (providers/base.EFFORT): Standard (medium) answers sooner and costs less, Deep (high, the
-# default) is for a lab's multi-step work, Deepest (xhigh) for the hardest problems; a message that asks Kelvin to think
-# hard gets xhigh for its turn whatever this says (agent.py).
-THINKING = ("medium", "high", "xhigh")
+# default) is for a lab's multi-step work, Deepest (xhigh) for hard problems, Maximum (max) thinks longest of all, for
+# the hardest (GPT, which has no max, gets xhigh). A message that asks Kelvin to think hard gets at least xhigh for its
+# turn (agent.py).
+THINKING = ("medium", "high", "xhigh", "max")
 DEFAULT_THINKING = "high"
 IDLE_OFF_MINUTES = 60   # outputs left on this long with nothing happening go to safe (LabRuntime._idle_check)
 APPROVAL_WAIT_MINUTES = 60   # a request nobody answered at the computer waits this long for the phone, then declines
@@ -386,7 +387,7 @@ class Settings:
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "answer_words":  # how long the model is asked to keep answers (brevity.py)
                 value = _answer_words(value)
-            if name == "thinking":  # how hard the model thinks: medium, high (the default, stored as "") or xhigh
+            if name == "thinking":  # how hard the model thinks: medium, high (the default, stored as ""), xhigh or max
                 value = value.lower() if value.lower() in THINKING and value.lower() != DEFAULT_THINKING else ""
             if name == "idle_off":  # minutes before light left on with nothing happening goes to safe, or off
                 value = _idle_off(value)
@@ -565,7 +566,7 @@ class Settings:
 
     @property
     def thinking(self) -> str:
-        """How hard the model thinks in a turn (providers/base.EFFORT): medium, high (the default) or xhigh."""
+        """How hard the model thinks in a turn (providers/base.EFFORT): medium, high (the default), xhigh or max."""
         value = self._user.get("thinking")
         return value if value in THINKING else DEFAULT_THINKING
 

@@ -100,7 +100,7 @@ def test_thinking_is_a_setting_and_a_hard_question_gets_the_deepest(tmp_path):
     settings.update({"thinking": "high"})
     assert "thinking" not in settings._user                 # the default is not stored
     settings.update({"thinking": "max please"})
-    assert settings.thinking == "high"                      # only Standard, Deep and Deepest
+    assert settings.thinking == "high"                      # only Standard, Deep, Deepest and Maximum
     assert EFFORT.get() == ""                               # a turn's effort ends with it
 
 
@@ -178,6 +178,81 @@ def test_the_claude_code_bridge_thinks_as_the_setting_says(tmp_path, monkeypatch
     result = asyncio.run(answer())
     assert result.blocks and provider.effort is False
     assert "--effort" not in json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["args"]
+
+
+def test_maximum_is_a_choice_and_a_hard_question_never_lowers_it(tmp_path):
+    import re
+    from pathlib import Path
+    from labharness.web import settings as settings_mod
+    settings = Settings(tmp_path / "settings.json")
+    settings.update({"thinking": "max"})
+    assert settings.thinking == "max" and settings._user["thinking"] == "max"
+    provider = Watching([DONE, DONE])
+    day(tmp_path / "a", provider, ["How is the lab?", "Please think hard about why the fit is off."], settings=settings)
+    assert provider.efforts == ["max", "max"]               # "think hard" asks for at least Deepest: Maximum stays
+    page = (Path(settings_mod.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    menu = re.search(r'<select id="thinking" name="thinking">(.*?)</select>', page, re.S).group(1)
+    assert tuple(re.findall(r'<option value="(\w+)">', menu)) == settings_mod.THINKING   # a choice for each level
+    assert '<option value="max">Maximum' in menu
+
+
+def test_maximum_goes_to_claude_as_max(tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+    from labharness.web.providers.claudecode_provider import ClaudeCodeProvider
+    fake = [sys.executable, str(Path(__file__).with_name("fake_claude.py"))]
+    log = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    bridge = ClaudeCodeProvider(fake, tmp_path)
+    hi = [{"role": "user", "text": "hi"}]
+
+    async def emit(e):
+        pass
+
+    async def at_maximum(provider, model, tools):
+        token = EFFORT.set("max")
+        try:
+            return await provider.stream(model, "You are Kelvin.", hi, tools, emit)
+        finally:
+            EFFORT.reset(token)
+    asyncio.run(at_maximum(bridge, "opus", []))
+    args = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["args"]
+    assert args[args.index("--effort") + 1] == "max"                  # through Claude Code
+    pytest.importorskip("anthropic")
+    from test_prompt_cache import TOOLS, FakeClaude
+    from labharness.web.providers import anthropic_provider as ap
+    keyed = ap.AnthropicProvider("test-key")
+    keyed.client = claude = FakeClaude()
+    asyncio.run(at_maximum(keyed, "claude-opus-5-5", TOOLS))
+    assert claude.sent[-1]["output_config"] == {"effort": "max"}      # with an API key
+
+
+def test_gpt_takes_maximum_as_xhigh_the_deepest_it_has(tmp_path):
+    from labharness.web.providers import responses
+    assert [responses.effort_for(e) for e in ("medium", "high", "xhigh", "max", "", "most")] == \
+        ["medium", "high", "xhigh", "xhigh", "", ""]
+    pytest.importorskip("openai")
+    from test_chatgpt import TOOLS, done, signed_in_provider
+    from test_append_only import Responses
+    from labharness.web.providers.openai_provider import OpenAIProvider
+    idle = {"type": "message", "content": [{"type": "output_text", "text": "Idle."}]}
+    plan, client = signed_in_provider(tmp_path, [[done([idle])]])
+    keyed = OpenAIProvider("openai", "GPT", "sk-test")
+    keyed.client = api = Responses([[idle]])
+
+    async def emit(e):
+        return None
+
+    async def at_maximum(provider, model):
+        token = EFFORT.set("max")
+        try:
+            return await provider.stream(model, "You are Kelvin.", [{"role": "user", "text": "hi"}], TOOLS, emit)
+        finally:
+            EFFORT.reset(token)
+    asyncio.run(at_maximum(plan, "gpt-6.1-sol"))
+    asyncio.run(at_maximum(keyed, "gpt-6.1"))
+    assert client.sent[0]["reasoning"] == {"effort": "xhigh"}         # the ChatGPT plan
+    assert api.sent[0]["reasoning"] == {"effort": "xhigh"}            # an API key
 
 
 # ------------------------------------------------------------------ the clock
