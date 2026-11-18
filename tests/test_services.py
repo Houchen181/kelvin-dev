@@ -400,7 +400,8 @@ def test_a_refusal_inside_a_tool_reaches_the_chat_in_plain_words(parts, tmp_path
     gpt.client = openai.AsyncOpenAI(api_key="sk-proj-AbCdEfGh0123456789wxYZ", max_retries=0,
                                     http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(
                                         lambda request: httpx2.Response(401, json=echoed))))
-    manual = tmp_path / "gizmo-7.txt"
+    manual = tmp_path / "manuals" / "gizmo-7.txt"   # where save_manual keeps one: Kelvin's home is tmp_path here
+    manual.parent.mkdir(exist_ok=True)
     manual.write_text(MANUAL, encoding="utf-8")
     said = ("GPT rejected the API key: it is wrong, or it was revoked. Copy it again from platform.openai.com into "
             "Settings → Models.")
