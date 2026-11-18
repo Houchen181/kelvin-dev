@@ -204,6 +204,18 @@ def summary(result: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def recorded(result: Dict[str, Any]) -> Dict[str, Any]:
+    """What a try found, as the lab's record keeps it with the try (card_try): the readings answered, failed and not
+    tried, whether the identity matched the card, and whether its set command took. A card sent to the instrument
+    collection (contribute.py) summarises its check on hardware from these."""
+    readings = result.get("readings") or []
+    check = result.get("write_check")
+    return {"answered": sum(1 for r in readings if "value" in r),
+            "failed": sum(1 for r in readings if r.get("error")) or None,
+            "not_tried": sum(1 for r in readings if r.get("skipped")) or None,
+            "matches": result.get("matches"), "set_check": check.get("ok") if isinstance(check, dict) else None}
+
+
 def addresses_for_agent(lab: Any, found: Optional[List[str]]) -> Dict[str, str]:
     """Where Kelvin may try a card on its own: instruments a person put in the lab, and what the last scan found."""
     out = {name: ic.address for name, ic in lab.config.instruments.items() if not ic.address.startswith("sim://")}

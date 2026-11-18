@@ -86,7 +86,7 @@ CONFIDENTIAL = """# Confidential project
 This project's rules: {rules}. Keep its details inside this conversation: never suggest pasting them into outside
 services."""
 WEB_TOOLS = {"search_papers", "read_paper", "web_search", "read_web_page", "save_manual",   # reach the internet
-             "install_for_instrument"}
+             "install_for_instrument", "contribute_card"}
 # tools whose results carry text that could steer a model, (what it is, its kind: gate.WEB, LAB_WORK): once a chat has
 # read some, Kelvin asks a person there until the person writes again, before anything it would approve itself after
 # text from outside the lab (the open web, the chat's files, the team chat), auto mode's drives and runs included, and
@@ -504,6 +504,7 @@ DEFERRED = {
                                              "experiments"],
     "writing and trying cards": ["card_guide", "card_text", "draft_card", "check_card", "try_card", "save_card",
                                  "read_examples", "find_maker_files", "library_api", "save_manual"],
+    "sending a card a person reviewed to the public instrument collection": ["contribute_card"],
     "makers' software": ["install_for_instrument", "installed_software", "environments", "remove_environment"],
     "editing and keeping the queue": ["queue_change", "queue_edit", "queue_pause", "queue_save", "queue_load"],
     "keeping the person's Home": ["home_update", "home_remove", "home_list"],

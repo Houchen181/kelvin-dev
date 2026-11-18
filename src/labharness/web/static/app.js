@@ -2505,6 +2505,7 @@
       case "save_sequence": return v("Saving", "Saved") + " the pulse sequence " + code(seqName(a.text) || "");
       case "read_examples": return v("Reading", "Read") + " the maker's examples in " + code(a.path || "");
       case "try_card": return v("Trying", "Tried") + " the card on " + code(a.instrument || "");
+      case "contribute_card": return v("Offering", "Offered") + " the card " + code(a.card || "") + " to the instrument collection";
       case "experiment_guide": return a.experiment ? v("Reading", "Read") + " the experiment " + code(a.experiment)
         : v("Looking for", "Looked for") + " experiments" + (a.query ? " on " + code(a.query) : "") + " in the instrument collection";
       case "get_value": return v("Reading", "Read") + " " + code(a.instrument + "." + a.parameter);
@@ -5770,13 +5771,20 @@
       };
       const back = c.kelvins ? h("button", { class: "link soft", type: "button" }, "Back to Kelvin's card") : null;
       if (back) back.addEventListener("click", remove);
+      // a card a person reviewed can go to Kelvin's public collection: what goes is shown first, and sent from GitHub;
+      // on a draft the button says it needs a person's review first (the server's answer, in the message line)
+      const send = !c.problems.length && c.id ? h("button", { class: "link soft", type: "button",
+        title: c.status === "draft" ? "A person reviews the card first (Mark reviewed); then it can go to Kelvin's public instrument collection"
+          : "Offer it to Kelvin's public instrument collection, so the next lab with this instrument has it: you see what goes first, and submit it on GitHub yourself" },
+        "Send to the collection") : null;
+      if (send) send.addEventListener("click", () => sendCard(c));
       return h("li", { class: "memory-note" + (c.problems.length ? " broken" : "") },
         h("span", { class: "memory-kind" + (reviewed ? " ok" : "") }, c.problems.length ? "broken" : reviewed ? "reviewed"
           : c.status === "draft" ? "draft" : c.status),
         h("div", { class: "memory-body" }, h("span", {}, c.model),
           h("span", { class: "memory-meta" }, (c.id || c.file) + (c.kelvins ? " · your lab's version of Kelvin's card" : "") +
             (c.problems.length ? " · " + c.problems[0] : ""))),
-        h("span", { class: "card-actions" }, edit, c.problems.length ? null : flip, back),
+        h("span", { class: "card-actions" }, edit, c.problems.length ? null : flip, back, send),
         c.kelvins ? null : rowButton("trash", "Delete this card", remove));
     }) : [h("li", { class: "memory-empty" }, "No cards of your own yet.")]), ...(r.kelvins || []).map(kelvinsCard));
   }
@@ -5886,6 +5894,55 @@
       await loadCards();
       if ($("lab-dialog").open) openLabSetup();
     } catch (e) { $("cards-msg").textContent = e.message; }
+  }
+  // Send to the collection (contribute.py): the server says what would go and where, and holds it under a ticket; on
+  // the person's go the collection's issue form opens, filled in, for them to submit from their own GitHub account, the
+  // card copied when it is too long for the link. In the Kelvin window Kelvin opens it in this computer's browser (the
+  // window hands links to Windows, which may cut a long one); in a browser this page does it, in the click itself
+  async function sendCard(c) {
+    $("cards-msg").textContent = "Looking at what would go to the collection…";
+    let r;
+    try { r = await api("/api/cards/contribute", { body: { id: c.id } }); }
+    catch (e) { $("cards-msg").textContent = e.message; return; }
+    $("cards-msg").textContent = "";
+    const inApp = !!(window.pywebview && window.pywebview.api);
+    const go = await offerDialog(r, () => {
+      if (inApp) return;
+      if (r.copy) copyText(r.yaml, h("span", {}, "Copy"));
+      window.open(r.url, "_blank", "noopener");
+    });
+    if (!go) return;
+    let done;
+    try { done = await api("/api/cards/contribute", { body: { ticket: r.ticket, open: inApp } }); }
+    catch (e) { $("cards-msg").textContent = e.message; return; }
+    const opened = inApp ? done.opened : true, copied = inApp ? done.copied : r.copy;
+    $("cards-msg").textContent = (opened ? "The collection's form is open in your browser" : "Kelvin could not open a browser here") +
+      (r.copy ? (copied ? "; the card is copied: paste it into the form's card field (Ctrl+V)" : "; copy the card from Edit and paste it into the form's card field") : "") +
+      ". Check it and submit it on GitHub; nothing is sent until you do.";
+  }
+  // the preview of what goes: each line, the card itself as code; go() runs in the person's click, as a browser lets
+  // only a click open a window and write the clipboard
+  function offerDialog(r, go) {
+    return new Promise((resolve) => {
+      const id = "offer-" + Math.random().toString(36).slice(2, 8);
+      const no = h("button", { class: "btn", type: "button" }, "Cancel");
+      const yes = h("button", { class: "btn primary", type: "button" }, "Open the form on GitHub");
+      const form = h("form", { method: "dialog" }, h("header", { class: "dialog-head" }, h("h2", { id }, r.question)),
+        h("div", { class: "ask-body", "data-region": "dialog" },
+          ...r.items.map((i) => (String(i).includes("\n") ? h("pre", { class: "approval-code" }, i) : h("p", {}, i)))),
+        h("footer", { class: "dialog-foot" }, no, yes));
+      const dlg = h("dialog", { class: "dialog ask-dialog wide", "aria-labelledby": id }, form);
+      let over = false;
+      const finish = (v) => { if (over) return; over = true; if (dlg.open) dlg.close(); dlg.remove(); resolve(v); };
+      yes.addEventListener("click", () => { if (!over) go(); finish(true); });
+      no.addEventListener("click", () => finish(false));
+      form.addEventListener("submit", (e) => e.preventDefault());
+      dlg.addEventListener("cancel", (e) => { e.preventDefault(); finish(false); });
+      dlg.addEventListener("close", () => finish(false));
+      document.body.append(dlg);
+      dlg.showModal();
+      no.focus();   // what goes public starts on Cancel: an Enter alone never sends it
+    });
   }
   async function setCardStatus(c, status) {
     // what lets outputs reach real hardware starts on Cancel: an Enter alone never marks a card reviewed

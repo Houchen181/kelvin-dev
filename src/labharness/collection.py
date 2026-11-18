@@ -201,6 +201,20 @@ def _matching(path: Optional[Path], digest: str) -> Optional[bytes]:
     return data if data is not None and sha256(data) == digest else None
 
 
+def entry_for(index: Dict[str, Any], idn: str) -> Optional[Dict[str, Any]]:
+    """The entry of a collection index for an instrument that answers `idn`; the most specific pattern wins, as for
+    cards."""
+    hits = []
+    for entry in index.get("instruments") or []:
+        pattern = str(((entry.get("identify") if isinstance(entry, dict) else None) or {}).get("idn") or "")
+        try:
+            if pattern and re.search(pattern, idn or "", re.I):
+                hits.append((len(pattern), entry))
+        except re.error:
+            continue
+    return max(hits, key=lambda h: h[0])[1] if hits else None
+
+
 def manuals(entry: Dict[str, Any]) -> List[str]:
     """The addresses of an instrument's public manuals (not those behind a sign-in or only for owners)."""
     return [str(m["url"]) for m in entry.get("manuals") or [] if isinstance(m, dict)
@@ -301,15 +315,7 @@ class Collection:
 
     def instrument_for(self, idn: str) -> Optional[Dict[str, Any]]:
         """The collection's entry for an instrument that answers `idn`; the most specific pattern wins, as for cards."""
-        hits = []
-        for entry in self.index().get("instruments") or []:
-            pattern = str(((entry.get("identify") if isinstance(entry, dict) else None) or {}).get("idn") or "")
-            try:
-                if pattern and re.search(pattern, idn or "", re.I):
-                    hits.append((len(pattern), entry))
-            except re.error:
-                continue
-        return max(hits, key=lambda h: h[0])[1] if hits else None
+        return entry_for(self.index(), idn)
 
     def instruments_for_usb(self, vid_pid: str) -> List[Dict[str, Any]]:
         """The collection's entries for a device with this USB ID ("1313:8078"), the most specific first: the one that

@@ -763,6 +763,21 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=FETCH, structured_output=False)
     @cancellable
+    def contribute_card(card: str) -> str:
+        """Offer a card a person reviewed (community or lab-verified) to Kelvin's public instrument collection, so that
+        the next lab with the instrument gets it instead of drafting it again: card is its id, or the name of the lab's
+        instrument that uses it. A person sees exactly what goes and where on an approval card: the card, the maker,
+        model, kind and interfaces, the collection's id for the model, an identity reply and USB IDs, and a summary of
+        the check on hardware from the lab's record, with addresses, serial numbers, host names, file paths and names
+        taken out. Only their yes opens the collection's issue form in their browser, filled in (the card copied when
+        it is too long for the link); they submit it from their own GitHub account, and the collection's maintainer
+        reviews it. Kelvin never approves it itself, auto mode or not, and submits nothing. A draft is refused (a
+        person reviews it first: Lab, Cards…, Mark reviewed), and so are Kelvin's and the collection's cards as they
+        are, which have nothing new. For when the person wants to share a card."""
+        return rt.contribute_card(card)
+
+    @server.tool(annotations=FETCH, structured_output=False)
+    @cancellable
     def draft_card(address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "") -> str:
         """Write a card for a connected instrument Kelvin has none for: Kelvin finds the maker's manual online, writes
         the card from its command reference, checks it and keeps it as a draft. Maker and model come from the

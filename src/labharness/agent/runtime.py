@@ -10192,8 +10192,7 @@ class LabRuntime:
                 result = cardtry.try_card(card, address, self.lab)
             except (AdapterError, OSError, ValueError) as e:
                 return "could not try it: %s" % e
-            self.gate.log.write("card_try", by="agent", card=card.id, address=address,
-                                answered=sum(1 for r in result["readings"] if "value" in r))
+            self.gate.log.write("card_try", by="agent", card=card.id, address=address, **cardtry.recorded(result))
             return cardtry.summary(result)
         from ..scriptrun import lab_name
         here = lab_name(self.lab, address)   # the lab's instrument there, however its address is spelled
@@ -10251,6 +10250,26 @@ class LabRuntime:
                           % (card.status, card.id, path, ", this lab's version of Kelvin's card" if card.id in
                              builtin_ids() else "", " (or reconnect_instrument %s)" % ", ".join(users) if users else "")]
                          + ["warning: " + w for w in warnings])
+
+    def contribute_card(self, ref: str) -> str:
+        """Offer a card a person reviewed to Kelvin's public instrument collection (contribute.py): an approval card shows
+        the person exactly what goes (the card and each field of the collection's form, with what is private taken out)
+        and where (a public repository, under their own GitHub account). Only their yes opens the form in their browser,
+        filled in, the card copied when it is too long for the link: never Kelvin's own yes, nor auto mode's. Kelvin
+        submits nothing; the person does, on GitHub, or doesn't."""
+        from .. import contribute
+        try:
+            offer = contribute.gather(self, ref)
+        except (KeyError, ValueError) as e:
+            return "not offered: %s" % (e.args[0] if e.args else e)
+        request = ApprovalRequest(contribute.question(offer), contribute.preview(offer))
+        if not self.gate.ask(request):   # a person's yes only: never Kelvin's own, nor auto mode's
+            return "declined: the card stays on this computer%s" % asked_because(request)
+        opened, copied = contribute.hand_over(offer)
+        self.gate.log.write("card_offered", by="human (approved Kelvin's request)", card=offer.card_id,
+                            instrument=offer.fields.get("instrument") or None, where="this computer's browser",
+                            opened=opened, copied=copied if offer.copy else None)
+        return contribute.said(offer, opened, copied)
 
     def draft_card(self, address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "") -> str:
         """A card for an instrument Kelvin has none for: Kelvin finds the maker's manual online (or reads the one the

@@ -45,6 +45,7 @@ from ..adapters import AdapterError
 from ..autosetup import AutoSetup, log as setup_log, reviewed as mark_reviewed
 from ..cards import plot_points, trace_x
 from .. import autocard
+from .. import contribute
 from .. import profiles
 from ..collection import Collection
 from ..discovery import (add_to_config, config_change_words, instrument_key, listed as config_lists, merge_added,
@@ -109,6 +110,7 @@ COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument c
 CLOSE_INSTRUMENTS_S = 10.0   # how long the instruments may take to close as Kelvin quits
 SOON_S = 5.0   # a person's action that waits longer (for an approval card) is answered at once, its end later
 LATER_KEEP_S = 600   # how long such an action's answer is kept after it ends, for the page to fetch (/api/later)
+OFFER_S = 900.0   # how long a card's preview for the collection (Send to the collection) waits for the person's go
 
 
 def and_list(names: Iterable[Any]) -> str:
@@ -2445,9 +2447,57 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(409, str(e))
         except Exception as e:
             return error(400, "Could not try it: %s" % (str(e).splitlines()[0][:300] if str(e) else type(e).__name__))
-        runtime.gate.log.write("card_try", by="human", card=card.id, address=address,
-                               answered=sum(1 for r in result["readings"] if "value" in r))
+        runtime.gate.log.write("card_try", by="human", card=card.id, address=address, **cardtry.recorded(result))
         return JSONResponse(dict(result, summary=cardtry.summary(result)))
+
+    offers: Dict[str, Tuple[float, Any]] = {}   # the cards' previews (Send to the collection) open now, by their tickets
+
+    async def card_contribute(request: Request) -> Response:
+        """A card the lab reviewed, to Kelvin's public instrument collection (contribute.py). POST {id}: what would go,
+        and where, for the person to see first, with a ticket for it: the lab owner's, as is all that leaves the lab
+        (the PIN when one is set; never a trainee). POST {ticket, open}: the person went ahead with that preview, as
+        they saw it. In the Kelvin window (open) Kelvin opens the form in this computer's browser itself and copies the
+        card when it is too long for the link; a browser's page does both itself (open false). Either way the record
+        says so. Kelvin submits nothing: the person does, on GitHub, from their own account."""
+        body = await request.json()
+        now = time.monotonic()
+        for ticket in [t for t, (at, _) in offers.items() if now - at > OFFER_S]:
+            offers.pop(ticket, None)
+        ticket = str(body.get("ticket") or "")
+        if ticket:
+            held = offers.pop(ticket, None)
+            if held is None:
+                return error(410, "That preview is no longer open: press Send to the collection again.")
+            offer, here = held[1], bool(body.get("open"))
+            if here and channel(request)[0] != "portal":   # a phone opens the form in its own browser
+                return error(403, "Kelvin opens the form on this computer only for the Kelvin window here.")
+            opened, copied = await asyncio.to_thread(contribute.hand_over, offer) if here else (False, False)
+            runtime.gate.log.write("card_offered", by=person(request), card=offer.card_id,
+                                   instrument=offer.fields.get("instrument") or None,
+                                   where="this computer's browser" if here else "the person's browser",
+                                   opened=opened if here else None, copied=copied if here and offer.copy else None)
+            return JSONResponse({"opened": opened, "copied": copied, "copy": offer.copy, "url": offer.url})
+        ref = str(body.get("id") or "")
+        try:   # a draft, or a card with nothing new, says so before anyone is asked for the PIN
+            await asyncio.to_thread(contribute.reviewed_card, ref, runtime.cards_dir, runtime.lab, runtime.collection)
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else str(e))
+        except ValueError as e:
+            return error(409, str(e))
+        refused = needs_owner(body, "Sending a card to the public instrument collection")
+        if refused:
+            return refused
+        try:
+            offer = await asyncio.to_thread(contribute.gather, runtime, ref)
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else str(e))
+        except ValueError as e:
+            return error(409, str(e))
+        ticket = secrets.token_urlsafe(18)
+        offers[ticket] = (now, offer)
+        return JSONResponse({"ticket": ticket, "id": offer.card_id, "question": contribute.question(offer),
+                             "items": contribute.preview(offer), "url": offer.url, "copy": offer.copy,
+                             "yaml": offer.yaml, "repository": offer.repository})
 
     async def card_draft(request: Request) -> Response:
         """Draft a card from manual text with a model (the default one unless named); checked, repaired once."""
@@ -5002,6 +5052,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/cards/delete", card_delete, methods=["POST"]),
         Route("/api/cards/draft", card_draft, methods=["POST"]),
         Route("/api/cards/try", card_try, methods=["POST"]),
+        Route("/api/cards/contribute", card_contribute, methods=["POST"]),
         Route("/api/devices/{device_id}", device, methods=["DELETE"]),
         Route("/api/bootstrap", bootstrap),
         Route("/api/session", session_view, methods=["GET", "POST", "DELETE"]),
