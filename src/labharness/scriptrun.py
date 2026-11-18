@@ -1434,10 +1434,12 @@ def port_device(lab: Any, address: str, listed: Optional[Dict[str, Any]] = None,
                 more: Sequence[Any] = ()) -> Optional[Dict[str, Any]]:
     """The device behind a serial port, as this computer lists it (probe.serial_device: pyserial's description, maker,
     product, the name it reports, USB ids; listed: that entry, when the caller has it), and what Kelvin makes of it:
-    {port, words: what it is, in words; card: the lab's card for its USB ID (identify: usb), or None; light: why it is
-    a light source (that card is a laser's, or what it calls itself, with more: other names it has, says so), or ""}.
-    None for an address that is no serial port, or a port this computer doesn't list."""
+    {port, words: what it is, in words; card: the lab's card for its USB ID (identify: usb; never for a generic
+    USB-serial chip's ID, usbids), or None; light: why it is a light source (that card is a laser's, or what it calls
+    itself, with more: other names it has, says so), or ""}. None for an address that is no serial port, or a port
+    this computer doesn't list."""
     from . import portholders, probe
+    from .usbids import is_generic
     port = portholders.port_name(address)
     if not port:
         return None
@@ -1445,6 +1447,8 @@ def port_device(lab: Any, address: str, listed: Optional[Dict[str, Any]] = None,
     if d is None:
         return None
     ids = "%04x:%04x" % (d["vid"], d.get("pid") or 0) if d.get("vid") is not None else ""
+    if is_generic(ids):   # a USB-serial chip's own ID (an FTDI's): no card's, whatever a card lists
+        ids = ""
     cards = [c for c in (getattr(lab, "registry", None) or ()) if ids and ids in c.usb_ids]
     card = next((c for c in cards if c.kind in LIGHT_KINDS), cards[0] if cards else None)
     if card is not None and card.kind in LIGHT_KINDS:

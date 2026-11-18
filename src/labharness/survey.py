@@ -20,10 +20,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-# makers of lab instruments, by USB vendor ID: an unknown device of theirs is worth naming
-USB_MAKERS = {0x0957: "Keysight (Agilent)", 0x2A8D: "Keysight", 0x05E6: "Keithley", 0x0699: "Tektronix",
-              0x1313: "Thorlabs", 0x0AAD: "Rohde & Schwarz", 0x1AB1: "Rigol", 0x3923: "National Instruments",
-              0x1FB9: "Lake Shore", 0x0B21: "Yokogawa"}
+from .usbids import vendor
+
 MDNS_TYPES = ("_vxi-11._tcp.local.", "_lxi._tcp.local.", "_hislip._tcp.local.", "_scpi-raw._tcp.local.")
 _libusb_ready = False
 
@@ -192,7 +190,8 @@ def mdns_instruments(seconds: float = 2.0, interfaces: Any = None) -> List[Tuple
 
 
 def usb_devices() -> List[Dict[str, Any]]:
-    """USB devices that look like instruments: a USBTMC interface, or a lab-instrument maker's vendor ID."""
+    """USB devices that look like instruments: a USBTMC interface, or a lab-instrument maker's vendor ID (usbids: an
+    unknown device of theirs is worth naming)."""
     if not use_bundled_libusb():
         return []
     import usb.core
@@ -209,7 +208,7 @@ def usb_devices() -> List[Dict[str, Any]]:
                     tmc = tmc or (intf.bInterfaceClass == 0xFE and intf.bInterfaceSubClass == 3)
         except Exception:
             pass
-        maker = USB_MAKERS.get(d.idVendor, "")
+        maker = vendor(d.idVendor)
         if tmc or maker:
             out.append({"vid": d.idVendor, "pid": d.idProduct, "maker": maker, "usbtmc": tmc, "visible": False})
     return out

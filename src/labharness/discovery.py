@@ -4,9 +4,12 @@ Discovery only asks instruments who they are (*IDN? or the card's own identity q
 so it is safe to run with a sample mounted. Serial ports are tried with each card's own framing (baud rate,
 data bits, parity, terminations) rather than a blind sweep. Instruments the lab already uses are left alone.
 An identity reply no card matches is looked up in the instrument collection (`catalog`, collection.py), which
-names the instrument and says where its maker publishes the manual. Behind a Prologix adapter (prologix.py: a GPIB-USB
-found among the serial ports, which answers ++ver, and the adapters the lab's instruments are on), every GPIB address
-is asked *IDN? in turn, as VISA's instruments are on a GPIB card.
+names the instrument and says where its maker publishes the manual. One that doesn't answer is named by its USB ID where
+it has one (by_usb, usbids.py): Kelvin's card for that ID, the collection's entry that lists it, or at least its maker,
+with the collection's instruments from that maker it may be; a generic USB-serial chip's ID (an FTDI's, a CH340's)
+names nothing. Behind a Prologix adapter (prologix.py: a GPIB-USB found among the serial ports, which answers ++ver,
+and the adapters the lab's instruments are on), every GPIB address is asked *IDN? in turn, as VISA's instruments are on
+a GPIB card.
 
     python -m labharness.discovery                 # list what is connected
     python -m labharness.discovery --write lab.yaml   # and draft a lab config to review
@@ -20,6 +23,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import usbids
 from .adapters import (AdapterError, apply_serial_settings, is_serial, lost_kind, resource_manager, resource_name,
                        timed_out)
 from .cards import Card, CardRegistry
@@ -46,6 +50,7 @@ class Found:
     serial: Dict[str, Any] = field(default_factory=dict)   # those settings, as a card's or lab's connection
     collection: str = ""   # no card matches, but the instrument collection knows it: its id there
     manuals: List[str] = field(default_factory=list)   # and the addresses of its public manuals
+    usb: str = ""          # its USB ID (VID:PID), when it is on USB and this computer says so
 
     def suggest_name(self, taken: Iterable[str] = ()) -> str:
         base = SHORT_NAMES.get(self.kind, re.sub(r"[^a-z0-9]+", "", self.kind.lower()) or "instr")
@@ -67,6 +72,11 @@ class Found:
                                                      " (%s)" % self.manuals[0] if self.manuals else "", where))
         if self.idn:
             return "%s: answered %r but no card matches; a card can be drafted for it%s" % (self.address, self.idn[:80], where)
+        if self.collection:   # named by its USB ID: it said nothing of who it is
+            return ("%s: %s (%s in the instrument collection, by its USB ID %s) didn't say who it is, and there is no "
+                    "card for it yet; a card can be drafted from its manual%s%s" % (
+                        self.address, self.model, self.collection, self.usb,
+                        " (%s)" % self.manuals[0] if self.manuals else "", where))
         return "%s: %s%s" % (self.address, self.how or "no answer", where)
 
 
@@ -212,12 +222,124 @@ def look_up(found: Found, catalog: Any) -> Found:
     collection (collection.Collection), if the collection knows its identity reply."""
     entry = catalog.instrument_for(found.idn) if catalog is not None and found.idn else None
     if entry:
-        from .collection import manuals
-        found.collection, found.manuals = str(entry["id"]), manuals(entry)
-        found.model = str(entry.get("name") or "%s %s" % (entry.get("maker", ""), entry.get("model", ""))).strip()
-        found.kind = str(entry.get("kind") or "")
-        found.how = "no card yet; the instrument collection knows it as %s" % entry["id"]
+        _as_entry(found, entry, "no card yet; the instrument collection knows it as %s" % entry["id"])
     return found
+
+
+def _as_entry(found: Found, entry: Dict[str, Any], how: str) -> Found:
+    """An instrument named as the instrument collection's entry names it: its id there, name, kind, public manuals."""
+    from .collection import manuals
+    found.collection, found.manuals = str(entry["id"]), manuals(entry)
+    found.model = str(entry.get("name") or "%s %s" % (entry.get("maker", ""), entry.get("model", ""))).strip()
+    found.kind = str(entry.get("kind") or "")
+    found.how = how
+    return found
+
+
+CANDIDATES = 5   # a maker's instruments a device of theirs may be, said by name; the rest are counted
+
+
+@dataclass
+class UsbName:
+    """What a USB ID (VID:PID) says of the device that has it (by_usb). A generic USB-serial chip's or adapter's ID
+    says nothing of the instrument behind it (chip: its name), nor a GPIB-USB adapter's (adapter); any other ID may have
+    Kelvin's card for it, the instrument collection's entries that list it (the most specific first), or at least its
+    maker, by vendor ID, with the collection's instruments from that maker that talk over USB as the candidates it may
+    be, those the device's own names name first."""
+    ids: str
+    chip: str = ""
+    adapter: str = ""
+    card: Optional[Card] = None
+    entries: List[Dict[str, Any]] = field(default_factory=list)
+    maker: str = ""
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def by_usb(vid_pid: Optional[str], registry: CardRegistry, catalog: Any = None,
+           names: Iterable[Any] = ()) -> UsbName:
+    """What a USB ID names, for a device that doesn't say who it is (or hasn't been asked): see UsbName. registry: the
+    cards (a card's identify: usb); catalog: the instrument collection, if it is on; names: what the device calls
+    itself, which puts the candidates it names first."""
+    named = UsbName(usbids.normal(vid_pid) or "")
+    if not named.ids:
+        return named
+    named.chip, named.adapter = usbids.chip(named.ids), usbids.gpib_adapter(named.ids)
+    if named.chip or named.adapter:
+        return named
+    named.card = next((c for c in registry if named.ids in c.usb_ids), None)
+    named.entries = catalog.instruments_for_usb(named.ids) if catalog is not None else []
+    named.maker = usbids.maker(named.ids)
+    if named.maker and named.card is None and not named.entries and catalog is not None:
+        named.candidates = _named_first(catalog.instruments_from_maker(named.ids), names)
+    return named
+
+
+def _named_first(entries: List[Dict[str, Any]], names: Iterable[Any]) -> List[Dict[str, Any]]:
+    """The entries whose model (or a model they cover) the device's own names hold first ("PM100D" names thorlabs'
+    PM100), the rest in the order they came."""
+    said = re.sub(r"[^a-z0-9]+", "", " ".join(str(n) for n in names if n).lower())
+
+    def named(entry: Dict[str, Any]) -> bool:
+        models = [entry.get("model")] + list(entry.get("covers") or [])
+        flat = [re.sub(r"[^a-z0-9]+", "", str(m).lower()) for m in models if m]
+        return bool(said) and any(len(m) >= 3 and m in said for m in flat)
+    return sorted(entries, key=lambda e: not named(e))
+
+
+def usb_words(named: UsbName, look_up: bool = False) -> str:
+    """What a USB ID says of a device (by_usb), in words: for a scan's line of one that didn't answer, or with look_up
+    for connected_devices, which also says how to find out what a device nothing here names is (a web search for its
+    IDs, as Windows writes them)."""
+    if not named.ids:
+        return ""
+    if named.chip:
+        return ("a USB-serial adapter (%s, USB %s), whose ID is the chip's own and names no instrument: the instrument "
+                "behind it says who it is to its manual's identity query, at its manual's speed (inspect_serial)"
+                % (named.chip, named.ids))
+    if named.adapter:
+        return ("a GPIB-USB adapter (%s, USB %s): no instrument itself; the instruments on its GPIB bus are asked "
+                "through it (scan_instruments)" % (named.adapter, named.ids))
+    if named.card is not None:
+        return "Kelvin's card for its USB ID %s is %s (%s)" % (named.ids, named.card.id, named.card.model)
+    if named.entries:
+        from .collection import manuals
+        entry = named.entries[0]
+        links = manuals(entry)
+        return "the instrument collection knows its USB ID %s as %s (%s)%s%s" % (
+            named.ids, entry["id"], entry.get("name") or entry.get("model") or "",
+            "" if isinstance(entry.get("card"), dict) else ", with no card yet",
+            "; its manual: %s" % links[0] if links else "")
+    if named.maker:
+        said = [usbids.maker_words(named.ids)]
+    else:   # connected_devices' line has the ID already; a scan's says it here
+        said = [] if look_up else ["USB %s" % named.ids]
+    if named.candidates:
+        shown = named.candidates[:CANDIDATES]
+        more = len(named.candidates) - len(shown)
+        said.append("it may be one of the instrument collection's %s instruments that talk over USB: %s%s" % (
+            named.maker, ", ".join("%s (%s)" % (e["id"], e.get("name") or e.get("model") or "") for e in shown),
+            " and %d more (find_card %s)" % (more, named.maker.split(" (")[0]) if more else ""))
+    if look_up:
+        said.append('nothing Kelvin has names the product: web_search "%s" says what it is'
+                    % usbids.search_text(named.ids))
+    return "; ".join(said)
+
+
+def _name_by_usb(found: Found, named: UsbName) -> bool:
+    """A device that didn't say who it is, named by what its USB ID says (by_usb): by Kelvin's card for it, or as the
+    instrument collection knows it (its name, kind and public manuals, as look_up gives them for a reply). False when
+    the ID names neither."""
+    if named.ids:
+        found.usb = named.ids
+    if named.card is not None:
+        card = named.card
+        found.card_id, found.model, found.kind, found.how = card.id, card.model, card.kind, "USB ID %s" % named.ids
+        return True
+    if named.entries:
+        _as_entry(found, named.entries[0], "no card yet; the instrument collection knows its USB ID %s as %s"
+                  % (named.ids, named.entries[0]["id"]))
+        return True
+    return False
 
 
 def _settings_of(card: Card) -> Dict[str, Any]:
@@ -426,13 +548,17 @@ def _usb_ids() -> Dict[str, str]:
 def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: int = 1000,
              usb: Optional[Dict[str, str]] = None, queries: Optional[List[str]] = None, catalog: Any = None) -> Found:
     """Ask one instrument who it is, and match the answer to a card (or look it up in `catalog`, the instrument
-    collection). queries: only these (not on a serial port), for a quick ask where the likely card is known: each one
-    opens the address again, which for a network address nobody answers at takes the connect timeout each time."""
+    collection). One that doesn't answer is named by its USB ID where it has one (by_usb): a serial port's (usb: the
+    ports' IDs, from pyserial by default), or the one in a VISA USB resource's name. queries: only these (not on a
+    serial port), for a quick ask where the likely card is known: each one opens the address again, which for a network
+    address nobody answers at takes the connect timeout each time."""
     from .prologix import MANAGER, is_prologix
     rm = MANAGER if is_prologix(address) else rm or resource_manager()
     found = Found(address)
     tries: List[Tuple[str, Optional[Dict[str, Any]]]]
-    vid_pid = (usb if usb is not None else _usb_ids()).get(address) if is_serial(address) else None
+    vid_pid = (usb if usb is not None else _usb_ids()).get(address) if is_serial(address) else \
+        usbids.from_visa(address)
+    found.usb = usbids.normal(vid_pid) or ""
     if resets_on_open(vid_pid):
         return _ask_board(found, rm, registry, vid_pid, timeout_ms, catalog)
     if is_serial(address):
@@ -472,14 +598,13 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
             if reply:
                 return _answered(found, reply, None, registry, catalog)
     vid_pid = vid_pid or (usb if usb is not None else _usb_ids()).get(address)
-    if vid_pid:
-        cards = [c for c in registry if vid_pid in c.usb_ids]
-        if cards:
-            card = cards[0]
-            found.card_id, found.model, found.kind, found.how = card.id, card.model, card.kind, "USB ID %s" % vid_pid
-            return found
     found.how = UNKNOWN_GPIB if re.match(r"^GPIB\d*::", address, re.I) else \
         "no answer (it may be write-only, use other settings, or be switched off)"
+    if vid_pid:   # its USB ID names it, or says what it can: a generic chip's names nothing, a maker's ID its maker
+        named = by_usb(vid_pid, registry, catalog)
+        said = "" if _name_by_usb(found, named) else usb_words(named)
+        if said:
+            found.how += "; " + said
     return found
 
 
@@ -494,10 +619,12 @@ def _ask_board(found: Found, rm: Any, registry: CardRegistry, vid_pid: str, time
     """A board that resets as its port opens (an Arduino, a CH340 board): opened once, with the framing of a card for
     its USB ID or a sketch's usual 9600 8N1. What it prints as it starts (READY) is read first and is not who it is,
     nor a refusal of the query (ERR): such a board is reported as there, without an identity, so first-run setup
-    doesn't take it for an instrument named READY (l07, the orchestrator's labsim check)."""
-    named = [c for c in registry if vid_pid in c.usb_ids and "baud_rate" in c.connection]
+    doesn't take it for an instrument named READY (l07, the orchestrator's labsim check). A CH340's ID is the chip's
+    own (usbids.GENERIC): no card's, so neither its framing nor its name comes from one."""
+    framed = [] if usbids.is_generic(vid_pid) else \
+        [c for c in registry if vid_pid in c.usb_ids and "baud_rate" in c.connection]
     baud, term = DEFAULT_SERIAL[0]
-    settings = _settings_of(named[0]) if named else {
+    settings = _settings_of(framed[0]) if framed else {
         "baud_rate": baud, "data_bits": 8, "parity": "none", "stop_bits": 1.0, "read_termination": term,
         "write_termination": term, "query": "*IDN?"}
     said: List[str] = []
@@ -517,14 +644,15 @@ def _ask_board(found: Found, rm: Any, registry: CardRegistry, vid_pid: str, time
             return found
         found.how = "no card matches the reply"
         return look_up(found, catalog)
-    cards = [c for c in registry if vid_pid in c.usb_ids]
-    if cards:
-        card = cards[0]
-        found.card_id, found.model, found.kind, found.how = card.id, card.model, card.kind, "USB ID %s" % vid_pid
+    named = by_usb(vid_pid, registry, catalog)
+    if _name_by_usb(found, named):
         return found
-    found.how = ("an Arduino-type board (USB %s): %s and didn't answer %s; give Kelvin its commands to make a card"
-                 % (vid_pid, "it printed %s as it started" % " / ".join(said[:2]) if said else
-                    "it printed nothing as it started", settings["query"]))
+    board = ("an Arduino-type board or a USB-serial adapter (%s, USB %s: the chip's own ID, which names no instrument)"
+             % (named.chip, vid_pid) if named.chip else "an Arduino-type board (USB %s)" % vid_pid)
+    found.how = ("%s: %s and didn't answer %s; give Kelvin its commands to make a card%s"
+                 % (board, "it printed %s as it started" % " / ".join(said[:2]) if said else
+                    "it printed nothing as it started", settings["query"],
+                    "; " + usb_words(named) if named.maker else ""))
     return found
 
 

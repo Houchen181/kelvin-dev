@@ -908,8 +908,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @cancellable   # it may hold the lab a while: the chat's Stop or a cancel ends it
     def scan_instruments() -> str:
         """Find instruments connected to this computer (GPIB, also behind a Prologix GPIB-USB adapter; USB, LAN,
-        serial) and match them to cards. It only asks each instrument who it is. add_instrument adds one the person
-        asked for."""
+        serial) and match them to cards. It only asks each instrument who it is; one that doesn't answer is named by
+        its USB ID where Kelvin's cards or the instrument collection list it, else its maker by vendor ID, with the
+        collection's instruments it may be. add_instrument adds one the person asked for."""
         return rt.scan()
 
     @server.tool(annotations=READ, structured_output=False)
@@ -952,8 +953,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=READ, structured_output=False)
     def connected_devices() -> str:
         """Everything plugged into this computer, also what no driver claims: USB devices with the name each
-        reports, its maker and driver (or that it has none), serial ports, and the networks this computer is on (a
-        board on USB networking makes one). For an instrument scan_instruments doesn't find."""
+        reports, its maker and driver (or that it has none), and what its USB ID names (Kelvin's card, the instrument
+        collection's entry, or the maker with the collection's instruments it may be; a USB-serial adapter's ID names
+        nothing; else the web search that does), serial ports, and the networks this computer is on (a board on USB
+        networking makes one). For an instrument scan_instruments doesn't find."""
         return rt.connected_devices()
 
     @server.tool(annotations=READ, structured_output=False)

@@ -10815,7 +10815,7 @@ class LabRuntime:
         the lab it is and which program has it open (portholders; the field report of 2026-11-15 had a port that
         CoboltMonitor.exe held, and only the port was shown); a light source the lab doesn't have says so, with how to
         bring it in (Kelvin sees nothing of one outside the lab); and the programs with VISA loaded, one of which may
-        hold an instrument's VISA session."""
+        hold an instrument's VISA session. A USB device not in the lab says what its USB ID names (_usb_said)."""
         from .. import portholders, probe
         from ..scriptrun import bring_in, lab_name, port_device
         ports, devices = probe.serial_ports(), probe.usb_devices()
@@ -10841,7 +10841,7 @@ class LabRuntime:
         plain = [d for d in devices if probe.ordinary(d)]
         for d in devices:
             if d not in plain:
-                lines.append("- " + probe.usb_line(d, ports, notes))
+                lines.append("- " + probe.usb_line(d, ports, notes) + self._usb_said(d, ports))
                 for p in probe.usb_ports(d, ports):
                     lines += light(p, list(d["names"]) + [d["maker"]])
         if plain:
@@ -10872,6 +10872,31 @@ class LabRuntime:
                      "web_search for its USB ID), then what it needs (install_for_instrument) and its card "
                      "(draft_card). On a network: inspect_address.")
         return "\n".join(lines)
+
+    def _usb_said(self, d: Dict[str, Any], ports: List[Dict[str, Any]]) -> str:
+        """What a USB device's ID names (discovery.by_usb: Kelvin's card for it, the instrument collection's entry,
+        or its maker with the collection's instruments it may be; a USB-serial chip's names nothing; else how to look
+        it up), for its line in connected_devices: "; ..." or "". Nothing for one of the lab's own instruments: on a
+        serial port of the lab's, or at a VISA USB address of the lab's with its IDs (and its serial number, where
+        both say one)."""
+        from .. import probe, usbids
+        from ..adapters import resource_name
+        from ..discovery import by_usb, usb_words
+        from ..scriptrun import lab_name
+        if d.get("vid") is None or d.get("pid") is None:
+            return ""
+        ids = "%04x:%04x" % (d["vid"], d["pid"])
+        if any(lab_name(self.lab, p["port"]) for p in probe.usb_ports(d, ports)):
+            return ""
+        for ic in self.lab.config.instruments.values():
+            address = resource_name(str(ic.address or ""))
+            parts = address.split("::")
+            serial = parts[3] if len(parts) > 4 else ""
+            if usbids.from_visa(address) == ids and (not serial or not d.get("serial")
+                                                     or serial.lower() == str(d["serial"]).lower()):
+                return ""
+        said = usb_words(by_usb(ids, self.lab.registry, self.collection, d.get("names") or ()), look_up=True)
+        return "; " + said if said else ""
 
     def installed_software(self, query: str = "") -> str:
         """Programs and drivers installed on this computer: those whose name or maker holds the query, or with no

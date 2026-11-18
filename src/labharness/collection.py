@@ -23,7 +23,9 @@ this computer so they work offline.
   the collection catching up with a newer Kelvin. Nothing replaces a card a person reviewed on this computer.
   Collection cards keep their status, so a draft stays simulation-only on real hardware.
 - Instruments without a card: a scan that gets an identity reply no card matches looks it up here, to name the
-  instrument and to take its manual from the address the collection gives (discovery.py, autocard.py).
+  instrument and to take its manual from the address the collection gives (discovery.py, autocard.py). One that
+  doesn't answer is looked up by its USB ID (an entry's usb), and one no ID names gets the instruments of its maker
+  (usbids.py) as what it may be.
 - Experiments: what to measure and how, with plans written for one of the collection's lab configs. adapt() maps
   their instrument names to a lab's own, for the agent's experiment_guide."""
 from __future__ import annotations
@@ -308,6 +310,30 @@ class Collection:
             except re.error:
                 continue
         return max(hits, key=lambda h: h[0])[1] if hits else None
+
+    def instruments_for_usb(self, vid_pid: str) -> List[Dict[str, Any]]:
+        """The collection's entries for a device with this USB ID ("1313:8078"), the most specific first: the one that
+        lists the fewest IDs and covers the fewest models (a model before its series). None for a generic USB-serial
+        chip's ID (usbids.GENERIC): any maker's product can sit behind one."""
+        from .usbids import is_generic, normal
+        want = normal(vid_pid)
+        if not want or is_generic(want):
+            return []
+        hits = []
+        for entry in self.index().get("instruments") or []:
+            ids = {normal(u) for u in (entry.get("usb") if isinstance(entry, dict) else None) or []}
+            if want in ids:
+                hits.append((len(ids), len(entry.get("covers") or []), str(entry.get("id")), entry))
+        return [hit[-1] for hit in sorted(hits, key=lambda hit: hit[:3])]
+
+    def instruments_from_maker(self, vid_pid: str) -> List[Dict[str, Any]]:
+        """The collection's instruments from the maker a USB ID names (usbids.maker: its vendor ID's, or a maker's own
+        product ID under a chip maker's) that talk over USB: what a device of that maker that no ID names may be.
+        Those with a card first."""
+        from .usbids import made_by
+        out = [e for e in self.index().get("instruments") or [] if isinstance(e, dict)
+               and set(e.get("interfaces") or []) & {"usb", "usb-tmc"} and made_by(vid_pid, str(e.get("maker") or ""))]
+        return sorted(out, key=lambda e: (not isinstance(e.get("card"), dict), str(e.get("id"))))
 
     def experiments(self, query: str = "") -> List[Dict[str, Any]]:
         """The collection's experiments, those that fit `query` best first (all of them for no query)."""
